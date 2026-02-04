@@ -92,33 +92,53 @@ Composite action orchestration, maintained by deployers or community.
 ```yaml
 schema: "ais-flow/1.0"
 
-name: string                          # Workflow identifier.
-version: string                       # Semver.
-description: string                   # Optional.
+meta:
+  name: string                        # Workflow identifier.
+  version: string                     # Semver.
+  description: string                 # Optional.
+
+requires_pack:                        # Optional. Pack dependency.
+  name: string
+  version: string
 
 inputs:                               # Workflow input parameters.
-  - name: string
+  [param_name]:
     type: string
-    description: string
+    required: boolean
+    default: any                      # Optional.
+    example: any                      # Optional.
 
 nodes:                                # Execution nodes.
-  - id: string
-    skill: string                     # skill_id reference.
-    action: string                    # Action or query ID within skill.
-    params: object                    # Param mapping (can reference inputs or prior nodes).
+  - id: string                        # Node identifier for references.
+    type: "query_ref" | "action_ref"  # Node type.
+    skill: string                     # Skill reference (see below).
+    query: string                     # Query ID (if type=query_ref).
+    action: string                    # Action ID (if type=action_ref).
+    args: object                      # Param mapping (references inputs.* or nodes.*.outputs.*).
+    calculated_overrides: object      # Override calculated fields (CEL in workflow namespace).
+    requires_queries: [string]        # Node IDs this node depends on.
     condition: string                 # Optional CEL condition.
 
-edges:                                # Data flow edges.
-  - from: string                      # node_id.output_name
-    to: string                        # node_id.param_name
-
-preflight:                            # Optional preflight checks.
-  - query: string                     # skill_id.query_id
-    assert: string                    # CEL assertion.
-
 policy:                               # Workflow-level policy (can tighten Pack policy).
+  approvals: object
   hard_constraints: object
+
+preflight:                            # Optional preflight simulation.
+  simulate: object
+
+outputs:                              # Workflow outputs.
+  [output_name]: string               # Reference to nodes.*.outputs.* or nodes.*.calculated.*
 ```
+
+#### Skill Reference Format
+
+Workflows reference skills using `protocol@version` shorthand:
+
+```yaml
+skill: "uniswap-v3@1.0.0"
+```
+
+Pack is responsible for resolving `protocol@version` to registry `skillId` or `specURI`. Workflow authors only need to specify protocol name and version.
 
 ---
 
@@ -339,7 +359,13 @@ params:
 
 AIS-1.0 uses a restricted [CEL (Common Expression Language)](https://github.com/google/cel-spec) subset for `condition` and `calculated_fields`.
 
-### Allowed Variables
+### Expression Namespaces
+
+**Skill Spec and Workflow use separate expression namespaces:**
+
+#### Skill Spec Namespace (actions/queries)
+
+`calculated_fields` and `condition` in Protocol Specs only reference:
 
 | Variable | Description |
 |----------|-------------|
@@ -350,7 +376,28 @@ AIS-1.0 uses a restricted [CEL (Common Expression Language)](https://github.com/
 | `ctx.policy.*` | Active policy constraints |
 | `query.<query_id>.<field>` | Query output fields |
 | `contracts.<name>` | Deployment contract addresses |
-| `calculated.<field>` | Other calculated fields |
+| `calculated.<field>` | Other calculated fields (within same action) |
+
+#### Workflow Namespace (nodes)
+
+`calculated_overrides` and `condition` in Workflows only reference:
+
+| Variable | Description |
+|----------|-------------|
+| `inputs.*` | Workflow input parameters |
+| `nodes.<id>.outputs.*` | Output fields from prior nodes |
+| `nodes.<id>.calculated.*` | Calculated fields from prior nodes |
+
+**Mapping Rules:**
+
+When a workflow invokes a skill action:
+- Workflow `inputs.*` → mapped to action `params.*` via `args`
+- Workflow `nodes.<id>.outputs.*` → mapped to action `query.<id>.*` via `args` or `calculated_overrides`
+
+This separation ensures:
+1. Skill specs are self-contained and testable
+2. Workflows are composable without namespace collisions
+3. Expression evaluation context is always explicit
 
 ### Allowed Operations
 
