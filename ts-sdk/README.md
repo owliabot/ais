@@ -239,6 +239,40 @@ const queryResult = buildQuery(protocol, query, { pair: '0x...' }, ctx, { chain:
 const txs = buildWorkflowTransactions(protocols, workflow.nodes, ctx, 'eip155:1');
 ```
 
+### CEL Expression Evaluator
+
+```typescript
+import { evaluateCEL, CELEvaluator } from '@owliabot/ais-ts-sdk';
+
+// Simple evaluation
+evaluateCEL('1 + 2')                    // → 3
+evaluateCEL('user.age >= 18', { user: { age: 25 } })  // → true
+
+// AIS-style conditions
+const ctx = {
+  inputs: { amount: 1000, slippage_bps: 50 },
+  constraints: { max_slippage_bps: 100 },
+  nodes: { approve: { outputs: { success: true } } },
+};
+
+evaluateCEL('inputs.slippage_bps <= constraints.max_slippage_bps', ctx)  // → true
+evaluateCEL('nodes.approve.outputs.success == true', ctx)                // → true
+
+// With custom functions
+const evaluator = new CELEvaluator();
+evaluator.registerFunction('double', (args) => (args[0] as number) * 2);
+evaluator.evaluate('double(21)')  // → 42
+```
+
+**Supported features:**
+- Arithmetic: `+`, `-`, `*`, `/`, `%`
+- Comparison: `==`, `!=`, `<`, `<=`, `>`, `>=`
+- Logical: `&&`, `||`, `!`
+- Ternary: `condition ? then : else`
+- Member access: `obj.field`, `list[0]`, `map["key"]`
+- `in` operator: `x in [1,2,3]`, `key in map`
+- Built-in functions: `size()`, `contains()`, `startsWith()`, `endsWith()`, `matches()`, `lower()`, `upper()`, `trim()`, `int()`, `string()`, `type()`, `abs()`, `min()`, `max()`
+
 ## API Reference
 
 ### Parsing
@@ -288,6 +322,13 @@ const txs = buildWorkflowTransactions(protocols, workflow.nodes, ctx, 'eip155:1'
 - `encodeFunctionCall(signature, types, values)` - Low-level ABI encoding
 - `encodeFunctionSelector(signature)` - Get 4-byte function selector
 - `keccak256(input)` - Keccak-256 hash
+
+### CEL Expression Evaluation
+
+- `evaluateCEL(expression, context?)` - Evaluate CEL expression
+- `CELEvaluator` - Evaluator class with custom function support
+- `CELLexer` - Tokenizer for CEL expressions
+- `CELParser` - Parser producing AST
 
 ### Schemas (Zod)
 

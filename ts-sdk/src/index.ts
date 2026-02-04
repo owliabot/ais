@@ -134,3 +134,15 @@ export {
   type BuildError,
   type BuildOutput,
 } from './execution/index.js';
+
+// CEL Expression Evaluator
+export {
+  Evaluator as CELEvaluator,
+  evaluateCEL,
+  Lexer as CELLexer,
+  Parser as CELParser,
+  type CELValue,
+  type CELContext,
+  type Token as CELToken,
+  type ASTNode as CELASTNode,
+} from './cel/index.js';
