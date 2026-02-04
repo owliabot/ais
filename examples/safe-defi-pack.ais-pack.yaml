@@ -1,0 +1,69 @@
+schema: "ais-pack/1.0"
+
+meta:
+  name: "safe-defi-pack"
+  version: "1.0.0"
+  description: "Enable Uniswap V3 swap with conservative defaults"
+
+includes:
+  - protocol: "uniswap-v3"
+    version: "1.0.0"
+    source: "registry"
+    chain_scope: ["eip155:8453"]
+
+policy:
+  approvals:
+    auto_execute_max_risk_level: 2
+    require_approval_min_risk_level: 3
+
+  hard_constraints_defaults:
+    max_slippage_bps: 50
+    allow_unlimited_approval: false
+    max_approval_multiplier: 1.05       # approve <= amount_in * 1.05
+
+token_policy:
+  resolution:
+    allow_symbol_input: true
+    require_user_confirm_asset_address: true
+    require_allowlist_for_symbol_resolution: true
+
+  allowlist:
+    - chain: "eip155:8453"
+      symbol: "WETH"
+      address: "0x4200000000000000000000000000000000000006"
+      decimals: 18
+      tags: ["wrapped"]
+
+    - chain: "eip155:8453"
+      symbol: "USDC"
+      address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+      decimals: 6
+      tags: ["stable"]
+
+    - chain: "eip155:8453"
+      symbol: "USDT"
+      address: "0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2"
+      decimals: 6
+      tags: ["stable"]
+
+providers:
+  quote:
+    enabled:
+      - provider: "uniswap-v3-quoter"
+        chains: ["eip155:8453"]
+        priority: 10
+
+  detect:
+    enabled:
+      - kind: "fee_tier"
+        provider: "uniswap-v3-fee-detect"
+        chains: ["eip155:8453"]
+        candidates: [100, 500, 3000, 10000]
+        rule: "max_liquidity"
+        priority: 10
+
+overrides:
+  actions:
+    "uniswap-v3.swap-exact-in":
+      hard_constraints:
+        max_slippage_bps: 50

@@ -1,0 +1,109 @@
+schema: "ais-flow/1.0"
+
+meta:
+  name: "swap-to-token"
+  version: "1.0.0"
+  description: "Quote then swap using Uniswap V3 exact-in"
+
+requires_pack:
+  name: "safe-defi-pack"
+  version: "1.0.0"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# INPUTS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+inputs:
+  chain_id:
+    type: string
+    required: true
+    example: "eip155:8453"
+
+  token_in:
+    type: asset
+    required: true
+
+  token_out:
+    type: asset
+    required: true
+
+  amount_in:
+    type: token_amount
+    required: true
+
+  slippage_bps:
+    type: uint32
+    required: true
+    default: 50
+
+  recipient:
+    type: address
+    required: false
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# NODES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+nodes:
+  - id: q_quote
+    type: query_ref
+    skill: "uniswap-v3@1.0.0"
+    query: "quote-exact-in-single"
+    args:
+      token_in: "inputs.token_in"
+      token_out: "inputs.token_out"
+      amount_in: "inputs.amount_in"
+      fee: null
+
+  - id: q_allowance
+    type: query_ref
+    skill: "uniswap-v3@1.0.0"
+    query: "allowance-token-in"
+    args:
+      token_in: "inputs.token_in"
+
+  - id: a_swap
+    type: action_ref
+    skill: "uniswap-v3@1.0.0"
+    action: "swap-exact-in"
+    args:
+      token_in: "inputs.token_in"
+      token_out: "inputs.token_out"
+      amount_in: "inputs.amount_in"
+      slippage_bps: "inputs.slippage_bps"
+      fee: "nodes.q_quote.outputs.fee_tier"
+      recipient: "inputs.recipient"
+    calculated_overrides:
+      min_out_atomic:
+        expr: "floor(nodes.q_quote.outputs.amount_out_atomic * (1.0 - inputs.slippage_bps / 10000.0))"
+    requires_queries: ["q_quote", "q_allowance"]
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# POLICY
+# ═══════════════════════════════════════════════════════════════════════════════
+
+policy:
+  approvals:
+    use_pack_defaults: true
+
+  hard_constraints:
+    tighten_only: true
+    max_slippage_bps: "inputs.slippage_bps"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PREFLIGHT
+# ═══════════════════════════════════════════════════════════════════════════════
+
+preflight:
+  simulate:
+    evm_eth_call: true
+    debug_call: false
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# OUTPUTS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+outputs:
+  expected_amount_out_atomic: "nodes.q_quote.outputs.amount_out_atomic"
+  min_out_atomic: "nodes.a_swap.calculated.min_out_atomic"
+  action_tx: "nodes.a_swap.tx"

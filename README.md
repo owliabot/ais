@@ -147,8 +147,16 @@ risk_tags:
 ## Examples
 
 See [/examples](./examples/) for complete spec files:
+
+**Protocol Specs:**
 - `uniswap-v3.ais.yaml` — DEX swap with quote-based slippage
 - `aave-v3.ais.yaml` — Lending protocol supply/withdraw
+
+**Pack (Deployment Bundle):**
+- `safe-defi-pack.ais-pack.yaml` — Conservative policy pack for Uniswap V3 on Base
+
+**Workflow (Orchestration):**
+- `swap-to-token.ais-flow.yaml` — Quote-then-swap workflow using Uniswap V3
 
 ## Status
 
