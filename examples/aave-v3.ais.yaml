@@ -1,0 +1,256 @@
+schema: "ais/1.0"
+
+meta:
+  protocol: "aave-v3"
+  version: "1.0.0"
+  name: "Aave V3"
+  homepage: "https://aave.com"
+  description: "Decentralized lending and borrowing protocol"
+  tags: ["lending", "borrowing", "yield", "defi"]
+
+deployments:
+  - chain: "eip155:1"
+    contracts:
+      pool: "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2"
+      oracle: "0x54586bE62E3c3580375aE3723C145253060Ca0C2"
+      data_provider: "0x7B4EB56E7CD4b454BA8ff71E4518426c84552Dc"
+
+  - chain: "eip155:8453"  # Base
+    contracts:
+      pool: "0xA238Dd80C259a72e81d7e4664a9801593F98d1c5"
+      oracle: "0x2Cc0Fc26eD4563A5ce5e8bdcfe1A2878676Ae156"
+
+  - chain: "eip155:42161"  # Arbitrum
+    contracts:
+      pool: "0x794a61358D6845594F94dc1DB02A252b5b4814aD"
+      oracle: "0xb56c2F0B653B2e0b10C9b928C8580Ac5Df02C7C7"
+
+actions:
+  supply:
+    description: "Supply (deposit) tokens to earn interest"
+    risk_level: 2
+    params:
+      - name: token
+        type: address
+        description: "Token to supply"
+      - name: amount
+        type: token_amount
+        description: "Amount to supply"
+      - name: on_behalf_of
+        type: address
+        required: false
+        description: "Credit recipient (default: self)"
+    returns:
+      - name: tx_hash
+        type: bytes32
+    execution:
+      "eip155:*":
+        type: composite
+        steps:
+          - type: evm_call
+            description: "Approve pool to spend token"
+            contract: "token"
+            function: "approve"
+            abi: "(address,uint256)"
+            mapping:
+              spender: "contracts.pool"
+              amount: "params.amount"
+            condition: "allowance < params.amount"
+          - type: evm_call
+            description: "Supply to pool"
+            contract: "pool"
+            function: "supply"
+            abi: "(address,uint256,address,uint16)"
+            mapping:
+              asset: "params.token"
+              amount: "params.amount"
+              onBehalfOf: "params.on_behalf_of || wallet_address"
+              referralCode: "0"
+    side_effects:
+      - "Grants token approval to Aave pool"
+      - "Receives aToken (interest-bearing) in return"
+
+  withdraw:
+    description: "Withdraw supplied tokens from Aave"
+    risk_level: 2
+    params:
+      - name: token
+        type: address
+        description: "Token to withdraw (underlying, not aToken)"
+      - name: amount
+        type: token_amount
+        description: "Amount to withdraw (use max_uint256 for all)"
+    returns:
+      - name: amount_withdrawn
+        type: token_amount
+      - name: tx_hash
+        type: bytes32
+    execution:
+      "eip155:*":
+        type: evm_call
+        contract: "pool"
+        function: "withdraw"
+        abi: "(address,uint256,address)"
+        mapping:
+          asset: "params.token"
+          amount: "params.amount"
+          to: "wallet_address"
+
+  borrow:
+    description: "Borrow tokens against supplied collateral"
+    risk_level: 4
+    params:
+      - name: token
+        type: address
+        description: "Token to borrow"
+      - name: amount
+        type: token_amount
+        description: "Amount to borrow"
+      - name: rate_mode
+        type: uint8
+        default: 2
+        description: "1 = stable rate, 2 = variable rate"
+        constraints:
+          enum: [1, 2]
+    returns:
+      - name: tx_hash
+        type: bytes32
+    execution:
+      "eip155:*":
+        type: evm_call
+        contract: "pool"
+        function: "borrow"
+        abi: "(address,uint256,uint256,uint16,address)"
+        mapping:
+          asset: "params.token"
+          amount: "params.amount"
+          interestRateMode: "params.rate_mode"
+          referralCode: "0"
+          onBehalfOf: "wallet_address"
+    pre_conditions:
+      - "Sufficient collateral deposited"
+      - "Health factor will remain above 1.0 after borrow"
+    side_effects:
+      - "Creates a debt position"
+      - "Reduces health factor"
+
+  repay:
+    description: "Repay borrowed tokens"
+    risk_level: 2
+    params:
+      - name: token
+        type: address
+        description: "Token to repay"
+      - name: amount
+        type: token_amount
+        description: "Amount to repay (use max_uint256 for full repay)"
+      - name: rate_mode
+        type: uint8
+        default: 2
+        description: "1 = stable, 2 = variable (must match borrow)"
+    returns:
+      - name: tx_hash
+        type: bytes32
+    execution:
+      "eip155:*":
+        type: composite
+        steps:
+          - type: evm_call
+            description: "Approve pool to spend token"
+            contract: "token"
+            function: "approve"
+            abi: "(address,uint256)"
+            mapping:
+              spender: "contracts.pool"
+              amount: "params.amount"
+            condition: "allowance < params.amount"
+          - type: evm_call
+            description: "Repay debt"
+            contract: "pool"
+            function: "repay"
+            abi: "(address,uint256,uint256,address)"
+            mapping:
+              asset: "params.token"
+              amount: "params.amount"
+              interestRateMode: "params.rate_mode"
+              onBehalfOf: "wallet_address"
+
+queries:
+  user_position:
+    description: "Get user's account data (collateral, debt, health factor)"
+    params:
+      - name: user
+        type: address
+        required: false
+        description: "User address (default: self)"
+    returns:
+      - name: total_collateral_usd
+        type: float
+      - name: total_debt_usd
+        type: float
+      - name: available_borrow_usd
+        type: float
+      - name: health_factor
+        type: float
+        description: "Below 1.0 = liquidatable"
+    execution:
+      "eip155:*":
+        type: evm_call
+        contract: "pool"
+        function: "getUserAccountData"
+        abi: "(address)"
+        mapping:
+          user: "params.user || wallet_address"
+    cache_ttl: 30
+
+  reserve_data:
+    description: "Get supply/borrow APY for a token"
+    params:
+      - name: token
+        type: address
+    returns:
+      - name: supply_apy
+        type: float
+      - name: variable_borrow_apy
+        type: float
+      - name: stable_borrow_apy
+        type: float
+      - name: total_supplied
+        type: token_amount
+      - name: total_borrowed
+        type: token_amount
+    execution:
+      "eip155:*":
+        type: evm_call
+        contract: "data_provider"
+        function: "getReserveData"
+        abi: "(address)"
+        mapping:
+          asset: "params.token"
+    cache_ttl: 60
+
+risks:
+  - level: critical
+    text: "Borrowing creates a debt position. If health factor drops below 1.0, your collateral will be liquidated."
+    applies_to: ["borrow"]
+  - level: warning
+    text: "Variable borrow rates can change significantly based on pool utilization"
+    applies_to: ["borrow"]
+  - level: info
+    text: "Supplied assets can be used as collateral for borrowing"
+    applies_to: ["supply"]
+
+supported_tokens:
+  - symbol: WETH
+    addresses:
+      "eip155:1": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+      "eip155:8453": "0x4200000000000000000000000000000000000006"
+      "eip155:42161": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"
+  - symbol: USDC
+    addresses:
+      "eip155:1": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+      "eip155:8453": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+      "eip155:42161": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+  - symbol: WBTC
+    addresses:
+      "eip155:1": "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599"
