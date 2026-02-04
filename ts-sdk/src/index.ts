@@ -79,3 +79,33 @@ export {
   resolveExpression,
   resolveExpressionString,
 } from './resolver/index.js';
+
+// Validator
+export {
+  // Constraints
+  validateConstraints,
+  requiresSimulation,
+  type ConstraintInput,
+  type ConstraintViolation,
+  type ConstraintResult,
+
+  // Workflow
+  validateWorkflow,
+  getWorkflowDependencies,
+  getWorkflowProtocols,
+  type WorkflowIssue,
+  type WorkflowValidationResult,
+} from './validator/index.js';
+
+// Loader
+export {
+  loadFile,
+  loadProtocol,
+  loadPack,
+  loadWorkflow,
+  loadDirectory,
+  loadDirectoryAsContext,
+  type LoadResult,
+  type LoadError,
+  type DirectoryLoadResult,
+} from './loader.js';

@@ -156,6 +156,63 @@ AIS supports expression placeholders in workflows:
 - `${step.id.output}` - Previous step output
 - `${address.name}` - Protocol address
 
+### Constraint Validation
+
+```typescript
+import { validateConstraints, requiresSimulation } from '@owliabot/ais-ts-sdk';
+
+// Validate against Pack constraints
+const result = validateConstraints(pack.constraints, {
+  token: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
+  amount_usd: 5000,
+  slippage_bps: 50,
+});
+
+if (!result.valid) {
+  console.log(result.violations);
+  // [{ field: 'slippage_bps', message: 'Slippage 50 bps exceeds max 30 bps', ... }]
+}
+
+// Check if simulation is required
+if (requiresSimulation(pack.constraints)) {
+  // Run simulation before executing
+}
+```
+
+### Workflow Validation
+
+```typescript
+import { validateWorkflow, getWorkflowProtocols } from '@owliabot/ais-ts-sdk';
+
+// Validate workflow references
+const result = validateWorkflow(workflow, ctx);
+if (!result.valid) {
+  console.log(result.issues);
+  // [{ stepId: 'step1', field: 'uses', message: 'Action "unknown/action" not found' }]
+}
+
+// Get protocols needed by a workflow
+const protocols = getWorkflowProtocols(workflow);
+// ['uniswap-v3', 'erc20']
+```
+
+### File Loading
+
+```typescript
+import { loadDirectory, loadDirectoryAsContext } from '@owliabot/ais-ts-sdk';
+
+// Load all AIS files from a directory
+const result = await loadDirectory('./protocols');
+console.log(result.protocols); // Protocol specs
+console.log(result.packs);     // Packs
+console.log(result.workflows); // Workflows
+console.log(result.errors);    // Parse errors
+
+// Load and create resolver context in one step
+const { context, result } = await loadDirectoryAsContext('./protocols');
+// context has all protocols registered
+```
+
 ## API Reference
 
 ### Parsing
@@ -179,6 +236,23 @@ AIS supports expression placeholders in workflows:
 - `resolveExpressionString(template, ctx)` - Resolve all expressions in string
 - `setVariable(ctx, key, value)` - Set runtime variable
 - `setQueryResult(ctx, name, result)` - Store query result
+
+### Validation
+
+- `validateConstraints(constraints, input)` - Validate against Pack constraints
+- `requiresSimulation(constraints)` - Check if simulation is required
+- `validateWorkflow(workflow, ctx)` - Validate workflow references
+- `getWorkflowDependencies(workflow)` - Get all action references
+- `getWorkflowProtocols(workflow)` - Get unique protocols used
+
+### File Loading
+
+- `loadFile(path)` - Load any AIS document from file
+- `loadProtocol(path)` - Load protocol spec from file
+- `loadPack(path)` - Load pack from file
+- `loadWorkflow(path)` - Load workflow from file
+- `loadDirectory(path, options?)` - Load all AIS files from directory
+- `loadDirectoryAsContext(path, options?)` - Load directory and create resolver context
 
 ### Schemas (Zod)
 
