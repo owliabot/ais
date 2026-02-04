@@ -1,55 +1,53 @@
 /**
  * Pack schema (.ais-pack.yaml)
+ * Based on AIS-1 Core Schema
  */
 import { z } from 'zod';
 
-const PackMetaSchema = z.object({
-  name: z.string(),
-  version: z.string(),
-  description: z.string().optional(),
-  maintainer: z.string().optional(),
+const HardConstraintsSchema = z.object({
+  max_spend: z.string().optional(),
+  max_approval: z.string().optional(),
+  max_slippage_bps: z.number().int().optional(),
+  allow_unlimited_approval: z.boolean().optional(),
 });
 
-const ProtocolRefSchema = z.object({
-  protocol: z.string(),
-  version: z.string(),
-  source: z.string().optional(),
-  actions: z.array(z.string()).optional(),
+const PolicySchema = z.object({
+  risk_threshold: z.number().int().optional(),
+  approval_required: z.array(z.string()).optional(),
+  hard_constraints: HardConstraintsSchema.optional(),
 });
 
-const AmountConstraintSchema = z.object({
-  max_usd: z.number().positive().optional(),
-  max_percentage_of_balance: z.number().min(0).max(100).optional(),
+const TokenPolicySchema = z.object({
+  allowlist: z.array(z.string()).optional(),
+  resolution: z.enum(['strict', 'permissive']).optional(),
 });
 
-const SlippageConstraintSchema = z.object({
-  max_bps: z.number().int().min(0).max(10000),
+const ProvidersSchema = z.object({
+  quote: z.array(z.string()).optional(),
+  routing: z.array(z.string()).optional(),
 });
 
-const PackConstraintsSchema = z.object({
-  tokens: z
-    .object({
-      allowlist: z.array(z.string()).optional(),
-      blocklist: z.array(z.string()).optional(),
-    })
-    .optional(),
-  amounts: AmountConstraintSchema.optional(),
-  slippage: SlippageConstraintSchema.optional(),
-  require_simulation: z.boolean().optional(),
+const SkillOverrideSchema = z.object({
+  risk_tags: z.array(z.string()).optional(),
+  hard_constraints: HardConstraintsSchema.optional(),
 });
 
 export const PackSchema = z.object({
-  ais_version: z.string(),
-  type: z.literal('pack'),
-  pack: PackMetaSchema,
-  protocols: z.array(ProtocolRefSchema),
-  constraints: PackConstraintsSchema.optional(),
+  schema: z.literal('ais-pack/1.0'),
+  name: z.string(),
+  version: z.string(),
+  description: z.string().optional(),
+  includes: z.array(z.string()), // skill_id or skill_uri references
+  policy: PolicySchema.optional(),
+  token_policy: TokenPolicySchema.optional(),
+  providers: ProvidersSchema.optional(),
+  overrides: z.record(SkillOverrideSchema).optional(),
 });
 
 // Inferred types
 export type Pack = z.infer<typeof PackSchema>;
-export type PackMeta = z.infer<typeof PackMetaSchema>;
-export type ProtocolRef = z.infer<typeof ProtocolRefSchema>;
-export type PackConstraints = z.infer<typeof PackConstraintsSchema>;
-export type AmountConstraint = z.infer<typeof AmountConstraintSchema>;
-export type SlippageConstraint = z.infer<typeof SlippageConstraintSchema>;
+export type Policy = z.infer<typeof PolicySchema>;
+export type HardConstraints = z.infer<typeof HardConstraintsSchema>;
+export type TokenPolicy = z.infer<typeof TokenPolicySchema>;
+export type Providers = z.infer<typeof ProvidersSchema>;
+export type SkillOverride = z.infer<typeof SkillOverrideSchema>;

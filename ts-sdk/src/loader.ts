@@ -58,17 +58,19 @@ export async function loadWorkflow(filePath: string): Promise<Workflow> {
 }
 
 /**
- * Determine AIS document type from filename
+ * Determine expected AIS document type from filename
  */
-function getTypeFromFilename(filename: string): 'protocol' | 'pack' | 'workflow' | null {
+function getExpectedTypeFromFilename(
+  filename: string
+): 'ais/1.0' | 'ais-pack/1.0' | 'ais-flow/1.0' | null {
   if (filename.endsWith('.ais-pack.yaml') || filename.endsWith('.ais-pack.yml')) {
-    return 'pack';
+    return 'ais-pack/1.0';
   }
   if (filename.endsWith('.ais-flow.yaml') || filename.endsWith('.ais-flow.yml')) {
-    return 'workflow';
+    return 'ais-flow/1.0';
   }
   if (filename.endsWith('.ais.yaml') || filename.endsWith('.ais.yml')) {
-    return 'protocol';
+    return 'ais/1.0';
   }
   return null;
 }
@@ -77,7 +79,7 @@ function getTypeFromFilename(filename: string): 'protocol' | 'pack' | 'workflow'
  * Check if a file is an AIS document
  */
 function isAISFile(filename: string): boolean {
-  return getTypeFromFilename(filename) !== null;
+  return getExpectedTypeFromFilename(filename) !== null;
 }
 
 /**
@@ -117,14 +119,14 @@ export async function loadDirectory(
         const content = await readFile(fullPath, 'utf-8');
         const doc = parseAIS(content, { source: fullPath });
 
-        switch (doc.type) {
-          case 'protocol':
+        switch (doc.schema) {
+          case 'ais/1.0':
             result.protocols.push({ path: fullPath, document: doc });
             break;
-          case 'pack':
+          case 'ais-pack/1.0':
             result.packs.push({ path: fullPath, document: doc });
             break;
-          case 'workflow':
+          case 'ais-flow/1.0':
             result.workflows.push({ path: fullPath, document: doc });
             break;
         }

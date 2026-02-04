@@ -5,6 +5,9 @@ import {
   resolveProtocolRef,
   resolveAction,
   resolveQuery,
+  parseSkillRef,
+  getContractAddress,
+  getSupportedChains,
   hasExpressions,
   extractExpressions,
   resolveExpression,
@@ -16,30 +19,33 @@ import {
 } from '../src/index.js';
 
 const SAMPLE_PROTOCOL = `
-ais_version: "1.0"
-type: protocol
-protocol:
-  name: uniswap-v3
+schema: "ais/1.0"
+meta:
+  protocol: uniswap-v3
   version: "1.0.0"
-  chain_id: 1
-  addresses:
-    router: "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45"
-    factory: "0x1F98431c8aD98523631AE4a59f267346ea31F984"
+deployments:
+  - chain: "eip155:1"
+    contracts:
+      router: "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45"
+      factory: "0x1F98431c8aD98523631AE4a59f267346ea31F984"
+  - chain: "eip155:8453"
+    contracts:
+      router: "0x2626664c2603336E57B271c5C0b26F421741e481"
 queries:
-  - name: get_pool
+  get_pool:
     contract: factory
     method: getPool
-    inputs:
+    params:
       - name: token0
         type: address
     outputs:
       - name: pool
         type: address
 actions:
-  - name: swap_exact_in
+  swap_exact_in:
     contract: router
     method: exactInputSingle
-    inputs:
+    params:
       - name: tokenIn
         type: address
       - name: amountIn
@@ -66,6 +72,20 @@ describe('ResolverContext', () => {
   });
 });
 
+describe('parseSkillRef', () => {
+  it('parses protocol only', () => {
+    const ref = parseSkillRef('uniswap-v3');
+    expect(ref.protocol).toBe('uniswap-v3');
+    expect(ref.version).toBeUndefined();
+  });
+
+  it('parses protocol with version', () => {
+    const ref = parseSkillRef('uniswap-v3@1.0.0');
+    expect(ref.protocol).toBe('uniswap-v3');
+    expect(ref.version).toBe('1.0.0');
+  });
+});
+
 describe('resolveProtocolRef', () => {
   let ctx: ResolverContext;
 
@@ -77,7 +97,7 @@ describe('resolveProtocolRef', () => {
   it('resolves protocol by name', () => {
     const spec = resolveProtocolRef(ctx, 'uniswap-v3');
     expect(spec).not.toBeNull();
-    expect(spec?.protocol.name).toBe('uniswap-v3');
+    expect(spec?.meta.protocol).toBe('uniswap-v3');
   });
 
   it('resolves protocol with version', () => {
@@ -107,7 +127,7 @@ describe('resolveAction', () => {
   it('resolves action by reference', () => {
     const result = resolveAction(ctx, 'uniswap-v3/swap_exact_in');
     expect(result).not.toBeNull();
-    expect(result?.action.name).toBe('swap_exact_in');
+    expect(result?.actionId).toBe('swap_exact_in');
     expect(result?.action.method).toBe('exactInputSingle');
   });
 
@@ -128,20 +148,49 @@ describe('resolveQuery', () => {
   it('resolves query by reference', () => {
     const result = resolveQuery(ctx, 'uniswap-v3/get_pool');
     expect(result).not.toBeNull();
-    expect(result?.query.name).toBe('get_pool');
+    expect(result?.queryId).toBe('get_pool');
+  });
+});
+
+describe('getContractAddress', () => {
+  it('gets contract address for chain', () => {
+    const spec = parseProtocolSpec(SAMPLE_PROTOCOL);
+    const addr = getContractAddress(spec, 'eip155:1', 'router');
+    expect(addr).toBe('0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45');
+  });
+
+  it('returns null for unknown chain', () => {
+    const spec = parseProtocolSpec(SAMPLE_PROTOCOL);
+    const addr = getContractAddress(spec, 'eip155:999', 'router');
+    expect(addr).toBeNull();
+  });
+
+  it('returns null for unknown contract', () => {
+    const spec = parseProtocolSpec(SAMPLE_PROTOCOL);
+    const addr = getContractAddress(spec, 'eip155:1', 'unknown');
+    expect(addr).toBeNull();
+  });
+});
+
+describe('getSupportedChains', () => {
+  it('returns all supported chains', () => {
+    const spec = parseProtocolSpec(SAMPLE_PROTOCOL);
+    const chains = getSupportedChains(spec);
+    expect(chains).toContain('eip155:1');
+    expect(chains).toContain('eip155:8453');
   });
 });
 
 describe('expression handling', () => {
   it('detects expressions in strings', () => {
-    expect(hasExpressions('${input.amount}')).toBe(true);
+    expect(hasExpressions('${inputs.amount}')).toBe(true);
     expect(hasExpressions('plain text')).toBe(false);
     expect(hasExpressions('${a} and ${b}')).toBe(true);
   });
 
   it('extracts expression references', () => {
-    const exprs = extractExpressions('${input.amount} + ${query.pool.fee}');
-    expect(exprs).toEqual(['input.amount', 'query.pool.fee']);
+    const exprs = extractExpressions('${inputs.amount} + ${nodes.pool.outputs.fee}');
+    expect(exprs).toEqual(['inputs.amount', 'nodes.pool.outputs.fee']);
   });
 });
 
@@ -154,30 +203,30 @@ describe('resolveExpression', () => {
   });
 
   it('resolves input variables', () => {
-    setVariable(ctx, 'amount', 1000);
-    expect(resolveExpression('input.amount', ctx)).toBe(1000);
+    setVariable(ctx, 'inputs.amount', 1000);
     expect(resolveExpression('inputs.amount', ctx)).toBe(1000);
   });
 
-  it('resolves query results', () => {
+  it('resolves node outputs', () => {
+    setVariable(ctx, 'nodes.get_pool', { outputs: { pool: '0xabc', fee: 3000 } });
+    expect(resolveExpression('nodes.get_pool.outputs.pool', ctx)).toBe('0xabc');
+    expect(resolveExpression('nodes.get_pool.outputs.fee', ctx)).toBe(3000);
+  });
+
+  it('resolves ctx variables', () => {
+    setVariable(ctx, 'ctx.chain', 'eip155:1');
+    setVariable(ctx, 'ctx.sender', '0xuser');
+    expect(resolveExpression('ctx.chain', ctx)).toBe('eip155:1');
+    expect(resolveExpression('ctx.sender', ctx)).toBe('0xuser');
+  });
+
+  it('resolves query results (legacy)', () => {
     setQueryResult(ctx, 'get_pool', { pool: '0xabc', fee: 3000 });
     expect(resolveExpression('query.get_pool.pool', ctx)).toBe('0xabc');
-    expect(resolveExpression('query.get_pool.fee', ctx)).toBe(3000);
-  });
-
-  it('resolves step outputs', () => {
-    setVariable(ctx, 'step.approve', { success: true, tx: '0x123' });
-    expect(resolveExpression('step.approve.success', ctx)).toBe(true);
-    expect(resolveExpression('step.approve.tx', ctx)).toBe('0x123');
-  });
-
-  it('resolves addresses', () => {
-    const router = resolveExpression('address.router', ctx);
-    expect(router).toBe('0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45');
   });
 
   it('returns undefined for missing references', () => {
-    expect(resolveExpression('input.missing', ctx)).toBeUndefined();
+    expect(resolveExpression('inputs.missing', ctx)).toBeUndefined();
   });
 });
 
@@ -186,30 +235,20 @@ describe('resolveExpressionString', () => {
 
   beforeEach(() => {
     ctx = createContext();
-    registerProtocol(ctx, parseProtocolSpec(SAMPLE_PROTOCOL));
-    setVariable(ctx, 'amount', 1000);
-    setVariable(ctx, 'token', '0xWETH');
+    setVariable(ctx, 'inputs.amount', 1000);
+    setVariable(ctx, 'inputs.token', '0xWETH');
   });
 
   it('resolves all expressions in a string', () => {
     const result = resolveExpressionString(
-      'Swap ${input.amount} of ${input.token}',
+      'Swap ${inputs.amount} of ${inputs.token}',
       ctx
     );
     expect(result).toBe('Swap 1000 of 0xWETH');
   });
 
   it('preserves unresolved expressions', () => {
-    const result = resolveExpressionString('${input.missing}', ctx);
-    expect(result).toBe('${input.missing}');
-  });
-
-  it('handles mixed content', () => {
-    const result = resolveExpressionString(
-      'Amount: ${input.amount}, Router: ${address.router}',
-      ctx
-    );
-    expect(result).toContain('1000');
-    expect(result).toContain('0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45');
+    const result = resolveExpressionString('${inputs.missing}', ctx);
+    expect(result).toBe('${inputs.missing}');
   });
 });

@@ -18,71 +18,67 @@ beforeAll(async () => {
   await writeFile(
     join(TEST_DIR, 'uniswap-v3.ais.yaml'),
     `
-ais_version: "1.0"
-type: protocol
-protocol:
-  name: uniswap-v3
+schema: "ais/1.0"
+meta:
+  protocol: uniswap-v3
   version: "1.0.0"
-  chain_id: 1
-  addresses:
-    router: "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45"
+deployments:
+  - chain: "eip155:1"
+    contracts:
+      router: "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45"
 actions:
-  - name: swap
+  swap:
     contract: router
     method: swap
-    inputs: []
 `
   );
 
   await writeFile(
     join(TEST_DIR, 'subdir', 'aave-v3.ais.yaml'),
     `
-ais_version: "1.0"
-type: protocol
-protocol:
-  name: aave-v3
+schema: "ais/1.0"
+meta:
+  protocol: aave-v3
   version: "1.0.0"
-  chain_id: 1
-  addresses:
-    pool: "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2"
+deployments:
+  - chain: "eip155:1"
+    contracts:
+      pool: "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2"
 actions:
-  - name: supply
+  supply:
     contract: pool
     method: supply
-    inputs: []
 `
   );
 
   await writeFile(
     join(TEST_DIR, 'safe-defi.ais-pack.yaml'),
     `
-ais_version: "1.0"
-type: pack
-pack:
-  name: safe-defi
-  version: "1.0.0"
-protocols:
-  - protocol: uniswap-v3
-    version: "1.0.0"
+schema: "ais-pack/1.0"
+name: safe-defi
+version: "1.0.0"
+includes:
+  - "uniswap-v3@1.0.0"
 `
   );
 
   await writeFile(
     join(TEST_DIR, 'swap-flow.ais-flow.yaml'),
     `
-ais_version: "1.0"
-type: workflow
-workflow:
+schema: "ais-flow/1.0"
+meta:
   name: swap-flow
   version: "1.0.0"
 inputs:
-  - name: token
+  token:
     type: address
-steps:
+nodes:
   - id: swap
-    uses: uniswap-v3/swap
-    with:
-      token: "\${input.token}"
+    type: action_ref
+    skill: "uniswap-v3@1.0.0"
+    action: swap
+    args:
+      token: "\${inputs.token}"
 `
   );
 
@@ -100,28 +96,28 @@ afterAll(async () => {
 describe('loadFile', () => {
   it('loads and parses a protocol file', async () => {
     const doc = await loadFile(join(TEST_DIR, 'uniswap-v3.ais.yaml'));
-    expect(doc.type).toBe('protocol');
-    if (doc.type === 'protocol') {
-      expect(doc.protocol.name).toBe('uniswap-v3');
+    expect(doc.schema).toBe('ais/1.0');
+    if (doc.schema === 'ais/1.0') {
+      expect(doc.meta.protocol).toBe('uniswap-v3');
     }
   });
 
   it('loads and parses a pack file', async () => {
     const doc = await loadFile(join(TEST_DIR, 'safe-defi.ais-pack.yaml'));
-    expect(doc.type).toBe('pack');
+    expect(doc.schema).toBe('ais-pack/1.0');
   });
 
   it('loads and parses a workflow file', async () => {
     const doc = await loadFile(join(TEST_DIR, 'swap-flow.ais-flow.yaml'));
-    expect(doc.type).toBe('workflow');
+    expect(doc.schema).toBe('ais-flow/1.0');
   });
 });
 
 describe('loadProtocol', () => {
   it('loads a protocol spec', async () => {
     const protocol = await loadProtocol(join(TEST_DIR, 'uniswap-v3.ais.yaml'));
-    expect(protocol.protocol.name).toBe('uniswap-v3');
-    expect(protocol.actions[0].name).toBe('swap');
+    expect(protocol.meta.protocol).toBe('uniswap-v3');
+    expect(protocol.actions.swap).toBeDefined();
   });
 });
 

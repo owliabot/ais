@@ -14,36 +14,39 @@ export {
   // Protocol
   ProtocolSpecSchema,
   type ProtocolSpec,
-  type ProtocolMeta,
+  type Meta,
+  type Deployment,
+  type Param,
   type Query,
-  type QueryInput,
-  type QueryOutput,
   type Action,
-  type ActionInput,
-  type ActionOutput,
-  type ConsistencyCheck,
-  type CustomType,
+  type Risk,
+  type Constraint,
+  type CalculatedField,
+  type AssetMapping,
+  type TestVector,
 
   // Pack
   PackSchema,
   type Pack,
-  type PackMeta,
-  type ProtocolRef,
-  type PackConstraints,
-  type AmountConstraint,
-  type SlippageConstraint,
+  type Policy,
+  type HardConstraints,
+  type TokenPolicy,
+  type Providers,
+  type SkillOverride,
 
   // Workflow
   WorkflowSchema,
   type Workflow,
   type WorkflowMeta,
   type WorkflowInput,
-  type WorkflowStep,
+  type WorkflowNode,
+  type WorkflowPolicy,
+  type PackRef,
 
   // Union
   AISDocumentSchema,
   type AnyAISDocument,
-  type AISDocumentType,
+  type AISSchemaType,
 } from './schema/index.js';
 
 // Parser
@@ -68,23 +71,27 @@ export {
 
   // References
   registerProtocol,
+  parseSkillRef,
   resolveProtocolRef,
   resolveAction,
   resolveQuery,
   expandPack,
+  getContractAddress,
+  getSupportedChains,
 
   // Expressions
   hasExpressions,
   extractExpressions,
   resolveExpression,
   resolveExpressionString,
+  resolveExpressionObject,
 } from './resolver/index.js';
 
 // Validator
 export {
   // Constraints
   validateConstraints,
-  requiresSimulation,
+  getHardConstraints,
   type ConstraintInput,
   type ConstraintViolation,
   type ConstraintResult,
@@ -93,6 +100,7 @@ export {
   validateWorkflow,
   getWorkflowDependencies,
   getWorkflowProtocols,
+  getExecutionOrder,
   type WorkflowIssue,
   type WorkflowValidationResult,
 } from './validator/index.js';

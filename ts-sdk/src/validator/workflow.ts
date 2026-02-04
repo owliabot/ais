@@ -1,13 +1,13 @@
 /**
- * Workflow validation - validate step references and dependencies
+ * Workflow validation - validate node references and dependencies
  */
-import type { Workflow } from '../schema/index.js';
+import type { Workflow, WorkflowNode } from '../schema/index.js';
 import type { ResolverContext } from '../resolver/index.js';
-import { resolveAction } from '../resolver/index.js';
+import { resolveAction, resolveQuery, parseSkillRef } from '../resolver/index.js';
 import { extractExpressions } from '../resolver/expression.js';
 
 export interface WorkflowIssue {
-  stepId: string;
+  nodeId: string;
   field: string;
   message: string;
   reference?: string;
@@ -21,8 +21,9 @@ export interface WorkflowValidationResult {
 /**
  * Validate a workflow against a resolver context
  * Checks:
- * - All `uses` references resolve to known actions
- * - All step references in expressions point to previous steps
+ * - All skill references resolve to known protocols
+ * - All action/query references exist in the protocol
+ * - All node references in expressions point to previous nodes
  * - Input references match declared inputs
  */
 export function validateWorkflow(
@@ -30,55 +31,100 @@ export function validateWorkflow(
   ctx: ResolverContext
 ): WorkflowValidationResult {
   const issues: WorkflowIssue[] = [];
-  const declaredInputs = new Set(workflow.inputs.map((i) => i.name));
-  const previousSteps = new Set<string>();
+  const declaredInputs = new Set(
+    workflow.inputs ? Object.keys(workflow.inputs) : []
+  );
+  const previousNodes = new Set<string>();
 
-  for (const step of workflow.steps) {
-    // Check `uses` reference
-    const actionResult = resolveAction(ctx, step.uses);
-    if (!actionResult) {
+  for (const node of workflow.nodes) {
+    // Check skill reference exists
+    const { protocol } = parseSkillRef(node.skill);
+    if (!ctx.protocols.has(protocol)) {
       issues.push({
-        stepId: step.id,
-        field: 'uses',
-        message: `Action "${step.uses}" not found`,
-        reference: step.uses,
+        nodeId: node.id,
+        field: 'skill',
+        message: `Protocol "${protocol}" not found`,
+        reference: node.skill,
       });
+    } else {
+      // Check action/query reference
+      if (node.type === 'action_ref' && node.action) {
+        const actionRef = `${node.skill}/${node.action}`;
+        const actionResult = resolveAction(ctx, actionRef);
+        if (!actionResult) {
+          issues.push({
+            nodeId: node.id,
+            field: 'action',
+            message: `Action "${node.action}" not found in ${node.skill}`,
+            reference: actionRef,
+          });
+        }
+      }
+
+      if (node.type === 'query_ref' && node.query) {
+        const queryRef = `${node.skill}/${node.query}`;
+        const queryResult = resolveQuery(ctx, queryRef);
+        if (!queryResult) {
+          issues.push({
+            nodeId: node.id,
+            field: 'query',
+            message: `Query "${node.query}" not found in ${node.skill}`,
+            reference: queryRef,
+          });
+        }
+      }
     }
 
-    // Check expressions in `with` values
-    for (const [key, value] of Object.entries(step.with)) {
-      if (typeof value === 'string') {
-        const expressions = extractExpressions(value);
-        for (const expr of expressions) {
-          const issue = validateExpression(
-            expr,
-            step.id,
-            `with.${key}`,
-            declaredInputs,
-            previousSteps
-          );
-          if (issue) issues.push(issue);
+    // Check expressions in args
+    if (node.args) {
+      for (const [key, value] of Object.entries(node.args)) {
+        if (typeof value === 'string') {
+          const expressions = extractExpressions(value);
+          for (const expr of expressions) {
+            const issue = validateExpression(
+              expr,
+              node.id,
+              `args.${key}`,
+              declaredInputs,
+              previousNodes
+            );
+            if (issue) issues.push(issue);
+          }
         }
       }
     }
 
     // Check condition expression
-    if (step.condition) {
-      const expressions = extractExpressions(step.condition);
+    if (node.condition) {
+      const expressions = extractExpressions(node.condition);
       for (const expr of expressions) {
         const issue = validateExpression(
           expr,
-          step.id,
+          node.id,
           'condition',
           declaredInputs,
-          previousSteps
+          previousNodes
         );
         if (issue) issues.push(issue);
       }
     }
 
-    // Add this step to available steps for subsequent steps
-    previousSteps.add(step.id);
+    // Check requires_queries references
+    if (node.requires_queries) {
+      for (const reqNode of node.requires_queries) {
+        if (!previousNodes.has(reqNode)) {
+          issues.push({
+            nodeId: node.id,
+            field: 'requires_queries',
+            message: `Required node "${reqNode}" not defined before this node`,
+            reference: reqNode,
+          });
+        }
+      }
+    }
+
+    // Add this node to available nodes for subsequent nodes
+    previousNodes.add(node.id);
   }
 
   return {
@@ -89,21 +135,20 @@ export function validateWorkflow(
 
 function validateExpression(
   expr: string,
-  stepId: string,
+  nodeId: string,
   field: string,
   declaredInputs: Set<string>,
-  previousSteps: Set<string>
+  previousNodes: Set<string>
 ): WorkflowIssue | null {
   const parts = expr.split('.');
   const namespace = parts[0];
 
   switch (namespace) {
-    case 'input':
     case 'inputs': {
       const inputName = parts[1];
       if (inputName && !declaredInputs.has(inputName)) {
         return {
-          stepId,
+          nodeId,
           field,
           message: `Input "${inputName}" not declared in workflow inputs`,
           reference: expr,
@@ -112,30 +157,38 @@ function validateExpression(
       break;
     }
 
-    case 'step': {
-      const refStepId = parts[1];
-      if (refStepId && !previousSteps.has(refStepId)) {
+    case 'nodes': {
+      const refNodeId = parts[1];
+      if (refNodeId && !previousNodes.has(refNodeId)) {
         return {
-          stepId,
+          nodeId,
           field,
-          message: `Step "${refStepId}" referenced before definition or does not exist`,
+          message: `Node "${refNodeId}" referenced before definition or does not exist`,
           reference: expr,
         };
       }
       break;
     }
 
-    // address and query references are validated at runtime
+    // ctx references are validated at runtime
   }
 
   return null;
 }
 
 /**
- * Get all action references used in a workflow
+ * Get all skill references used in a workflow
  */
 export function getWorkflowDependencies(workflow: Workflow): string[] {
-  return workflow.steps.map((step) => step.uses);
+  return workflow.nodes.map((node) => {
+    if (node.type === 'action_ref' && node.action) {
+      return `${node.skill}/${node.action}`;
+    }
+    if (node.type === 'query_ref' && node.query) {
+      return `${node.skill}/${node.query}`;
+    }
+    return node.skill;
+  });
 }
 
 /**
@@ -143,9 +196,18 @@ export function getWorkflowDependencies(workflow: Workflow): string[] {
  */
 export function getWorkflowProtocols(workflow: Workflow): string[] {
   const protocols = new Set<string>();
-  for (const step of workflow.steps) {
-    const [protocol] = step.uses.split('/');
-    if (protocol) protocols.add(protocol);
+  for (const node of workflow.nodes) {
+    const { protocol } = parseSkillRef(node.skill);
+    protocols.add(protocol);
   }
   return Array.from(protocols);
+}
+
+/**
+ * Get workflow nodes in dependency order
+ */
+export function getExecutionOrder(workflow: Workflow): WorkflowNode[] {
+  // For now, assume nodes are already in order
+  // TODO: Implement topological sort based on requires_queries
+  return workflow.nodes;
 }

@@ -1,24 +1,40 @@
 /**
  * Protocol Spec schema (.ais.yaml)
+ * Based on AIS-1 Core Schema
  */
 import { z } from 'zod';
-import { HexAddressSchema } from './common.js';
 
-const ProtocolMetaSchema = z.object({
-  name: z.string(),
+const MetaSchema = z.object({
+  protocol: z.string(),
   version: z.string(),
-  chain_id: z.number().int().positive(),
+  name: z.string().optional(),
+  homepage: z.string().optional(),
+  logo: z.string().optional(),
   description: z.string().optional(),
-  addresses: z.record(HexAddressSchema),
+  tags: z.array(z.string()).optional(),
+  maintainer: z.string().optional(),
 });
 
-const QueryInputSchema = z.object({
+const DeploymentSchema = z.object({
+  chain: z.string(), // e.g., "eip155:1"
+  contracts: z.record(z.string()), // contract name → address
+});
+
+const ParamSchema = z.object({
   name: z.string(),
   type: z.string(),
+  required: z.boolean().optional(),
+  description: z.string().optional(),
+  example: z.unknown().optional(),
+});
+
+const CalculatedFieldSchema = z.object({
+  type: z.string(),
+  expr: z.string(),
   description: z.string().optional(),
 });
 
-const QueryOutputSchema = z.object({
+const OutputSchema = z.object({
   name: z.string(),
   type: z.string(),
   path: z.string().optional(),
@@ -26,69 +42,77 @@ const QueryOutputSchema = z.object({
 });
 
 const QuerySchema = z.object({
-  name: z.string(),
+  name: z.string().optional(),
+  description: z.string().optional(),
   contract: z.string(),
   method: z.string(),
-  inputs: z.array(QueryInputSchema).optional(),
-  outputs: z.array(QueryOutputSchema),
+  params: z.array(ParamSchema).optional(),
+  outputs: z.array(OutputSchema).optional(),
+  capabilities_required: z.array(z.string()).optional(),
+});
+
+const RiskSchema = z.object({
+  level: z.number().int().min(1).max(5),
+  tags: z.array(z.string()).optional(),
   description: z.string().optional(),
 });
 
-const ActionInputSchema = z.object({
-  name: z.string(),
-  type: z.string(),
+const ConstraintSchema = z.object({
+  max_slippage_bps: z.number().int().optional(),
+  min_receive_ratio: z.number().optional(),
   description: z.string().optional(),
-  default: z.unknown().optional(),
-  calculated_from: z.string().optional(),
-});
-
-const ActionOutputSchema = z.object({
-  name: z.string(),
-  type: z.string(),
-  path: z.string().optional(),
-});
-
-const ConsistencyCheckSchema = z.object({
-  condition: z.string(),
-  message: z.string(),
 });
 
 const ActionSchema = z.object({
-  name: z.string(),
+  name: z.string().optional(),
+  description: z.string().optional(),
   contract: z.string(),
   method: z.string(),
-  inputs: z.array(ActionInputSchema),
-  outputs: z.array(ActionOutputSchema).optional(),
+  params: z.array(ParamSchema).optional(),
+  calculated: z.record(CalculatedFieldSchema).optional(),
+  outputs: z.array(OutputSchema).optional(),
   requires_queries: z.array(z.string()).optional(),
-  calculated_fields: z.record(z.string()).optional(),
-  consistency: z.array(ConsistencyCheckSchema).optional(),
-  description: z.string().optional(),
+  risks: z.array(RiskSchema).optional(),
+  constraints: z.array(ConstraintSchema).optional(),
+  capabilities_required: z.array(z.string()).optional(),
 });
 
-const CustomTypeSchema = z.object({
+const AssetMappingSchema = z.object({
+  chain: z.string(),
+  symbol: z.string(),
+  address: z.string(),
+  decimals: z.number().int().optional(),
+});
+
+const TestVectorSchema = z.object({
   name: z.string(),
-  base: z.string(),
-  fields: z.record(z.string()).optional(),
   description: z.string().optional(),
+  action: z.string(),
+  inputs: z.record(z.unknown()),
+  expected: z.record(z.unknown()).optional(),
 });
 
 export const ProtocolSpecSchema = z.object({
-  ais_version: z.string(),
-  type: z.literal('protocol'),
-  protocol: ProtocolMetaSchema,
-  queries: z.array(QuerySchema).optional(),
-  actions: z.array(ActionSchema),
-  types: z.array(CustomTypeSchema).optional(),
+  schema: z.literal('ais/1.0'),
+  meta: MetaSchema,
+  deployments: z.array(DeploymentSchema),
+  actions: z.record(ActionSchema),
+  queries: z.record(QuerySchema).optional(),
+  risks: z.array(RiskSchema).optional(),
+  supported_assets: z.array(AssetMappingSchema).optional(),
+  capabilities_required: z.array(z.string()).optional(),
+  tests: z.array(TestVectorSchema).optional(),
 });
 
 // Inferred types
 export type ProtocolSpec = z.infer<typeof ProtocolSpecSchema>;
-export type ProtocolMeta = z.infer<typeof ProtocolMetaSchema>;
+export type Meta = z.infer<typeof MetaSchema>;
+export type Deployment = z.infer<typeof DeploymentSchema>;
+export type Param = z.infer<typeof ParamSchema>;
 export type Query = z.infer<typeof QuerySchema>;
-export type QueryInput = z.infer<typeof QueryInputSchema>;
-export type QueryOutput = z.infer<typeof QueryOutputSchema>;
 export type Action = z.infer<typeof ActionSchema>;
-export type ActionInput = z.infer<typeof ActionInputSchema>;
-export type ActionOutput = z.infer<typeof ActionOutputSchema>;
-export type ConsistencyCheck = z.infer<typeof ConsistencyCheckSchema>;
-export type CustomType = z.infer<typeof CustomTypeSchema>;
+export type Risk = z.infer<typeof RiskSchema>;
+export type Constraint = z.infer<typeof ConstraintSchema>;
+export type CalculatedField = z.infer<typeof CalculatedFieldSchema>;
+export type AssetMapping = z.infer<typeof AssetMappingSchema>;
+export type TestVector = z.infer<typeof TestVectorSchema>;

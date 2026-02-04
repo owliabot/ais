@@ -12,7 +12,7 @@ import {
   type ProtocolSpec,
   type Pack,
   type Workflow,
-  type AISDocumentType,
+  type AISSchemaType,
 } from './schema/index.js';
 
 export class AISParseError extends Error {
@@ -79,13 +79,13 @@ export const parseWorkflow = createParser<Workflow>(WorkflowSchema, 'Workflow');
 /**
  * Detect document type without full validation
  */
-export function detectType(yaml: string): AISDocumentType | null {
+export function detectType(yaml: string): AISSchemaType | null {
   try {
     const parsed = parseYAML(yaml);
-    if (typeof parsed === 'object' && parsed !== null && 'type' in parsed) {
-      const type = (parsed as Record<string, unknown>).type;
-      if (type === 'protocol' || type === 'pack' || type === 'workflow') {
-        return type;
+    if (typeof parsed === 'object' && parsed !== null && 'schema' in parsed) {
+      const schema = (parsed as Record<string, unknown>).schema;
+      if (schema === 'ais/1.0' || schema === 'ais-pack/1.0' || schema === 'ais-flow/1.0') {
+        return schema;
       }
     }
     return null;

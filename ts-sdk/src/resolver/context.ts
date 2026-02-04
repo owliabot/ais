@@ -4,7 +4,7 @@
 import type { ProtocolSpec } from '../schema/index.js';
 
 export interface ResolverContext {
-  /** Loaded protocol specs by name */
+  /** Loaded protocol specs by protocol name */
   protocols: Map<string, ProtocolSpec>;
   /** Runtime variables */
   variables: Record<string, unknown>;

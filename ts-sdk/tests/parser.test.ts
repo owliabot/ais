@@ -12,71 +12,65 @@ import {
 describe('parseAIS', () => {
   it('parses a valid protocol spec', () => {
     const yaml = `
-ais_version: "1.0"
-type: protocol
-protocol:
-  name: test-protocol
+schema: "ais/1.0"
+meta:
+  protocol: test-protocol
   version: "1.0.0"
-  chain_id: 1
-  addresses:
-    router: "0x1234567890123456789012345678901234567890"
+deployments:
+  - chain: "eip155:1"
+    contracts:
+      router: "0x1234567890123456789012345678901234567890"
 actions:
-  - name: test_action
+  test_action:
     contract: router
     method: execute
-    inputs:
-      - name: amount
-        type: uint256
 `;
     const result = parseAIS(yaml);
-    expect(result.type).toBe('protocol');
-    expect(result.ais_version).toBe('1.0');
-    if (result.type === 'protocol') {
-      expect(result.protocol.name).toBe('test-protocol');
-      expect(result.actions).toHaveLength(1);
+    expect(result.schema).toBe('ais/1.0');
+    if (result.schema === 'ais/1.0') {
+      expect(result.meta.protocol).toBe('test-protocol');
+      expect(Object.keys(result.actions)).toHaveLength(1);
     }
   });
 
   it('parses a valid pack', () => {
     const yaml = `
-ais_version: "1.0"
-type: pack
-pack:
-  name: test-pack
-  version: "1.0.0"
-protocols:
-  - protocol: uniswap-v3
-    version: "1.0.0"
+schema: "ais-pack/1.0"
+name: test-pack
+version: "1.0.0"
+includes:
+  - "uniswap-v3@1.0.0"
 `;
     const result = parseAIS(yaml);
-    expect(result.type).toBe('pack');
-    if (result.type === 'pack') {
-      expect(result.pack.name).toBe('test-pack');
-      expect(result.protocols).toHaveLength(1);
+    expect(result.schema).toBe('ais-pack/1.0');
+    if (result.schema === 'ais-pack/1.0') {
+      expect(result.name).toBe('test-pack');
+      expect(result.includes).toHaveLength(1);
     }
   });
 
   it('parses a valid workflow', () => {
     const yaml = `
-ais_version: "1.0"
-type: workflow
-workflow:
+schema: "ais-flow/1.0"
+meta:
   name: test-workflow
   version: "1.0.0"
 inputs:
-  - name: token
+  token:
     type: address
-steps:
+nodes:
   - id: step1
-    uses: uniswap-v3/swap_exact_in
-    with:
-      token_in: "\${input.token}"
+    type: action_ref
+    skill: "uniswap-v3@1.0.0"
+    action: swap_exact_in
+    args:
+      token_in: "\${inputs.token}"
 `;
     const result = parseAIS(yaml);
-    expect(result.type).toBe('workflow');
-    if (result.type === 'workflow') {
-      expect(result.workflow.name).toBe('test-workflow');
-      expect(result.steps).toHaveLength(1);
+    expect(result.schema).toBe('ais-flow/1.0');
+    if (result.schema === 'ais-flow/1.0') {
+      expect(result.meta.name).toBe('test-workflow');
+      expect(result.nodes).toHaveLength(1);
     }
   });
 
@@ -85,36 +79,38 @@ steps:
   });
 
   it('throws on invalid document structure', () => {
-    expect(() => parseAIS('type: invalid')).toThrow(AISParseError);
+    expect(() => parseAIS('schema: invalid')).toThrow(AISParseError);
   });
 });
 
 describe('parseProtocolSpec', () => {
   it('validates protocol-specific fields', () => {
     const yaml = `
-ais_version: "1.0"
-type: protocol
-protocol:
-  name: uniswap-v3
+schema: "ais/1.0"
+meta:
+  protocol: uniswap-v3
   version: "1.0.0"
-  chain_id: 1
-  addresses:
-    router: "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45"
+  name: Uniswap V3
+deployments:
+  - chain: "eip155:1"
+    contracts:
+      router: "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45"
+      factory: "0x1F98431c8aD98523631AE4a59f267346ea31F984"
 queries:
-  - name: get_pool
+  get_pool:
     contract: factory
     method: getPool
-    inputs:
+    params:
       - name: token0
         type: address
     outputs:
       - name: pool
         type: address
 actions:
-  - name: swap_exact_in
+  swap_exact_in:
     contract: router
     method: exactInputSingle
-    inputs:
+    params:
       - name: tokenIn
         type: address
       - name: amountIn
@@ -123,19 +119,17 @@ actions:
       - get_pool
 `;
     const result = parseProtocolSpec(yaml);
-    expect(result.protocol.name).toBe('uniswap-v3');
-    expect(result.queries).toHaveLength(1);
-    expect(result.actions[0].requires_queries).toContain('get_pool');
+    expect(result.meta.protocol).toBe('uniswap-v3');
+    expect(result.queries?.get_pool).toBeDefined();
+    expect(result.actions.swap_exact_in.requires_queries).toContain('get_pool');
   });
 
   it('rejects pack documents', () => {
     const yaml = `
-ais_version: "1.0"
-type: pack
-pack:
-  name: test
-  version: "1.0.0"
-protocols: []
+schema: "ais-pack/1.0"
+name: test
+version: "1.0.0"
+includes: []
 `;
     expect(() => parseProtocolSpec(yaml)).toThrow(AISParseError);
   });
@@ -143,19 +137,19 @@ protocols: []
 
 describe('detectType', () => {
   it('detects protocol type', () => {
-    expect(detectType('type: protocol')).toBe('protocol');
+    expect(detectType('schema: "ais/1.0"')).toBe('ais/1.0');
   });
 
   it('detects pack type', () => {
-    expect(detectType('type: pack')).toBe('pack');
+    expect(detectType('schema: "ais-pack/1.0"')).toBe('ais-pack/1.0');
   });
 
   it('detects workflow type', () => {
-    expect(detectType('type: workflow')).toBe('workflow');
+    expect(detectType('schema: "ais-flow/1.0"')).toBe('ais-flow/1.0');
   });
 
   it('returns null for invalid type', () => {
-    expect(detectType('type: invalid')).toBeNull();
+    expect(detectType('schema: invalid')).toBeNull();
   });
 
   it('returns null for invalid YAML', () => {
@@ -166,21 +160,19 @@ describe('detectType', () => {
 describe('validate', () => {
   it('returns valid: true for valid documents', () => {
     const yaml = `
-ais_version: "1.0"
-type: protocol
-protocol:
-  name: test
+schema: "ais/1.0"
+meta:
+  protocol: test
   version: "1.0.0"
-  chain_id: 1
-  addresses: {}
-actions: []
+deployments: []
+actions: {}
 `;
     const result = validate(yaml);
     expect(result.valid).toBe(true);
   });
 
   it('returns issues for invalid documents', () => {
-    const result = validate('type: protocol');
+    const result = validate('schema: "ais/1.0"');
     expect(result.valid).toBe(false);
     if (!result.valid) {
       expect(result.issues.length).toBeGreaterThan(0);
@@ -189,57 +181,60 @@ actions: []
 });
 
 describe('parsePack', () => {
-  it('parses pack with constraints', () => {
+  it('parses pack with policy', () => {
     const yaml = `
-ais_version: "1.0"
-type: pack
-pack:
-  name: safe-defi
-  version: "1.0.0"
-protocols:
-  - protocol: uniswap-v3
-    version: "1.0.0"
-constraints:
-  tokens:
-    allowlist:
-      - "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
-  slippage:
-    max_bps: 50
-  require_simulation: true
+schema: "ais-pack/1.0"
+name: safe-defi
+version: "1.0.0"
+includes:
+  - "uniswap-v3@1.0.0"
+policy:
+  risk_threshold: 3
+  hard_constraints:
+    max_slippage_bps: 50
+token_policy:
+  allowlist:
+    - "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+  resolution: strict
 `;
     const result = parsePack(yaml);
-    expect(result.constraints?.slippage?.max_bps).toBe(50);
-    expect(result.constraints?.require_simulation).toBe(true);
+    expect(result.policy?.hard_constraints?.max_slippage_bps).toBe(50);
+    expect(result.token_policy?.resolution).toBe('strict');
   });
 });
 
 describe('parseWorkflow', () => {
-  it('parses workflow with multiple steps', () => {
+  it('parses workflow with multiple nodes', () => {
     const yaml = `
-ais_version: "1.0"
-type: workflow
-workflow:
+schema: "ais-flow/1.0"
+meta:
   name: swap-to-token
   version: "1.0.0"
 inputs:
-  - name: target_token
+  target_token:
     type: address
-  - name: amount
+  amount:
     type: uint256
-steps:
+nodes:
   - id: approve
-    uses: erc20/approve
-    with:
-      spender: "\${address.router}"
-      amount: "\${input.amount}"
+    type: action_ref
+    skill: "erc20@1.0.0"
+    action: approve
+    args:
+      spender: "\${ctx.router_address}"
+      amount: "\${inputs.amount}"
   - id: swap
-    uses: uniswap-v3/swap_exact_in
-    with:
-      token_out: "\${input.target_token}"
-    condition: "\${step.approve.success}"
+    type: action_ref
+    skill: "uniswap-v3@1.0.0"
+    action: swap_exact_in
+    args:
+      token_out: "\${inputs.target_token}"
+    requires_queries:
+      - approve
+    condition: "nodes.approve.outputs.success == true"
 `;
     const result = parseWorkflow(yaml);
-    expect(result.steps).toHaveLength(2);
-    expect(result.steps[1].condition).toBe('${step.approve.success}');
+    expect(result.nodes).toHaveLength(2);
+    expect(result.nodes[1].condition).toContain('approve');
   });
 });

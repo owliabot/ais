@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
   validateConstraints,
-  requiresSimulation,
+  getHardConstraints,
   validateWorkflow,
   getWorkflowDependencies,
   getWorkflowProtocols,
@@ -10,103 +10,116 @@ import {
   parseProtocolSpec,
   parseWorkflow,
   type ResolverContext,
-  type PackConstraints,
+  type Policy,
+  type TokenPolicy,
 } from '../src/index.js';
 
 describe('validateConstraints', () => {
-  const constraints: PackConstraints = {
-    tokens: {
-      allowlist: [
-        '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2', // WETH
-        '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', // USDC
-      ],
-      blocklist: ['0x0000000000000000000000000000000000000000'],
+  const policy: Policy = {
+    risk_threshold: 3,
+    approval_required: ['flash_loan', 'unlimited_approval'],
+    hard_constraints: {
+      max_slippage_bps: 100,
+      allow_unlimited_approval: false,
     },
-    amounts: {
-      max_usd: 10000,
-      max_percentage_of_balance: 50,
-    },
-    slippage: {
-      max_bps: 100,
-    },
-    require_simulation: true,
+  };
+
+  const tokenPolicy: TokenPolicy = {
+    allowlist: [
+      '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2', // WETH
+      '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', // USDC
+    ],
+    resolution: 'strict',
   };
 
   it('passes valid inputs', () => {
-    const result = validateConstraints(constraints, {
+    const result = validateConstraints(policy, tokenPolicy, {
       token: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
-      amount_usd: 5000,
       slippage_bps: 50,
     });
     expect(result.valid).toBe(true);
     expect(result.violations).toHaveLength(0);
   });
 
-  it('rejects token not in allowlist', () => {
-    const result = validateConstraints(constraints, {
+  it('rejects token not in allowlist (strict mode)', () => {
+    const result = validateConstraints(policy, tokenPolicy, {
       token: '0x1234567890123456789012345678901234567890',
     });
     expect(result.valid).toBe(false);
-    expect(result.violations[0].constraint).toBe('tokens.allowlist');
+    expect(result.violations[0].constraint).toBe('token_policy.allowlist');
   });
 
-  it('rejects blocklisted token', () => {
-    const result = validateConstraints(constraints, {
-      token: '0x0000000000000000000000000000000000000000',
+  it('soft-rejects token not in allowlist (permissive mode)', () => {
+    const permissivePolicy: TokenPolicy = {
+      allowlist: ['0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'],
+      resolution: 'permissive',
+    };
+    const result = validateConstraints(policy, permissivePolicy, {
+      token: '0x1234567890123456789012345678901234567890',
     });
-    expect(result.valid).toBe(false);
-    expect(result.violations.some(v => v.constraint === 'tokens.blocklist')).toBe(true);
-  });
-
-  it('rejects amount exceeding max_usd', () => {
-    const result = validateConstraints(constraints, {
-      token: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
-      amount_usd: 15000,
-    });
-    expect(result.valid).toBe(false);
-    expect(result.violations[0].constraint).toBe('amounts.max_usd');
+    expect(result.valid).toBe(true);
+    expect(result.requires_approval).toBe(true);
+    expect(result.approval_reasons.length).toBeGreaterThan(0);
   });
 
   it('rejects slippage exceeding max_bps', () => {
-    const result = validateConstraints(constraints, {
+    const result = validateConstraints(policy, tokenPolicy, {
       token: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
       slippage_bps: 150,
     });
     expect(result.valid).toBe(false);
-    expect(result.violations[0].constraint).toBe('slippage.max_bps');
+    expect(result.violations[0].constraint).toBe('hard_constraints.max_slippage_bps');
   });
 
-  it('collects multiple violations', () => {
-    const result = validateConstraints(constraints, {
-      token: '0x1234567890123456789012345678901234567890',
-      amount_usd: 20000,
-      slippage_bps: 200,
+  it('rejects unlimited approval when not allowed', () => {
+    const result = validateConstraints(policy, tokenPolicy, {
+      unlimited_approval: true,
     });
     expect(result.valid).toBe(false);
-    expect(result.violations.length).toBeGreaterThanOrEqual(3);
+    expect(result.violations[0].constraint).toBe('hard_constraints.allow_unlimited_approval');
   });
 
-  it('handles undefined constraints', () => {
-    const result = validateConstraints(undefined, {
+  it('requires approval for high risk level', () => {
+    const result = validateConstraints(policy, tokenPolicy, {
+      risk_level: 4,
+    });
+    expect(result.valid).toBe(true);
+    expect(result.requires_approval).toBe(true);
+    expect(result.approval_reasons[0]).toContain('Risk level');
+  });
+
+  it('requires approval for risky tags', () => {
+    const result = validateConstraints(policy, tokenPolicy, {
+      risk_tags: ['flash_loan'],
+    });
+    expect(result.valid).toBe(true);
+    expect(result.requires_approval).toBe(true);
+    expect(result.approval_reasons[0]).toContain('flash_loan');
+  });
+
+  it('handles undefined policy', () => {
+    const result = validateConstraints(undefined, undefined, {
       token: '0x1234',
-      amount_usd: 999999,
+      slippage_bps: 999999,
     });
     expect(result.valid).toBe(true);
   });
 });
 
-describe('requiresSimulation', () => {
-  it('returns true when require_simulation is true', () => {
-    expect(requiresSimulation({ require_simulation: true })).toBe(true);
+describe('getHardConstraints', () => {
+  it('extracts hard constraints from policy', () => {
+    const policy: Policy = {
+      hard_constraints: {
+        max_slippage_bps: 50,
+        allow_unlimited_approval: false,
+      },
+    };
+    const hc = getHardConstraints(policy);
+    expect(hc.max_slippage_bps).toBe(50);
   });
 
-  it('returns false when require_simulation is false', () => {
-    expect(requiresSimulation({ require_simulation: false })).toBe(false);
-  });
-
-  it('returns false when undefined', () => {
-    expect(requiresSimulation(undefined)).toBe(false);
-    expect(requiresSimulation({})).toBe(false);
+  it('returns empty object for undefined policy', () => {
+    expect(getHardConstraints(undefined)).toEqual({});
   });
 });
 
@@ -118,19 +131,19 @@ describe('validateWorkflow', () => {
     registerProtocol(
       ctx,
       parseProtocolSpec(`
-ais_version: "1.0"
-type: protocol
-protocol:
-  name: uniswap-v3
+schema: "ais/1.0"
+meta:
+  protocol: uniswap-v3
   version: "1.0.0"
-  chain_id: 1
-  addresses:
-    router: "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45"
+deployments:
+  - chain: "eip155:1"
+    contracts:
+      router: "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45"
 actions:
-  - name: swap_exact_in
+  swap_exact_in:
     contract: router
     method: exactInputSingle
-    inputs:
+    params:
       - name: tokenIn
         type: address
 `)
@@ -138,18 +151,18 @@ actions:
     registerProtocol(
       ctx,
       parseProtocolSpec(`
-ais_version: "1.0"
-type: protocol
-protocol:
-  name: erc20
+schema: "ais/1.0"
+meta:
+  protocol: erc20
   version: "1.0.0"
-  chain_id: 1
-  addresses: {}
+deployments:
+  - chain: "eip155:1"
+    contracts: {}
 actions:
-  - name: approve
+  approve:
     contract: token
     method: approve
-    inputs:
+    params:
       - name: spender
         type: address
 `)
@@ -158,82 +171,107 @@ actions:
 
   it('validates workflow with valid references', () => {
     const workflow = parseWorkflow(`
-ais_version: "1.0"
-type: workflow
-workflow:
+schema: "ais-flow/1.0"
+meta:
   name: test
   version: "1.0.0"
 inputs:
-  - name: amount
+  amount:
     type: uint256
-steps:
+nodes:
   - id: approve
-    uses: erc20/approve
-    with:
-      amount: "\${input.amount}"
+    type: action_ref
+    skill: "erc20@1.0.0"
+    action: approve
+    args:
+      amount: "\${inputs.amount}"
   - id: swap
-    uses: uniswap-v3/swap_exact_in
-    with:
-      amount: "\${step.approve.result}"
+    type: action_ref
+    skill: "uniswap-v3@1.0.0"
+    action: swap_exact_in
+    args:
+      amount: "\${nodes.approve.outputs.result}"
+    requires_queries:
+      - approve
 `);
     const result = validateWorkflow(workflow, ctx);
     expect(result.valid).toBe(true);
   });
 
-  it('detects unknown action reference', () => {
+  it('detects unknown protocol reference', () => {
     const workflow = parseWorkflow(`
-ais_version: "1.0"
-type: workflow
-workflow:
+schema: "ais-flow/1.0"
+meta:
   name: test
   version: "1.0.0"
-inputs: []
-steps:
+nodes:
   - id: step1
-    uses: unknown-protocol/unknown-action
-    with: {}
+    type: action_ref
+    skill: "unknown-protocol@1.0.0"
+    action: unknown_action
+    args: {}
 `);
     const result = validateWorkflow(workflow, ctx);
     expect(result.valid).toBe(false);
-    expect(result.issues[0].field).toBe('uses');
-    expect(result.issues[0].reference).toBe('unknown-protocol/unknown-action');
+    expect(result.issues[0].field).toBe('skill');
+  });
+
+  it('detects unknown action reference', () => {
+    const workflow = parseWorkflow(`
+schema: "ais-flow/1.0"
+meta:
+  name: test
+  version: "1.0.0"
+nodes:
+  - id: step1
+    type: action_ref
+    skill: "uniswap-v3@1.0.0"
+    action: unknown_action
+    args: {}
+`);
+    const result = validateWorkflow(workflow, ctx);
+    expect(result.valid).toBe(false);
+    expect(result.issues[0].field).toBe('action');
   });
 
   it('detects undeclared input reference', () => {
     const workflow = parseWorkflow(`
-ais_version: "1.0"
-type: workflow
-workflow:
+schema: "ais-flow/1.0"
+meta:
   name: test
   version: "1.0.0"
-inputs: []
-steps:
+inputs: {}
+nodes:
   - id: step1
-    uses: erc20/approve
-    with:
-      amount: "\${input.undeclared}"
+    type: action_ref
+    skill: "erc20@1.0.0"
+    action: approve
+    args:
+      amount: "\${inputs.undeclared}"
 `);
     const result = validateWorkflow(workflow, ctx);
     expect(result.valid).toBe(false);
     expect(result.issues[0].message).toContain('undeclared');
   });
 
-  it('detects forward step reference', () => {
+  it('detects forward node reference', () => {
     const workflow = parseWorkflow(`
-ais_version: "1.0"
-type: workflow
-workflow:
+schema: "ais-flow/1.0"
+meta:
   name: test
   version: "1.0.0"
-inputs: []
-steps:
+nodes:
   - id: step1
-    uses: erc20/approve
-    with:
-      value: "\${step.step2.output}"
+    type: action_ref
+    skill: "erc20@1.0.0"
+    action: approve
+    args:
+      value: "\${nodes.step2.outputs.result}"
   - id: step2
-    uses: uniswap-v3/swap_exact_in
-    with: {}
+    type: action_ref
+    skill: "uniswap-v3@1.0.0"
+    action: swap_exact_in
+    args: {}
 `);
     const result = validateWorkflow(workflow, ctx);
     expect(result.valid).toBe(false);
@@ -244,44 +282,51 @@ steps:
 describe('getWorkflowDependencies', () => {
   it('extracts all action references', () => {
     const workflow = parseWorkflow(`
-ais_version: "1.0"
-type: workflow
-workflow:
+schema: "ais-flow/1.0"
+meta:
   name: test
   version: "1.0.0"
-inputs: []
-steps:
+nodes:
   - id: s1
-    uses: erc20/approve
-    with: {}
+    type: action_ref
+    skill: "erc20@1.0.0"
+    action: approve
+    args: {}
   - id: s2
-    uses: uniswap-v3/swap
-    with: {}
+    type: action_ref
+    skill: "uniswap-v3@1.0.0"
+    action: swap
+    args: {}
 `);
     const deps = getWorkflowDependencies(workflow);
-    expect(deps).toEqual(['erc20/approve', 'uniswap-v3/swap']);
+    expect(deps).toContain('erc20@1.0.0/approve');
+    expect(deps).toContain('uniswap-v3@1.0.0/swap');
   });
 });
 
 describe('getWorkflowProtocols', () => {
   it('extracts unique protocols', () => {
     const workflow = parseWorkflow(`
-ais_version: "1.0"
-type: workflow
-workflow:
+schema: "ais-flow/1.0"
+meta:
   name: test
   version: "1.0.0"
-inputs: []
-steps:
+nodes:
   - id: s1
-    uses: erc20/approve
-    with: {}
+    type: action_ref
+    skill: "erc20@1.0.0"
+    action: approve
+    args: {}
   - id: s2
-    uses: uniswap-v3/swap
-    with: {}
+    type: action_ref
+    skill: "uniswap-v3@1.0.0"
+    action: swap
+    args: {}
   - id: s3
-    uses: erc20/transfer
-    with: {}
+    type: action_ref
+    skill: "erc20@1.0.0"
+    action: transfer
+    args: {}
 `);
     const protocols = getWorkflowProtocols(workflow);
     expect(protocols.sort()).toEqual(['erc20', 'uniswap-v3']);

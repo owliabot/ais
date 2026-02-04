@@ -1,17 +1,23 @@
 /**
- * Constraint validation - validate values against Pack constraints
+ * Constraint validation - validate values against Pack policy constraints
  */
-import type { PackConstraints } from '../schema/index.js';
+import type { Policy, HardConstraints, TokenPolicy } from '../schema/index.js';
 
 export interface ConstraintInput {
-  /** Token address being used */
+  /** Token address or symbol being used */
   token?: string;
-  /** Amount in USD */
-  amount_usd?: number;
-  /** Percentage of balance being used */
-  percentage_of_balance?: number;
+  /** Amount being spent (as string, e.g., "100 USDC") */
+  spend_amount?: string;
+  /** Approval amount (as string) */
+  approval_amount?: string;
   /** Slippage in basis points */
   slippage_bps?: number;
+  /** Whether this is an unlimited approval */
+  unlimited_approval?: boolean;
+  /** Risk level of the action (1-5) */
+  risk_level?: number;
+  /** Risk tags of the action */
+  risk_tags?: string[];
 }
 
 export interface ConstraintViolation {
@@ -25,115 +31,108 @@ export interface ConstraintViolation {
 export interface ConstraintResult {
   valid: boolean;
   violations: ConstraintViolation[];
+  requires_approval: boolean;
+  approval_reasons: string[];
 }
 
 /**
- * Validate input values against Pack constraints
+ * Validate input values against Pack policy
  */
 export function validateConstraints(
-  constraints: PackConstraints | undefined,
+  policy: Policy | undefined,
+  tokenPolicy: TokenPolicy | undefined,
   input: ConstraintInput
 ): ConstraintResult {
   const violations: ConstraintViolation[] = [];
+  const approvalReasons: string[] = [];
 
-  if (!constraints) {
-    return { valid: true, violations: [] };
-  }
-
-  // Token allowlist/blocklist
-  if (input.token && constraints.tokens) {
+  // Check token policy
+  if (input.token && tokenPolicy) {
     const token = input.token.toLowerCase();
 
-    if (constraints.tokens.allowlist) {
-      const allowed = constraints.tokens.allowlist.map((t) => t.toLowerCase());
-      if (!allowed.includes(token)) {
-        violations.push({
-          field: 'token',
-          message: `Token ${input.token} not in allowlist`,
-          constraint: 'tokens.allowlist',
-          value: input.token,
-          limit: constraints.tokens.allowlist,
-        });
-      }
-    }
-
-    if (constraints.tokens.blocklist) {
-      const blocked = constraints.tokens.blocklist.map((t) => t.toLowerCase());
-      if (blocked.includes(token)) {
-        violations.push({
-          field: 'token',
-          message: `Token ${input.token} is blocklisted`,
-          constraint: 'tokens.blocklist',
-          value: input.token,
-          limit: constraints.tokens.blocklist,
-        });
+    if (tokenPolicy.allowlist && tokenPolicy.allowlist.length > 0) {
+      const allowed = tokenPolicy.allowlist.map((t) => t.toLowerCase());
+      const isAllowed = allowed.some(
+        (t) => t === token || t === input.token // Check both lowercase and original
+      );
+      
+      if (!isAllowed) {
+        if (tokenPolicy.resolution === 'strict') {
+          violations.push({
+            field: 'token',
+            message: `Token ${input.token} not in allowlist`,
+            constraint: 'token_policy.allowlist',
+            value: input.token,
+            limit: tokenPolicy.allowlist,
+          });
+        } else {
+          approvalReasons.push(`Token ${input.token} not in allowlist`);
+        }
       }
     }
   }
 
-  // Amount constraints
-  if (constraints.amounts) {
-    if (
-      input.amount_usd !== undefined &&
-      constraints.amounts.max_usd !== undefined
-    ) {
-      if (input.amount_usd > constraints.amounts.max_usd) {
+  // Check hard constraints
+  if (policy?.hard_constraints) {
+    const hc = policy.hard_constraints;
+
+    // Slippage check
+    if (input.slippage_bps !== undefined && hc.max_slippage_bps !== undefined) {
+      if (input.slippage_bps > hc.max_slippage_bps) {
         violations.push({
-          field: 'amount_usd',
-          message: `Amount $${input.amount_usd} exceeds max $${constraints.amounts.max_usd}`,
-          constraint: 'amounts.max_usd',
-          value: input.amount_usd,
-          limit: constraints.amounts.max_usd,
+          field: 'slippage_bps',
+          message: `Slippage ${input.slippage_bps} bps exceeds max ${hc.max_slippage_bps} bps`,
+          constraint: 'hard_constraints.max_slippage_bps',
+          value: input.slippage_bps,
+          limit: hc.max_slippage_bps,
         });
       }
     }
 
-    if (
-      input.percentage_of_balance !== undefined &&
-      constraints.amounts.max_percentage_of_balance !== undefined
-    ) {
-      if (
-        input.percentage_of_balance >
-        constraints.amounts.max_percentage_of_balance
-      ) {
-        violations.push({
-          field: 'percentage_of_balance',
-          message: `${input.percentage_of_balance}% exceeds max ${constraints.amounts.max_percentage_of_balance}%`,
-          constraint: 'amounts.max_percentage_of_balance',
-          value: input.percentage_of_balance,
-          limit: constraints.amounts.max_percentage_of_balance,
-        });
-      }
-    }
-  }
-
-  // Slippage constraint
-  if (
-    input.slippage_bps !== undefined &&
-    constraints.slippage?.max_bps !== undefined
-  ) {
-    if (input.slippage_bps > constraints.slippage.max_bps) {
+    // Unlimited approval check
+    if (input.unlimited_approval && hc.allow_unlimited_approval === false) {
       violations.push({
-        field: 'slippage_bps',
-        message: `Slippage ${input.slippage_bps} bps exceeds max ${constraints.slippage.max_bps} bps`,
-        constraint: 'slippage.max_bps',
-        value: input.slippage_bps,
-        limit: constraints.slippage.max_bps,
+        field: 'unlimited_approval',
+        message: 'Unlimited approvals are not allowed',
+        constraint: 'hard_constraints.allow_unlimited_approval',
+        value: true,
+        limit: false,
       });
+    }
+  }
+
+  // Check risk threshold
+  if (policy?.risk_threshold !== undefined && input.risk_level !== undefined) {
+    if (input.risk_level > policy.risk_threshold) {
+      approvalReasons.push(
+        `Risk level ${input.risk_level} exceeds auto-approve threshold ${policy.risk_threshold}`
+      );
+    }
+  }
+
+  // Check risk tags requiring approval
+  if (policy?.approval_required && input.risk_tags) {
+    const requiringApproval = input.risk_tags.filter((tag) =>
+      policy.approval_required!.includes(tag)
+    );
+    if (requiringApproval.length > 0) {
+      approvalReasons.push(
+        `Risk tags require approval: ${requiringApproval.join(', ')}`
+      );
     }
   }
 
   return {
     valid: violations.length === 0,
     violations,
+    requires_approval: approvalReasons.length > 0,
+    approval_reasons: approvalReasons,
   };
 }
 
 /**
- * Check if simulation is required by constraints
+ * Extract hard constraints from policy (for display/UI)
  */
-export function requiresSimulation(
-  constraints: PackConstraints | undefined
-): boolean {
-  return constraints?.require_simulation === true;
+export function getHardConstraints(policy: Policy | undefined): HardConstraints {
+  return policy?.hard_constraints ?? {};
 }

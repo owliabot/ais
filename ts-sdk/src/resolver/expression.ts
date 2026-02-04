@@ -1,5 +1,5 @@
 /**
- * Expression resolution - resolve ${...} placeholders
+ * Expression resolution - resolve ${...} placeholders and CEL-like references
  */
 import type { ResolverContext } from './context.js';
 
@@ -27,20 +27,40 @@ export function extractExpressions(value: string): string[] {
 
 /**
  * Resolve a single expression reference
- * Supports: input.x, query.name.field, step.id.output, address.name
+ * Supports:
+ * - inputs.param_name - Workflow input parameter
+ * - nodes.node_id.outputs.field - Previous node output
+ * - ctx.chain - Context chain ID
+ * - ctx.sender - Context sender address
  */
 export function resolveExpression(expr: string, ctx: ResolverContext): unknown {
   const parts = expr.split('.');
   const namespace = parts[0];
 
   switch (namespace) {
-    case 'input':
     case 'inputs': {
       const key = parts.slice(1).join('.');
-      return ctx.variables[key];
+      return ctx.variables[`inputs.${key}`] ?? ctx.variables[key];
+    }
+
+    case 'nodes': {
+      const nodeId = parts[1];
+      const rest = parts.slice(2).join('.');
+      const nodeKey = `nodes.${nodeId}`;
+      const nodeData = ctx.variables[nodeKey] as Record<string, unknown> | undefined;
+      if (!nodeData) return undefined;
+      
+      // Navigate the rest of the path
+      return getNestedValue(nodeData, rest);
+    }
+
+    case 'ctx': {
+      const ctxKey = parts.slice(1).join('.');
+      return ctx.variables[`ctx.${ctxKey}`];
     }
 
     case 'query': {
+      // Legacy support for query.name.field
       const queryName = parts[1];
       const field = parts.slice(2).join('.');
       const result = ctx.queryResults.get(queryName);
@@ -48,28 +68,28 @@ export function resolveExpression(expr: string, ctx: ResolverContext): unknown {
       return field ? result[field] : result;
     }
 
-    case 'step': {
-      const stepId = parts[1];
-      const output = parts.slice(2).join('.');
-      const stepKey = `step.${stepId}`;
-      const result = ctx.variables[stepKey] as Record<string, unknown> | undefined;
-      if (!result) return undefined;
-      return output ? result[output] : result;
-    }
-
-    case 'address': {
-      const addrName = parts[1];
-      for (const spec of ctx.protocols.values()) {
-        if (addrName in spec.protocol.addresses) {
-          return spec.protocol.addresses[addrName];
-        }
-      }
-      return undefined;
-    }
-
     default:
+      // Direct variable lookup
       return ctx.variables[expr];
   }
+}
+
+/**
+ * Get a nested value from an object using dot notation
+ */
+function getNestedValue(obj: Record<string, unknown>, path: string): unknown {
+  if (!path) return obj;
+  
+  const parts = path.split('.');
+  let current: unknown = obj;
+  
+  for (const part of parts) {
+    if (current === null || current === undefined) return undefined;
+    if (typeof current !== 'object') return undefined;
+    current = (current as Record<string, unknown>)[part];
+  }
+  
+  return current;
 }
 
 /**
@@ -83,4 +103,28 @@ export function resolveExpressionString(
     const value = resolveExpression(expr, ctx);
     return value !== undefined ? String(value) : `\${${expr}}`;
   });
+}
+
+/**
+ * Resolve all expressions in an object recursively
+ */
+export function resolveExpressionObject(
+  obj: Record<string, unknown>,
+  ctx: ResolverContext
+): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  
+  for (const [key, value] of Object.entries(obj)) {
+    if (typeof value === 'string') {
+      result[key] = hasExpressions(value) 
+        ? resolveExpressionString(value, ctx)
+        : value;
+    } else if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+      result[key] = resolveExpressionObject(value as Record<string, unknown>, ctx);
+    } else {
+      result[key] = value;
+    }
+  }
+  
+  return result;
 }
