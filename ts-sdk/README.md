@@ -1,11 +1,11 @@
-# @ais-protocol/sdk
+# @owliabot/ais-ts-sdk
 
 TypeScript SDK for parsing and validating AIS (Agent Interaction Specification) files.
 
 ## Installation
 
 ```bash
-npm install @ais-protocol/sdk
+npm install @owliabot/ais-ts-sdk
 ```
 
 ## Usage
@@ -13,7 +13,7 @@ npm install @ais-protocol/sdk
 ### Parsing Documents
 
 ```typescript
-import { parseAIS, parseProtocolSpec, parsePack, parseWorkflow } from '@ais-protocol/sdk';
+import { parseAIS, parseProtocolSpec, parsePack, parseWorkflow } from '@owliabot/ais-ts-sdk';
 
 // Parse any AIS document (auto-detects type)
 const doc = parseAIS(yamlString);
@@ -30,7 +30,7 @@ const workflow = parseWorkflow(workflowYaml);
 ### Validation
 
 ```typescript
-import { validate, detectType } from '@ais-protocol/sdk';
+import { validate, detectType } from '@owliabot/ais-ts-sdk';
 
 // Quick type detection
 const type = detectType(yamlString); // 'protocol' | 'pack' | 'workflow' | null
@@ -52,7 +52,7 @@ import {
   resolveExpressionString,
   setVariable,
   setQueryResult,
-} from '@ais-protocol/sdk';
+} from '@owliabot/ais-ts-sdk';
 
 // Create a resolver context
 const ctx = createContext();

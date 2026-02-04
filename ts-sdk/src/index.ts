@@ -1,5 +1,5 @@
 /**
- * @ais-protocol/sdk
+ * @owliabot/ais-ts-sdk
  * TypeScript SDK for parsing and validating AIS (Agent Interaction Specification) files
  */
 

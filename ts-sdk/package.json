@@ -1,5 +1,5 @@
 {
-  "name": "@ais-protocol/sdk",
+  "name": "@owliabot/ais-ts-sdk",
   "version": "0.1.0",
   "description": "TypeScript SDK for parsing and validating AIS (Agent Interaction Specification) files",
   "type": "module",
