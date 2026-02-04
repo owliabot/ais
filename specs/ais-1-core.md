@@ -5,14 +5,30 @@
 
 ## Abstract
 
-AIS-1 defines the core schema for describing protocol interactions in a chain-agnostic way. It covers metadata, deployments, actions, queries, risk declarations, and token mappings.
+AIS-1 defines the core schema for describing protocol interactions in a chain-agnostic way. AIS-1.0 enables Agents to "read chain and fill forms" and "construct interaction suggestions per spec" with interoperability, auditability, and extensibility.
 
-## Specification
+## Design Principles
 
-### 1. Top-Level Structure
+AIS-1.0 separates concerns into layers:
+
+1. **Protocol Spec** describes atomic capabilities (actions, queries) and minimal execution recipes
+2. **Pack** handles deployer selection, risk policies, available tokens and providers
+3. **Workflow** handles cross-protocol composition and data flow orchestration
+4. **Explicit query dependencies** — engine execution requires explicit query data dependencies; `condition` and `calculated` only reference query outputs and context
+5. **CEL subset expressions** — capabilities can declare requirements
+
+---
+
+## Document Types
+
+AIS-1.0 introduces three top-level document types, each independently versioned and cross-referenced.
+
+### A) Protocol Skill Spec
+
+Protocol capability definition, maintained by protocol authors.
 
 ```yaml
-schema: "ais/1.0"                    # Required. Schema version.
+schema: "ais/1.0"
 
 meta:
   protocol: string                    # Required. Protocol identifier (kebab-case).
@@ -28,10 +44,87 @@ deployments: [Deployment]             # Required. Where the protocol lives.
 actions: { [id]: Action }             # Required. Write operations.
 queries: { [id]: Query }              # Optional. Read-only operations.
 risks: [Risk]                         # Optional. Protocol-level risk disclosures.
-supported_tokens: [TokenMapping]      # Optional. Recommended safe tokens.
+supported_assets: [AssetMapping]      # Optional. Recommended safe assets.
+capabilities_required: [string]       # Optional. Required engine capabilities.
+tests: [TestVector]                   # Optional. Lightweight test vectors.
 ```
 
-### 2. Deployment
+### B) Pack
+
+Deployment collection and policies, maintained by deployers.
+
+```yaml
+schema: "ais-pack/1.0"
+
+name: string                          # Pack identifier.
+version: string                       # Semver.
+description: string                   # Optional.
+
+includes: [string]                    # skill_id or skill_uri references.
+
+policy:
+  risk_threshold: integer             # Max risk_level to auto-approve.
+  approval_required: [string]         # risk_tags requiring human approval.
+  hard_constraints:                   # Default hard constraints.
+    max_spend: string
+    max_approval: string
+    max_slippage_bps: integer
+    allow_unlimited_approval: boolean
+
+token_policy:
+  allowlist: [string]                 # Allowed token symbols or addresses.
+  resolution: "strict" | "permissive" # How to handle unknown tokens.
+
+providers:
+  quote: [string]                     # Enabled quote providers: oneinch, jupiter, etc.
+  routing: [string]                   # Enabled routing providers.
+
+overrides:                            # Per-skill overrides.
+  [skill_id]:
+    risk_tags: [string]               # Override risk tags.
+    hard_constraints: object          # Override constraints.
+```
+
+### C) Workflow
+
+Composite action orchestration, maintained by deployers or community.
+
+```yaml
+schema: "ais-flow/1.0"
+
+name: string                          # Workflow identifier.
+version: string                       # Semver.
+description: string                   # Optional.
+
+inputs:                               # Workflow input parameters.
+  - name: string
+    type: string
+    description: string
+
+nodes:                                # Execution nodes.
+  - id: string
+    skill: string                     # skill_id reference.
+    action: string                    # Action or query ID within skill.
+    params: object                    # Param mapping (can reference inputs or prior nodes).
+    condition: string                 # Optional CEL condition.
+
+edges:                                # Data flow edges.
+  - from: string                      # node_id.output_name
+    to: string                        # node_id.param_name
+
+preflight:                            # Optional preflight checks.
+  - query: string                     # skill_id.query_id
+    assert: string                    # CEL assertion.
+
+policy:                               # Workflow-level policy (can tighten Pack policy).
+  hard_constraints: object
+```
+
+---
+
+## Specification
+
+### 1. Deployment
 
 ```yaml
 deployments:
@@ -42,14 +135,20 @@ deployments:
 ```
 
 **Chain ID format:** [CAIP-2](https://github.com/ChainAgnostic/CAIPs/blob/main/CAIPs/caip-2.md)
-- EVM: `eip155:1` (Ethereum), `eip155:8453` (Base), `eip155:42161` (Arbitrum)
-- Solana: `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp`
-- Cosmos: `cosmos:cosmoshub-4`, `cosmos:osmosis-1`
-- Bitcoin: `bip122:000000000019d6689c085ae165831e93`
-- Aptos: `aptos:1`
-- Sui: `sui:mainnet`
 
-### 3. Action
+| Chain | CAIP-2 ID |
+|-------|-----------|
+| Ethereum | `eip155:1` |
+| Base | `eip155:8453` |
+| Arbitrum | `eip155:42161` |
+| Solana | `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp` |
+| Cosmos Hub | `cosmos:cosmoshub-4` |
+| Osmosis | `cosmos:osmosis-1` |
+| Bitcoin | `bip122:000000000019d6689c085ae165831e93` |
+| Aptos | `aptos:1` |
+| Sui | `sui:mainnet` |
+
+### 2. Action
 
 An action is a state-changing operation that requires signing.
 
@@ -58,6 +157,7 @@ actions:
   [action_id]:                        # kebab-case identifier
     description: string               # Required. What this does.
     risk_level: integer               # Required. 1 (safe) to 5 (dangerous).
+    risk_tags: [string]               # Optional. Structured risk tags.
     
     params:                           # Required. Input parameters.
       - name: string                  # Required. Parameter name.
@@ -76,6 +176,21 @@ actions:
         type: string
         description: string
     
+    requires_queries: [string]        # Required for complex actions. Query IDs.
+    
+    hard_constraints:                 # Optional. Action-level constraints.
+      max_slippage_bps: string        # CEL expr or literal.
+      max_spend: string
+      max_approval: string
+      allow_unlimited_approval: boolean
+      max_price_impact_bps: integer
+      min_health_factor_after: string # For lending protocols.
+    
+    calculated_fields:                # Structured calculated field declarations.
+      [field_name]:
+        expr: string                  # CEL expression.
+        inputs: [string]              # Explicit query/param references.
+    
     execution:                        # Required. Chain-specific details.
       [chain_pattern]: ExecutionSpec  # See AIS-2.
     
@@ -83,7 +198,21 @@ actions:
     side_effects: [string]            # Optional. e.g., "Grants token approval".
 ```
 
-### 4. Query
+**Risk Tags:**
+
+| Tag | Description |
+|-----|-------------|
+| `approval` | Requires token approval |
+| `unlimited_approval` | May request unlimited approval |
+| `upgradeable` | Contract is upgradeable |
+| `oracle_dependency` | Depends on price oracles |
+| `mev_exposure` | Exposed to MEV extraction |
+| `custody` | Protocol takes custody of funds |
+| `irreversible` | Action cannot be undone |
+| `external_bridge` | Crosses chain boundaries |
+| `slippage` | Subject to slippage |
+
+### 3. Query
 
 A query is a read-only operation (no signing needed).
 
@@ -93,12 +222,18 @@ queries:
     description: string
     params: [Param]                   # Same schema as Action params.
     returns: [ReturnField]
+    
+    cache_ttl: integer                # Optional. Suggested cache seconds.
+    
+    consistency:                      # Optional. Data consistency requirements.
+      block_tag: "latest" | "safe" | "finalized" | integer
+      require_same_block: boolean     # All reads in same block.
+    
     execution:
       [chain_pattern]: ExecutionSpec
-    cache_ttl: integer                # Optional. Suggested cache seconds.
 ```
 
-### 5. Risk
+### 4. Risk
 
 ```yaml
 risks:
@@ -107,28 +242,36 @@ risks:
     applies_to: [string]              # Optional. Action IDs this risk applies to.
 ```
 
-### 6. Token Mapping
+**Risk Level Resolution:**
 
-Cross-chain token address resolution.
+`final_risk_level = max(protocol_declared, verifier_assessed, deployer_override)`
+
+### 5. Asset Mapping (formerly Token Mapping)
+
+Cross-chain asset address resolution with the new `asset` composite type.
 
 ```yaml
-supported_tokens:
+supported_assets:
   - symbol: string                    # e.g., "WETH"
     name: string                      # Optional. "Wrapped Ether"
-    decimals:                         # Per-chain decimals (usually same, not always)
+    decimals:                         # Per-chain decimals.
       [chain_id]: integer
     addresses:
-      [chain_id]: string             # Token address on each chain.
+      [chain_id]: string              # Token address on each chain.
     coingecko_id: string              # Optional. For price feeds.
     tags: ["stable", "wrapped", "governance"]  # Optional.
 ```
 
-### 7. Type System
+---
 
-AIS uses a minimal type system for params and returns:
+## Type System
+
+AIS uses a minimal type system for params and returns.
+
+### Basic Types
 
 | Type | Description | Example |
-|---|---|---|
+|------|-------------|---------|
 | `address` | Chain-native address | `0x1234...` / `So1234...` |
 | `uint256` | Unsigned 256-bit integer (as string) | `"1000000000000000000"` |
 | `uint128` | Unsigned 128-bit integer | |
@@ -139,19 +282,159 @@ AIS uses a minimal type system for params and returns:
 | `string` | UTF-8 string | |
 | `bytes` | Hex-encoded bytes | `"0xabcd..."` |
 | `bytes32` | Fixed 32 bytes | |
-| `float` | Floating point (for human-facing values like slippage %) | `0.5` |
-| `token_amount` | Human-readable token amount (engine handles decimals) | `"1.5"` |
+| `float` | Floating point (for human-facing values) | `0.5` |
 | `array<T>` | Array of type T | `array<address>` |
 | `tuple<T1,T2,...>` | Ordered tuple | |
 
-**Note:** `token_amount` is a convenience type. When `type: token_amount`, the engine converts human amounts to on-chain representation using the token's decimals.
+### Composite Types
 
-### 8. Chain Pattern Matching
+#### `asset`
+
+Represents a token/asset with full chain context.
+
+```yaml
+type: asset
+# Structure:
+# {
+#   chain_id: string,     # CAIP-2 chain ID
+#   address: string,      # Token contract address
+#   symbol?: string,      # Optional symbol hint
+#   decimals?: integer    # Optional decimals (engine fetches if missing)
+# }
+```
+
+**Usage:**
+```yaml
+params:
+  - name: token_in
+    type: asset
+    description: "Input token asset"
+```
+
+#### `token_amount`
+
+Human-readable token amount. **Must be bound to an `asset` parameter.**
+
+```yaml
+params:
+  - name: token_in
+    type: asset
+    description: "Input token"
+  - name: amount_in
+    type: token_amount
+    description: "Human amount for token_in"
+    # Implicitly bound to token_in (same prefix) or explicit binding:
+    asset_ref: "token_in"
+```
+
+**Engine Responsibility:**
+
+- Engine reads `decimals` from chain if not provided
+- If decimals fetch fails, engine MUST reject `token_amount` conversion and require user to provide atomic amount
+- Conversion: `atomic_amount = human_amount * 10^decimals`
+
+---
+
+## Expression Language (CEL Profile)
+
+AIS-1.0 uses a restricted [CEL (Common Expression Language)](https://github.com/google/cel-spec) subset for `condition` and `calculated_fields`.
+
+### Allowed Variables
+
+| Variable | Description |
+|----------|-------------|
+| `params.*` | Action/query parameters |
+| `ctx.wallet_address` | Signer's address |
+| `ctx.chain_id` | Current chain (CAIP-2) |
+| `ctx.now` | Current Unix timestamp (seconds) |
+| `ctx.policy.*` | Active policy constraints |
+| `query.<query_id>.<field>` | Query output fields |
+| `contracts.<name>` | Deployment contract addresses |
+| `calculated.<field>` | Other calculated fields |
+
+### Allowed Operations
+
+- **Arithmetic:** `+`, `-`, `*`, `/`, `%`
+- **Comparison:** `==`, `!=`, `<`, `<=`, `>`, `>=`
+- **Logical:** `&&`, `||`, `!`
+- **Conditional:** `condition ? true_value : false_value`
+- **Functions:** `min`, `max`, `abs`, `ceil`, `floor`, `round`
+- **Type conversion:** `to_atomic(amount, asset)`, `to_human(atomic, asset)`
+
+### Prohibited
+
+- Reflection or dynamic evaluation
+- Loops or recursion
+- String concatenation to generate addresses, function names, or ABI
+- External calls or side effects
+
+**Example:**
+```yaml
+calculated_fields:
+  amount_in_atomic:
+    expr: "to_atomic(params.amount_in, params.token_in)"
+  min_out_atomic:
+    expr: "floor(query.quote.amount_out_atomic * (1.0 - params.slippage_bps / 10000.0))"
+  deadline_unix:
+    expr: "ctx.now + 600"
+```
+
+---
+
+## Structured Detection
+
+The `auto_detect` string is replaced with a structured `detect` object.
+
+```yaml
+mapping:
+  fee: 
+    detect:
+      kind: "choose_one" | "best_quote" | "best_path" | "protocol_specific"
+      provider: string              # oneinch, jupiter, internal_router, etc.
+      candidates: [any]             # Candidate values to choose from.
+      constraints: object           # Provider-specific constraints.
+      requires_capabilities: [string]  # Engine capabilities needed.
+```
+
+**Detection Kinds:**
+
+| Kind | Description |
+|------|-------------|
+| `choose_one` | Select one from candidates based on criteria |
+| `best_quote` | Query provider for best quote |
+| `best_path` | Find optimal routing path |
+| `protocol_specific` | Protocol-defined detection logic |
+
+---
+
+## Capabilities
+
+Engine implementations vary. AIS-1.0 introduces capability declarations.
+
+### Skill Declaration
+
+```yaml
+capabilities_required:
+  - "cel_v1"            # CEL expression support
+  - "evm_multiread"     # Multicall support
+  - "permit2"           # Permit2 signature support
+  - "quote_provider:oneinch"  # Specific quote provider
+```
+
+### Engine Advertisement
+
+Engines report capabilities at startup. If a skill requires capabilities the engine doesn't support:
+1. Execution is rejected with clear error, OR
+2. Engine falls back to explicit degradation path
+
+---
+
+## Chain Pattern Matching
 
 Execution blocks use glob patterns for chain matching:
 
 | Pattern | Matches |
-|---|---|
+|---------|---------|
 | `eip155:1` | Ethereum mainnet only |
 | `eip155:*` | All EVM chains |
 | `solana:*` | All Solana clusters |
@@ -160,24 +443,55 @@ Execution blocks use glob patterns for chain matching:
 
 Resolution order: most specific pattern first.
 
-### 9. Versioning
+---
+
+## Versioning
 
 - Spec files use semver: `MAJOR.MINOR.PATCH`
-- MAJOR: breaking changes to params or execution
-- MINOR: new actions/queries, non-breaking
-- PATCH: description/metadata fixes
+- **MAJOR:** Breaking changes to params or execution
+- **MINOR:** New actions/queries, non-breaking additions
+- **PATCH:** Description/metadata fixes
 - Registry enforces: major version bump → re-verification required
+
+---
+
+## Test Vectors (Optional)
+
+Skills can include lightweight test vectors for validation.
+
+```yaml
+tests:
+  - name: "swap-basic"
+    action: "swap-exact-in"
+    params:
+      token_in: { chain_id: "eip155:8453", address: "0x4200...", decimals: 18 }
+      token_out: { chain_id: "eip155:8453", address: "0x8330...", decimals: 6 }
+      amount_in: "1.0"
+      slippage_bps: 50
+    expect:
+      calculated:
+        amount_in_atomic: "1000000000000000000"
+      execution_type: "composite"
+```
+
+---
 
 ## Examples
 
 See [/examples](../examples/) for complete spec files.
 
+---
+
 ## Rationale
 
-**Why YAML over JSON?** — Human readability matters for a spec that protocol teams will write and maintain. YAML supports comments and is less noisy. Parsers convert to JSON internally.
+**Why YAML over JSON?** — Human readability matters for a spec that protocol teams will write and maintain. YAML supports comments and is less noisy.
 
 **Why CAIP-2?** — Industry standard for chain identification. Avoids inventing yet another chain ID scheme.
 
-**Why risk_level as integer?** — Enables programmatic policy decisions. A policy engine can say "auto-approve risk ≤ 2, require human approval for risk ≥ 4" without parsing text.
+**Why risk_level as integer?** — Enables programmatic policy decisions ("auto-approve risk ≤ 2").
 
-**Why token_amount type?** — Agents think in human units ("swap 1.5 ETH"). Forcing uint256 wei values into the spec would make it harder for both agents and humans to reason about.
+**Why asset type?** — Resolves symbol/address ambiguity. Agents often see "swap USDC for ETH" but need precise addresses. The `asset` type bundles chain, address, and decimals.
+
+**Why CEL?** — Well-specified, sandboxable, already used in IAM policies. Avoids inventing yet another expression language.
+
+**Why capabilities?** — Different engines have different features. Explicit capability negotiation prevents runtime surprises.

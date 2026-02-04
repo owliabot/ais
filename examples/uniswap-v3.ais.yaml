@@ -2,11 +2,17 @@ schema: "ais/1.0"
 
 meta:
   protocol: "uniswap-v3"
-  version: "1.2.0"
+  version: "1.0.0"
   name: "Uniswap V3"
   homepage: "https://uniswap.org"
-  description: "Decentralized exchange with concentrated liquidity"
+  description: "Swap via Uniswap V3 router with quote-based minOut"
   tags: ["dex", "swap", "liquidity", "amm"]
+  maintainer: "uniswap.eth"
+
+capabilities_required:
+  - "cel_v1"
+  - "evm_read"
+  - "evm_call"
 
 deployments:
   - chain: "eip155:1"
@@ -16,243 +22,309 @@ deployments:
       factory: "0x1F98431c8aD98523631AE4a59f267346ea31F984"
       position_manager: "0xC36442b4a4522E871399CD717aBDD847Ab11FE88"
 
-  - chain: "eip155:8453"  # Base
+  - chain: "eip155:8453"
     contracts:
       router: "0x2626664c2603336E57B271c5C0b26F421741e481"
       quoter: "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a"
       factory: "0x33128a8fC17869897dcE68Ed026d694621f6FDfD"
       position_manager: "0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1"
 
-  - chain: "eip155:42161"  # Arbitrum
+  - chain: "eip155:42161"
     contracts:
       router: "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45"
       quoter: "0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6"
       factory: "0x1F98431c8aD98523631AE4a59f267346ea31F984"
       position_manager: "0xC36442b4a4522E871399CD717aBDD847Ab11FE88"
 
+supported_assets:
+  - symbol: "WETH"
+    name: "Wrapped Ether"
+    decimals:
+      eip155:1: 18
+      eip155:8453: 18
+      eip155:42161: 18
+    addresses:
+      eip155:1: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+      eip155:8453: "0x4200000000000000000000000000000000000006"
+      eip155:42161: "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"
+    tags: ["wrapped"]
+
+  - symbol: "USDC"
+    name: "USD Coin"
+    decimals:
+      eip155:1: 6
+      eip155:8453: 6
+      eip155:42161: 6
+    addresses:
+      eip155:1: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+      eip155:8453: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+      eip155:42161: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+    tags: ["stable"]
+
+  - symbol: "USDT"
+    name: "Tether USD"
+    decimals:
+      eip155:1: 6
+    addresses:
+      eip155:1: "0xdAC17F958D2ee523a2206206994597C13D831ec7"
+    tags: ["stable"]
+
+  - symbol: "DAI"
+    name: "Dai Stablecoin"
+    decimals:
+      eip155:1: 18
+    addresses:
+      eip155:1: "0x6B175474E89094C44Da98b954EedeAC495271d0F"
+    tags: ["stable"]
+
+  - symbol: "WBTC"
+    name: "Wrapped BTC"
+    decimals:
+      eip155:1: 8
+    addresses:
+      eip155:1: "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599"
+    tags: ["wrapped"]
+
+risks:
+  - level: "warning"
+    text: "Swaps are exposed to price movement and MEV. Use slippage limits and consider private tx routing."
+    applies_to: ["swap-exact-in"]
+  - level: "warning"
+    text: "Concentrated liquidity positions suffer impermanent loss when price moves outside the selected range."
+    applies_to: ["add-liquidity"]
+  - level: "info"
+    text: "Available fee tiers: 0.01% (100), 0.05% (500), 0.3% (3000), 1% (10000)"
+    applies_to: ["swap-exact-in", "add-liquidity"]
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ACTIONS
+# ═══════════════════════════════════════════════════════════════════════════════
+
 actions:
-  swap:
-    description: "Swap one token for another at the best available rate across V3 pools"
-    risk_level: 2
+  swap-exact-in:
+    description: "Swap exact input amount for as much output as possible with quote-based minOut."
+    risk_level: 3
+    risk_tags: ["mev_exposure", "slippage", "approval"]
+
     params:
       - name: token_in
-        type: address
-        description: "Token to sell"
+        type: asset
+        description: "Input token asset"
       - name: token_out
-        type: address
-        description: "Token to buy"
-      - name: amount
+        type: asset
+        description: "Output token asset"
+      - name: amount_in
         type: token_amount
-        description: "Amount of token_in to swap"
+        description: "Human input amount for token_in"
+        asset_ref: "token_in"
       - name: slippage_bps
-        type: uint16
+        type: uint32
+        description: "Max slippage in basis points, e.g. 50 = 0.5%"
         default: 50
-        description: "Maximum slippage in basis points (50 = 0.5%)"
         constraints:
           min: 1
-          max: 5000
+          max: 2000
+      - name: fee
+        type: uint32
+        description: "Uniswap V3 fee tier, e.g. 500, 3000"
+        required: false
+      - name: recipient
+        type: address
+        description: "Recipient of token_out (defaults to sender)"
+        required: false
+
     returns:
-      - name: amount_out
-        type: token_amount
-        description: "Amount of token_out received"
       - name: tx_hash
-        type: bytes32
-        description: "Transaction hash"
+        type: string
+        description: "Broadcast transaction hash"
+      - name: amount_out
+        type: uint256
+        description: "Actual output amount received"
+
+    requires_queries:
+      - "quote-exact-in-single"
+      - "allowance-token-in"
+
+    hard_constraints:
+      max_slippage_bps: "params.slippage_bps"
+      allow_unlimited_approval: false
+
+    calculated_fields:
+      amount_in_atomic:
+        expr: "to_atomic(params.amount_in, params.token_in)"
+        inputs: ["params.amount_in", "params.token_in"]
+      recipient:
+        expr: "params.recipient != null ? params.recipient : ctx.wallet_address"
+        inputs: ["params.recipient", "ctx.wallet_address"]
+      fee_tier:
+        expr: "params.fee != null ? params.fee : query.quote-exact-in-single.fee_tier"
+        inputs: ["params.fee", "query.quote-exact-in-single.fee_tier"]
+      deadline_unix:
+        expr: "ctx.now + 600"
+        inputs: ["ctx.now"]
+      min_out_atomic:
+        expr: "floor(query.quote-exact-in-single.amount_out_atomic * (1.0 - params.slippage_bps / 10000.0))"
+        inputs: ["query.quote-exact-in-single.amount_out_atomic", "params.slippage_bps"]
+      approval_amount_atomic:
+        expr: "calculated.amount_in_atomic"
+        inputs: ["calculated.amount_in_atomic"]
+
     execution:
       "eip155:*":
-        type: evm_call
-        contract: "router"
-        function: "exactInputSingle"
-        abi: "(address,address,uint24,address,uint256,uint256,uint160)"
-        pre_approve:
-          token: "params.token_in"
-          spender: "router"
-          amount: "params.amount"
-        mapping:
-          tokenIn: "params.token_in"
-          tokenOut: "params.token_out"
-          fee: "auto_detect"
-          recipient: "wallet_address"
-          amountIn: "params.amount"
-          amountOutMinimum: "calculated"
-          sqrtPriceLimitX96: "0"
-        deadline: "block.timestamp + 600"
+        type: composite
+        steps:
+          - id: approve_if_needed
+            type: evm_call
+            description: "Approve router to spend token_in if allowance insufficient"
+            contract: "params.token_in.address"
+            function: "approve"
+            abi: "(address,uint256)"
+            mapping:
+              spender: "contracts.router"
+              amount: "calculated.approval_amount_atomic"
+            condition: |
+              query.allowance-token-in.allowance_atomic < calculated.amount_in_atomic
+
+          - id: swap
+            type: evm_call
+            description: "Execute exactInputSingle swap"
+            contract: "router"
+            function: "exactInputSingle"
+            abi: "((address,address,uint24,address,uint256,uint256,uint160))"
+            mapping:
+              params:
+                tokenIn: "params.token_in.address"
+                tokenOut: "params.token_out.address"
+                fee: "calculated.fee_tier"
+                recipient: "calculated.recipient"
+                amountIn: "calculated.amount_in_atomic"
+                amountOutMinimum: "calculated.min_out_atomic"
+                sqrtPriceLimitX96: "0"
+            deadline: "calculated.deadline_unix"
+
     pre_conditions:
       - "Sufficient token_in balance"
     side_effects:
       - "Grants token approval to router if needed"
 
-  add_liquidity:
-    description: "Provide concentrated liquidity to a Uniswap V3 pool"
-    risk_level: 3
-    params:
-      - name: token_a
-        type: address
-        description: "First token of the pair"
-      - name: token_b
-        type: address
-        description: "Second token of the pair"
-      - name: amount_a
-        type: token_amount
-        description: "Amount of token_a to provide"
-      - name: amount_b
-        type: token_amount
-        description: "Amount of token_b to provide"
-      - name: fee_tier
-        type: uint24
-        description: "Fee tier in hundredths of a bip"
-        constraints:
-          enum: [100, 500, 3000, 10000]
-      - name: tick_lower
-        type: int256
-        description: "Lower tick boundary"
-      - name: tick_upper
-        type: int256
-        description: "Upper tick boundary"
-      - name: slippage_bps
-        type: uint16
-        default: 100
-        description: "Maximum slippage in basis points"
-    returns:
-      - name: token_id
-        type: uint256
-        description: "NFT position token ID"
-      - name: liquidity
-        type: uint128
-        description: "Liquidity amount minted"
-      - name: tx_hash
-        type: bytes32
-    execution:
-      "eip155:*":
-        type: composite
-        steps:
-          - type: evm_call
-            description: "Approve token A"
-            contract: "token_a"
-            function: "approve"
-            abi: "(address,uint256)"
-            mapping:
-              spender: "contracts.position_manager"
-              amount: "params.amount_a"
-            condition: "allowance_a < params.amount_a"
-          - type: evm_call
-            description: "Approve token B"
-            contract: "token_b"
-            function: "approve"
-            abi: "(address,uint256)"
-            mapping:
-              spender: "contracts.position_manager"
-              amount: "params.amount_b"
-            condition: "allowance_b < params.amount_b"
-          - type: evm_call
-            description: "Mint liquidity position"
-            contract: "position_manager"
-            function: "mint"
-            abi: "(address,address,uint24,int24,int24,uint256,uint256,uint256,uint256,address,uint256)"
-            mapping:
-              token0: "params.token_a"
-              token1: "params.token_b"
-              fee: "params.fee_tier"
-              tickLower: "params.tick_lower"
-              tickUpper: "params.tick_upper"
-              amount0Desired: "params.amount_a"
-              amount1Desired: "params.amount_b"
-              amount0Min: "calculated"
-              amount1Min: "calculated"
-              recipient: "wallet_address"
-              deadline: "block.timestamp + 600"
-    pre_conditions:
-      - "Sufficient balance of both tokens"
-    side_effects:
-      - "Grants token approvals to position manager"
-      - "Mints an ERC-721 position NFT to wallet"
+# ═══════════════════════════════════════════════════════════════════════════════
+# QUERIES
+# ═══════════════════════════════════════════════════════════════════════════════
 
 queries:
-  get_quote:
-    description: "Get expected output amount for a swap (no gas cost)"
+  quote-exact-in-single:
+    description: "Quote output for exact input single hop"
     params:
       - name: token_in
-        type: address
-        description: "Token to sell"
+        type: asset
+        description: "Input token asset"
       - name: token_out
-        type: address
-        description: "Token to buy"
-      - name: amount
+        type: asset
+        description: "Output token asset"
+      - name: amount_in
         type: token_amount
-        description: "Amount of token_in"
+        description: "Human amount for token_in"
+        asset_ref: "token_in"
       - name: fee
-        type: uint24
-        default: 3000
-        description: "Pool fee tier"
+        type: uint32
+        description: "Optional fee tier (auto-detected if not provided)"
+        required: false
+
     returns:
-      - name: amount_out
-        type: token_amount
-        description: "Expected output amount"
+      - name: amount_out_atomic
+        type: uint256
+        description: "Quoted output amount in token_out atomic units"
+      - name: fee_tier
+        type: uint32
+        description: "Selected fee tier"
+
+    cache_ttl: 3
+    consistency:
+      block_tag: "latest"
+      require_same_block: true
+
     execution:
       "eip155:*":
-        type: evm_call
+        type: evm_read
         contract: "quoter"
         function: "quoteExactInputSingle"
-        abi: "(address,address,uint256,uint24,uint160)"
+        abi: "(address,address,uint24,uint256,uint160)"
         mapping:
-          tokenIn: "params.token_in"
-          tokenOut: "params.token_out"
-          amountIn: "params.amount"
-          fee: "params.fee"
+          tokenIn: "params.token_in.address"
+          tokenOut: "params.token_out.address"
+          fee:
+            detect:
+              kind: "best_quote"
+              candidates: [100, 500, 3000, 10000]
+              constraints:
+                prefer_liquidity: true
+          amountIn: "to_atomic(params.amount_in, params.token_in)"
           sqrtPriceLimitX96: "0"
-    cache_ttl: 15
 
-risks:
-  - level: warning
-    text: "Swaps on low-liquidity pairs may result in significant slippage beyond the specified tolerance"
-    applies_to: ["swap"]
-  - level: warning
-    text: "Concentrated liquidity positions suffer impermanent loss when price moves outside the selected range"
-    applies_to: ["add_liquidity"]
-  - level: info
-    text: "Available fee tiers: 0.01% (100), 0.05% (500), 0.3% (3000), 1% (10000)"
-    applies_to: ["swap", "add_liquidity"]
+  allowance-token-in:
+    description: "Read token_in allowance for router"
+    params:
+      - name: token_in
+        type: asset
+        description: "Input token asset"
 
-supported_tokens:
-  - symbol: WETH
-    name: "Wrapped Ether"
-    decimals:
-      "eip155:1": 18
-      "eip155:8453": 18
-      "eip155:42161": 18
-    addresses:
-      "eip155:1": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
-      "eip155:8453": "0x4200000000000000000000000000000000000006"
-      "eip155:42161": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"
+    returns:
+      - name: allowance_atomic
+        type: uint256
+        description: "Allowance in token_in atomic units"
 
-  - symbol: USDC
-    name: "USD Coin"
-    decimals:
-      "eip155:1": 6
-      "eip155:8453": 6
-      "eip155:42161": 6
-    addresses:
-      "eip155:1": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
-      "eip155:8453": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
-      "eip155:42161": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+    cache_ttl: 10
+    execution:
+      "eip155:*":
+        type: evm_read
+        contract: "params.token_in.address"
+        function: "allowance"
+        abi: "(address,address)"
+        mapping:
+          owner: "ctx.wallet_address"
+          spender: "contracts.router"
 
-  - symbol: USDT
-    name: "Tether USD"
-    decimals:
-      "eip155:1": 6
-    addresses:
-      "eip155:1": "0xdAC17F958D2ee523a2206206994597C13D831ec7"
+  balance-token-in:
+    description: "Read token_in balance"
+    params:
+      - name: token_in
+        type: asset
+        description: "Input token asset"
 
-  - symbol: DAI
-    name: "Dai Stablecoin"
-    decimals:
-      "eip155:1": 18
-    addresses:
-      "eip155:1": "0x6B175474E89094C44Da98b954EedeAC495271d0F"
+    returns:
+      - name: balance_atomic
+        type: uint256
+        description: "Balance in atomic units"
 
-  - symbol: WBTC
-    name: "Wrapped BTC"
-    decimals:
-      "eip155:1": 8
-    addresses:
-      "eip155:1": "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599"
+    cache_ttl: 10
+    execution:
+      "eip155:*":
+        type: evm_read
+        contract: "params.token_in.address"
+        function: "balanceOf"
+        abi: "(address)"
+        mapping:
+          owner: "ctx.wallet_address"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TEST VECTORS (Optional)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+tests:
+  - name: "swap-basic-eth-usdc"
+    action: "swap-exact-in"
+    params:
+      token_in:
+        chain_id: "eip155:8453"
+        address: "0x4200000000000000000000000000000000000006"
+        decimals: 18
+      token_out:
+        chain_id: "eip155:8453"
+        address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+        decimals: 6
+      amount_in: "1.0"
+      slippage_bps: 50
+    expect:
+      calculated:
+        amount_in_atomic: "1000000000000000000"
+      execution_type: "composite"

@@ -7,9 +7,100 @@
 
 AIS-2 defines chain-specific execution formats. Each execution type describes exactly how to build a transaction for a given blockchain architecture.
 
-## Execution Types
+---
 
-### 1. `evm_call` — EVM Chains
+## Execution Types Overview
+
+| Type | Description | Use Case |
+|------|-------------|----------|
+| `evm_read` | Single eth_call read | Query single value |
+| `evm_multiread` | Batched multicall read | Query multiple values efficiently |
+| `evm_call` | Single write transaction | Simple state change |
+| `evm_multicall` | Batched write transaction | Multiple writes in one tx |
+| `composite` | Multi-step execution | Approve + swap patterns |
+| `solana_instruction` | Solana program call | Solana transactions |
+| `cosmos_message` | Cosmos SDK message | Cosmos chain txs |
+| `bitcoin_psbt` | Bitcoin PSBT | Bitcoin transactions |
+| `move_entry` | Move entry function | Aptos/Sui transactions |
+
+---
+
+## 1. `evm_read` — EVM Single Read
+
+For single `eth_call` operations (queries).
+
+```yaml
+execution:
+  "eip155:*":
+    type: evm_read
+    contract: string                  # Contract reference from deployments.
+    function: string                  # View function name.
+    abi: string                       # Parameter type signature.
+    mapping: object                   # Param name → value source mapping.
+```
+
+**Example:**
+
+```yaml
+execution:
+  "eip155:*":
+    type: evm_read
+    contract: "quoter"
+    function: "quoteExactInputSingle"
+    abi: "(address,address,uint24,uint256,uint160)"
+    mapping:
+      tokenIn: "params.token_in.address"
+      tokenOut: "params.token_out.address"
+      fee: "params.fee"
+      amountIn: "to_atomic(params.amount_in, params.token_in)"
+      sqrtPriceLimitX96: "0"
+```
+
+---
+
+## 2. `evm_multiread` — EVM Batched Read
+
+For multiple reads in a single RPC call using Multicall3 or RPC batching.
+
+```yaml
+execution:
+  "eip155:*":
+    type: evm_multiread
+    method: "multicall3" | "rpc_batch"  # Aggregation method.
+    calls:
+      - contract: string
+        function: string
+        abi: string
+        mapping: object
+        output_as: string             # Name for this result.
+```
+
+**Example:**
+
+```yaml
+execution:
+  "eip155:*":
+    type: evm_multiread
+    method: "multicall3"
+    calls:
+      - contract: "token_in.address"
+        function: "balanceOf"
+        abi: "(address)"
+        mapping:
+          owner: "ctx.wallet_address"
+        output_as: "balance"
+      - contract: "token_in.address"
+        function: "allowance"
+        abi: "(address,address)"
+        mapping:
+          owner: "ctx.wallet_address"
+          spender: "contracts.router"
+        output_as: "allowance"
+```
+
+---
+
+## 3. `evm_call` — EVM Single Write
 
 For Ethereum, Arbitrum, Base, Polygon, Optimism, and all EVM-compatible chains.
 
@@ -23,55 +114,147 @@ execution:
     mapping: object                   # Param name → value source mapping.
     value: string | null              # ETH value for payable functions.
     
-    # Optional
-    pre_approve:                      # Token approval if needed.
+    # Optional: Pre-authorization
+    pre_authorize:
+      method: "approve" | "permit" | "permit2"
       token: string                   # Param reference or address.
       spender: string                 # Contract name that needs approval.
-      amount: string                  # "params.amount" or "unlimited".
-    
-    multicall: boolean                # Whether this is part of a multicall batch.
-    deadline: string                  # "block.timestamp + 300" etc.
+      amount: string                  # Amount expression.
 ```
 
-**Mapping syntax:**
+### Pre-Authorization Methods
 
-| Value | Meaning |
-|---|---|
-| `"params.token_in"` | From action params |
-| `"wallet_address"` | Signer's address |
-| `"calculated"` | Engine computes (e.g., minOut from quote × slippage) |
-| `"auto_detect"` | Engine determines optimal value (e.g., fee tier) |
-| `"contracts.router"` | From deployment contracts |
-| `"0"` / `"0x0"` | Literal value |
-| `"block.timestamp + 300"` | Expression |
+| Method | Description | Spender |
+|--------|-------------|---------|
+| `approve` | Standard ERC20 approve tx | Target contract |
+| `permit` | EIP-2612 signature | Target contract |
+| `permit2` | Uniswap Permit2 signature | Permit2 contract, then target |
+
+**Permit2 Flow:**
+1. Check Permit2 allowance for token
+2. If insufficient, approve Permit2 contract
+3. Sign Permit2 message for spender
+4. Include signature in transaction
+
+---
+
+## 4. `evm_multicall` — EVM Batched Write (Optional)
+
+For protocols supporting atomic multi-call patterns (e.g., Uniswap Universal Router).
+
+```yaml
+execution:
+  "eip155:*":
+    type: evm_multicall
+    contract: string                  # Router with multicall support.
+    calls:
+      - function: string
+        abi: string
+        mapping: object
+        condition: string             # Optional skip condition.
+    deadline: string
+```
+
+---
+
+## 5. `composite` — Multi-Step Execution
+
+For actions requiring multiple sequential steps (e.g., approve → swap).
+
+```yaml
+execution:
+  "eip155:*":
+    type: composite
+    steps:
+      - id: string                    # Step identifier for references.
+        type: evm_call | evm_read     # Step execution type.
+        description: string           # Human-readable description.
+        contract: string
+        function: string
+        abi: string
+        mapping: object
+        condition: string             # Optional. CEL expression to skip step.
+```
+
+**Condition Evaluation:**
+- Conditions reference `query.*` outputs and `calculated.*` fields
+- If condition evaluates to `false`, step is skipped
+- Conditions cannot reference runtime transaction results
 
 **Example:**
 
 ```yaml
 execution:
   "eip155:*":
-    type: evm_call
-    contract: "router"
-    function: "exactInputSingle"
-    abi: "(address,address,uint24,address,uint256,uint256,uint160)"
-    pre_approve:
-      token: "params.token_in"
-      spender: "router"
-      amount: "params.amount"
-    mapping:
-      tokenIn: "params.token_in"
-      tokenOut: "params.token_out"
-      fee: "auto_detect"
-      recipient: "wallet_address"
-      amountIn: "params.amount"
-      amountOutMinimum: "calculated"
-      sqrtPriceLimitX96: "0"
-    deadline: "block.timestamp + 600"
+    type: composite
+    steps:
+      - id: approve_if_needed
+        type: evm_call
+        description: "Approve router to spend token_in if allowance insufficient"
+        contract: "params.token_in.address"
+        function: "approve"
+        abi: "(address,uint256)"
+        mapping:
+          spender: "contracts.router"
+          amount: "calculated.approval_amount_atomic"
+        condition: |
+          query.allowance-token-in.allowance_atomic < calculated.amount_in_atomic
+
+      - id: swap
+        type: evm_call
+        description: "Execute exactInputSingle swap"
+        contract: "router"
+        function: "exactInputSingle"
+        abi: "(address,address,uint24,address,uint256,uint256,uint160)"
+        mapping:
+          tokenIn: "params.token_in.address"
+          tokenOut: "params.token_out.address"
+          fee: "calculated.fee_tier"
+          recipient: "calculated.recipient"
+          amountIn: "calculated.amount_in_atomic"
+          amountOutMinimum: "calculated.min_out_atomic"
+          sqrtPriceLimitX96: "0"
+        deadline: "calculated.deadline_unix"
 ```
 
 ---
 
-### 2. `solana_instruction` — Solana
+## Mapping Syntax
+
+Values in `mapping` can be:
+
+| Value | Meaning |
+|-------|---------|
+| `"params.<name>"` | From action/query params |
+| `"params.<name>.address"` | Address field from asset param |
+| `"ctx.wallet_address"` | Signer's address |
+| `"ctx.chain_id"` | Current chain ID |
+| `"ctx.now"` | Current timestamp |
+| `"calculated.<field>"` | From calculated_fields |
+| `"query.<id>.<field>"` | From query output |
+| `"contracts.<name>"` | From deployment contracts |
+| `"0"` / `"0x0..."` | Literal value |
+| `"to_atomic(...)"` | CEL conversion function |
+| `{ detect: ... }` | Structured detection (see below) |
+
+### Structured Detection
+
+Replace string `"auto_detect"` with structured object:
+
+```yaml
+mapping:
+  fee:
+    detect:
+      kind: "best_quote"
+      provider: "uniswap_pool_query"
+      candidates: [100, 500, 3000, 10000]
+      constraints:
+        prefer_liquidity: true
+```
+
+---
+
+## 6. `solana_instruction` — Solana
 
 ```yaml
 execution:
@@ -83,115 +266,49 @@ execution:
     discriminator: string             # Optional. 8-byte hex if no IDL.
     
     accounts:                         # Required. All accounts the instruction touches.
-      - name: string                  # Human-readable name.
-        signer: boolean               # Is this a signer?
-        writable: boolean             # Is this writable?
-        source: string                # Where the address comes from.
-        
-        # For derived accounts
+      - name: string
+        signer: boolean
+        writable: boolean
+        source: string                # wallet | params.* | constant:* | derived
         derived: "ata" | "pda" | null
-        seeds: [string]               # PDA seeds (if derived=pda).
-        program: string               # Deriving program (if derived=pda).
+        seeds: [string]               # PDA seeds.
+        program: string               # Deriving program.
     
-    mapping: object                   # Param → instruction data mapping.
-    compute_units: integer            # Optional. CU estimate.
-    lookup_tables: [string]           # Optional. ALT addresses.
+    mapping: object
+    compute_units: integer
+    lookup_tables: [string]
 ```
 
 **Account source values:**
 
 | Source | Meaning |
-|---|---|
+|--------|---------|
 | `"wallet"` | Signer's public key |
-| `"params.token_in"` | From action params |
-| `"constant:TokenkegQ..."` | Fixed address |
-| `"derived"` | Computed from seeds (see `derived` field) |
+| `"params.<name>"` | From action params |
+| `"constant:<address>"` | Fixed address |
+| `"derived"` | Computed from seeds |
 
 **Derived account types:**
-- `ata` — Associated Token Account. Engine computes: `getAssociatedTokenAddress(wallet, mint)`
-- `pda` — Program Derived Address. Engine computes from `seeds` + `program`
-
-**Example (Jupiter swap):**
-
-```yaml
-execution:
-  "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp":
-    type: solana_instruction
-    program: "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"
-    instruction: "route"
-    idl: "ipfs://QmJupiterIdl..."
-    accounts:
-      - name: "user"
-        signer: true
-        writable: true
-        source: "wallet"
-      - name: "input_mint"
-        signer: false
-        writable: false
-        source: "params.token_in"
-      - name: "output_mint"
-        signer: false
-        writable: false
-        source: "params.token_out"
-      - name: "input_token_account"
-        signer: false
-        writable: true
-        derived: "ata"
-        seeds: ["wallet", "params.token_in"]
-      - name: "output_token_account"
-        signer: false
-        writable: true
-        derived: "ata"
-        seeds: ["wallet", "params.token_out"]
-      - name: "token_program"
-        signer: false
-        writable: false
-        source: "constant:TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
-    mapping:
-      amount_in: "params.amount"
-      slippage_bps: "params.slippage_bps"
-      route: "auto_detect"
-    compute_units: 400000
-```
+- `ata` — Associated Token Account
+- `pda` — Program Derived Address
 
 ---
 
-### 3. `cosmos_message` — Cosmos SDK Chains
+## 7. `cosmos_message` — Cosmos SDK Chains
 
 ```yaml
 execution:
   "cosmos:osmosis-1":
     type: cosmos_message
     msg_type: string                  # Protobuf message type path.
-    mapping: object                   # Param → message field mapping.
-    gas_estimate: integer             # Optional.
-    memo: string                      # Optional. Transaction memo.
-```
-
-**Example (Osmosis swap):**
-
-```yaml
-execution:
-  "cosmos:osmosis-1":
-    type: cosmos_message
-    msg_type: "/osmosis.gamm.v1beta1.MsgSwapExactAmountIn"
-    mapping:
-      sender: "wallet_address"
-      routes:
-        - poolId: "auto_detect"
-          tokenOutDenom: "params.token_out"
-      tokenIn:
-        denom: "params.token_in"
-        amount: "params.amount"
-      tokenOutMinAmount: "calculated"
-    gas_estimate: 250000
+    mapping: object
+    gas_estimate: integer
+    memo: string
 ```
 
 ---
 
-### 4. `bitcoin_psbt` — Bitcoin
-
-Bitcoin doesn't have smart contract calls in the traditional sense, but AIS can describe PSBT construction for specific protocols (Ordinals, Runes, Lightning channel ops).
+## 8. `bitcoin_psbt` — Bitcoin
 
 ```yaml
 execution:
@@ -199,88 +316,61 @@ execution:
     type: bitcoin_psbt
     script_type: "p2wpkh" | "p2tr" | "p2sh" | "p2wsh"
     mapping: object
-    
-    # For Ordinals/Runes
-    op_return: string                 # Optional. OP_RETURN data template.
-    
-    # For simple transfers
+    op_return: string                 # Optional OP_RETURN data.
     outputs:
-      - address: string              # "params.to_address"
-        amount: string               # "params.amount" (in sats)
+      - address: string
+        amount: string                # In satoshis.
 ```
 
 ---
 
-### 5. `move_entry` — Move Chains (Aptos/Sui)
+## 9. `move_entry` — Move Chains (Aptos/Sui)
 
 ```yaml
 execution:
   "aptos:1":
     type: move_entry
-    module: string                    # Full module path: "0x1::coin"
+    module: string                    # Full module path.
     function: string                  # Entry function name.
-    type_args: [string]              # Move generic type arguments.
+    type_args: [string]               # Generic type arguments.
     mapping: object
     gas_estimate: integer
 ```
 
-**Example (Aptos token transfer):**
-
-```yaml
-execution:
-  "aptos:1":
-    type: move_entry
-    module: "0x1::aptos_account"
-    function: "transfer_coins"
-    type_args: ["0x1::aptos_coin::AptosCoin"]
-    mapping:
-      to: "params.to_address"
-      amount: "params.amount"
-    gas_estimate: 1000
-```
-
 ---
-
-## Composite Execution
-
-Some actions require multiple steps (e.g., approve → swap). Use `steps` for ordered execution:
-
-```yaml
-execution:
-  "eip155:*":
-    type: composite
-    steps:
-      - type: evm_call
-        description: "Approve router to spend token"
-        contract: "token_in"          # Dynamic: resolved from params
-        function: "approve"
-        abi: "(address,uint256)"
-        mapping:
-          spender: "contracts.router"
-          amount: "params.amount"
-        condition: "allowance < params.amount"  # Skip if already approved
-        
-      - type: evm_call
-        description: "Execute swap"
-        contract: "router"
-        function: "exactInputSingle"
-        abi: "..."
-        mapping: { ... }
-```
 
 ## Engine Requirements
 
 An AIS-compliant engine MUST:
 
-1. **Validate mapping references** — All `params.*` references must exist in the action's params.
-2. **Resolve derived accounts** — Correctly compute ATAs and PDAs for Solana.
-3. **Handle `calculated` values** — Use the protocol's query functions (e.g., quoter) to compute values like minimum output.
-4. **Handle `auto_detect` values** — Use heuristics or queries to determine optimal values (e.g., fee tier, route).
-5. **Check `condition`** — In composite execution, evaluate conditions before each step.
-6. **Respect `compute_units` / `gas_estimate`** — Use as hints for transaction construction.
+1. **Validate mapping references** — All `params.*` references must exist in the action's params
+2. **Resolve derived accounts** — Correctly compute ATAs and PDAs for Solana
+3. **Handle `calculated` values** — Evaluate CEL expressions using query outputs
+4. **Handle `detect` objects** — Query providers or evaluate candidates to determine values
+5. **Evaluate `condition`** — In composite execution, evaluate conditions before each step
+6. **Respect gas/CU hints** — Use `gas_estimate` / `compute_units` for transaction construction
+7. **Enforce `requires_queries`** — Execute required queries before action execution
 
 An AIS-compliant engine SHOULD:
 
-1. Simulate transactions before signing when possible.
-2. Cache query results per `cache_ttl`.
-3. Support multiple specs for the same action and choose the most specific chain match.
+1. Simulate transactions before signing when possible (eth_call preflight)
+2. Cache query results per `cache_ttl`
+3. Support multiple specs and choose the most specific chain match
+4. Provide clear errors when capabilities are insufficient
+
+---
+
+## Built-in Functions
+
+Engines MUST implement these CEL functions:
+
+| Function | Description |
+|----------|-------------|
+| `to_atomic(amount, asset)` | Convert human amount to atomic using asset decimals |
+| `to_human(atomic, asset)` | Convert atomic amount to human readable |
+| `min(a, b)` | Minimum of two values |
+| `max(a, b)` | Maximum of two values |
+| `abs(x)` | Absolute value |
+| `floor(x)` | Floor to integer |
+| `ceil(x)` | Ceiling to integer |
+| `round(x)` | Round to nearest integer |
