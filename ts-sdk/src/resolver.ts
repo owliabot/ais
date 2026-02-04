@@ -3,7 +3,7 @@
  * Resolve protocol references and expression placeholders
  */
 
-import type { ProtocolSpec, Pack, Workflow, Action, Query } from './types.js';
+import type { ProtocolSpec, Pack, Action, Query } from './types.js';
 
 export interface ResolverContext {
   /** Loaded protocol specs by name */
