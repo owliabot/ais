@@ -269,6 +269,48 @@ const queryResult = buildQuery(protocol, query, { pair: '0x...' }, ctx, { chain:
 const txs = buildWorkflowTransactions(protocols, workflow.nodes, ctx, 'eip155:1');
 ```
 
+### Builder DSL
+
+```typescript
+import { protocol, pack, workflow, param } from '@owliabot/ais-ts-sdk';
+
+// Build a Protocol Spec
+const uniswap = protocol('uniswap-v3', '1.0.0')
+  .description('Uniswap V3 DEX')
+  .deployment('eip155:1', {
+    router: '0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45',
+  })
+  .action('swap_exact_in', {
+    contract: 'router',
+    method: 'exactInputSingle',
+    params: [param('tokenIn', 'address'), param('amountIn', 'uint256')],
+  })
+  .build();
+
+// Build a Pack
+const safePack = pack('safe-defi', '1.0.0')
+  .includes('uniswap-v3@1.0.0', 'erc20@1.0.0')
+  .maxSlippage(100)
+  .tokenAllowlist(['0xWETH...', '0xUSDC...'])
+  .build();
+
+// Build a Workflow
+const swapFlow = workflow('swap-to-token', '1.0.0')
+  .requiredInput('target_token', 'address')
+  .requiredInput('amount_in', 'uint256')
+  .action('approve', 'erc20@1.0.0', 'approve', {
+    args: { amount: '${inputs.amount_in}' },
+  })
+  .action('swap', 'uniswap-v3@1.0.0', 'swap_exact_in', {
+    args: { tokenOut: '${inputs.target_token}' },
+    requires: ['approve'],
+  })
+  .build();
+
+// Export as YAML
+console.log(uniswap.toYAML());
+```
+
 ### CEL Expression Evaluator
 
 ```typescript
@@ -352,6 +394,17 @@ evaluator.evaluate('double(21)')  // → 42
 - `encodeFunctionCall(signature, types, values)` - Low-level ABI encoding
 - `encodeFunctionSelector(signature)` - Get 4-byte function selector
 - `keccak256(input)` - Keccak-256 hash
+
+### Builder DSL
+
+- `protocol(name, version)` - Create Protocol builder
+- `pack(name, version)` - Create Pack builder
+- `workflow(name, version)` - Create Workflow builder
+- `param(name, type, options?)` - Create parameter definition
+- `output(name, type, options?)` - Create output definition
+- `.build()` - Build and validate document
+- `.toYAML()` - Convert to YAML string
+- `.toJSON()` - Convert to JSON string
 
 ### CEL Expression Evaluation
 

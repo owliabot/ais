@@ -146,3 +146,17 @@ export {
   type Token as CELToken,
   type ASTNode as CELASTNode,
 } from './cel/index.js';
+
+// Builder DSL
+export {
+  protocol,
+  pack,
+  workflow,
+  param,
+  output,
+  ProtocolBuilder,
+  PackBuilder,
+  WorkflowBuilder,
+  type ParamDef,
+  type OutputDef,
+} from './builder/index.js';
