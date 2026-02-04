@@ -117,3 +117,20 @@ export {
   type LoadError,
   type DirectoryLoadResult,
 } from './loader.js';
+
+// Execution
+export {
+  buildTransaction,
+  buildQuery,
+  buildWorkflowTransactions,
+  encodeFunctionCall,
+  encodeFunctionSelector,
+  encodeValue,
+  buildFunctionSignature,
+  keccak256,
+  type TransactionRequest,
+  type BuildOptions,
+  type BuildResult,
+  type BuildError,
+  type BuildOutput,
+} from './execution/index.js';

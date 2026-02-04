@@ -213,6 +213,32 @@ const { context, result } = await loadDirectoryAsContext('./protocols');
 // context has all protocols registered
 ```
 
+### Execution Builder
+
+```typescript
+import { buildTransaction, buildQuery, buildWorkflowTransactions } from '@owliabot/ais-ts-sdk';
+
+// Build a transaction from an action
+const result = buildTransaction(protocol, action, {
+  amountIn: 1000000000000000000n,
+  amountOutMin: 990000000000000000n,
+  path: ['0xWETH...', '0xUSDC...'],
+  to: '0xRecipient...',
+  deadline: 1700000000n,
+}, ctx, { chain: 'eip155:1' });
+
+if (result.success) {
+  console.log(result.transaction);
+  // { to: '0x...', data: '0x...', value: 0n, chainId: 1 }
+}
+
+// Build a query call (for eth_call)
+const queryResult = buildQuery(protocol, query, { pair: '0x...' }, ctx, { chain: 'eip155:1' });
+
+// Build all transactions for a workflow
+const txs = buildWorkflowTransactions(protocols, workflow.nodes, ctx, 'eip155:1');
+```
+
 ## API Reference
 
 ### Parsing
@@ -253,6 +279,15 @@ const { context, result } = await loadDirectoryAsContext('./protocols');
 - `loadWorkflow(path)` - Load workflow from file
 - `loadDirectory(path, options?)` - Load all AIS files from directory
 - `loadDirectoryAsContext(path, options?)` - Load directory and create resolver context
+
+### Execution
+
+- `buildTransaction(protocol, action, inputs, ctx, options)` - Build transaction calldata
+- `buildQuery(protocol, query, inputs, ctx, options)` - Build query call data
+- `buildWorkflowTransactions(protocols, nodes, ctx, chain)` - Build all workflow transactions
+- `encodeFunctionCall(signature, types, values)` - Low-level ABI encoding
+- `encodeFunctionSelector(signature)` - Get 4-byte function selector
+- `keccak256(input)` - Keccak-256 hash
 
 ### Schemas (Zod)
 

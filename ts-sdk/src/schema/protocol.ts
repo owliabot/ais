@@ -26,6 +26,8 @@ const ParamSchema = z.object({
   required: z.boolean().optional(),
   description: z.string().optional(),
   example: z.unknown().optional(),
+  default: z.unknown().optional(),
+  constraints: z.record(z.unknown()).optional(),
 });
 
 const CalculatedFieldSchema = z.object({
