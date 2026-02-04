@@ -3,44 +3,48 @@
  * TypeScript SDK for parsing and validating AIS (Agent Interaction Specification) files
  */
 
-// Types
-export type {
-  AISDocument,
-  AISDocumentType,
-  ProtocolSpec,
-  ProtocolMeta,
-  Query,
-  QueryInput,
-  QueryOutput,
-  Action,
-  ActionInput,
-  ActionOutput,
-  ConsistencyCheck,
-  CustomType,
-  Pack,
-  PackMeta,
-  ProtocolRef,
-  PackConstraints,
-  AmountConstraint,
-  SlippageConstraint,
-  Workflow,
-  WorkflowMeta,
-  WorkflowInput,
-  WorkflowStep,
-  AnyAISDocument,
-  Asset,
-  TokenAmount,
-} from './types.js';
-
-// Schemas
+// Schema types and validators
 export {
-  ProtocolSpecSchema,
-  PackSchema,
-  WorkflowSchema,
-  AISDocumentSchema,
+  // Common
   AssetSchema,
   TokenAmountSchema,
-} from './schema.js';
+  type Asset,
+  type TokenAmount,
+
+  // Protocol
+  ProtocolSpecSchema,
+  type ProtocolSpec,
+  type ProtocolMeta,
+  type Query,
+  type QueryInput,
+  type QueryOutput,
+  type Action,
+  type ActionInput,
+  type ActionOutput,
+  type ConsistencyCheck,
+  type CustomType,
+
+  // Pack
+  PackSchema,
+  type Pack,
+  type PackMeta,
+  type ProtocolRef,
+  type PackConstraints,
+  type AmountConstraint,
+  type SlippageConstraint,
+
+  // Workflow
+  WorkflowSchema,
+  type Workflow,
+  type WorkflowMeta,
+  type WorkflowInput,
+  type WorkflowStep,
+
+  // Union
+  AISDocumentSchema,
+  type AnyAISDocument,
+  type AISDocumentType,
+} from './schema/index.js';
 
 // Parser
 export {
@@ -56,17 +60,22 @@ export {
 
 // Resolver
 export {
+  // Context
   createContext,
+  setVariable,
+  setQueryResult,
+  type ResolverContext,
+
+  // References
   registerProtocol,
   resolveProtocolRef,
   resolveAction,
   resolveQuery,
   expandPack,
+
+  // Expressions
   hasExpressions,
   extractExpressions,
   resolveExpression,
   resolveExpressionString,
-  setVariable,
-  setQueryResult,
-  type ResolverContext,
-} from './resolver.js';
+} from './resolver/index.js';

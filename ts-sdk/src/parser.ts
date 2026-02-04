@@ -1,11 +1,19 @@
 /**
- * AIS Protocol SDK - Parser
- * Load and validate AIS documents from YAML
+ * Parser module - parse and validate AIS documents from YAML
  */
-
 import { parse as parseYAML } from 'yaml';
-import { AISDocumentSchema, ProtocolSpecSchema, PackSchema, WorkflowSchema } from './schema.js';
-import type { AnyAISDocument, ProtocolSpec, Pack, Workflow, AISDocumentType } from './types.js';
+import type { ZodSchema } from 'zod';
+import {
+  AISDocumentSchema,
+  ProtocolSpecSchema,
+  PackSchema,
+  WorkflowSchema,
+  type AnyAISDocument,
+  type ProtocolSpec,
+  type Pack,
+  type Workflow,
+  type AISDocumentType,
+} from './schema/index.js';
 
 export class AISParseError extends Error {
   constructor(
@@ -19,130 +27,57 @@ export class AISParseError extends Error {
 }
 
 export interface ParseOptions {
-  /** Strict mode fails on unknown fields */
-  strict?: boolean;
   /** Source identifier for error messages */
   source?: string;
 }
 
 /**
- * Parse a YAML string into an AIS document
+ * Generic parser factory - creates type-safe parsers from Zod schemas
  */
-export function parseAIS(yaml: string, options: ParseOptions = {}): AnyAISDocument {
-  const { source } = options;
+function createParser<T>(schema: ZodSchema<T>, typeName: string) {
+  return (yaml: string, options: ParseOptions = {}): T => {
+    const { source } = options;
 
-  let parsed: unknown;
-  try {
-    parsed = parseYAML(yaml);
-  } catch (err) {
-    throw new AISParseError(
-      `Invalid YAML: ${err instanceof Error ? err.message : 'Unknown error'}`,
-      source
-    );
-  }
+    let parsed: unknown;
+    try {
+      parsed = parseYAML(yaml);
+    } catch (err) {
+      throw new AISParseError(
+        `Invalid YAML: ${err instanceof Error ? err.message : 'Unknown error'}`,
+        source
+      );
+    }
 
-  if (typeof parsed !== 'object' || parsed === null) {
-    throw new AISParseError('Document must be an object', source);
-  }
+    const result = schema.safeParse(parsed);
+    if (!result.success) {
+      const issues = result.error.issues
+        .map((i) => `${i.path.join('.')}: ${i.message}`)
+        .join('; ');
+      throw new AISParseError(
+        `${typeName} validation failed: ${issues}`,
+        source,
+        result.error.issues
+      );
+    }
 
-  const result = AISDocumentSchema.safeParse(parsed);
-  if (!result.success) {
-    throw new AISParseError(
-      `Validation failed: ${result.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('; ')}`,
-      source,
-      result.error.issues
-    );
-  }
-
-  return result.data;
+    return result.data;
+  };
 }
 
-/**
- * Parse a YAML string as a Protocol Spec
- */
-export function parseProtocolSpec(yaml: string, options: ParseOptions = {}): ProtocolSpec {
-  const { source } = options;
+/** Parse any AIS document (auto-detects type) */
+export const parseAIS = createParser<AnyAISDocument>(AISDocumentSchema, 'Document');
 
-  let parsed: unknown;
-  try {
-    parsed = parseYAML(yaml);
-  } catch (err) {
-    throw new AISParseError(
-      `Invalid YAML: ${err instanceof Error ? err.message : 'Unknown error'}`,
-      source
-    );
-  }
+/** Parse a Protocol Spec */
+export const parseProtocolSpec = createParser<ProtocolSpec>(ProtocolSpecSchema, 'Protocol spec');
 
-  const result = ProtocolSpecSchema.safeParse(parsed);
-  if (!result.success) {
-    throw new AISParseError(
-      `Protocol spec validation failed: ${result.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('; ')}`,
-      source,
-      result.error.issues
-    );
-  }
+/** Parse a Pack */
+export const parsePack = createParser<Pack>(PackSchema, 'Pack');
 
-  return result.data;
-}
+/** Parse a Workflow */
+export const parseWorkflow = createParser<Workflow>(WorkflowSchema, 'Workflow');
 
 /**
- * Parse a YAML string as a Pack
- */
-export function parsePack(yaml: string, options: ParseOptions = {}): Pack {
-  const { source } = options;
-
-  let parsed: unknown;
-  try {
-    parsed = parseYAML(yaml);
-  } catch (err) {
-    throw new AISParseError(
-      `Invalid YAML: ${err instanceof Error ? err.message : 'Unknown error'}`,
-      source
-    );
-  }
-
-  const result = PackSchema.safeParse(parsed);
-  if (!result.success) {
-    throw new AISParseError(
-      `Pack validation failed: ${result.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('; ')}`,
-      source,
-      result.error.issues
-    );
-  }
-
-  return result.data;
-}
-
-/**
- * Parse a YAML string as a Workflow
- */
-export function parseWorkflow(yaml: string, options: ParseOptions = {}): Workflow {
-  const { source } = options;
-
-  let parsed: unknown;
-  try {
-    parsed = parseYAML(yaml);
-  } catch (err) {
-    throw new AISParseError(
-      `Invalid YAML: ${err instanceof Error ? err.message : 'Unknown error'}`,
-      source
-    );
-  }
-
-  const result = WorkflowSchema.safeParse(parsed);
-  if (!result.success) {
-    throw new AISParseError(
-      `Workflow validation failed: ${result.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('; ')}`,
-      source,
-      result.error.issues
-    );
-  }
-
-  return result.data;
-}
-
-/**
- * Detect the document type from YAML without full validation
+ * Detect document type without full validation
  */
 export function detectType(yaml: string): AISDocumentType | null {
   try {
@@ -160,9 +95,11 @@ export function detectType(yaml: string): AISDocumentType | null {
 }
 
 /**
- * Validate a document without parsing (returns issues or null)
+ * Validate document without parsing (returns issues or null)
  */
-export function validate(yaml: string): { valid: true } | { valid: false; issues: string[] } {
+export function validate(
+  yaml: string
+): { valid: true } | { valid: false; issues: string[] } {
   try {
     const parsed = parseYAML(yaml);
     const result = AISDocumentSchema.safeParse(parsed);
@@ -171,7 +108,7 @@ export function validate(yaml: string): { valid: true } | { valid: false; issues
     }
     return {
       valid: false,
-      issues: result.error.issues.map(i => `${i.path.join('.')}: ${i.message}`),
+      issues: result.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`),
     };
   } catch (err) {
     return {
