@@ -6,7 +6,37 @@ TypeScript SDK for parsing and validating AIS (Agent Interaction Specification) 
 
 ```bash
 npm install @owliabot/ais-ts-sdk
+
+# Or install globally for CLI
+npm install -g @owliabot/ais-ts-sdk
 ```
+
+## CLI Usage
+
+```bash
+# Validate AIS files against schema
+ais validate ./protocols/
+ais validate myprotocol.ais.yaml
+
+# Lint for best practices
+ais lint ./specs/
+
+# Run all checks (validate + lint + workflow references)
+ais check . --recursive
+
+# Output as JSON
+ais validate ./specs/ --json
+
+# Quiet mode (only errors)
+ais check . --quiet
+```
+
+**Commands:**
+- `validate` - Validate AIS files against schema
+- `lint` - Check for best practices and common issues
+- `check` - Run all checks (validate + lint + workflow validation)
+- `help` - Show help message
+- `version` - Show version
 
 ## Usage
 
