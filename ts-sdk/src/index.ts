@@ -6,10 +6,35 @@
 // Schema types and validators
 export {
   // Common
+  ChainIdSchema,
+  HexAddressSchema,
+  AddressSchema,
   AssetSchema,
   TokenAmountSchema,
+  AISTypeSchema,
+  type ChainId,
   type Asset,
   type TokenAmount,
+  type AISType,
+
+  // Execution
+  ExecutionSpecSchema,
+  ExecutionBlockSchema,
+  type Detect,
+  type MappingValue,
+  type Mapping,
+  type ExecutionSpec,
+  type ExecutionBlock,
+  type CompositeStep,
+  type EvmRead,
+  type EvmMultiread,
+  type EvmCall,
+  type EvmMulticall,
+  type Composite,
+  type SolanaInstruction,
+  type CosmosMessage,
+  type BitcoinPsbt,
+  type MoveEntry,
 
   // Protocol
   ProtocolSpecSchema,
@@ -17,22 +42,30 @@ export {
   type Meta,
   type Deployment,
   type Param,
+  type ParamConstraints,
   type Query,
   type Action,
-  type Risk,
-  type Constraint,
+  type ProtocolRisk,
+  type HardConstraints,
   type CalculatedField,
+  type CalculatedFields,
   type AssetMapping,
   type TestVector,
+  type ReturnField,
+  type Consistency,
+  type RiskTag,
 
   // Pack
   PackSchema,
   type Pack,
+  type PackMeta,
+  type SkillInclude,
   type Policy,
-  type HardConstraints,
+  type HardConstraintsDefaults,
   type TokenPolicy,
+  type TokenAllowlistEntry,
   type Providers,
-  type SkillOverride,
+  type ActionOverride,
 
   // Workflow
   WorkflowSchema,
@@ -42,6 +75,7 @@ export {
   type WorkflowNode,
   type WorkflowPolicy,
   type PackRef,
+  type CalculatedOverride,
 
   // Union
   AISDocumentSchema,

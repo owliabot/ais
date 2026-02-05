@@ -1,9 +1,17 @@
 /**
- * Pack Builder
+ * Pack Builder - DSL for building pack configs programmatically
  */
 
 import { BaseBuilder } from './base.js';
-import { PackSchema, type Pack, type Policy, type TokenPolicy, type HardConstraints } from '../schema/index.js';
+import {
+  PackSchema,
+  type Pack,
+  type SkillInclude,
+  type Policy,
+  type TokenPolicy,
+  type TokenAllowlistEntry,
+  type HardConstraintsDefaults,
+} from '../schema/index.js';
 import type { ZodSchema } from 'zod';
 
 export class PackBuilder extends BaseBuilder<Pack> {
@@ -12,10 +20,10 @@ export class PackBuilder extends BaseBuilder<Pack> {
   private _name: string;
   private _version: string;
   private _description?: string;
-  private _includes: string[] = [];
+  private _includes: SkillInclude[] = [];
   private _policy?: Policy;
   private _tokenPolicy?: TokenPolicy;
-  private _providers?: { quote?: string[]; routing?: string[] };
+  private _providers?: Pack['providers'];
 
   constructor(name: string, version: string) {
     super();
@@ -29,33 +37,41 @@ export class PackBuilder extends BaseBuilder<Pack> {
     return this;
   }
 
-  /** Include a protocol (skill reference) */
-  include(skillRef: string): this {
-    this._includes.push(skillRef);
+  /** Include a protocol skill */
+  include(
+    protocol: string,
+    version: string,
+    options?: {
+      source?: 'registry' | 'local' | 'uri';
+      uri?: string;
+      chain_scope?: string[];
+    }
+  ): this {
+    this._includes.push({
+      protocol,
+      version,
+      ...options,
+    });
     return this;
   }
 
-  /** Include multiple protocols */
-  includes(...skillRefs: string[]): this {
-    this._includes.push(...skillRefs);
-    return this;
-  }
-
-  /** Set risk policy */
-  policy(policy: {
-    risk_threshold?: number;
-    approval_required?: string[];
-    hard_constraints?: HardConstraints;
+  /** Set approval policy */
+  approvals(config: {
+    auto_execute_max_risk_level?: number;
+    require_approval_min_risk_level?: number;
   }): this {
-    this._policy = policy;
-    return this;
-  }
-
-  /** Set hard constraints directly */
-  constraints(constraints: HardConstraints): this {
     this._policy = {
       ...this._policy,
-      hard_constraints: constraints,
+      approvals: config,
+    };
+    return this;
+  }
+
+  /** Set hard constraints defaults */
+  constraints(constraints: HardConstraintsDefaults): this {
+    this._policy = {
+      ...this._policy,
+      hard_constraints_defaults: constraints,
     };
     return this;
   }
@@ -64,28 +80,44 @@ export class PackBuilder extends BaseBuilder<Pack> {
   maxSlippage(bps: number): this {
     this._policy = {
       ...this._policy,
-      hard_constraints: {
-        ...this._policy?.hard_constraints,
+      hard_constraints_defaults: {
+        ...this._policy?.hard_constraints_defaults,
         max_slippage_bps: bps,
       },
     };
     return this;
   }
 
-  /** Set token allowlist */
-  tokenAllowlist(tokens: string[]): this {
-    this._tokenPolicy = {
-      ...this._tokenPolicy,
-      allowlist: tokens,
+  /** Disallow unlimited approvals */
+  disallowUnlimitedApproval(): this {
+    this._policy = {
+      ...this._policy,
+      hard_constraints_defaults: {
+        ...this._policy?.hard_constraints_defaults,
+        allow_unlimited_approval: false,
+      },
     };
     return this;
   }
 
-  /** Set token policy resolution mode */
-  tokenResolution(mode: 'strict' | 'permissive'): this {
+  /** Set token resolution policy */
+  tokenResolution(config: {
+    allow_symbol_input?: boolean;
+    require_user_confirm_asset_address?: boolean;
+    require_allowlist_for_symbol_resolution?: boolean;
+  }): this {
     this._tokenPolicy = {
       ...this._tokenPolicy,
-      resolution: mode,
+      resolution: config,
+    };
+    return this;
+  }
+
+  /** Add to token allowlist */
+  allowToken(entry: TokenAllowlistEntry): this {
+    this._tokenPolicy = {
+      ...this._tokenPolicy,
+      allowlist: [...(this._tokenPolicy?.allowlist ?? []), entry],
     };
     return this;
   }
@@ -96,20 +128,26 @@ export class PackBuilder extends BaseBuilder<Pack> {
     return this;
   }
 
-  /** Set quote providers */
-  quoteProviders(...providers: string[]): this {
+  /** Add quote provider */
+  quoteProvider(
+    provider: string,
+    options?: { chains?: string[]; priority?: number }
+  ): this {
+    const existing = this._providers?.quote?.enabled ?? [];
     this._providers = {
       ...this._providers,
-      quote: providers,
+      quote: {
+        enabled: [...existing, { provider, ...options }],
+      },
     };
     return this;
   }
 
-  /** Set routing providers */
+  /** Add routing providers */
   routingProviders(...providers: string[]): this {
     this._providers = {
       ...this._providers,
-      routing: providers,
+      routing: [...(this._providers?.routing ?? []), ...providers],
     };
     return this;
   }

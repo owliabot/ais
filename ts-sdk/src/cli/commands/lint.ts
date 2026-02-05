@@ -138,11 +138,11 @@ const packRules: LintRule[] = [
       const issues: LintIssue[] = [];
       for (let i = 0; i < doc.includes.length; i++) {
         const ref = doc.includes[i];
-        if (!ref.includes('@')) {
+        if (!ref.version) {
           issues.push({
             rule: 'pack-skill-ref-format',
             severity: 'warning',
-            message: `Skill reference '${ref}' should include version (e.g., '${ref}@1.0.0')`,
+            message: `Skill reference '${ref.protocol}' should include version`,
             path: `includes[${i}]`,
           });
         }

@@ -43,30 +43,46 @@ export abstract class BaseBuilder<T> {
 }
 
 /**
- * Param builder helper
+ * Parameter definition
  */
 export interface ParamDef {
   name: string;
   type: string;
-  required?: boolean;
   description?: string;
+  required?: boolean;
   default?: unknown;
+  example?: unknown;
+  constraints?: {
+    min?: number;
+    max?: number;
+    enum?: unknown[];
+    pattern?: string;
+  };
+  /** For token_amount type - reference to asset param */
+  asset_ref?: string;
 }
 
-export function param(name: string, type: string, options?: Omit<ParamDef, 'name' | 'type'>): ParamDef {
+export function param(
+  name: string,
+  type: string,
+  options?: Omit<ParamDef, 'name' | 'type'>
+): ParamDef {
   return { name, type, ...options };
 }
 
 /**
- * Common output definition
+ * Output/Return field definition
  */
 export interface OutputDef {
   name: string;
   type: string;
-  path?: string;
   description?: string;
 }
 
-export function output(name: string, type: string, options?: Omit<OutputDef, 'name' | 'type'>): OutputDef {
+export function output(
+  name: string,
+  type: string,
+  options?: Omit<OutputDef, 'name' | 'type'>
+): OutputDef {
   return { name, type, ...options };
 }

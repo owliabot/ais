@@ -81,7 +81,8 @@ export function expandPack(
   const protocols: ProtocolSpec[] = [];
   const missing: string[] = [];
 
-  for (const ref of pack.includes) {
+  for (const skillInclude of pack.includes) {
+    const ref = `${skillInclude.protocol}@${skillInclude.version}`;
     const spec = resolveProtocolRef(ctx, ref);
     if (spec) {
       protocols.push(spec);

@@ -1,12 +1,29 @@
 /**
  * Execution Builder - build transaction calldata from AIS actions
+ * 
+ * NOTE: This module is being refactored to support the new execution block structure.
+ * Full implementation pending.
  */
 
-import type { Action, ProtocolSpec, Param } from '../schema/index.js';
+import type {
+  Action,
+  Query,
+  ProtocolSpec,
+  Param,
+  ExecutionSpec,
+  EvmCall,
+  EvmRead,
+  Composite,
+  CompositeStep,
+} from '../schema/index.js';
 import type { ResolverContext } from '../resolver/index.js';
 import { getContractAddress } from '../resolver/reference.js';
 import { resolveExpressionString, hasExpressions } from '../resolver/expression.js';
 import { encodeFunctionCall, buildFunctionSignature } from './encoder.js';
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Types
+// ═══════════════════════════════════════════════════════════════════════════════
 
 export interface TransactionRequest {
   /** Target contract address */
@@ -17,6 +34,10 @@ export interface TransactionRequest {
   value: bigint;
   /** Chain ID */
   chainId: number;
+  /** Step ID (for composite execution) */
+  stepId?: string;
+  /** Step description */
+  stepDescription?: string;
 }
 
 export interface BuildOptions {
@@ -30,7 +51,7 @@ export interface BuildOptions {
 
 export interface BuildResult {
   success: true;
-  transaction: TransactionRequest;
+  transactions: TransactionRequest[];
   action: Action;
   resolvedParams: Record<string, unknown>;
 }
@@ -43,6 +64,42 @@ export interface BuildError {
 
 export type BuildOutput = BuildResult | BuildError;
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// Chain Pattern Matching
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Match chain against execution patterns
+ * Returns the most specific matching ExecutionSpec
+ */
+export function matchChainPattern(
+  chain: string,
+  execution: Record<string, ExecutionSpec>
+): ExecutionSpec | null {
+  // Exact match first
+  if (execution[chain]) {
+    return execution[chain];
+  }
+
+  // Pattern match (e.g., "eip155:*" matches "eip155:1")
+  const [namespace] = chain.split(':');
+  const wildcardPattern = `${namespace}:*`;
+  if (execution[wildcardPattern]) {
+    return execution[wildcardPattern];
+  }
+
+  // Global fallback
+  if (execution['*']) {
+    return execution['*'];
+  }
+
+  return null;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Type Mapping
+// ═══════════════════════════════════════════════════════════════════════════════
+
 /**
  * Map AIS types to Solidity types
  */
@@ -52,20 +109,18 @@ function mapToSolidityType(aisType: string): string {
     bool: 'bool',
     string: 'string',
     bytes: 'bytes',
-    asset: 'address', // asset resolves to token address
-    token_amount: 'uint256', // token_amount resolves to raw amount
+    asset: 'address',
+    token_amount: 'uint256',
+    float: 'uint256', // Floats are typically converted to atomic amounts
   };
 
-  // Direct match
   if (typeMap[aisType]) {
     return typeMap[aisType];
   }
 
   // uint/int types
   if (/^u?int\d*$/.test(aisType)) {
-    return aisType.includes('int') && !aisType.startsWith('uint')
-      ? aisType
-      : aisType.replace('uint', 'uint');
+    return aisType;
   }
 
   // bytes1-32
@@ -73,9 +128,23 @@ function mapToSolidityType(aisType: string): string {
     return aisType;
   }
 
-  // Default to the type as-is
   return aisType;
 }
+
+/**
+ * Parse chain ID from chain string (e.g., "eip155:1" → 1)
+ */
+function parseChainId(chain: string): number {
+  const match = chain.match(/^eip155:(\d+)$/);
+  if (!match) {
+    throw new Error(`Unsupported chain format: ${chain}. Only EVM chains supported.`);
+  }
+  return parseInt(match[1], 10);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Parameter Resolution
+// ═══════════════════════════════════════════════════════════════════════════════
 
 /**
  * Resolve parameter value, handling expressions and type coercion
@@ -127,19 +196,93 @@ function resolveParamValue(
   return value;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// Transaction Building
+// ═══════════════════════════════════════════════════════════════════════════════
+
 /**
- * Parse chain ID from chain string (e.g., "eip155:1" → 1)
+ * Build a single EVM call transaction
  */
-function parseChainId(chain: string): number {
-  const match = chain.match(/^eip155:(\d+)$/);
-  if (!match) {
-    throw new Error(`Invalid chain format: ${chain}. Expected "eip155:<chainId>"`);
+function buildEvmCall(
+  protocol: ProtocolSpec,
+  spec: EvmCall | EvmRead,
+  ctx: ResolverContext,
+  chain: string,
+  stepId?: string,
+  stepDescription?: string
+): TransactionRequest {
+  // Resolve contract address
+  let to: string;
+  const contractRef = spec.contract;
+  
+  if (contractRef.startsWith('0x')) {
+    // Direct address
+    to = contractRef;
+  } else if (contractRef.startsWith('params.')) {
+    // Reference to param (e.g., "params.token_in.address")
+    // TODO: Resolve from context
+    throw new Error('Param references in contract not yet implemented');
+  } else {
+    // Contract name from deployments
+    const addr = getContractAddress(protocol, chain, contractRef);
+    if (!addr) {
+      throw new Error(`Contract "${contractRef}" not found for chain "${chain}"`);
+    }
+    to = addr;
   }
-  return parseInt(match[1], 10);
+
+  // Parse ABI to get types
+  // ABI format: "(type1,type2,...)" or "((type1,type2))" for structs
+  const abiMatch = spec.abi.match(/^\((.*)\)$/);
+  if (!abiMatch) {
+    throw new Error(`Invalid ABI format: ${spec.abi}`);
+  }
+  
+  // Split types (simple split for now, doesn't handle nested tuples)
+  const types = abiMatch[1]
+    .split(',')
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0);
+
+  // Resolve mapping values
+  const values: unknown[] = [];
+  const mappingEntries = Object.entries(spec.mapping);
+  
+  for (const [, mappingValue] of mappingEntries) {
+    // TODO: Properly resolve mapping values from context
+    // For now, just use the raw value
+    if (typeof mappingValue === 'string') {
+      if (mappingValue.startsWith('0x')) {
+        values.push(mappingValue);
+      } else if (/^\d+$/.test(mappingValue)) {
+        values.push(BigInt(mappingValue));
+      } else {
+        // Expression reference - needs resolver
+        values.push(mappingValue);
+      }
+    } else if (typeof mappingValue === 'number') {
+      values.push(BigInt(mappingValue));
+    } else {
+      values.push(mappingValue);
+    }
+  }
+
+  // Build calldata
+  const signature = buildFunctionSignature(spec.function, types);
+  const data = encodeFunctionCall(signature, types, values);
+
+  return {
+    to,
+    data,
+    value: 0n, // TODO: Support value from spec
+    chainId: parseChainId(chain),
+    stepId,
+    stepDescription,
+  };
 }
 
 /**
- * Build a transaction request from an AIS action
+ * Build transactions from an action's execution spec
  */
 export function buildTransaction(
   protocol: ProtocolSpec,
@@ -149,34 +292,25 @@ export function buildTransaction(
   options: BuildOptions
 ): BuildOutput {
   try {
-    const { chain, contractAddress, value = 0n } = options;
+    const { chain } = options;
 
-    // Get contract address
-    let to: string;
-    if (contractAddress) {
-      to = contractAddress;
-    } else {
-      const addr = getContractAddress(protocol, chain, action.contract);
-      if (!addr) {
-        return {
-          success: false,
-          error: `Contract "${action.contract}" not found for chain "${chain}"`,
-        };
-      }
-      to = addr;
+    // Match execution spec for chain
+    const execSpec = matchChainPattern(chain, action.execution);
+    if (!execSpec) {
+      return {
+        success: false,
+        error: `No execution spec found for chain "${chain}"`,
+      };
     }
 
-    // Get parameter types and values
+    // Resolve input params
     const params = action.params ?? [];
-    const types: string[] = [];
-    const values: unknown[] = [];
     const resolvedParams: Record<string, unknown> = {};
 
     for (const param of params) {
       const inputValue = inputs[param.name];
 
-      // Check required params
-      if (inputValue === undefined && param.required !== false && param.default === undefined) {
+      if (inputValue === undefined && param.required && param.default === undefined) {
         return {
           success: false,
           error: `Missing required parameter: ${param.name}`,
@@ -184,11 +318,7 @@ export function buildTransaction(
       }
 
       try {
-        const resolved = resolveParamValue(param, inputValue, ctx);
-        const solType = mapToSolidityType(param.type);
-        types.push(solType);
-        values.push(resolved);
-        resolvedParams[param.name] = resolved;
+        resolvedParams[param.name] = resolveParamValue(param, inputValue, ctx);
       } catch (err) {
         return {
           success: false,
@@ -197,18 +327,51 @@ export function buildTransaction(
       }
     }
 
-    // Build function signature and encode call
-    const signature = buildFunctionSignature(action.method, types);
-    const data = encodeFunctionCall(signature, types, values);
+    // Build transactions based on execution type
+    const transactions: TransactionRequest[] = [];
+
+    switch (execSpec.type) {
+      case 'evm_call':
+      case 'evm_read': {
+        const tx = buildEvmCall(protocol, execSpec, ctx, chain);
+        transactions.push(tx);
+        break;
+      }
+
+      case 'composite': {
+        // Build each step
+        for (const step of (execSpec as Composite).steps) {
+          // TODO: Evaluate step.condition
+          const stepSpec: EvmCall = {
+            type: 'evm_call',
+            contract: step.contract,
+            function: step.function,
+            abi: step.abi,
+            mapping: step.mapping,
+          };
+          const tx = buildEvmCall(
+            protocol,
+            stepSpec,
+            ctx,
+            chain,
+            step.id,
+            step.description
+          );
+          transactions.push(tx);
+        }
+        break;
+      }
+
+      default:
+        return {
+          success: false,
+          error: `Execution type "${execSpec.type}" not yet implemented`,
+        };
+    }
 
     return {
       success: true,
-      transaction: {
-        to,
-        data,
-        value,
-        chainId: parseChainId(chain),
-      },
+      transactions,
       action,
       resolvedParams,
     };
@@ -226,24 +389,54 @@ export function buildTransaction(
  */
 export function buildQuery(
   protocol: ProtocolSpec,
-  query: { contract: string; method: string; params?: Param[] },
+  query: Query,
   inputs: Record<string, unknown>,
   ctx: ResolverContext,
   options: BuildOptions
 ): BuildOutput {
-  // Queries use the same encoding as transactions
-  const pseudoAction: Action = {
-    contract: query.contract,
-    method: query.method,
-    params: query.params,
-  };
+  try {
+    const { chain } = options;
 
-  const result = buildTransaction(protocol, pseudoAction, inputs, ctx, {
-    ...options,
-    value: 0n, // Queries never send value
-  });
+    // Match execution spec for chain
+    const execSpec = matchChainPattern(chain, query.execution);
+    if (!execSpec) {
+      return {
+        success: false,
+        error: `No execution spec found for chain "${chain}"`,
+      };
+    }
 
-  return result;
+    if (execSpec.type !== 'evm_read') {
+      return {
+        success: false,
+        error: `Query execution type must be evm_read, got "${execSpec.type}"`,
+      };
+    }
+
+    const tx = buildEvmCall(protocol, execSpec, ctx, chain);
+
+    // Create a pseudo-action for the result type
+    const pseudoAction: Action = {
+      description: query.description,
+      risk_level: 1,
+      execution: query.execution,
+      params: query.params,
+      returns: query.returns,
+    };
+
+    return {
+      success: true,
+      transactions: [{ ...tx, value: 0n }],
+      action: pseudoAction,
+      resolvedParams: inputs,
+    };
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : String(err),
+      details: err,
+    };
+  }
 }
 
 /**

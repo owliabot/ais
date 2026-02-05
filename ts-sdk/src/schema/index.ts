@@ -5,6 +5,7 @@ import { z } from 'zod';
 
 // Re-export individual schemas and types
 export * from './common.js';
+export * from './execution.js';
 export * from './protocol.js';
 export * from './pack.js';
 export * from './workflow.js';

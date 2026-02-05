@@ -1,9 +1,15 @@
 /**
- * Workflow Builder
+ * Workflow Builder - DSL for building workflows programmatically
  */
 
 import { BaseBuilder } from './base.js';
-import { WorkflowSchema, type Workflow, type WorkflowNode, type WorkflowInput } from '../schema/index.js';
+import {
+  WorkflowSchema,
+  type Workflow,
+  type WorkflowNode,
+  type WorkflowInput,
+  type CalculatedOverride,
+} from '../schema/index.js';
 import type { ZodSchema } from 'zod';
 
 interface NodeDef {
@@ -12,6 +18,7 @@ interface NodeDef {
   action?: string;
   query?: string;
   args?: Record<string, unknown>;
+  calculated_overrides?: Record<string, CalculatedOverride>;
   condition?: string;
   requires?: string[];
 }
@@ -24,6 +31,8 @@ export class WorkflowBuilder extends BaseBuilder<Workflow> {
   private _nodes: WorkflowNode[] = [];
   private _outputs: Record<string, string> = {};
   private _requiresPack?: { name: string; version: string };
+  private _policy?: Workflow['policy'];
+  private _preflight?: Workflow['preflight'];
 
   constructor(name: string, version: string) {
     super();
@@ -37,13 +46,25 @@ export class WorkflowBuilder extends BaseBuilder<Workflow> {
   }
 
   /** Add an input parameter */
-  input(name: string, type: string, options?: Omit<WorkflowInput, 'type'>): this {
-    this._inputs[name] = { type, ...options };
+  input(
+    name: string,
+    type: string,
+    options?: Omit<WorkflowInput, 'type'>
+  ): this {
+    this._inputs[name] = {
+      type,
+      required: options?.required ?? true,
+      ...options,
+    };
     return this;
   }
 
   /** Add a required input parameter */
-  requiredInput(name: string, type: string, options?: Omit<WorkflowInput, 'type' | 'required'>): this {
+  requiredInput(
+    name: string,
+    type: string,
+    options?: Omit<WorkflowInput, 'type' | 'required'>
+  ): this {
     this._inputs[name] = { type, required: true, ...options };
     return this;
   }
@@ -63,6 +84,7 @@ export class WorkflowBuilder extends BaseBuilder<Workflow> {
       action: def.action,
       query: def.query,
       args: def.args,
+      calculated_overrides: def.calculated_overrides,
       condition: def.condition,
       requires_queries: def.requires,
     });
@@ -70,12 +92,22 @@ export class WorkflowBuilder extends BaseBuilder<Workflow> {
   }
 
   /** Add an action node */
-  action(id: string, skill: string, action: string, options?: Omit<NodeDef, 'type' | 'skill' | 'action'>): this {
+  action(
+    id: string,
+    skill: string,
+    action: string,
+    options?: Omit<NodeDef, 'type' | 'skill' | 'action'>
+  ): this {
     return this.node(id, { type: 'action_ref', skill, action, ...options });
   }
 
   /** Add a query node */
-  query(id: string, skill: string, queryName: string, options?: Omit<NodeDef, 'type' | 'skill' | 'query'>): this {
+  query(
+    id: string,
+    skill: string,
+    queryName: string,
+    options?: Omit<NodeDef, 'type' | 'skill' | 'query'>
+  ): this {
     return this.node(id, { type: 'query_ref', skill, query: queryName, ...options });
   }
 
@@ -91,6 +123,18 @@ export class WorkflowBuilder extends BaseBuilder<Workflow> {
     return this;
   }
 
+  /** Set workflow policy */
+  policy(policy: Workflow['policy']): this {
+    this._policy = policy;
+    return this;
+  }
+
+  /** Enable preflight simulation */
+  preflight(config: Workflow['preflight']): this {
+    this._preflight = config;
+    return this;
+  }
+
   protected getData(): Workflow {
     return {
       schema: 'ais-flow/1.0',
@@ -98,6 +142,8 @@ export class WorkflowBuilder extends BaseBuilder<Workflow> {
       requires_pack: this._requiresPack,
       inputs: Object.keys(this._inputs).length > 0 ? this._inputs : undefined,
       nodes: this._nodes,
+      policy: this._policy,
+      preflight: this._preflight,
       outputs: Object.keys(this._outputs).length > 0 ? this._outputs : undefined,
     };
   }

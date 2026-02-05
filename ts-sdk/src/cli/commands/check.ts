@@ -76,13 +76,12 @@ export async function checkCommand(options: CLIOptions, useColor: boolean): Prom
         });
 
         // Check skill references
-        for (const ref of document.includes) {
-          const [protocol] = ref.split('@');
-          if (!context.protocols.has(protocol)) {
+        for (const skillInclude of document.includes) {
+          if (!context.protocols.has(skillInclude.protocol)) {
             results.push({
               path: relative(process.cwd(), path),
               type: 'warning',
-              message: `Referenced protocol not found locally: ${ref}`,
+              message: `Referenced protocol not found locally: ${skillInclude.protocol}@${skillInclude.version}`,
             });
           }
         }

@@ -19,7 +19,7 @@ deployments:
     contracts:
       pool: "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2"
       oracle: "0x54586bE62E3c3580375aE3723C145253060Ca0C2"
-      data_provider: "0x7B4EB56E7CD4b454BA8ff71E4518426c84552Dc"
+      data_provider: "0x7B4EB56E7CD4b454BA8ff71E4518426c84552Dc7"
 
   - chain: "eip155:8453"
     contracts:
@@ -504,6 +504,7 @@ queries:
       - name: user
         type: address
         required: false
+        description: "User address (defaults to sender)"
 
     returns:
       - name: balance_atomic

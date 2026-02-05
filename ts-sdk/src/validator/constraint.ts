@@ -1,11 +1,15 @@
 /**
  * Constraint validation - validate values against Pack policy constraints
  */
-import type { Policy, HardConstraints, TokenPolicy } from '../schema/index.js';
+import type { Policy, HardConstraintsDefaults, TokenPolicy } from '../schema/index.js';
 
 export interface ConstraintInput {
-  /** Token address or symbol being used */
-  token?: string;
+  /** Token address being used */
+  token_address?: string;
+  /** Token symbol */
+  token_symbol?: string;
+  /** Chain ID (CAIP-2) */
+  chain?: string;
   /** Amount being spent (as string, e.g., "100 USDC") */
   spend_amount?: string;
   /** Approval amount (as string) */
@@ -47,35 +51,43 @@ export function validateConstraints(
   const approvalReasons: string[] = [];
 
   // Check token policy
-  if (input.token && tokenPolicy) {
-    const token = input.token.toLowerCase();
+  if (tokenPolicy?.allowlist && tokenPolicy.allowlist.length > 0) {
+    const tokenToCheck = input.token_address?.toLowerCase() ?? input.token_symbol?.toLowerCase();
+    
+    if (tokenToCheck) {
+      const isAllowed = tokenPolicy.allowlist.some((entry) => {
+        // Match by address or symbol
+        const matchesAddress = entry.address.toLowerCase() === tokenToCheck;
+        const matchesSymbol = entry.symbol.toLowerCase() === tokenToCheck;
+        // Also check chain if provided
+        const matchesChain = !input.chain || entry.chain === input.chain;
+        return (matchesAddress || matchesSymbol) && matchesChain;
+      });
 
-    if (tokenPolicy.allowlist && tokenPolicy.allowlist.length > 0) {
-      const allowed = tokenPolicy.allowlist.map((t) => t.toLowerCase());
-      const isAllowed = allowed.some(
-        (t) => t === token || t === input.token // Check both lowercase and original
-      );
-      
       if (!isAllowed) {
-        if (tokenPolicy.resolution === 'strict') {
+        const resolution = tokenPolicy.resolution;
+        const strictMode =
+          resolution?.require_allowlist_for_symbol_resolution ||
+          (resolution && 'strict' in resolution);
+
+        if (strictMode) {
           violations.push({
             field: 'token',
-            message: `Token ${input.token} not in allowlist`,
+            message: `Token ${tokenToCheck} not in allowlist`,
             constraint: 'token_policy.allowlist',
-            value: input.token,
-            limit: tokenPolicy.allowlist,
+            value: tokenToCheck,
+            limit: tokenPolicy.allowlist.map((e) => `${e.symbol} (${e.chain})`),
           });
         } else {
-          approvalReasons.push(`Token ${input.token} not in allowlist`);
+          approvalReasons.push(`Token ${tokenToCheck} not in allowlist`);
         }
       }
     }
   }
 
-  // Check hard constraints
-  if (policy?.hard_constraints) {
-    const hc = policy.hard_constraints;
-
+  // Check hard constraints (from hard_constraints_defaults or hard_constraints)
+  const hc = policy?.hard_constraints_defaults ?? policy?.hard_constraints;
+  if (hc) {
     // Slippage check
     if (input.slippage_bps !== undefined && hc.max_slippage_bps !== undefined) {
       if (input.slippage_bps > hc.max_slippage_bps) {
@@ -101,7 +113,28 @@ export function validateConstraints(
     }
   }
 
-  // Check risk threshold
+  // Check approval policy
+  const approvals = policy?.approvals;
+  if (approvals && input.risk_level !== undefined) {
+    if (
+      approvals.auto_execute_max_risk_level !== undefined &&
+      input.risk_level > approvals.auto_execute_max_risk_level
+    ) {
+      approvalReasons.push(
+        `Risk level ${input.risk_level} exceeds auto-execute threshold ${approvals.auto_execute_max_risk_level}`
+      );
+    }
+    if (
+      approvals.require_approval_min_risk_level !== undefined &&
+      input.risk_level >= approvals.require_approval_min_risk_level
+    ) {
+      approvalReasons.push(
+        `Risk level ${input.risk_level} requires approval (min: ${approvals.require_approval_min_risk_level})`
+      );
+    }
+  }
+
+  // Legacy: Check risk threshold
   if (policy?.risk_threshold !== undefined && input.risk_level !== undefined) {
     if (input.risk_level > policy.risk_threshold) {
       approvalReasons.push(
@@ -110,7 +143,7 @@ export function validateConstraints(
     }
   }
 
-  // Check risk tags requiring approval
+  // Legacy: Check risk tags requiring approval
   if (policy?.approval_required && input.risk_tags) {
     const requiringApproval = input.risk_tags.filter((tag) =>
       policy.approval_required!.includes(tag)
@@ -133,6 +166,8 @@ export function validateConstraints(
 /**
  * Extract hard constraints from policy (for display/UI)
  */
-export function getHardConstraints(policy: Policy | undefined): HardConstraints {
-  return policy?.hard_constraints ?? {};
+export function getHardConstraints(
+  policy: Policy | undefined
+): HardConstraintsDefaults {
+  return policy?.hard_constraints_defaults ?? policy?.hard_constraints ?? {};
 }
