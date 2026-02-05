@@ -61,6 +61,7 @@ export interface BuildResult {
   transactions: TransactionRequest[];
   action: Action;
   resolvedParams: Record<string, unknown>;
+  calculatedValues: Record<string, unknown>;
 }
 
 export interface BuildError {
@@ -499,6 +500,108 @@ function evaluateCondition(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Calculated Fields
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Topological sort for calculated field dependencies
+ * Returns field names in evaluation order
+ */
+function topologicalSortFields(
+  fields: Record<string, { expr: string; inputs?: string[] }>
+): string[] {
+  const result: string[] = [];
+  const visited = new Set<string>();
+  const visiting = new Set<string>();
+
+  // Build dependency graph from inputs
+  const deps = new Map<string, string[]>();
+  for (const [name, field] of Object.entries(fields)) {
+    const calcDeps: string[] = [];
+    for (const input of field.inputs ?? []) {
+      if (input.startsWith('calculated.')) {
+        calcDeps.push(input.slice('calculated.'.length));
+      }
+    }
+    deps.set(name, calcDeps);
+  }
+
+  function visit(name: string): void {
+    if (visited.has(name)) return;
+    if (visiting.has(name)) {
+      throw new Error(`Circular dependency in calculated_fields: ${name}`);
+    }
+
+    visiting.add(name);
+    for (const dep of deps.get(name) ?? []) {
+      if (dep in fields) {
+        visit(dep);
+      }
+    }
+    visiting.delete(name);
+    visited.add(name);
+    result.push(name);
+  }
+
+  for (const name of Object.keys(fields)) {
+    visit(name);
+  }
+
+  return result;
+}
+
+/**
+ * Compute all calculated_fields for an action
+ * Evaluates in dependency order and returns computed values
+ */
+function computeCalculatedFields(
+  action: Action,
+  ctx: ResolverContext,
+  protocol: ProtocolSpec,
+  chain: string,
+  evaluator: Evaluator
+): Record<string, CELValue> {
+  const calcFields = action.calculated_fields;
+  if (!calcFields || Object.keys(calcFields).length === 0) {
+    return {};
+  }
+
+  // Get evaluation order
+  const order = topologicalSortFields(calcFields);
+  const computed: Record<string, CELValue> = {};
+
+  // Evaluate each field in order
+  for (const fieldName of order) {
+    const field = calcFields[fieldName];
+    
+    // Build fresh CEL context with current computed values
+    const celCtx = buildCELContext(ctx, protocol, chain);
+    
+    // Add already-computed calculated fields
+    if (!celCtx['calculated']) {
+      celCtx['calculated'] = {};
+    }
+    for (const [k, v] of Object.entries(computed)) {
+      (celCtx['calculated'] as Record<string, CELValue>)[k] = v;
+    }
+
+    try {
+      const result = evaluator.evaluate(field.expr, celCtx);
+      computed[fieldName] = result as CELValue;
+      
+      // Also set in resolver context for mapping resolution
+      ctx.variables[`calculated.${fieldName}`] = result as CELValue;
+    } catch (err) {
+      throw new Error(
+        `Failed to compute calculated_field "${fieldName}": ${err instanceof Error ? err.message : err}`
+      );
+    }
+  }
+
+  return computed;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Transaction Building
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -641,7 +744,20 @@ export function buildTransaction(
       }
     }
 
-    // Build CEL context with all resolved values
+    // Compute calculated_fields (must be after params are resolved)
+    let calculatedValues: Record<string, CELValue> = {};
+    if (action.calculated_fields) {
+      try {
+        calculatedValues = computeCalculatedFields(action, ctx, protocol, chain, evaluator);
+      } catch (err) {
+        return {
+          success: false,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    }
+
+    // Build CEL context with all resolved values (including calculated)
     const celCtx = buildCELContext(ctx, protocol, chain);
 
     // Build transactions based on execution type
@@ -698,6 +814,7 @@ export function buildTransaction(
       transactions,
       action,
       resolvedParams,
+      calculatedValues,
     };
   } catch (err) {
     return {
@@ -799,6 +916,7 @@ export function buildQuery(
         transactions,
         action: pseudoAction,
         resolvedParams,
+        calculatedValues: {},
       };
     }
 
@@ -819,6 +937,7 @@ export function buildQuery(
       transactions: [{ ...tx, value: 0n }],
       action: pseudoAction,
       resolvedParams,
+      calculatedValues: {},
     };
   } catch (err) {
     return {

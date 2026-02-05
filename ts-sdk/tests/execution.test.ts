@@ -549,3 +549,144 @@ describe('Composite execution with conditions', () => {
     }
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Calculated Fields
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const CALC_FIELDS_PROTOCOL = `
+schema: "ais/1.0"
+meta:
+  protocol: calc-test
+  version: "1.0.0"
+deployments:
+  - chain: "eip155:1"
+    contracts:
+      router: "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D"
+actions:
+  swap-with-calc:
+    description: "Swap with calculated fields"
+    risk_level: 3
+    params:
+      - name: amount
+        type: float
+        description: "Human amount"
+      - name: slippage_bps
+        type: uint32
+        description: "Slippage in basis points"
+        default: 50
+    calculated_fields:
+      amount_atomic:
+        expr: "to_atomic(params.amount, 18)"
+        inputs: ["params.amount"]
+      min_out:
+        expr: "floor(query.quote.amount_out * (1 - params.slippage_bps / 10000))"
+        inputs: ["query.quote.amount_out", "params.slippage_bps"]
+      deadline:
+        expr: "ctx.now + 600"
+        inputs: ["ctx.now"]
+      double_amount:
+        expr: "calculated.amount_atomic * 2"
+        inputs: ["calculated.amount_atomic"]
+    execution:
+      "eip155:*":
+        type: evm_call
+        contract: router
+        function: swap
+        abi: "(uint256,uint256,uint256)"
+        mapping:
+          amountIn: "calculated.amount_atomic"
+          minOut: "calculated.min_out"
+          deadline: "calculated.deadline"
+`;
+
+describe('Calculated fields', () => {
+  let ctx: ResolverContext;
+  let protocol: ReturnType<typeof parseProtocolSpec>;
+
+  beforeEach(() => {
+    ctx = createContext();
+    protocol = parseProtocolSpec(CALC_FIELDS_PROTOCOL);
+    registerProtocol(ctx, protocol);
+    // Set context variables
+    setVariable(ctx, 'ctx.now', 1700000000);
+    setVariable(ctx, 'ctx.wallet_address', '0x1234567890123456789012345678901234567890');
+  });
+
+  it('computes simple calculated fields', () => {
+    ctx.queryResults.set('quote', { amount_out: 1000000 });
+
+    const result = buildTransaction(
+      protocol,
+      protocol.actions['swap-with-calc'],
+      { amount: 1.5 },
+      ctx,
+      { chain: 'eip155:1' }
+    );
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      // Check calculated values are returned
+      expect(result.calculatedValues).toBeDefined();
+      expect(result.calculatedValues.amount_atomic).toBe(1500000000000000000);
+      expect(result.calculatedValues.deadline).toBe(1700000600);
+    }
+  });
+
+  it('computes calculated fields with query dependencies', () => {
+    ctx.queryResults.set('quote', { amount_out: 1000000 });
+
+    const result = buildTransaction(
+      protocol,
+      protocol.actions['swap-with-calc'],
+      { amount: 1.0, slippage_bps: 100 }, // 1% slippage
+      ctx,
+      { chain: 'eip155:1' }
+    );
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      // min_out = floor(1000000 * 0.99) = 990000
+      expect(result.calculatedValues.min_out).toBe(990000);
+    }
+  });
+
+  it('handles calculated field dependencies (calculated.x referencing calculated.y)', () => {
+    ctx.queryResults.set('quote', { amount_out: 1000000 });
+
+    const result = buildTransaction(
+      protocol,
+      protocol.actions['swap-with-calc'],
+      { amount: 1.0 },
+      ctx,
+      { chain: 'eip155:1' }
+    );
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      // double_amount = amount_atomic * 2
+      expect(result.calculatedValues.amount_atomic).toBe(1000000000000000000);
+      expect(result.calculatedValues.double_amount).toBe(2000000000000000000);
+    }
+  });
+
+  it('uses calculated values in mapping', () => {
+    ctx.queryResults.set('quote', { amount_out: 1000000 });
+
+    const result = buildTransaction(
+      protocol,
+      protocol.actions['swap-with-calc'],
+      { amount: 1.0 },
+      ctx,
+      { chain: 'eip155:1' }
+    );
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      // Transaction should be built successfully with calculated values
+      expect(result.transactions).toHaveLength(1);
+      expect(result.transactions[0].data).toBeDefined();
+      // Data should contain the calculated amount_atomic value
+    }
+  });
+});
