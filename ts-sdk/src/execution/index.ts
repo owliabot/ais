@@ -44,3 +44,6 @@ export {
   type MulticallBuildOptions,
   type EncodedCall,
 } from './multicall.js';
+
+// Solana execution
+export * as solana from './solana/index.js';

@@ -1,0 +1,458 @@
+schema: "ais/1.0"
+
+meta:
+  protocol: "spl-token"
+  version: "1.0.0"
+  name: "SPL Token"
+  homepage: "https://spl.solana.com/token"
+  description: "Solana Program Library Token standard operations"
+  tags: ["token", "transfer", "solana"]
+  maintainer: "solana.labs"
+
+capabilities_required:
+  - "cel_v1"
+  - "solana_instruction"
+
+deployments:
+  - chain: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"  # Mainnet
+    contracts:
+      token_program: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+      ata_program: "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+      system_program: "11111111111111111111111111111111"
+
+  - chain: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"  # Devnet
+    contracts:
+      token_program: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+      ata_program: "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+      system_program: "11111111111111111111111111111111"
+
+supported_assets:
+  - symbol: "SOL"
+    name: "Wrapped SOL"
+    decimals:
+      solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp: 9
+      solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1: 9
+    addresses:
+      solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp: "So11111111111111111111111111111111111111112"
+      solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1: "So11111111111111111111111111111111111111112"
+    tags: ["native", "wrapped"]
+
+  - symbol: "USDC"
+    name: "USD Coin"
+    decimals:
+      solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp: 6
+    addresses:
+      solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+    tags: ["stable"]
+
+  - symbol: "USDT"
+    name: "Tether USD"
+    decimals:
+      solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp: 6
+    addresses:
+      solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp: "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
+    tags: ["stable"]
+
+risks:
+  - level: "info"
+    text: "SPL Token transfers require the destination to have an Associated Token Account. If it doesn't exist, it will be created (costs ~0.002 SOL)."
+    applies_to: ["transfer"]
+  - level: "info"
+    text: "TransferChecked verifies decimals to prevent amount errors. Recommended for user-facing transfers."
+    applies_to: ["transfer-checked"]
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ACTIONS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+actions:
+  transfer:
+    description: "Transfer SPL tokens to another wallet. Creates destination ATA if needed."
+    risk_level: 2
+    risk_tags: ["transfer"]
+
+    params:
+      - name: token
+        type: asset
+        description: "Token mint address"
+      - name: amount
+        type: token_amount
+        description: "Amount to transfer (human readable)"
+        asset_ref: "token"
+      - name: recipient
+        type: address
+        description: "Recipient wallet address (not ATA)"
+
+    returns:
+      - name: signature
+        type: string
+        description: "Transaction signature"
+
+    requires_queries:
+      - "balance"
+      - "recipient-ata-exists"
+
+    calculated_fields:
+      amount_atomic:
+        expr: "to_atomic(params.amount, params.token)"
+        inputs: ["params.amount", "params.token"]
+      sender_ata:
+        expr: "derive_ata(ctx.wallet_address, params.token.address)"
+        inputs: ["ctx.wallet_address", "params.token"]
+      recipient_ata:
+        expr: "derive_ata(params.recipient, params.token.address)"
+        inputs: ["params.recipient", "params.token"]
+
+    execution:
+      "solana:*":
+        type: composite
+        steps:
+          - id: create_recipient_ata
+            type: solana_instruction
+            description: "Create recipient ATA if it doesn't exist (idempotent)"
+            program: "ata_program"
+            instruction: "create_idempotent"
+            discriminator: "0x01"
+            accounts:
+              - name: payer
+                source: wallet
+                signer: true
+                writable: true
+              - name: associated_token
+                source: "calculated.recipient_ata"
+                signer: false
+                writable: true
+              - name: owner
+                source: "params.recipient"
+                signer: false
+                writable: false
+              - name: mint
+                source: "params.token.address"
+                signer: false
+                writable: false
+              - name: system_program
+                source: "system:system_program"
+                signer: false
+                writable: false
+              - name: token_program
+                source: "system:token_program"
+                signer: false
+                writable: false
+            mapping: {}
+            compute_units: 30000
+
+          - id: transfer
+            type: solana_instruction
+            description: "Transfer tokens to recipient"
+            program: "token_program"
+            instruction: "transfer"
+            discriminator: "0x03"
+            accounts:
+              - name: source
+                source: "calculated.sender_ata"
+                signer: false
+                writable: true
+              - name: destination
+                source: "calculated.recipient_ata"
+                signer: false
+                writable: true
+              - name: authority
+                source: wallet
+                signer: true
+                writable: false
+            mapping:
+              amount: "calculated.amount_atomic"
+            compute_units: 10000
+
+    pre_conditions:
+      - "Sender has sufficient token balance"
+      - "Sender has SOL for transaction fee (and ATA creation if needed)"
+    side_effects:
+      - "May create destination ATA (costs ~0.002 SOL rent)"
+
+  transfer-checked:
+    description: "Transfer SPL tokens with decimal verification. Safer for user-facing transfers."
+    risk_level: 2
+    risk_tags: ["transfer"]
+
+    params:
+      - name: token
+        type: asset
+        description: "Token mint address"
+      - name: amount
+        type: token_amount
+        description: "Amount to transfer (human readable)"
+        asset_ref: "token"
+      - name: recipient
+        type: address
+        description: "Recipient wallet address (not ATA)"
+
+    returns:
+      - name: signature
+        type: string
+        description: "Transaction signature"
+
+    requires_queries:
+      - "balance"
+
+    calculated_fields:
+      amount_atomic:
+        expr: "to_atomic(params.amount, params.token)"
+        inputs: ["params.amount", "params.token"]
+      sender_ata:
+        expr: "derive_ata(ctx.wallet_address, params.token.address)"
+        inputs: ["ctx.wallet_address", "params.token"]
+      recipient_ata:
+        expr: "derive_ata(params.recipient, params.token.address)"
+        inputs: ["params.recipient", "params.token"]
+      decimals:
+        expr: "params.token.decimals"
+        inputs: ["params.token"]
+
+    execution:
+      "solana:*":
+        type: composite
+        steps:
+          - id: create_recipient_ata
+            type: solana_instruction
+            description: "Create recipient ATA if it doesn't exist"
+            program: "ata_program"
+            instruction: "create_idempotent"
+            discriminator: "0x01"
+            accounts:
+              - name: payer
+                source: wallet
+                signer: true
+                writable: true
+              - name: associated_token
+                source: "calculated.recipient_ata"
+                signer: false
+                writable: true
+              - name: owner
+                source: "params.recipient"
+                signer: false
+                writable: false
+              - name: mint
+                source: "params.token.address"
+                signer: false
+                writable: false
+              - name: system_program
+                source: "system:system_program"
+                signer: false
+                writable: false
+              - name: token_program
+                source: "system:token_program"
+                signer: false
+                writable: false
+            mapping: {}
+            compute_units: 30000
+
+          - id: transfer_checked
+            type: solana_instruction
+            description: "Transfer tokens with decimal verification"
+            program: "token_program"
+            instruction: "transfer_checked"
+            discriminator: "0x0c"
+            accounts:
+              - name: source
+                source: "calculated.sender_ata"
+                signer: false
+                writable: true
+              - name: mint
+                source: "params.token.address"
+                signer: false
+                writable: false
+              - name: destination
+                source: "calculated.recipient_ata"
+                signer: false
+                writable: true
+              - name: authority
+                source: wallet
+                signer: true
+                writable: false
+            mapping:
+              amount: "calculated.amount_atomic"
+              decimals: "calculated.decimals"
+            compute_units: 12000
+
+  approve:
+    description: "Approve a delegate to transfer tokens on your behalf"
+    risk_level: 3
+    risk_tags: ["approval", "delegation"]
+
+    params:
+      - name: token
+        type: asset
+        description: "Token mint address"
+      - name: amount
+        type: token_amount
+        description: "Amount to approve (human readable)"
+        asset_ref: "token"
+      - name: delegate
+        type: address
+        description: "Address to approve as delegate"
+
+    returns:
+      - name: signature
+        type: string
+        description: "Transaction signature"
+
+    calculated_fields:
+      amount_atomic:
+        expr: "to_atomic(params.amount, params.token)"
+        inputs: ["params.amount", "params.token"]
+      token_account:
+        expr: "derive_ata(ctx.wallet_address, params.token.address)"
+        inputs: ["ctx.wallet_address", "params.token"]
+
+    execution:
+      "solana:*":
+        type: solana_instruction
+        program: "token_program"
+        instruction: "approve"
+        discriminator: "0x04"
+        accounts:
+          - name: source
+            source: "calculated.token_account"
+            signer: false
+            writable: true
+          - name: delegate
+            source: "params.delegate"
+            signer: false
+            writable: false
+          - name: owner
+            source: wallet
+            signer: true
+            writable: false
+        mapping:
+          amount: "calculated.amount_atomic"
+        compute_units: 5000
+
+    side_effects:
+      - "Grants delegate permission to transfer up to approved amount"
+
+  revoke:
+    description: "Revoke all delegate permissions for a token account"
+    risk_level: 1
+    risk_tags: ["revoke"]
+
+    params:
+      - name: token
+        type: asset
+        description: "Token mint address"
+
+    returns:
+      - name: signature
+        type: string
+        description: "Transaction signature"
+
+    calculated_fields:
+      token_account:
+        expr: "derive_ata(ctx.wallet_address, params.token.address)"
+        inputs: ["ctx.wallet_address", "params.token"]
+
+    execution:
+      "solana:*":
+        type: solana_instruction
+        program: "token_program"
+        instruction: "revoke"
+        discriminator: "0x05"
+        accounts:
+          - name: source
+            source: "calculated.token_account"
+            signer: false
+            writable: true
+          - name: owner
+            source: wallet
+            signer: true
+            writable: false
+        mapping: {}
+        compute_units: 3000
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# QUERIES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+queries:
+  balance:
+    description: "Get token balance for wallet"
+    params:
+      - name: token
+        type: asset
+        description: "Token mint address"
+      - name: wallet
+        type: address
+        description: "Wallet to check (defaults to signer)"
+        required: false
+
+    returns:
+      - name: balance_atomic
+        type: uint64
+        description: "Balance in atomic units"
+      - name: balance_human
+        type: string
+        description: "Balance in human readable format"
+
+    cache_ttl: 5
+
+    execution:
+      "solana:*":
+        type: solana_account_read
+        account:
+          derived: ata
+          wallet: "params.wallet ?? ctx.wallet_address"
+          mint: "params.token.address"
+        parse_as: "spl_token_account"
+        fields:
+          balance_atomic: "amount"
+          balance_human: "to_human(amount, params.token)"
+
+  recipient-ata-exists:
+    description: "Check if recipient ATA exists"
+    params:
+      - name: token
+        type: asset
+        description: "Token mint address"
+      - name: recipient
+        type: address
+        description: "Recipient wallet"
+
+    returns:
+      - name: exists
+        type: boolean
+        description: "Whether the ATA exists"
+      - name: ata_address
+        type: address
+        description: "The ATA address"
+
+    cache_ttl: 10
+
+    execution:
+      "solana:*":
+        type: solana_account_read
+        account:
+          derived: ata
+          wallet: "params.recipient"
+          mint: "params.token.address"
+        parse_as: "exists_check"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TEST VECTORS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+tests:
+  - name: "transfer-usdc-basic"
+    action: "transfer"
+    chain: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
+    params:
+      token:
+        chain_id: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
+        address: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+        decimals: 6
+      amount: "10.0"
+      recipient: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"
+    expect:
+      calculated:
+        amount_atomic: "10000000"
+      execution_type: "composite"
+      steps_count: 2
