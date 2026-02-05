@@ -34,3 +34,13 @@ export {
   type PreAuthorizeContext,
   type PermitData,
 } from './pre-authorize.js';
+
+export {
+  buildEvmMulticall,
+  buildMulticallCalls,
+  encodeStandardMulticall,
+  encodeMulticall3,
+  encodeUniversalRouter,
+  type MulticallBuildOptions,
+  type EncodedCall,
+} from './multicall.js';

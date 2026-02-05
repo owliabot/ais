@@ -18,6 +18,7 @@ import type {
   EvmCall,
   EvmRead,
   EvmMultiread,
+  EvmMulticall,
   Composite,
   CompositeStep,
   Detect,
@@ -33,6 +34,7 @@ import {
   type PreAuthorizeResult,
   type PermitData,
 } from './pre-authorize.js';
+import { buildEvmMulticall, type MulticallBuildOptions } from './multicall.js';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Types
@@ -62,6 +64,8 @@ export interface BuildOptions {
   value?: bigint;
   /** Pre-authorization context (wallet address, allowances, nonces) */
   preAuthorize?: PreAuthorizeContext;
+  /** Multicall encoding style (for evm_multicall) */
+  multicallStyle?: 'standard' | 'multicall3' | 'universal_router';
 }
 
 export interface BuildResult {
@@ -855,6 +859,25 @@ export function buildTransaction(
           );
           transactions.push(tx);
         }
+        break;
+      }
+
+      case 'evm_multicall': {
+        // Build batched multicall transaction
+        const multicallOpts: MulticallBuildOptions = {
+          chain,
+          style: options.multicallStyle,
+        };
+        const tx = buildEvmMulticall(
+          protocol,
+          execSpec,
+          ctx,
+          celCtx,
+          evaluator,
+          chain,
+          multicallOpts
+        );
+        transactions.push(tx);
         break;
       }
 
