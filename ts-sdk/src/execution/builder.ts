@@ -17,6 +17,7 @@ import type {
   CompositeStep,
 } from '../schema/index.js';
 import type { ResolverContext } from '../resolver/index.js';
+import type { CELValue } from '../cel/evaluator.js';
 import { getContractAddress } from '../resolver/reference.js';
 import { resolveExpressionString, hasExpressions } from '../resolver/expression.js';
 import { encodeFunctionCall, buildFunctionSignature } from './encoder.js';
@@ -197,6 +198,73 @@ function resolveParamValue(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Mapping Resolution
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Resolve a mapping value from context
+ * Supports: literal values, params.*, calculated.*, ctx.*, query.*, contracts.*
+ */
+function resolveMappingValue(value: unknown, ctx: ResolverContext): unknown {
+  if (typeof value !== 'string') {
+    // Not a string - return as-is (number, object, etc.)
+    if (typeof value === 'number') {
+      return BigInt(value);
+    }
+    return value;
+  }
+
+  // Check for literal values
+  if (value.startsWith('0x')) {
+    return value; // Address or hex data
+  }
+  if (/^-?\d+$/.test(value)) {
+    return BigInt(value); // Integer literal
+  }
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  if (value === 'null') return null;
+
+  // Reference patterns: params.*, calculated.*, ctx.*, query.*, contracts.*
+  const parts = value.split('.');
+  const namespace = parts[0];
+
+  switch (namespace) {
+    case 'params': {
+      // params.token_in or params.token_in.address
+      const key = parts.slice(1).join('.');
+      const paramValue = ctx.variables[`params.${key}`];
+      if (paramValue !== undefined) return paramValue;
+      // Try without 'params.' prefix
+      return ctx.variables[key];
+    }
+    case 'calculated': {
+      const key = parts.slice(1).join('.');
+      return ctx.variables[`calculated.${key}`];
+    }
+    case 'ctx': {
+      const key = parts.slice(1).join('.');
+      return ctx.variables[`ctx.${key}`];
+    }
+    case 'query': {
+      const queryName = parts[1];
+      const field = parts.slice(2).join('.');
+      const result = ctx.queryResults.get(queryName);
+      if (!result) return undefined;
+      return field ? result[field] : result;
+    }
+    case 'contracts': {
+      // contracts.router - resolved at build time via protocol
+      // Return the reference as-is for now
+      return value;
+    }
+    default:
+      // Unknown reference - return as-is
+      return value;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Transaction Building
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -244,27 +312,13 @@ function buildEvmCall(
     .map((t) => t.trim())
     .filter((t) => t.length > 0);
 
-  // Resolve mapping values
+  // Resolve mapping values from context
   const values: unknown[] = [];
   const mappingEntries = Object.entries(spec.mapping);
   
   for (const [, mappingValue] of mappingEntries) {
-    // TODO: Properly resolve mapping values from context
-    // For now, just use the raw value
-    if (typeof mappingValue === 'string') {
-      if (mappingValue.startsWith('0x')) {
-        values.push(mappingValue);
-      } else if (/^\d+$/.test(mappingValue)) {
-        values.push(BigInt(mappingValue));
-      } else {
-        // Expression reference - needs resolver
-        values.push(mappingValue);
-      }
-    } else if (typeof mappingValue === 'number') {
-      values.push(BigInt(mappingValue));
-    } else {
-      values.push(mappingValue);
-    }
+    const resolved = resolveMappingValue(mappingValue, ctx);
+    values.push(resolved);
   }
 
   // Build calldata
@@ -303,14 +357,16 @@ export function buildTransaction(
       };
     }
 
-    // Resolve input params
+    // Resolve input params and set them in context
     const params = action.params ?? [];
     const resolvedParams: Record<string, unknown> = {};
 
     for (const param of params) {
       const inputValue = inputs[param.name];
 
-      if (inputValue === undefined && param.required && param.default === undefined) {
+      // Check required (default to true if not specified)
+      const isRequired = param.required !== false;
+      if (inputValue === undefined && isRequired && param.default === undefined) {
         return {
           success: false,
           error: `Missing required parameter: ${param.name}`,
@@ -318,7 +374,10 @@ export function buildTransaction(
       }
 
       try {
-        resolvedParams[param.name] = resolveParamValue(param, inputValue, ctx);
+        const resolved = resolveParamValue(param, inputValue, ctx);
+        resolvedParams[param.name] = resolved;
+        // Set in context for mapping resolution
+        ctx.variables[`params.${param.name}`] = resolved as CELValue;
       } catch (err) {
         return {
           success: false,
@@ -413,6 +472,33 @@ export function buildQuery(
       };
     }
 
+    // Resolve params and set in context
+    const params = query.params ?? [];
+    const resolvedParams: Record<string, unknown> = {};
+
+    for (const param of params) {
+      const inputValue = inputs[param.name];
+      const isRequired = param.required !== false;
+      
+      if (inputValue === undefined && isRequired && param.default === undefined) {
+        return {
+          success: false,
+          error: `Missing required parameter: ${param.name}`,
+        };
+      }
+
+      try {
+        const resolved = resolveParamValue(param, inputValue, ctx);
+        resolvedParams[param.name] = resolved;
+        ctx.variables[`params.${param.name}`] = resolved as CELValue;
+      } catch (err) {
+        return {
+          success: false,
+          error: `Failed to resolve parameter ${param.name}: ${err instanceof Error ? err.message : err}`,
+        };
+      }
+    }
+
     const tx = buildEvmCall(protocol, execSpec, ctx, chain);
 
     // Create a pseudo-action for the result type
@@ -428,7 +514,7 @@ export function buildQuery(
       success: true,
       transactions: [{ ...tx, value: 0n }],
       action: pseudoAction,
-      resolvedParams: inputs,
+      resolvedParams,
     };
   } catch (err) {
     return {

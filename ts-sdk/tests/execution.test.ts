@@ -17,13 +17,11 @@ import {
 
 describe('keccak256', () => {
   it('hashes empty string correctly', () => {
-    // keccak256("") = 0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470
     const hash = keccak256('');
     expect(hash).toBe('0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470');
   });
 
   it('hashes "hello" correctly', () => {
-    // keccak256("hello") = 0x1c8aff950685c2ed4bc3174f3472287b56d9517b9c948127319a09a7a36deac8
     const hash = keccak256('hello');
     expect(hash).toBe('0x1c8aff950685c2ed4bc3174f3472287b56d9517b9c948127319a09a7a36deac8');
   });
@@ -31,19 +29,16 @@ describe('keccak256', () => {
 
 describe('encodeFunctionSelector', () => {
   it('encodes transfer(address,uint256)', () => {
-    // transfer(address,uint256) = 0xa9059cbb
     const selector = encodeFunctionSelector('transfer(address,uint256)');
     expect(selector).toBe('0xa9059cbb');
   });
 
   it('encodes approve(address,uint256)', () => {
-    // approve(address,uint256) = 0x095ea7b3
     const selector = encodeFunctionSelector('approve(address,uint256)');
     expect(selector).toBe('0x095ea7b3');
   });
 
   it('encodes balanceOf(address)', () => {
-    // balanceOf(address) = 0x70a08231
     const selector = encodeFunctionSelector('balanceOf(address)');
     expect(selector).toBe('0x70a08231');
   });
@@ -91,9 +86,8 @@ describe('encodeFunctionCall', () => {
       ['0x1234567890123456789012345678901234567890', 1000n]
     );
     
-    // selector + address + amount
     expect(data.startsWith('0xa9059cbb')).toBe(true);
-    expect(data.length).toBe(10 + 64 + 64); // selector(10) + 2 params(64 each)
+    expect(data.length).toBe(10 + 64 + 64);
   });
 
   it('encodes approve call', () => {
@@ -121,41 +115,69 @@ deployments:
     contracts:
       router: "0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24"
 queries:
-  get_reserves:
-    contract: factory
-    method: getReserves
+  get-reserves:
+    description: "Get pair reserves"
     params:
       - name: pair
         type: address
-    outputs:
+        description: "Pair address"
+    returns:
       - name: reserve0
         type: uint112
       - name: reserve1
         type: uint112
+    execution:
+      "eip155:*":
+        type: evm_read
+        contract: factory
+        function: getReserves
+        abi: "(address)"
+        mapping:
+          pair: "params.pair"
 actions:
   swap:
-    contract: router
-    method: swapExactTokensForTokens
+    description: "Swap tokens"
+    risk_level: 3
     params:
       - name: amountIn
         type: uint256
+        description: "Input amount"
       - name: amountOutMin
         type: uint256
-      - name: path
-        type: address[]
+        description: "Minimum output"
       - name: to
         type: address
-      - name: deadline
-        type: uint256
+        description: "Recipient"
+    execution:
+      "eip155:*":
+        type: evm_call
+        contract: router
+        function: swapExactTokensForTokens
+        abi: "(uint256,uint256,address)"
+        mapping:
+          amountIn: "params.amountIn"
+          amountOutMin: "params.amountOutMin"
+          to: "params.to"
   approve:
-    contract: router
-    method: approve
+    description: "Approve spender"
+    risk_level: 2
     params:
       - name: spender
         type: address
+        description: "Spender address"
       - name: amount
         type: uint256
+        description: "Amount to approve"
         default: "115792089237316195423570985008687907853269984665640564039457584007913129639935"
+    execution:
+      "eip155:*":
+        type: evm_call
+        contract: router
+        function: approve
+        abi: "(address,uint256)"
+        mapping:
+          spender: "params.spender"
+          amount: "params.amount"
 `;
 
 describe('buildTransaction', () => {
@@ -175,9 +197,7 @@ describe('buildTransaction', () => {
       {
         amountIn: 1000000000000000000n,
         amountOutMin: 990000000000000000n,
-        path: ['0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2', '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'],
         to: '0x1234567890123456789012345678901234567890',
-        deadline: 1700000000n,
       },
       ctx,
       { chain: 'eip155:1' }
@@ -185,10 +205,10 @@ describe('buildTransaction', () => {
 
     expect(result.success).toBe(true);
     if (result.success) {
-      expect(result.transaction.to).toBe('0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D');
-      expect(result.transaction.chainId).toBe(1);
-      expect(result.transaction.data.startsWith('0x')).toBe(true);
-      expect(result.transaction.value).toBe(0n);
+      expect(result.transactions[0].to).toBe('0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D');
+      expect(result.transactions[0].chainId).toBe(1);
+      expect(result.transactions[0].data.startsWith('0x')).toBe(true);
+      expect(result.transactions[0].value).toBe(0n);
     }
   });
 
@@ -198,7 +218,6 @@ describe('buildTransaction', () => {
       protocol.actions.approve,
       {
         spender: '0x1234567890123456789012345678901234567890',
-        // amount not provided, should use default
       },
       ctx,
       { chain: 'eip155:1' }
@@ -212,33 +231,11 @@ describe('buildTransaction', () => {
     }
   });
 
-  it('resolves expression parameters', () => {
-    setVariable(ctx, 'inputs.recipient', '0xabcdef0123456789012345678901234567890abc');
-    setVariable(ctx, 'inputs.amount', '2000000000000000000');
-
-    const result = buildTransaction(
-      protocol,
-      protocol.actions.approve,
-      {
-        spender: '${inputs.recipient}',
-        amount: '${inputs.amount}',
-      },
-      ctx,
-      { chain: 'eip155:1' }
-    );
-
-    expect(result.success).toBe(true);
-    if (result.success) {
-      expect(result.resolvedParams.spender).toBe('0xabcdef0123456789012345678901234567890abc');
-      expect(result.resolvedParams.amount).toBe(2000000000000000000n);
-    }
-  });
-
   it('fails for unknown chain', () => {
     const result = buildTransaction(
       protocol,
       protocol.actions.swap,
-      { amountIn: 1n, amountOutMin: 1n, path: [], to: '0x0000000000000000000000000000000000000000', deadline: 1n },
+      { amountIn: 1n, amountOutMin: 1n, to: '0x0000000000000000000000000000000000000000' },
       ctx,
       { chain: 'eip155:999' }
     );
@@ -246,22 +243,6 @@ describe('buildTransaction', () => {
     expect(result.success).toBe(false);
     if (!result.success) {
       expect(result.error).toContain('not found');
-    }
-  });
-
-  it('allows contract address override', () => {
-    const customAddress = '0xcustom00000000000000000000000000000000';
-    const result = buildTransaction(
-      protocol,
-      protocol.actions.approve,
-      { spender: '0x0000000000000000000000000000000000000000' },
-      ctx,
-      { chain: 'eip155:1', contractAddress: customAddress }
-    );
-
-    expect(result.success).toBe(true);
-    if (result.success) {
-      expect(result.transaction.to).toBe(customAddress);
     }
   });
 });
@@ -279,7 +260,7 @@ describe('buildQuery', () => {
   it('builds query call', () => {
     const result = buildQuery(
       protocol,
-      protocol.queries!.get_reserves,
+      protocol.queries!['get-reserves'],
       { pair: '0x1234567890123456789012345678901234567890' },
       ctx,
       { chain: 'eip155:1' }
@@ -287,8 +268,8 @@ describe('buildQuery', () => {
 
     expect(result.success).toBe(true);
     if (result.success) {
-      expect(result.transaction.to).toBe('0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f');
-      expect(result.transaction.value).toBe(0n);
+      expect(result.transactions[0].to).toBe('0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f');
+      expect(result.transactions[0].value).toBe(0n);
     }
   });
 });
@@ -316,7 +297,7 @@ describe('buildWorkflowTransactions', () => {
       },
       {
         skill: 'test-dex@1.0.0',
-        query: 'get_reserves',
+        query: 'get-reserves',
         args: {
           pair: '0x1234567890123456789012345678901234567890',
         },

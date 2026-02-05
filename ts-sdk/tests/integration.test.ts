@@ -1,6 +1,5 @@
 /**
  * Integration tests - test full SDK flows with mock data
- * Note: Real examples may have evolved schema, so we use controlled test data
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdir, writeFile, rm } from 'node:fs/promises';
@@ -27,7 +26,6 @@ import {
 
 const TEST_DIR = '/tmp/ais-sdk-integration-test';
 
-// Test fixtures matching SDK schema
 const UNISWAP_PROTOCOL = `
 schema: "ais/1.0"
 meta:
@@ -46,50 +44,90 @@ deployments:
       router: "0x2626664c2603336E57B271c5C0b26F421741e481"
       quoter: "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a"
 queries:
-  get_pool:
-    contract: factory
-    method: getPool
+  get-pool:
+    description: "Get pool address for token pair"
     params:
       - name: tokenA
         type: address
+        description: "First token"
       - name: tokenB
         type: address
+        description: "Second token"
       - name: fee
         type: uint24
-    outputs:
+        description: "Fee tier"
+    returns:
       - name: pool
         type: address
-  quote_exact_in:
-    contract: quoter
-    method: quoteExactInputSingle
+    execution:
+      "eip155:*":
+        type: evm_read
+        contract: factory
+        function: getPool
+        abi: "(address,address,uint24)"
+        mapping:
+          tokenA: "params.tokenA"
+          tokenB: "params.tokenB"
+          fee: "params.fee"
+  quote-exact-in:
+    description: "Get quote for exact input swap"
     params:
       - name: tokenIn
         type: address
+        description: "Input token"
       - name: tokenOut
         type: address
+        description: "Output token"
       - name: amountIn
         type: uint256
-    outputs:
+        description: "Input amount"
+    returns:
       - name: amountOut
         type: uint256
+    execution:
+      "eip155:*":
+        type: evm_read
+        contract: quoter
+        function: quoteExactInputSingle
+        abi: "(address,address,uint256)"
+        mapping:
+          tokenIn: "params.tokenIn"
+          tokenOut: "params.tokenOut"
+          amountIn: "params.amountIn"
 actions:
-  swap_exact_in:
-    contract: router
-    method: exactInputSingle
-    description: Swap exact input for maximum output
+  swap-exact-in:
+    description: "Swap exact input for maximum output"
+    risk_level: 3
     params:
       - name: tokenIn
         type: address
+        description: "Input token"
       - name: tokenOut
         type: address
+        description: "Output token"
       - name: fee
         type: uint24
+        description: "Fee tier"
       - name: amountIn
         type: uint256
+        description: "Input amount"
       - name: amountOutMin
         type: uint256
+        description: "Minimum output"
     requires_queries:
-      - quote_exact_in
+      - quote-exact-in
+    execution:
+      "eip155:*":
+        type: evm_call
+        contract: router
+        function: exactInputSingle
+        abi: "(address,address,uint24,uint256,uint256)"
+        mapping:
+          tokenIn: "params.tokenIn"
+          tokenOut: "params.tokenOut"
+          fee: "params.fee"
+          amountIn: "params.amountIn"
+          amountOutMin: "params.amountOutMin"
 `;
 
 const ERC20_PROTOCOL = `
@@ -105,42 +143,82 @@ deployments:
     contracts: {}
 queries:
   allowance:
-    contract: token
-    method: allowance
+    description: "Check token allowance"
     params:
       - name: owner
         type: address
+        description: "Token owner"
       - name: spender
         type: address
-    outputs:
+        description: "Approved spender"
+    returns:
       - name: amount
         type: uint256
+    execution:
+      "eip155:*":
+        type: evm_read
+        contract: token
+        function: allowance
+        abi: "(address,address)"
+        mapping:
+          owner: "params.owner"
+          spender: "params.spender"
   balance:
-    contract: token
-    method: balanceOf
+    description: "Check token balance"
     params:
       - name: account
         type: address
-    outputs:
+        description: "Account to check"
+    returns:
       - name: balance
         type: uint256
+    execution:
+      "eip155:*":
+        type: evm_read
+        contract: token
+        function: balanceOf
+        abi: "(address)"
+        mapping:
+          account: "params.account"
 actions:
   approve:
-    contract: token
-    method: approve
+    description: "Approve spender"
+    risk_level: 2
     params:
       - name: spender
         type: address
+        description: "Spender address"
       - name: amount
         type: uint256
+        description: "Amount to approve"
+    execution:
+      "eip155:*":
+        type: evm_call
+        contract: token
+        function: approve
+        abi: "(address,uint256)"
+        mapping:
+          spender: "params.spender"
+          amount: "params.amount"
   transfer:
-    contract: token
-    method: transfer
+    description: "Transfer tokens"
+    risk_level: 2
     params:
       - name: to
         type: address
+        description: "Recipient"
       - name: amount
         type: uint256
+        description: "Amount"
+    execution:
+      "eip155:*":
+        type: evm_call
+        contract: token
+        function: transfer
+        abi: "(address,uint256)"
+        mapping:
+          to: "params.to"
+          amount: "params.amount"
 `;
 
 const TEST_PACK = `
@@ -149,8 +227,10 @@ name: safe-defi-pack
 version: "1.0.0"
 description: Safe DeFi operations with conservative constraints
 includes:
-  - "uniswap-v3@1.0.0"
-  - "erc20@1.0.0"
+  - protocol: uniswap-v3
+    version: "1.0.0"
+  - protocol: erc20
+    version: "1.0.0"
 policy:
   risk_threshold: 3
   approval_required:
@@ -161,9 +241,14 @@ policy:
     allow_unlimited_approval: false
 token_policy:
   allowlist:
-    - "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
-    - "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
-  resolution: strict
+    - chain: "eip155:1"
+      symbol: WETH
+      address: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+    - chain: "eip155:1"
+      symbol: USDC
+      address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+  resolution:
+    require_allowlist_for_symbol_resolution: true
 `;
 
 const TEST_WORKFLOW = `
@@ -201,7 +286,7 @@ nodes:
   - id: get_quote
     type: query_ref
     skill: "uniswap-v3@1.0.0"
-    query: quote_exact_in
+    query: quote-exact-in
     args:
       tokenIn: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
       tokenOut: "\${inputs.target_token}"
@@ -211,7 +296,7 @@ nodes:
   - id: swap
     type: action_ref
     skill: "uniswap-v3@1.0.0"
-    action: swap_exact_in
+    action: swap-exact-in
     args:
       tokenIn: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
       tokenOut: "\${inputs.target_token}"
@@ -257,16 +342,15 @@ describe('Integration: Load Protocols', () => {
   });
 
   it('resolves actions', () => {
-    const swapAction = resolveAction(ctx, 'uniswap-v3/swap_exact_in');
+    const swapAction = resolveAction(ctx, 'uniswap-v3/swap-exact-in');
     expect(swapAction).not.toBeNull();
-    expect(swapAction?.action.method).toBe('exactInputSingle');
-    expect(swapAction?.action.contract).toBe('router');
+    expect(swapAction?.action.description).toBe('Swap exact input for maximum output');
   });
 
   it('resolves queries', () => {
-    const query = resolveQuery(ctx, 'uniswap-v3/quote_exact_in');
+    const query = resolveQuery(ctx, 'uniswap-v3/quote-exact-in');
     expect(query).not.toBeNull();
-    expect(query?.query.method).toBe('quoteExactInputSingle');
+    expect(query?.query.description).toBe('Get quote for exact input swap');
   });
 
   it('gets contract addresses for chains', () => {
@@ -314,7 +398,7 @@ describe('Integration: Pack Operations', () => {
 
   it('validates constraints - passes valid input', () => {
     const result = validateConstraints(pack.policy, pack.token_policy, {
-      token: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
+      token_address: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
       slippage_bps: 50,
     });
     expect(result.valid).toBe(true);
@@ -331,7 +415,7 @@ describe('Integration: Pack Operations', () => {
 
   it('validates constraints - rejects non-allowlisted token', () => {
     const result = validateConstraints(pack.policy, pack.token_policy, {
-      token: '0x1234567890123456789012345678901234567890',
+      token_address: '0x1234567890123456789012345678901234567890',
     });
     expect(result.valid).toBe(false);
   });
@@ -369,8 +453,8 @@ describe('Integration: Workflow Operations', () => {
     const deps = getWorkflowDependencies(workflow);
     expect(deps).toContain('erc20@1.0.0/allowance');
     expect(deps).toContain('erc20@1.0.0/approve');
-    expect(deps).toContain('uniswap-v3@1.0.0/quote_exact_in');
-    expect(deps).toContain('uniswap-v3@1.0.0/swap_exact_in');
+    expect(deps).toContain('uniswap-v3@1.0.0/quote-exact-in');
+    expect(deps).toContain('uniswap-v3@1.0.0/swap-exact-in');
   });
 
   it('validates workflow - all references resolve', () => {
@@ -419,7 +503,7 @@ describe('Integration: End-to-End Agent Simulation', () => {
 
     // 6. Validate operation against pack constraints
     const constraintCheck = validateConstraints(pack.policy, pack.token_policy, {
-      token: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2', // WETH
+      token_address: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
       slippage_bps: 50,
     });
     expect(constraintCheck.valid).toBe(true);
@@ -433,37 +517,35 @@ describe('Integration: End-to-End Agent Simulation', () => {
 
     // 8. Build execution plan
     const executionPlan = workflow.nodes.map(node => {
-      let ref = node.skill;
+      const [protocolName] = node.skill.split('@');
+      const protocol = ctx.protocols.get(protocolName)!;
+
       if (node.type === 'action_ref' && node.action) {
-        ref = `${node.skill}/${node.action}`;
-        const action = resolveAction(ctx, ref);
-        const protocol = ctx.protocols.get(node.skill.split('@')[0])!;
-        const address = getContractAddress(protocol, 'eip155:1', action?.action.contract ?? '');
+        const action = protocol.actions[node.action];
+        const execSpec = action?.execution?.['eip155:*'] || action?.execution?.['*'];
+        const contractName = execSpec && 'contract' in execSpec ? execSpec.contract : null;
+        const address = contractName ? getContractAddress(protocol, 'eip155:1', contractName) : null;
         return {
           nodeId: node.id,
           type: 'action',
-          method: action?.action.method,
+          actionId: node.action,
           contract: address,
         };
       } else if (node.type === 'query_ref' && node.query) {
-        ref = `${node.skill}/${node.query}`;
-        const query = resolveQuery(ctx, ref);
         return {
           nodeId: node.id,
           type: 'query',
-          method: query?.query.method,
+          queryId: node.query,
         };
       }
       return { nodeId: node.id, type: 'unknown' };
     });
 
-    // Verify execution plan
     expect(executionPlan).toHaveLength(4);
-    expect(executionPlan[0].type).toBe('query'); // check_allowance
-    expect(executionPlan[1].type).toBe('action'); // approve_if_needed
-    expect(executionPlan[2].type).toBe('query'); // get_quote
-    expect(executionPlan[3].type).toBe('action'); // swap
-    expect(executionPlan[3].method).toBe('exactInputSingle');
+    expect(executionPlan[0].type).toBe('query');
+    expect(executionPlan[1].type).toBe('action');
+    expect(executionPlan[2].type).toBe('query');
+    expect(executionPlan[3].type).toBe('action');
     expect(executionPlan[3].contract).toBe('0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45');
   });
 });

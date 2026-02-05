@@ -245,6 +245,87 @@ describe('CEL Evaluator', () => {
     it('max() returns maximum', () => {
       expect(evaluateCEL('max(3, 1, 2)')).toBe(3);
     });
+
+    it('floor() floors to integer', () => {
+      expect(evaluateCEL('floor(3.7)')).toBe(3);
+      expect(evaluateCEL('floor(3.2)')).toBe(3);
+      expect(evaluateCEL('floor(-3.2)')).toBe(-4);
+    });
+
+    it('ceil() ceils to integer', () => {
+      expect(evaluateCEL('ceil(3.2)')).toBe(4);
+      expect(evaluateCEL('ceil(3.7)')).toBe(4);
+      expect(evaluateCEL('ceil(-3.7)')).toBe(-3);
+    });
+
+    it('round() rounds to nearest integer', () => {
+      expect(evaluateCEL('round(3.4)')).toBe(3);
+      expect(evaluateCEL('round(3.5)')).toBe(4);
+      expect(evaluateCEL('round(3.6)')).toBe(4);
+    });
+
+    it('pow() computes power', () => {
+      expect(evaluateCEL('pow(2, 3)')).toBe(8);
+      expect(evaluateCEL('pow(10, 2)')).toBe(100);
+      expect(evaluateCEL('pow(10, 0)')).toBe(1);
+    });
+  });
+
+  describe('AIS token conversion functions', () => {
+    it('to_atomic() converts human amount with decimals number', () => {
+      // 1.5 tokens with 18 decimals
+      expect(evaluateCEL('to_atomic(1.5, 18)')).toBe('1500000000000000000');
+      // 100 USDC with 6 decimals
+      expect(evaluateCEL('to_atomic(100, 6)')).toBe('100000000');
+      // 0.001 ETH
+      expect(evaluateCEL('to_atomic(0.001, 18)')).toBe('1000000000000000');
+    });
+
+    it('to_atomic() converts human amount with asset object', () => {
+      const ctx = {
+        token: { decimals: 18, symbol: 'WETH' },
+        amount: 2.5,
+      };
+      expect(evaluateCEL('to_atomic(amount, token)', ctx)).toBe('2500000000000000000');
+    });
+
+    it('to_atomic() handles string amounts', () => {
+      expect(evaluateCEL('to_atomic("1.0", 18)')).toBe('1000000000000000000');
+    });
+
+    it('to_human() converts atomic amount to human', () => {
+      // 1e18 wei to ETH
+      expect(evaluateCEL('to_human(1000000000000000000, 18)')).toBe(1);
+      // 1e6 to USDC
+      expect(evaluateCEL('to_human(1000000, 6)')).toBe(1);
+      // 2.5 ETH in wei
+      expect(evaluateCEL('to_human(2500000000000000000, 18)')).toBe(2.5);
+    });
+
+    it('to_human() works with asset object', () => {
+      const ctx = {
+        token: { decimals: 6, symbol: 'USDC' },
+        atomic: 50000000, // 50 USDC
+      };
+      expect(evaluateCEL('to_human(atomic, token)', ctx)).toBe(50);
+    });
+
+    it('to_human() handles string atomic amounts', () => {
+      expect(evaluateCEL('to_human("1000000000000000000", 18)')).toBe(1);
+    });
+
+    it('calculates min_out with slippage (AIS pattern)', () => {
+      const ctx = {
+        quote_amount_out_atomic: 1000000000000000000, // 1 token
+        slippage_bps: 50, // 0.5%
+      };
+      // floor(amount * (1 - slippage/10000))
+      const result = evaluateCEL(
+        'floor(quote_amount_out_atomic * (1.0 - slippage_bps / 10000.0))',
+        ctx
+      );
+      expect(result).toBe(995000000000000000); // 0.995 token
+    });
   });
 
   describe('method-style function calls', () => {

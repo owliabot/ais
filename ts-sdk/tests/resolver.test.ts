@@ -32,24 +32,43 @@ deployments:
     contracts:
       router: "0x2626664c2603336E57B271c5C0b26F421741e481"
 queries:
-  get_pool:
-    contract: factory
-    method: getPool
+  get-pool:
+    description: "Get pool address for token pair"
     params:
       - name: token0
         type: address
-    outputs:
+        description: "First token"
+    returns:
       - name: pool
         type: address
+    execution:
+      "eip155:*":
+        type: evm_read
+        contract: factory
+        function: getPool
+        abi: "(address)"
+        mapping:
+          token0: "params.token0"
 actions:
-  swap_exact_in:
-    contract: router
-    method: exactInputSingle
+  swap-exact-in:
+    description: "Swap exact input amount"
+    risk_level: 3
     params:
       - name: tokenIn
         type: address
+        description: "Input token"
       - name: amountIn
         type: uint256
+        description: "Amount to swap"
+    execution:
+      "eip155:*":
+        type: evm_call
+        contract: router
+        function: exactInputSingle
+        abi: "(address,uint256)"
+        mapping:
+          tokenIn: "params.tokenIn"
+          amountIn: "params.amountIn"
 `;
 
 describe('ResolverContext', () => {
@@ -125,10 +144,10 @@ describe('resolveAction', () => {
   });
 
   it('resolves action by reference', () => {
-    const result = resolveAction(ctx, 'uniswap-v3/swap_exact_in');
+    const result = resolveAction(ctx, 'uniswap-v3/swap-exact-in');
     expect(result).not.toBeNull();
-    expect(result?.actionId).toBe('swap_exact_in');
-    expect(result?.action.method).toBe('exactInputSingle');
+    expect(result?.actionId).toBe('swap-exact-in');
+    expect(result?.action.description).toBe('Swap exact input amount');
   });
 
   it('returns null for unknown action', () => {
@@ -146,9 +165,9 @@ describe('resolveQuery', () => {
   });
 
   it('resolves query by reference', () => {
-    const result = resolveQuery(ctx, 'uniswap-v3/get_pool');
+    const result = resolveQuery(ctx, 'uniswap-v3/get-pool');
     expect(result).not.toBeNull();
-    expect(result?.queryId).toBe('get_pool');
+    expect(result?.queryId).toBe('get-pool');
   });
 });
 

@@ -28,8 +28,15 @@ deployments:
       router: "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45"
 actions:
   swap:
-    contract: router
-    method: swap
+    description: "Swap tokens"
+    risk_level: 3
+    execution:
+      "eip155:*":
+        type: evm_call
+        contract: router
+        function: swap
+        abi: "()"
+        mapping: {}
 `
   );
 
@@ -46,8 +53,15 @@ deployments:
       pool: "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2"
 actions:
   supply:
-    contract: pool
-    method: supply
+    description: "Supply tokens"
+    risk_level: 2
+    execution:
+      "eip155:*":
+        type: evm_call
+        contract: pool
+        function: supply
+        abi: "()"
+        mapping: {}
 `
   );
 
@@ -58,7 +72,8 @@ schema: "ais-pack/1.0"
 name: safe-defi
 version: "1.0.0"
 includes:
-  - "uniswap-v3@1.0.0"
+  - protocol: uniswap-v3
+    version: "1.0.0"
 `
   );
 
@@ -125,16 +140,16 @@ describe('loadDirectory', () => {
   it('loads all AIS files from directory', async () => {
     const result = await loadDirectory(TEST_DIR);
 
-    expect(result.protocols).toHaveLength(2); // uniswap-v3 + aave-v3 (in subdir)
+    expect(result.protocols).toHaveLength(2);
     expect(result.packs).toHaveLength(1);
     expect(result.workflows).toHaveLength(1);
-    expect(result.errors).toHaveLength(1); // invalid.ais.yaml
+    expect(result.errors).toHaveLength(1);
   });
 
   it('respects recursive: false option', async () => {
     const result = await loadDirectory(TEST_DIR, { recursive: false });
 
-    expect(result.protocols).toHaveLength(1); // only uniswap-v3
+    expect(result.protocols).toHaveLength(1);
     expect(result.packs).toHaveLength(1);
     expect(result.workflows).toHaveLength(1);
   });

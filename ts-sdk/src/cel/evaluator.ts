@@ -153,6 +153,88 @@ const BUILTINS: Record<string, CELFunction> = {
     if (nums.length === 0) throw new Error('max() requires numbers');
     return Math.max(...nums);
   },
+
+  floor: (args) => {
+    const val = args[0];
+    if (typeof val !== 'number') throw new Error('floor() requires number');
+    return Math.floor(val);
+  },
+
+  ceil: (args) => {
+    const val = args[0];
+    if (typeof val !== 'number') throw new Error('ceil() requires number');
+    return Math.ceil(val);
+  },
+
+  round: (args) => {
+    const val = args[0];
+    if (typeof val !== 'number') throw new Error('round() requires number');
+    return Math.round(val);
+  },
+
+  // AIS-specific functions for token amount conversion
+  // to_atomic(amount, asset) - Convert human amount to atomic using asset decimals
+  // asset should have a 'decimals' property
+  to_atomic: (args) => {
+    const [amount, asset] = args;
+    
+    if (typeof amount !== 'number' && typeof amount !== 'string') {
+      throw new Error('to_atomic() first arg must be number or string amount');
+    }
+    
+    // Get decimals from asset
+    let decimals: number;
+    if (typeof asset === 'number') {
+      decimals = asset;
+    } else if (asset && typeof asset === 'object' && 'decimals' in asset) {
+      decimals = (asset as { decimals: number }).decimals;
+    } else {
+      throw new Error('to_atomic() second arg must be asset with decimals or decimal count');
+    }
+    
+    const numAmount = typeof amount === 'string' ? parseFloat(amount) : amount;
+    
+    // Use string math to avoid floating point issues for large numbers
+    // For precision, we multiply and then truncate
+    const multiplier = Math.pow(10, decimals);
+    const result = Math.floor(numAmount * multiplier);
+    
+    // Return as string for uint256 compatibility
+    return result.toString();
+  },
+
+  // to_human(atomic, asset) - Convert atomic amount to human readable
+  to_human: (args) => {
+    const [atomic, asset] = args;
+    
+    if (typeof atomic !== 'number' && typeof atomic !== 'string') {
+      throw new Error('to_human() first arg must be number or string atomic amount');
+    }
+    
+    // Get decimals from asset
+    let decimals: number;
+    if (typeof asset === 'number') {
+      decimals = asset;
+    } else if (asset && typeof asset === 'object' && 'decimals' in asset) {
+      decimals = (asset as { decimals: number }).decimals;
+    } else {
+      throw new Error('to_human() second arg must be asset with decimals or decimal count');
+    }
+    
+    const numAtomic = typeof atomic === 'string' ? parseFloat(atomic) : atomic;
+    const divisor = Math.pow(10, decimals);
+    
+    return numAtomic / divisor;
+  },
+
+  // pow(base, exponent) - Power function
+  pow: (args) => {
+    const [base, exp] = args;
+    if (typeof base !== 'number' || typeof exp !== 'number') {
+      throw new Error('pow() requires two numbers');
+    }
+    return Math.pow(base, exp);
+  },
 };
 
 export class Evaluator {

@@ -21,9 +21,16 @@ deployments:
     contracts:
       router: "0x1234567890123456789012345678901234567890"
 actions:
-  test_action:
-    contract: router
-    method: execute
+  test-action:
+    description: "Test action"
+    risk_level: 2
+    execution:
+      "eip155:*":
+        type: evm_call
+        contract: router
+        function: execute
+        abi: "()"
+        mapping: {}
 `;
     const result = parseAIS(yaml);
     expect(result.schema).toBe('ais/1.0');
@@ -39,7 +46,8 @@ schema: "ais-pack/1.0"
 name: test-pack
 version: "1.0.0"
 includes:
-  - "uniswap-v3@1.0.0"
+  - protocol: uniswap-v3
+    version: "1.0.0"
 `;
     const result = parseAIS(yaml);
     expect(result.schema).toBe('ais-pack/1.0');
@@ -62,7 +70,7 @@ nodes:
   - id: step1
     type: action_ref
     skill: "uniswap-v3@1.0.0"
-    action: swap_exact_in
+    action: swap-exact-in
     args:
       token_in: "\${inputs.token}"
 `;
@@ -97,31 +105,50 @@ deployments:
       router: "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45"
       factory: "0x1F98431c8aD98523631AE4a59f267346ea31F984"
 queries:
-  get_pool:
-    contract: factory
-    method: getPool
+  get-pool:
+    description: "Get pool address for token pair"
     params:
       - name: token0
         type: address
-    outputs:
+        description: "First token address"
+    returns:
       - name: pool
         type: address
+    execution:
+      "eip155:*":
+        type: evm_read
+        contract: factory
+        function: getPool
+        abi: "(address)"
+        mapping:
+          token0: "params.token0"
 actions:
-  swap_exact_in:
-    contract: router
-    method: exactInputSingle
+  swap-exact-in:
+    description: "Swap exact input amount"
+    risk_level: 3
     params:
       - name: tokenIn
         type: address
+        description: "Input token address"
       - name: amountIn
         type: uint256
+        description: "Amount to swap"
     requires_queries:
-      - get_pool
+      - get-pool
+    execution:
+      "eip155:*":
+        type: evm_call
+        contract: router
+        function: exactInputSingle
+        abi: "(address,uint256)"
+        mapping:
+          tokenIn: "params.tokenIn"
+          amountIn: "params.amountIn"
 `;
     const result = parseProtocolSpec(yaml);
     expect(result.meta.protocol).toBe('uniswap-v3');
-    expect(result.queries?.get_pool).toBeDefined();
-    expect(result.actions.swap_exact_in.requires_queries).toContain('get_pool');
+    expect(result.queries?.['get-pool']).toBeDefined();
+    expect(result.actions['swap-exact-in'].requires_queries).toContain('get-pool');
   });
 
   it('rejects pack documents', () => {
@@ -187,19 +214,24 @@ schema: "ais-pack/1.0"
 name: safe-defi
 version: "1.0.0"
 includes:
-  - "uniswap-v3@1.0.0"
+  - protocol: uniswap-v3
+    version: "1.0.0"
 policy:
   risk_threshold: 3
   hard_constraints:
     max_slippage_bps: 50
 token_policy:
   allowlist:
-    - "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
-  resolution: strict
+    - chain: "eip155:1"
+      symbol: WETH
+      address: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+  resolution:
+    allow_symbol_input: true
+    require_allowlist_for_symbol_resolution: true
 `;
     const result = parsePack(yaml);
     expect(result.policy?.hard_constraints?.max_slippage_bps).toBe(50);
-    expect(result.token_policy?.resolution).toBe('strict');
+    expect(result.token_policy?.resolution?.allow_symbol_input).toBe(true);
   });
 });
 
@@ -226,7 +258,7 @@ nodes:
   - id: swap
     type: action_ref
     skill: "uniswap-v3@1.0.0"
-    action: swap_exact_in
+    action: swap-exact-in
     args:
       token_out: "\${inputs.target_token}"
     requires_queries:

@@ -26,15 +26,17 @@ describe('validateConstraints', () => {
 
   const tokenPolicy: TokenPolicy = {
     allowlist: [
-      '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2', // WETH
-      '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', // USDC
+      { chain: 'eip155:1', symbol: 'WETH', address: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2' },
+      { chain: 'eip155:1', symbol: 'USDC', address: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48' },
     ],
-    resolution: 'strict',
+    resolution: {
+      require_allowlist_for_symbol_resolution: true,
+    },
   };
 
   it('passes valid inputs', () => {
     const result = validateConstraints(policy, tokenPolicy, {
-      token: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
+      token_address: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
       slippage_bps: 50,
     });
     expect(result.valid).toBe(true);
@@ -43,7 +45,7 @@ describe('validateConstraints', () => {
 
   it('rejects token not in allowlist (strict mode)', () => {
     const result = validateConstraints(policy, tokenPolicy, {
-      token: '0x1234567890123456789012345678901234567890',
+      token_address: '0x1234567890123456789012345678901234567890',
     });
     expect(result.valid).toBe(false);
     expect(result.violations[0].constraint).toBe('token_policy.allowlist');
@@ -51,11 +53,15 @@ describe('validateConstraints', () => {
 
   it('soft-rejects token not in allowlist (permissive mode)', () => {
     const permissivePolicy: TokenPolicy = {
-      allowlist: ['0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'],
-      resolution: 'permissive',
+      allowlist: [
+        { chain: 'eip155:1', symbol: 'WETH', address: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2' },
+      ],
+      resolution: {
+        require_allowlist_for_symbol_resolution: false,
+      },
     };
     const result = validateConstraints(policy, permissivePolicy, {
-      token: '0x1234567890123456789012345678901234567890',
+      token_address: '0x1234567890123456789012345678901234567890',
     });
     expect(result.valid).toBe(true);
     expect(result.requires_approval).toBe(true);
@@ -64,7 +70,7 @@ describe('validateConstraints', () => {
 
   it('rejects slippage exceeding max_bps', () => {
     const result = validateConstraints(policy, tokenPolicy, {
-      token: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
+      token_address: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
       slippage_bps: 150,
     });
     expect(result.valid).toBe(false);
@@ -99,7 +105,7 @@ describe('validateConstraints', () => {
 
   it('handles undefined policy', () => {
     const result = validateConstraints(undefined, undefined, {
-      token: '0x1234',
+      token_address: '0x1234',
       slippage_bps: 999999,
     });
     expect(result.valid).toBe(true);
@@ -140,12 +146,21 @@ deployments:
     contracts:
       router: "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45"
 actions:
-  swap_exact_in:
-    contract: router
-    method: exactInputSingle
+  swap-exact-in:
+    description: "Swap exact input"
+    risk_level: 3
     params:
       - name: tokenIn
         type: address
+        description: "Input token"
+    execution:
+      "eip155:*":
+        type: evm_call
+        contract: router
+        function: exactInputSingle
+        abi: "(address)"
+        mapping:
+          tokenIn: "params.tokenIn"
 `)
     );
     registerProtocol(
@@ -160,11 +175,20 @@ deployments:
     contracts: {}
 actions:
   approve:
-    contract: token
-    method: approve
+    description: "Approve spender"
+    risk_level: 2
     params:
       - name: spender
         type: address
+        description: "Spender address"
+    execution:
+      "eip155:*":
+        type: evm_call
+        contract: token
+        function: approve
+        abi: "(address)"
+        mapping:
+          spender: "params.spender"
 `)
     );
   });
@@ -188,7 +212,7 @@ nodes:
   - id: swap
     type: action_ref
     skill: "uniswap-v3@1.0.0"
-    action: swap_exact_in
+    action: swap-exact-in
     args:
       amount: "\${nodes.approve.outputs.result}"
     requires_queries:
@@ -208,7 +232,7 @@ nodes:
   - id: step1
     type: action_ref
     skill: "unknown-protocol@1.0.0"
-    action: unknown_action
+    action: unknown-action
     args: {}
 `);
     const result = validateWorkflow(workflow, ctx);
@@ -226,7 +250,7 @@ nodes:
   - id: step1
     type: action_ref
     skill: "uniswap-v3@1.0.0"
-    action: unknown_action
+    action: unknown-action
     args: {}
 `);
     const result = validateWorkflow(workflow, ctx);
@@ -270,7 +294,7 @@ nodes:
   - id: step2
     type: action_ref
     skill: "uniswap-v3@1.0.0"
-    action: swap_exact_in
+    action: swap-exact-in
     args: {}
 `);
     const result = validateWorkflow(workflow, ctx);
