@@ -27,6 +27,12 @@ import { Evaluator, type CELValue, type CELContext } from '../cel/evaluator.js';
 import { getContractAddress } from '../resolver/reference.js';
 import { resolveExpressionString, hasExpressions } from '../resolver/expression.js';
 import { encodeFunctionCall, buildFunctionSignature } from './encoder.js';
+import {
+  buildPreAuthorize,
+  type PreAuthorizeContext,
+  type PreAuthorizeResult,
+  type PermitData,
+} from './pre-authorize.js';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Types
@@ -54,6 +60,8 @@ export interface BuildOptions {
   contractAddress?: string;
   /** ETH value to send */
   value?: bigint;
+  /** Pre-authorization context (wallet address, allowances, nonces) */
+  preAuthorize?: PreAuthorizeContext;
 }
 
 export interface BuildResult {
@@ -62,6 +70,10 @@ export interface BuildResult {
   action: Action;
   resolvedParams: Record<string, unknown>;
   calculatedValues: Record<string, unknown>;
+  /** Pre-authorization result (if pre_authorize was specified) */
+  preAuthorize?: PreAuthorizeResult;
+  /** Permit signature data (for permit/permit2 methods) */
+  permitData?: PermitData;
 }
 
 export interface BuildError {
@@ -762,9 +774,53 @@ export function buildTransaction(
 
     // Build transactions based on execution type
     const transactions: TransactionRequest[] = [];
+    let preAuthorizeResult: PreAuthorizeResult | undefined;
+    let permitData: PermitData | undefined;
 
     switch (execSpec.type) {
-      case 'evm_call':
+      case 'evm_call': {
+        // Handle pre_authorize if specified
+        if (execSpec.pre_authorize && options.preAuthorize) {
+          try {
+            preAuthorizeResult = buildPreAuthorize(
+              execSpec.pre_authorize,
+              ctx,
+              celCtx,
+              evaluator,
+              protocol,
+              chain,
+              options.preAuthorize
+            );
+
+            // Add approval transactions if needed
+            if (preAuthorizeResult.needed) {
+              // Permit2 approval tx first (if needed)
+              if (preAuthorizeResult.permit2ApproveTx) {
+                transactions.push(preAuthorizeResult.permit2ApproveTx);
+              }
+              // Standard approve tx (if needed)
+              if (preAuthorizeResult.approveTx) {
+                transactions.push(preAuthorizeResult.approveTx);
+              }
+              // Save permit data for caller to sign
+              if (preAuthorizeResult.permitData) {
+                permitData = preAuthorizeResult.permitData;
+              }
+            }
+          } catch (err) {
+            return {
+              success: false,
+              error: `Pre-authorization failed: ${err instanceof Error ? err.message : err}`,
+            };
+          }
+        }
+
+        // Build main transaction
+        const tx = buildEvmCall(protocol, execSpec, ctx, celCtx, evaluator, chain);
+        transactions.push(tx);
+        break;
+      }
+
       case 'evm_read': {
         const tx = buildEvmCall(protocol, execSpec, ctx, celCtx, evaluator, chain);
         transactions.push(tx);
@@ -815,6 +871,8 @@ export function buildTransaction(
       action,
       resolvedParams,
       calculatedValues,
+      ...(preAuthorizeResult && { preAuthorize: preAuthorizeResult }),
+      ...(permitData && { permitData }),
     };
   } catch (err) {
     return {

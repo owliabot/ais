@@ -22,3 +22,15 @@ export {
 } from './encoder.js';
 
 export { keccak256 } from './keccak.js';
+
+export {
+  buildPreAuthorize,
+  buildAllowanceCheckData,
+  getPreAuthorizeQueries,
+  PERMIT2_ADDRESS,
+  MAX_UINT256,
+  type PreAuthorizeConfig,
+  type PreAuthorizeResult,
+  type PreAuthorizeContext,
+  type PermitData,
+} from './pre-authorize.js';
