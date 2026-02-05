@@ -174,7 +174,7 @@ const BUILTINS: Record<string, CELFunction> = {
 
   // AIS-specific functions for token amount conversion
   // to_atomic(amount, asset) - Convert human amount to atomic using asset decimals
-  // asset should have a 'decimals' property
+  // asset should have a 'decimals' property or be a number
   to_atomic: (args) => {
     const [amount, asset] = args;
     
@@ -194,13 +194,10 @@ const BUILTINS: Record<string, CELFunction> = {
     
     const numAmount = typeof amount === 'string' ? parseFloat(amount) : amount;
     
-    // Use string math to avoid floating point issues for large numbers
-    // For precision, we multiply and then truncate
+    // Return as number for CEL calculations
+    // The execution builder will convert to BigInt when needed
     const multiplier = Math.pow(10, decimals);
-    const result = Math.floor(numAmount * multiplier);
-    
-    // Return as string for uint256 compatibility
-    return result.toString();
+    return Math.floor(numAmount * multiplier);
   },
 
   // to_human(atomic, asset) - Convert atomic amount to human readable

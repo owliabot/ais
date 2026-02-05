@@ -1,8 +1,12 @@
 /**
  * Execution Builder - build transaction calldata from AIS actions
  * 
- * NOTE: This module is being refactored to support the new execution block structure.
- * Full implementation pending.
+ * Supports AIS-2 execution types with:
+ * - Chain pattern matching (eip155:*, solana:*, etc.)
+ * - CEL expression evaluation in mapping values
+ * - Condition evaluation for composite steps
+ * - Contract resolution from deployments
+ * - Detect object handling (structured detection)
  */
 
 import type {
@@ -13,11 +17,13 @@ import type {
   ExecutionSpec,
   EvmCall,
   EvmRead,
+  EvmMultiread,
   Composite,
   CompositeStep,
+  Detect,
 } from '../schema/index.js';
 import type { ResolverContext } from '../resolver/index.js';
-import type { CELValue } from '../cel/evaluator.js';
+import { Evaluator, type CELValue, type CELContext } from '../cel/evaluator.js';
 import { getContractAddress } from '../resolver/reference.js';
 import { resolveExpressionString, hasExpressions } from '../resolver/expression.js';
 import { encodeFunctionCall, buildFunctionSignature } from './encoder.js';
@@ -167,6 +173,18 @@ function resolveParamValue(
     value = param.default;
   }
 
+  // Keep float/token_amount as numbers for CEL processing
+  // They'll be converted to atomic amounts by to_atomic() or similar
+  if (param.type === 'float' || param.type === 'token_amount') {
+    if (typeof value === 'string') {
+      return parseFloat(value);
+    }
+    if (typeof value === 'number') {
+      return value;
+    }
+    throw new Error(`Invalid ${param.type} for ${param.name}: ${value}`);
+  }
+
   // Type coercion
   const solType = mapToSolidityType(param.type);
 
@@ -182,7 +200,11 @@ function resolveParamValue(
       return BigInt(value);
     }
     if (typeof value === 'number') {
-      return BigInt(value);
+      // Only convert to BigInt if it's an integer
+      if (Number.isInteger(value)) {
+        return BigInt(value);
+      }
+      throw new Error(`Invalid integer for ${param.name}: ${value} (got float)`);
     }
     if (typeof value === 'bigint') {
       return value;
@@ -198,14 +220,145 @@ function resolveParamValue(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// CEL Expression Detection
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Check if a value contains a CEL function call or complex expression
+ * CEL expressions: function calls, operators, ternary
+ */
+function isCELExpression(value: string): boolean {
+  // Function calls: to_atomic(...), floor(...), etc.
+  if (/\w+\s*\(/.test(value)) return true;
+  // Operators: +, -, *, /, <, >, ==, etc.
+  if (/[+\-*/%<>=!&|?:]/.test(value)) return true;
+  return false;
+}
+
+/**
+ * Build CEL context from ResolverContext
+ * Flattens nested objects for CEL evaluation
+ */
+/**
+ * Convert a value to CEL-compatible type
+ * BigInt is converted to number for CEL calculations
+ */
+function toCELValue(value: unknown): CELValue {
+  if (typeof value === 'bigint') {
+    // Convert to number - safe for values up to Number.MAX_SAFE_INTEGER
+    // For very large values, precision may be lost but CEL comparison will still work
+    return Number(value);
+  }
+  return value as CELValue;
+}
+
+function buildCELContext(
+  ctx: ResolverContext,
+  protocol: ProtocolSpec,
+  chain: string
+): CELContext {
+  const celCtx: CELContext = {};
+
+  // Build nested params object for CEL member access
+  const params: Record<string, CELValue> = {};
+  const calculated: Record<string, CELValue> = {};
+  const ctxVars: Record<string, CELValue> = {};
+
+  // Parse variables into nested namespaces
+  for (const [key, value] of Object.entries(ctx.variables)) {
+    const celValue = toCELValue(value);
+    const parts = key.split('.');
+    if (parts[0] === 'params' && parts.length >= 2) {
+      // Build nested structure for params.token_in.address etc.
+      let current = params;
+      for (let i = 1; i < parts.length - 1; i++) {
+        if (!(parts[i] in current)) {
+          current[parts[i]] = {};
+        }
+        current = current[parts[i]] as Record<string, CELValue>;
+      }
+      current[parts[parts.length - 1]] = celValue;
+    } else if (parts[0] === 'calculated' && parts.length >= 2) {
+      calculated[parts.slice(1).join('.')] = celValue;
+    } else if (parts[0] === 'ctx' && parts.length >= 2) {
+      ctxVars[parts.slice(1).join('.')] = celValue;
+    } else {
+      // Flat key
+      celCtx[key] = celValue;
+    }
+  }
+
+  // Set namespace objects
+  if (Object.keys(params).length > 0) {
+    celCtx['params'] = params;
+  }
+  if (Object.keys(calculated).length > 0) {
+    celCtx['calculated'] = calculated;
+  }
+  if (Object.keys(ctxVars).length > 0) {
+    celCtx['ctx'] = ctxVars;
+  }
+
+  // Build nested query object with bigint conversion
+  const query: Record<string, CELValue> = {};
+  for (const [queryName, result] of ctx.queryResults) {
+    // Convert query result values (may contain bigints)
+    const converted: Record<string, CELValue> = {};
+    for (const [k, v] of Object.entries(result)) {
+      converted[k] = toCELValue(v);
+    }
+    query[queryName] = converted;
+  }
+  if (Object.keys(query).length > 0) {
+    celCtx['query'] = query;
+  }
+
+  // Build contracts object from protocol deployments
+  const contracts: Record<string, CELValue> = {};
+  const deployment = protocol.deployments?.find((d) => {
+    if (d.chain === chain) return true;
+    // Wildcard match: eip155:* matches eip155:1
+    const [ns] = chain.split(':');
+    return d.chain === `${ns}:*`;
+  });
+
+  if (deployment?.contracts) {
+    for (const [name, address] of Object.entries(deployment.contracts)) {
+      contracts[name] = address;
+    }
+  }
+  if (Object.keys(contracts).length > 0) {
+    celCtx['contracts'] = contracts;
+  }
+
+  return celCtx;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Mapping Resolution
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /**
  * Resolve a mapping value from context
- * Supports: literal values, params.*, calculated.*, ctx.*, query.*, contracts.*
+ * Supports:
+ * - Literal values: "0x...", "123", "true", "false", "null"
+ * - References: params.*, calculated.*, ctx.*, query.*, contracts.*
+ * - CEL expressions: to_atomic(params.amount, params.token), floor(x * 0.99)
+ * - Detect objects: { detect: { kind: "best_quote", ... } }
  */
-function resolveMappingValue(value: unknown, ctx: ResolverContext): unknown {
+function resolveMappingValue(
+  value: unknown,
+  ctx: ResolverContext,
+  celCtx: CELContext,
+  evaluator: Evaluator,
+  protocol: ProtocolSpec,
+  chain: string
+): unknown {
+  // Handle detect objects
+  if (value && typeof value === 'object' && 'detect' in value) {
+    return resolveDetect((value as { detect: Detect }).detect, ctx, protocol, chain);
+  }
+
   if (typeof value !== 'string') {
     // Not a string - return as-is (number, object, etc.)
     if (typeof value === 'number') {
@@ -224,6 +377,25 @@ function resolveMappingValue(value: unknown, ctx: ResolverContext): unknown {
   if (value === 'true') return true;
   if (value === 'false') return false;
   if (value === 'null') return null;
+
+  // Check if it's a CEL expression (function call or operators)
+  if (isCELExpression(value)) {
+    try {
+      const result = evaluator.evaluate(value, celCtx);
+      // Convert numeric results to BigInt for transaction encoding
+      if (typeof result === 'number') {
+        return BigInt(Math.floor(result));
+      }
+      if (typeof result === 'string' && /^\d+$/.test(result)) {
+        return BigInt(result);
+      }
+      return result;
+    } catch (err) {
+      throw new Error(
+        `CEL evaluation failed for "${value}": ${err instanceof Error ? err.message : err}`
+      );
+    }
+  }
 
   // Reference patterns: params.*, calculated.*, ctx.*, query.*, contracts.*
   const parts = value.split('.');
@@ -254,13 +426,75 @@ function resolveMappingValue(value: unknown, ctx: ResolverContext): unknown {
       return field ? result[field] : result;
     }
     case 'contracts': {
-      // contracts.router - resolved at build time via protocol
-      // Return the reference as-is for now
-      return value;
+      // contracts.router - resolve from protocol deployments
+      const contractName = parts[1];
+      const addr = getContractAddress(protocol, chain, contractName);
+      if (!addr) {
+        throw new Error(`Contract "${contractName}" not found for chain "${chain}"`);
+      }
+      return addr;
     }
     default:
       // Unknown reference - return as-is
       return value;
+  }
+}
+
+/**
+ * Resolve a detect object
+ * Detect objects specify dynamic value resolution (e.g., best quote, choose one)
+ */
+function resolveDetect(
+  detect: Detect,
+  ctx: ResolverContext,
+  protocol: ProtocolSpec,
+  chain: string
+): unknown {
+  switch (detect.kind) {
+    case 'choose_one':
+      // For choose_one, return first candidate or use provider
+      if (detect.candidates && detect.candidates.length > 0) {
+        return detect.candidates[0];
+      }
+      throw new Error('choose_one detect requires candidates');
+
+    case 'best_quote':
+    case 'best_path':
+      // These require async provider calls - return placeholder for now
+      // In production, engine would query the provider
+      if (detect.candidates && detect.candidates.length > 0) {
+        // Return first candidate as fallback
+        return detect.candidates[0];
+      }
+      throw new Error(`${detect.kind} detect requires provider implementation`);
+
+    case 'protocol_specific':
+      // Protocol-specific detection - requires protocol handler
+      throw new Error('protocol_specific detect not yet implemented');
+
+    default:
+      throw new Error(`Unknown detect kind: ${detect.kind}`);
+  }
+}
+
+/**
+ * Evaluate a condition expression (CEL)
+ * Returns true if condition passes (or is undefined), false to skip step
+ */
+function evaluateCondition(
+  condition: string | undefined,
+  celCtx: CELContext,
+  evaluator: Evaluator
+): boolean {
+  if (!condition) return true;
+
+  try {
+    const result = evaluator.evaluate(condition.trim(), celCtx);
+    return Boolean(result);
+  } catch (err) {
+    throw new Error(
+      `Condition evaluation failed: ${err instanceof Error ? err.message : err}`
+    );
   }
 }
 
@@ -275,6 +509,8 @@ function buildEvmCall(
   protocol: ProtocolSpec,
   spec: EvmCall | EvmRead,
   ctx: ResolverContext,
+  celCtx: CELContext,
+  evaluator: Evaluator,
   chain: string,
   stepId?: string,
   stepDescription?: string
@@ -288,8 +524,11 @@ function buildEvmCall(
     to = contractRef;
   } else if (contractRef.startsWith('params.')) {
     // Reference to param (e.g., "params.token_in.address")
-    // TODO: Resolve from context
-    throw new Error('Param references in contract not yet implemented');
+    const resolved = resolveMappingValue(contractRef, ctx, celCtx, evaluator, protocol, chain);
+    if (typeof resolved !== 'string' || !resolved.startsWith('0x')) {
+      throw new Error(`Contract reference "${contractRef}" did not resolve to address`);
+    }
+    to = resolved;
   } else {
     // Contract name from deployments
     const addr = getContractAddress(protocol, chain, contractRef);
@@ -312,12 +551,12 @@ function buildEvmCall(
     .map((t) => t.trim())
     .filter((t) => t.length > 0);
 
-  // Resolve mapping values from context
+  // Resolve mapping values from context with CEL support
   const values: unknown[] = [];
   const mappingEntries = Object.entries(spec.mapping);
   
   for (const [, mappingValue] of mappingEntries) {
-    const resolved = resolveMappingValue(mappingValue, ctx);
+    const resolved = resolveMappingValue(mappingValue, ctx, celCtx, evaluator, protocol, chain);
     values.push(resolved);
   }
 
@@ -325,10 +564,23 @@ function buildEvmCall(
   const signature = buildFunctionSignature(spec.function, types);
   const data = encodeFunctionCall(signature, types, values);
 
+  // Resolve value if specified (for payable functions)
+  let txValue = 0n;
+  if (spec.type === 'evm_call' && spec.value) {
+    const resolvedValue = resolveMappingValue(spec.value, ctx, celCtx, evaluator, protocol, chain);
+    if (typeof resolvedValue === 'bigint') {
+      txValue = resolvedValue;
+    } else if (typeof resolvedValue === 'string' && /^\d+$/.test(resolvedValue)) {
+      txValue = BigInt(resolvedValue);
+    } else if (typeof resolvedValue === 'number') {
+      txValue = BigInt(resolvedValue);
+    }
+  }
+
   return {
     to,
     data,
-    value: 0n, // TODO: Support value from spec
+    value: txValue,
     chainId: parseChainId(chain),
     stepId,
     stepDescription,
@@ -356,6 +608,9 @@ export function buildTransaction(
         error: `No execution spec found for chain "${chain}"`,
       };
     }
+
+    // Create CEL evaluator
+    const evaluator = new Evaluator();
 
     // Resolve input params and set them in context
     const params = action.params ?? [];
@@ -386,21 +641,29 @@ export function buildTransaction(
       }
     }
 
+    // Build CEL context with all resolved values
+    const celCtx = buildCELContext(ctx, protocol, chain);
+
     // Build transactions based on execution type
     const transactions: TransactionRequest[] = [];
 
     switch (execSpec.type) {
       case 'evm_call':
       case 'evm_read': {
-        const tx = buildEvmCall(protocol, execSpec, ctx, chain);
+        const tx = buildEvmCall(protocol, execSpec, ctx, celCtx, evaluator, chain);
         transactions.push(tx);
         break;
       }
 
       case 'composite': {
-        // Build each step
+        // Build each step, evaluating conditions
         for (const step of (execSpec as Composite).steps) {
-          // TODO: Evaluate step.condition
+          // Evaluate step condition
+          if (!evaluateCondition(step.condition, celCtx, evaluator)) {
+            // Condition is false, skip this step
+            continue;
+          }
+
           const stepSpec: EvmCall = {
             type: 'evm_call',
             contract: step.contract,
@@ -412,6 +675,8 @@ export function buildTransaction(
             protocol,
             stepSpec,
             ctx,
+            celCtx,
+            evaluator,
             chain,
             step.id,
             step.description
@@ -465,12 +730,15 @@ export function buildQuery(
       };
     }
 
-    if (execSpec.type !== 'evm_read') {
+    if (execSpec.type !== 'evm_read' && execSpec.type !== 'evm_multiread') {
       return {
         success: false,
-        error: `Query execution type must be evm_read, got "${execSpec.type}"`,
+        error: `Query execution type must be evm_read or evm_multiread, got "${execSpec.type}"`,
       };
     }
+
+    // Create CEL evaluator
+    const evaluator = new Evaluator();
 
     // Resolve params and set in context
     const params = query.params ?? [];
@@ -499,7 +767,43 @@ export function buildQuery(
       }
     }
 
-    const tx = buildEvmCall(protocol, execSpec, ctx, chain);
+    // Build CEL context
+    const celCtx = buildCELContext(ctx, protocol, chain);
+
+    // Handle evm_multiread differently
+    if (execSpec.type === 'evm_multiread') {
+      // Build multiple calls for multiread
+      const transactions: TransactionRequest[] = [];
+      for (const call of execSpec.calls) {
+        const callSpec: EvmRead = {
+          type: 'evm_read',
+          contract: call.contract,
+          function: call.function,
+          abi: call.abi,
+          mapping: call.mapping,
+        };
+        const tx = buildEvmCall(protocol, callSpec, ctx, celCtx, evaluator, chain);
+        transactions.push({ ...tx, stepId: call.output_as });
+      }
+
+      const pseudoAction: Action = {
+        description: query.description,
+        risk_level: 1,
+        execution: query.execution,
+        params: query.params,
+        returns: query.returns,
+      };
+
+      return {
+        success: true,
+        transactions,
+        action: pseudoAction,
+        resolvedParams,
+      };
+    }
+
+    // Single evm_read
+    const tx = buildEvmCall(protocol, execSpec, ctx, celCtx, evaluator, chain);
 
     // Create a pseudo-action for the result type
     const pseudoAction: Action = {

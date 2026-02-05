@@ -274,11 +274,11 @@ describe('CEL Evaluator', () => {
   describe('AIS token conversion functions', () => {
     it('to_atomic() converts human amount with decimals number', () => {
       // 1.5 tokens with 18 decimals
-      expect(evaluateCEL('to_atomic(1.5, 18)')).toBe('1500000000000000000');
+      expect(evaluateCEL('to_atomic(1.5, 18)')).toBe(1500000000000000000);
       // 100 USDC with 6 decimals
-      expect(evaluateCEL('to_atomic(100, 6)')).toBe('100000000');
+      expect(evaluateCEL('to_atomic(100, 6)')).toBe(100000000);
       // 0.001 ETH
-      expect(evaluateCEL('to_atomic(0.001, 18)')).toBe('1000000000000000');
+      expect(evaluateCEL('to_atomic(0.001, 18)')).toBe(1000000000000000);
     });
 
     it('to_atomic() converts human amount with asset object', () => {
@@ -286,11 +286,16 @@ describe('CEL Evaluator', () => {
         token: { decimals: 18, symbol: 'WETH' },
         amount: 2.5,
       };
-      expect(evaluateCEL('to_atomic(amount, token)', ctx)).toBe('2500000000000000000');
+      expect(evaluateCEL('to_atomic(amount, token)', ctx)).toBe(2500000000000000000);
     });
 
     it('to_atomic() handles string amounts', () => {
-      expect(evaluateCEL('to_atomic("1.0", 18)')).toBe('1000000000000000000');
+      expect(evaluateCEL('to_atomic("1.0", 18)')).toBe(1000000000000000000);
+    });
+
+    it('to_atomic() result can be used in calculations', () => {
+      // This is the key use case - CEL calculations with atomic amounts
+      expect(evaluateCEL('floor(to_atomic(1.5, 18) * 0.99)')).toBe(1485000000000000000);
     });
 
     it('to_human() converts atomic amount to human', () => {

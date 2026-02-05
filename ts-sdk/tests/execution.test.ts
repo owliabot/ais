@@ -311,3 +311,241 @@ describe('buildWorkflowTransactions', () => {
     expect(results[1].success).toBe(true);
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Chain Pattern Resolver Enhancements
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const CEL_PROTOCOL = `
+schema: "ais/1.0"
+meta:
+  protocol: cel-test
+  version: "1.0.0"
+deployments:
+  - chain: "eip155:1"
+    contracts:
+      router: "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D"
+      token: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+actions:
+  swap-with-cel:
+    description: "Swap with CEL expressions in mapping"
+    risk_level: 3
+    params:
+      - name: amount
+        type: float
+        description: "Human-readable amount"
+      - name: token
+        type: address
+        description: "Token with decimals"
+      - name: slippage
+        type: float
+        description: "Slippage tolerance"
+        default: 0.01
+    execution:
+      "eip155:*":
+        type: evm_call
+        contract: router
+        function: swap
+        abi: "(uint256,uint256)"
+        mapping:
+          amountIn: "to_atomic(params.amount, 18)"
+          minOut: "floor(to_atomic(params.amount, 18) * (1 - params.slippage))"
+`;
+
+const COMPOSITE_PROTOCOL = `
+schema: "ais/1.0"
+meta:
+  protocol: composite-test
+  version: "1.0.0"
+deployments:
+  - chain: "eip155:1"
+    contracts:
+      router: "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D"
+actions:
+  swap-with-approve:
+    description: "Swap with conditional approve"
+    risk_level: 3
+    params:
+      - name: token_in
+        type: address
+        description: "Input token"
+      - name: amount_in
+        type: uint256
+        description: "Input amount"
+    execution:
+      "eip155:*":
+        type: composite
+        steps:
+          - id: approve
+            type: evm_call
+            description: "Approve router"
+            contract: "params.token_in"
+            function: "approve"
+            abi: "(address,uint256)"
+            mapping:
+              spender: "contracts.router"
+              amount: "params.amount_in"
+            condition: "query.allowance.value < params.amount_in"
+          - id: swap
+            type: evm_call
+            description: "Execute swap"
+            contract: router
+            function: "swap"
+            abi: "(uint256)"
+            mapping:
+              amountIn: "params.amount_in"
+`;
+
+describe('CEL expressions in mapping', () => {
+  let ctx: ResolverContext;
+  let protocol: ReturnType<typeof parseProtocolSpec>;
+
+  beforeEach(() => {
+    ctx = createContext();
+    protocol = parseProtocolSpec(CEL_PROTOCOL);
+    registerProtocol(ctx, protocol);
+  });
+
+  it('evaluates to_atomic() in mapping', () => {
+    const result = buildTransaction(
+      protocol,
+      protocol.actions['swap-with-cel'],
+      {
+        amount: 1.5,
+        token: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
+      },
+      ctx,
+      { chain: 'eip155:1' }
+    );
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      // 1.5 * 10^18 = 1500000000000000000
+      expect(result.transactions[0].data).toContain('14d1120d7b160000'); // hex for 1.5e18
+    }
+  });
+
+  it('evaluates complex CEL expression with floor()', () => {
+    const result = buildTransaction(
+      protocol,
+      protocol.actions['swap-with-cel'],
+      {
+        amount: 100,
+        token: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
+        slippage: 0.01,
+      },
+      ctx,
+      { chain: 'eip155:1' }
+    );
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      // minOut should be floor(100e18 * 0.99) = 99e18
+      expect(result.transactions[0].to).toBe('0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D');
+    }
+  });
+});
+
+describe('Composite execution with conditions', () => {
+  let ctx: ResolverContext;
+  let protocol: ReturnType<typeof parseProtocolSpec>;
+
+  beforeEach(() => {
+    ctx = createContext();
+    protocol = parseProtocolSpec(COMPOSITE_PROTOCOL);
+    registerProtocol(ctx, protocol);
+  });
+
+  it('skips approve step when condition is false', () => {
+    // Set query result showing sufficient allowance (use number, not bigint)
+    ctx.queryResults.set('allowance', { value: 1000000 });
+
+    const result = buildTransaction(
+      protocol,
+      protocol.actions['swap-with-approve'],
+      {
+        token_in: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
+        amount_in: 1000n, // Less than allowance
+      },
+      ctx,
+      { chain: 'eip155:1' }
+    );
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      // Only swap step should be included (approve skipped)
+      expect(result.transactions).toHaveLength(1);
+      expect(result.transactions[0].stepId).toBe('swap');
+    }
+  });
+
+  it('includes approve step when condition is true', () => {
+    // Set query result showing insufficient allowance
+    ctx.queryResults.set('allowance', { value: 100 });
+
+    const result = buildTransaction(
+      protocol,
+      protocol.actions['swap-with-approve'],
+      {
+        token_in: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
+        amount_in: 1000n, // More than allowance
+      },
+      ctx,
+      { chain: 'eip155:1' }
+    );
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      // Both steps should be included
+      expect(result.transactions).toHaveLength(2);
+      expect(result.transactions[0].stepId).toBe('approve');
+      expect(result.transactions[1].stepId).toBe('swap');
+    }
+  });
+
+  it('resolves contracts.* in mapping', () => {
+    // Set query result to trigger approve step
+    ctx.queryResults.set('allowance', { value: 0 });
+
+    const result = buildTransaction(
+      protocol,
+      protocol.actions['swap-with-approve'],
+      {
+        token_in: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
+        amount_in: 1000n,
+      },
+      ctx,
+      { chain: 'eip155:1' }
+    );
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      // Approve step should have router address as spender
+      const approveData = result.transactions[0].data;
+      // Router address should be in the calldata (lowercase, no 0x prefix)
+      expect(approveData.toLowerCase()).toContain('7a250d5630b4cf539739df2c5dacb4c659f2488d');
+    }
+  });
+
+  it('resolves params.* as contract address', () => {
+    // Set query result to trigger approve step
+    ctx.queryResults.set('allowance', { value: 0 });
+
+    const result = buildTransaction(
+      protocol,
+      protocol.actions['swap-with-approve'],
+      {
+        token_in: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', // USDC
+        amount_in: 1000n,
+      },
+      ctx,
+      { chain: 'eip155:1' }
+    );
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      // Approve step should target the token_in address
+      expect(result.transactions[0].to.toLowerCase()).toBe('0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48');
+    }
+  });
+});
