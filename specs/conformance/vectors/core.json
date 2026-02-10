@@ -1,0 +1,96 @@
+{
+  "schema": "ais-conformance/0.0.2",
+  "cases": [
+    {
+      "id": "jcs-basic",
+      "kind": "jcs_canonicalize",
+      "input": {
+        "value": {
+          "b": 1,
+          "a": 2,
+          "arr": [
+            { "y": 2, "x": 1 },
+            3,
+            "z"
+          ],
+          "nested": { "k2": false, "k1": null }
+        }
+      },
+      "expect": {
+        "canonical": "{\"a\":2,\"arr\":[{\"x\":1,\"y\":2},3,\"z\"],\"b\":1,\"nested\":{\"k1\":null,\"k2\":false}}",
+        "specHashKeccak256": "0xee4e15c8af1c68683b8bf174b34f06c29a356dab7d1ac5094f5aeba48ed9a1fe"
+      }
+    },
+    {
+      "id": "cel-to-atomic-usdc",
+      "kind": "cel_eval",
+      "input": { "expression": "to_atomic(\"1.23\", 6)" },
+      "expect": { "value_bigint": "1230000" }
+    },
+    {
+      "id": "evm-abi-erc20-transfer",
+      "kind": "evm_json_abi_encode",
+      "input": {
+        "abi": {
+          "type": "function",
+          "name": "transfer",
+          "inputs": [
+            { "name": "to", "type": "address" },
+            { "name": "amount", "type": "uint256" }
+          ],
+          "outputs": []
+        },
+        "args": {
+          "to": "0x000000000000000000000000000000000000dEaD",
+          "amount": "1"
+        }
+      },
+      "expect": {
+        "data": "0xa9059cbb000000000000000000000000000000000000000000000000000000000000dead0000000000000000000000000000000000000000000000000000000000000001"
+      }
+    },
+    {
+      "id": "select-execution-spec-order",
+      "kind": "select_execution_spec",
+      "input": {
+        "chain": "eip155:1",
+        "execution": {
+          "*": {
+            "type": "evm_call",
+            "to": { "lit": "0x0000000000000000000000000000000000000000" },
+            "abi": { "type": "function", "name": "x", "inputs": [], "outputs": [] },
+            "args": {}
+          },
+          "eip155:*": {
+            "type": "evm_read",
+            "to": { "lit": "0x0000000000000000000000000000000000000000" },
+            "abi": { "type": "function", "name": "y", "inputs": [], "outputs": [] },
+            "args": {}
+          },
+          "eip155:1": {
+            "type": "evm_multicall",
+            "to": { "lit": "0x0000000000000000000000000000000000000000" },
+            "calls": [
+              {
+                "abi": { "type": "function", "name": "z", "inputs": [], "outputs": [] },
+                "args": {}
+              }
+            ]
+          }
+        }
+      },
+      "expect": { "type": "evm_multicall" }
+    },
+    {
+      "id": "workflow-plan-composite-golden",
+      "kind": "workflow_plan",
+      "input": {
+        "protocols_yaml": [
+          "schema: \"ais/0.0.2\"\nmeta: { protocol: demo, version: \"0.0.2\" }\ndeployments:\n  - chain: \"eip155:1\"\n    contracts: { router: \"0x1111111111111111111111111111111111111111\" }\nactions:\n  do:\n    description: \"composite write\"\n    risk_level: 1\n    params: [{ name: x, type: uint256, description: \"x\" }]\n    execution:\n      \"eip155:*\":\n        type: composite\n        steps:\n          - id: approve\n            description: \"approve\"\n            execution:\n              type: evm_call\n              to: { ref: \"contracts.router\" }\n              abi: { type: \"function\", name: \"approve\", inputs: [{ name: \"x\", type: \"uint256\" }], outputs: [] }\n              args: { x: { ref: \"params.x\" } }\n          - id: swap\n            description: \"swap\"\n            execution:\n              type: evm_call\n              to: { ref: \"contracts.router\" }\n              abi: { type: \"function\", name: \"swap\", inputs: [{ name: \"x\", type: \"uint256\" }], outputs: [] }\n              args: { x: { ref: \"params.x\" } }\n"
+        ],
+        "workflow_yaml": "schema: \"ais-flow/0.0.2\"\nmeta: { name: wf, version: \"0.0.2\" }\ndefault_chain: \"eip155:1\"\ninputs: { amount: { type: uint256 } }\nnodes:\n  - id: n1\n    type: action_ref\n    skill: \"demo@0.0.2\"\n    action: do\n    args:\n      x: { ref: \"inputs.amount\" }\n",
+        "golden_file": "plan-composite.json"
+      }
+    }
+  ]
+}

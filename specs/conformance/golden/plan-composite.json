@@ -1,0 +1,73 @@
+{
+  "schema": "ais-plan/0.0.2",
+  "meta": {
+    "created_at": "<ignored>",
+    "name": "wf"
+  },
+  "nodes": [
+    {
+      "id": "n1__approve",
+      "chain": "eip155:1",
+      "kind": "execution",
+      "description": "approve",
+      "bindings": {
+        "params": {
+          "x": { "ref": "inputs.amount" }
+        }
+      },
+      "execution": {
+        "type": "evm_call",
+        "to": { "ref": "contracts.router" },
+        "abi": {
+          "type": "function",
+          "name": "approve",
+          "inputs": [{ "name": "x", "type": "uint256" }],
+          "outputs": []
+        },
+        "args": { "x": { "ref": "params.x" } }
+      },
+      "writes": [{ "path": "nodes.n1.outputs.steps.approve", "mode": "set" }],
+      "source": {
+        "workflow": { "name": "wf", "version": "0.0.2" },
+        "node_id": "n1",
+        "skill": "demo@0.0.2",
+        "action": "do",
+        "step_id": "approve"
+      }
+    },
+    {
+      "id": "n1",
+      "chain": "eip155:1",
+      "kind": "execution",
+      "description": "swap",
+      "deps": ["n1__approve"],
+      "bindings": {
+        "params": {
+          "x": { "ref": "inputs.amount" }
+        }
+      },
+      "execution": {
+        "type": "evm_call",
+        "to": { "ref": "contracts.router" },
+        "abi": {
+          "type": "function",
+          "name": "swap",
+          "inputs": [{ "name": "x", "type": "uint256" }],
+          "outputs": []
+        },
+        "args": { "x": { "ref": "params.x" } }
+      },
+      "writes": [
+        { "path": "nodes.n1.outputs", "mode": "merge" },
+        { "path": "nodes.n1.outputs.steps.swap", "mode": "set" }
+      ],
+      "source": {
+        "workflow": { "name": "wf", "version": "0.0.2" },
+        "node_id": "n1",
+        "skill": "demo@0.0.2",
+        "action": "do",
+        "step_id": "swap"
+      }
+    }
+  ]
+}

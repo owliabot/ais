@@ -4,7 +4,9 @@
 import type { Workflow, WorkflowNode } from '../schema/index.js';
 import type { ResolverContext } from '../resolver/index.js';
 import { resolveAction, resolveQuery, parseSkillRef } from '../resolver/index.js';
-import { extractExpressions } from '../resolver/expression.js';
+import { buildWorkflowDag, WorkflowDagError } from '../workflow/dag.js';
+import type { ValidatorRegistry } from './plugins.js';
+import { defaultValidatorRegistry } from './plugins.js';
 
 export interface WorkflowIssue {
   nodeId: string;
@@ -28,22 +30,42 @@ export interface WorkflowValidationResult {
  */
 export function validateWorkflow(
   workflow: Workflow,
-  ctx: ResolverContext
+  ctx: ResolverContext,
+  options: { registry?: ValidatorRegistry } = {}
 ): WorkflowValidationResult {
   const issues: WorkflowIssue[] = [];
+  const registry = options.registry ?? defaultValidatorRegistry;
   const declaredInputs = new Set(
     workflow.inputs ? Object.keys(workflow.inputs) : []
   );
-  const previousNodes = new Set<string>();
+  const nodeIds = workflow.nodes.map((n) => n.id);
+  const nodeIdSet = new Set(nodeIds);
 
   for (const node of workflow.nodes) {
-    // Check skill reference exists
-    const { protocol } = parseSkillRef(node.skill);
-    if (!ctx.protocols.has(protocol)) {
+    if (!node.chain && !workflow.default_chain) {
+      issues.push({
+        nodeId: node.id,
+        field: 'chain',
+        message: 'Missing chain: set nodes[].chain or workflow.default_chain',
+      });
+    }
+
+    // Check skill reference exists (+ version matches the loaded workspace)
+    const { protocol, version } = parseSkillRef(node.skill);
+    const protocolSpec = ctx.protocols.get(protocol);
+    const hasVersionMismatch = Boolean(version && protocolSpec && protocolSpec.meta.version !== version);
+    if (!protocolSpec) {
       issues.push({
         nodeId: node.id,
         field: 'skill',
         message: `Protocol "${protocol}" not found`,
+        reference: node.skill,
+      });
+    } else if (hasVersionMismatch) {
+      issues.push({
+        nodeId: node.id,
+        field: 'skill',
+        message: `Protocol version mismatch: requested ${protocol}@${version}, loaded ${protocol}@${protocolSpec.meta.version}`,
         reference: node.skill,
       });
     } else {
@@ -78,53 +100,112 @@ export function validateWorkflow(
     // Check expressions in args
     if (node.args) {
       for (const [key, value] of Object.entries(node.args)) {
-        if (typeof value === 'string') {
-          const expressions = extractExpressions(value);
-          for (const expr of expressions) {
-            const issue = validateExpression(
-              expr,
-              node.id,
-              `args.${key}`,
-              declaredInputs,
-              previousNodes
-            );
-            if (issue) issues.push(issue);
-          }
-        }
+        validateValueRefLike(value, node.id, `args.${key}`, declaredInputs, nodeIdSet, issues);
       }
     }
 
     // Check condition expression
     if (node.condition) {
-      const expressions = extractExpressions(node.condition);
-      for (const expr of expressions) {
-        const issue = validateExpression(
-          expr,
-          node.id,
-          'condition',
-          declaredInputs,
-          previousNodes
-        );
-        if (issue) issues.push(issue);
+      validateValueRefLike(node.condition, node.id, 'condition', declaredInputs, nodeIdSet, issues);
+    }
+
+    // Check until expression
+    if (node.until) {
+      // until is evaluated *after* node execution, so self-reference to `nodes.<id>.outputs.*` is valid.
+      validateValueRefLike(node.until, node.id, 'until', declaredInputs, nodeIdSet, issues, { allow_self_node_ref: true });
+    }
+
+    // Check calculated_overrides
+    if (node.calculated_overrides) {
+      for (const [k, ov] of Object.entries(node.calculated_overrides)) {
+        validateValueRefLike(ov.expr, node.id, `calculated_overrides.${k}.expr`, declaredInputs, nodeIdSet, issues);
       }
     }
 
-    // Check requires_queries references
-    if (node.requires_queries) {
-      for (const reqNode of node.requires_queries) {
-        if (!previousNodes.has(reqNode)) {
+    // Check explicit deps references (existence only; order is defined by DAG)
+    if (node.deps) {
+      for (const d of node.deps) {
+        if (!nodeIdSet.has(d)) {
           issues.push({
             nodeId: node.id,
-            field: 'requires_queries',
-            message: `Required node "${reqNode}" not defined before this node`,
-            reference: reqNode,
+            field: 'deps',
+            message: `Dependency "${d}" does not exist in workflow`,
+            reference: d,
+          });
+        } else if (d === node.id) {
+          issues.push({
+            nodeId: node.id,
+            field: 'deps',
+            message: 'Node cannot depend on itself',
+            reference: d,
           });
         }
       }
     }
+  }
 
-    // Add this node to available nodes for subsequent nodes
-    previousNodes.add(node.id);
+  // Check workflow outputs references
+  if (workflow.outputs) {
+    for (const [k, v] of Object.entries(workflow.outputs)) {
+      validateValueRefLike(v, '(workflow)', `outputs.${k}`, declaredInputs, nodeIdSet, issues);
+    }
+  }
+
+  // DAG validation (cycles / missing deps implied by refs / duplicates)
+  try {
+    buildWorkflowDag(workflow, { include_implicit_deps: true });
+  } catch (err) {
+    if (err instanceof WorkflowDagError) {
+      if (err.kind === 'cycle') {
+        for (const id of err.cycle ?? []) {
+          issues.push({
+            nodeId: id,
+            field: 'deps',
+            message: `Dependency cycle detected: ${(err.cycle ?? []).join(' -> ')}`,
+          });
+        }
+      } else if (err.kind === 'duplicate_node_id') {
+        issues.push({
+          nodeId: err.nodeId ?? '(workflow)',
+          field: 'id',
+          message: err.message,
+          reference: err.nodeId,
+        });
+      } else if (err.kind === 'unknown_dep') {
+        issues.push({
+          nodeId: err.nodeId ?? '(workflow)',
+          field: 'deps',
+          message: err.message,
+          reference: err.depId,
+        });
+      } else if (err.kind === 'self_dep') {
+        issues.push({
+          nodeId: err.nodeId ?? '(workflow)',
+          field: 'deps',
+          message: err.message,
+          reference: err.nodeId,
+        });
+      }
+    } else {
+      issues.push({
+        nodeId: '(workflow)',
+        field: 'deps',
+        message: (err as Error)?.message ?? 'Unknown workflow DAG error',
+      });
+    }
+  }
+
+  // Plugin validators (normative errors)
+  for (const v of registry.listWorkflowValidators()) {
+    try {
+      issues.push(...(v(workflow, ctx) ?? []));
+    } catch (e) {
+      issues.push({
+        nodeId: '(workflow)',
+        field: 'plugin',
+        message: `Validator plugin threw: ${(e as Error)?.message ?? String(e)}`,
+      });
+    }
   }
 
   return {
@@ -133,47 +214,117 @@ export function validateWorkflow(
   };
 }
 
-function validateExpression(
-  expr: string,
+function validateValueRefLike(
+  value: unknown,
   nodeId: string,
   field: string,
   declaredInputs: Set<string>,
-  previousNodes: Set<string>
-): WorkflowIssue | null {
-  const parts = expr.split('.');
-  const namespace = parts[0];
+  nodeIdSet: Set<string>,
+  issues: WorkflowIssue[],
+  options: { allow_self_node_ref?: boolean } = {}
+): void {
+  const extracted = collectRefPathsAndCel(value);
+  const allowSelf = options.allow_self_node_ref === true;
 
-  switch (namespace) {
-    case 'inputs': {
+  for (const path of extracted.refPaths) {
+    const parts = path.split('.');
+    if (parts[0] === 'inputs') {
       const inputName = parts[1];
       if (inputName && !declaredInputs.has(inputName)) {
-        return {
+        issues.push({
           nodeId,
           field,
           message: `Input "${inputName}" not declared in workflow inputs`,
-          reference: expr,
-        };
+          reference: path,
+        });
       }
-      break;
-    }
-
-    case 'nodes': {
+    } else if (parts[0] === 'nodes') {
       const refNodeId = parts[1];
-      if (refNodeId && !previousNodes.has(refNodeId)) {
-        return {
+      if (refNodeId && !nodeIdSet.has(refNodeId)) {
+        issues.push({
           nodeId,
           field,
-          message: `Node "${refNodeId}" referenced before definition or does not exist`,
-          reference: expr,
-        };
+          message: `Node "${refNodeId}" referenced but does not exist in workflow`,
+          reference: path,
+        });
       }
-      break;
+      if (!allowSelf && refNodeId && refNodeId === nodeId) {
+        issues.push({
+          nodeId,
+          field,
+          message: 'Node cannot reference its own outputs',
+          reference: path,
+        });
+      }
     }
-
-    // ctx references are validated at runtime
   }
 
-  return null;
+  for (const cel of extracted.celExprs) {
+    for (const inputName of extractIdsFromCel(cel, 'inputs')) {
+      if (!declaredInputs.has(inputName)) {
+        issues.push({
+          nodeId,
+          field,
+          message: `Input "${inputName}" not declared in workflow inputs`,
+          reference: `inputs.${inputName}`,
+        });
+      }
+    }
+    for (const refNodeId of extractIdsFromCel(cel, 'nodes')) {
+      if (!nodeIdSet.has(refNodeId)) {
+        issues.push({
+          nodeId,
+          field,
+          message: `Node "${refNodeId}" referenced but does not exist in workflow`,
+          reference: `nodes.${refNodeId}`,
+        });
+      }
+      if (!allowSelf && refNodeId === nodeId) {
+        issues.push({
+          nodeId,
+          field,
+          message: 'Node cannot reference its own outputs',
+          reference: `nodes.${refNodeId}`,
+        });
+      }
+    }
+  }
+}
+
+function collectRefPathsAndCel(value: unknown): { refPaths: string[]; celExprs: string[] } {
+  const refPaths: string[] = [];
+  const celExprs: string[] = [];
+
+  const visit = (v: unknown) => {
+    if (!v || typeof v !== 'object') return;
+    const rec = v as Record<string, unknown>;
+
+    if (typeof rec.ref === 'string') refPaths.push(rec.ref);
+    if (typeof rec.cel === 'string') celExprs.push(rec.cel);
+
+    if (rec.object && typeof rec.object === 'object' && rec.object !== null) {
+      for (const child of Object.values(rec.object as Record<string, unknown>)) visit(child);
+    }
+    if (Array.isArray(rec.array)) {
+      for (const child of rec.array) visit(child);
+    }
+  };
+
+  visit(value);
+  return { refPaths, celExprs };
+}
+
+function extractIdsFromCel(cel: string, namespace: 'nodes' | 'inputs'): string[] {
+  const out: string[] = [];
+  const re =
+    namespace === 'nodes'
+      ? /\bnodes\.([A-Za-z_][A-Za-z0-9_-]*)\b/g
+      : /\binputs\.([A-Za-z_][A-Za-z0-9_-]*)\b/g;
+
+  for (let m = re.exec(cel); m; m = re.exec(cel)) {
+    if (m[1]) out.push(m[1]);
+  }
+  return out;
 }
 
 /**
@@ -207,7 +358,11 @@ export function getWorkflowProtocols(workflow: Workflow): string[] {
  * Get workflow nodes in dependency order
  */
 export function getExecutionOrder(workflow: Workflow): WorkflowNode[] {
-  // For now, assume nodes are already in order
-  // TODO: Implement topological sort based on requires_queries
-  return workflow.nodes;
+  const dag = buildWorkflowDag(workflow, { include_implicit_deps: true });
+  const nodesById = new Map(workflow.nodes.map((n) => [n.id, n] as const));
+  return dag.order.map((id) => {
+    const node = nodesById.get(id);
+    if (!node) throw new Error(`Internal error: node "${id}" not found`);
+    return node;
+  });
 }

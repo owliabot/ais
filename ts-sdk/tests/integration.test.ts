@@ -13,7 +13,7 @@ import {
   resolveAction,
   resolveQuery,
   resolveExpressionString,
-  setVariable,
+  setRef,
   getWorkflowProtocols,
   getWorkflowDependencies,
   expandPack,
@@ -27,10 +27,10 @@ import {
 const TEST_DIR = '/tmp/ais-sdk-integration-test';
 
 const UNISWAP_PROTOCOL = `
-schema: "ais/1.0"
+schema: "ais/0.0.2"
 meta:
   protocol: uniswap-v3
-  version: "1.0.0"
+  version: "0.0.2"
   name: Uniswap V3
   description: DEX protocol for token swaps
 deployments:
@@ -62,13 +62,20 @@ queries:
     execution:
       "eip155:*":
         type: evm_read
-        contract: factory
-        function: getPool
-        abi: "(address,address,uint24)"
-        mapping:
-          tokenA: "params.tokenA"
-          tokenB: "params.tokenB"
-          fee: "params.fee"
+        to: { ref: "contracts.factory" }
+        abi:
+          type: "function"
+          name: "getPool"
+          inputs:
+            - { name: "tokenA", type: "address" }
+            - { name: "tokenB", type: "address" }
+            - { name: "fee", type: "uint24" }
+          outputs:
+            - { name: "pool", type: "address" }
+        args:
+          tokenA: { ref: "params.tokenA" }
+          tokenB: { ref: "params.tokenB" }
+          fee: { ref: "params.fee" }
   quote-exact-in:
     description: "Get quote for exact input swap"
     params:
@@ -87,13 +94,20 @@ queries:
     execution:
       "eip155:*":
         type: evm_read
-        contract: quoter
-        function: quoteExactInputSingle
-        abi: "(address,address,uint256)"
-        mapping:
-          tokenIn: "params.tokenIn"
-          tokenOut: "params.tokenOut"
-          amountIn: "params.amountIn"
+        to: { ref: "contracts.quoter" }
+        abi:
+          type: "function"
+          name: "quoteExactInputSingle"
+          inputs:
+            - { name: "tokenIn", type: "address" }
+            - { name: "tokenOut", type: "address" }
+            - { name: "amountIn", type: "uint256" }
+          outputs:
+            - { name: "amountOut", type: "uint256" }
+        args:
+          tokenIn: { ref: "params.tokenIn" }
+          tokenOut: { ref: "params.tokenOut" }
+          amountIn: { ref: "params.amountIn" }
 actions:
   swap-exact-in:
     description: "Swap exact input for maximum output"
@@ -119,22 +133,30 @@ actions:
     execution:
       "eip155:*":
         type: evm_call
-        contract: router
-        function: exactInputSingle
-        abi: "(address,address,uint24,uint256,uint256)"
-        mapping:
-          tokenIn: "params.tokenIn"
-          tokenOut: "params.tokenOut"
-          fee: "params.fee"
-          amountIn: "params.amountIn"
-          amountOutMin: "params.amountOutMin"
+        to: { ref: "contracts.router" }
+        abi:
+          type: "function"
+          name: "exactInputSingle"
+          inputs:
+            - { name: "tokenIn", type: "address" }
+            - { name: "tokenOut", type: "address" }
+            - { name: "fee", type: "uint24" }
+            - { name: "amountIn", type: "uint256" }
+            - { name: "amountOutMin", type: "uint256" }
+          outputs: []
+        args:
+          tokenIn: { ref: "params.tokenIn" }
+          tokenOut: { ref: "params.tokenOut" }
+          fee: { ref: "params.fee" }
+          amountIn: { ref: "params.amountIn" }
+          amountOutMin: { ref: "params.amountOutMin" }
 `;
 
 const ERC20_PROTOCOL = `
-schema: "ais/1.0"
+schema: "ais/0.0.2"
 meta:
   protocol: erc20
-  version: "1.0.0"
+  version: "0.0.2"
   name: ERC20 Token Standard
 deployments:
   - chain: "eip155:1"
@@ -145,6 +167,9 @@ queries:
   allowance:
     description: "Check token allowance"
     params:
+      - name: token
+        type: address
+        description: "Token address"
       - name: owner
         type: address
         description: "Token owner"
@@ -157,15 +182,24 @@ queries:
     execution:
       "eip155:*":
         type: evm_read
-        contract: token
-        function: allowance
-        abi: "(address,address)"
-        mapping:
-          owner: "params.owner"
-          spender: "params.spender"
+        to: { ref: "params.token" }
+        abi:
+          type: "function"
+          name: "allowance"
+          inputs:
+            - { name: "owner", type: "address" }
+            - { name: "spender", type: "address" }
+          outputs:
+            - { name: "amount", type: "uint256" }
+        args:
+          owner: { ref: "params.owner" }
+          spender: { ref: "params.spender" }
   balance:
     description: "Check token balance"
     params:
+      - name: token
+        type: address
+        description: "Token address"
       - name: account
         type: address
         description: "Account to check"
@@ -175,16 +209,24 @@ queries:
     execution:
       "eip155:*":
         type: evm_read
-        contract: token
-        function: balanceOf
-        abi: "(address)"
-        mapping:
-          account: "params.account"
+        to: { ref: "params.token" }
+        abi:
+          type: "function"
+          name: "balanceOf"
+          inputs:
+            - { name: "account", type: "address" }
+          outputs:
+            - { name: "balance", type: "uint256" }
+        args:
+          account: { ref: "params.account" }
 actions:
   approve:
     description: "Approve spender"
     risk_level: 2
     params:
+      - name: token
+        type: address
+        description: "Token address"
       - name: spender
         type: address
         description: "Spender address"
@@ -194,16 +236,24 @@ actions:
     execution:
       "eip155:*":
         type: evm_call
-        contract: token
-        function: approve
-        abi: "(address,uint256)"
-        mapping:
-          spender: "params.spender"
-          amount: "params.amount"
+        to: { ref: "params.token" }
+        abi:
+          type: "function"
+          name: "approve"
+          inputs:
+            - { name: "spender", type: "address" }
+            - { name: "amount", type: "uint256" }
+          outputs: []
+        args:
+          spender: { ref: "params.spender" }
+          amount: { ref: "params.amount" }
   transfer:
     description: "Transfer tokens"
     risk_level: 2
     params:
+      - name: token
+        type: address
+        description: "Token address"
       - name: to
         type: address
         description: "Recipient"
@@ -213,24 +263,29 @@ actions:
     execution:
       "eip155:*":
         type: evm_call
-        contract: token
-        function: transfer
-        abi: "(address,uint256)"
-        mapping:
-          to: "params.to"
-          amount: "params.amount"
+        to: { ref: "params.token" }
+        abi:
+          type: "function"
+          name: "transfer"
+          inputs:
+            - { name: "to", type: "address" }
+            - { name: "amount", type: "uint256" }
+          outputs: []
+        args:
+          to: { ref: "params.to" }
+          amount: { ref: "params.amount" }
 `;
 
 const TEST_PACK = `
-schema: "ais-pack/1.0"
+schema: "ais-pack/0.0.2"
 name: safe-defi-pack
-version: "1.0.0"
+version: "0.0.2"
 description: Safe DeFi operations with conservative constraints
 includes:
   - protocol: uniswap-v3
-    version: "1.0.0"
+    version: "0.0.2"
   - protocol: erc20
-    version: "1.0.0"
+    version: "0.0.2"
 policy:
   risk_threshold: 3
   approval_required:
@@ -252,11 +307,12 @@ token_policy:
 `;
 
 const TEST_WORKFLOW = `
-schema: "ais-flow/1.0"
+schema: "ais-flow/0.0.2"
 meta:
   name: swap-to-token
-  version: "1.0.0"
+  version: "0.0.2"
   description: Swap ETH to target token
+default_chain: "eip155:1"
 inputs:
   target_token:
     type: address
@@ -270,42 +326,45 @@ inputs:
 nodes:
   - id: check_allowance
     type: query_ref
-    skill: "erc20@1.0.0"
+    skill: "erc20@0.0.2"
     query: allowance
     args:
-      owner: "\${ctx.sender}"
-      spender: "\${ctx.router}"
+      token: { ref: "inputs.target_token" }
+      owner: { ref: "ctx.sender" }
+      spender: { ref: "ctx.router" }
   - id: approve_if_needed
     type: action_ref
-    skill: "erc20@1.0.0"
+    skill: "erc20@0.0.2"
     action: approve
     args:
-      spender: "\${ctx.router}"
-      amount: "\${inputs.amount_in}"
-    condition: "nodes.check_allowance.outputs.amount < inputs.amount_in"
+      token: { ref: "inputs.target_token" }
+      spender: { ref: "ctx.router" }
+      amount: { ref: "inputs.amount_in" }
+    condition: { cel: "nodes.check_allowance.outputs.amount < inputs.amount_in" }
   - id: get_quote
     type: query_ref
-    skill: "uniswap-v3@1.0.0"
+    skill: "uniswap-v3@0.0.2"
     query: quote-exact-in
     args:
-      tokenIn: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
-      tokenOut: "\${inputs.target_token}"
-      amountIn: "\${inputs.amount_in}"
-    requires_queries:
+      tokenIn: { lit: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2" }
+      tokenOut: { ref: "inputs.target_token" }
+      amountIn: { ref: "inputs.amount_in" }
+    deps:
       - approve_if_needed
   - id: swap
     type: action_ref
-    skill: "uniswap-v3@1.0.0"
+    skill: "uniswap-v3@0.0.2"
     action: swap-exact-in
     args:
-      tokenIn: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
-      tokenOut: "\${inputs.target_token}"
-      amountIn: "\${inputs.amount_in}"
-      amountOutMin: "\${nodes.get_quote.outputs.amountOut}"
-    requires_queries:
+      tokenIn: { lit: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2" }
+      tokenOut: { ref: "inputs.target_token" }
+      fee: { lit: 3000 }
+      amountIn: { ref: "inputs.amount_in" }
+      amountOutMin: { ref: "nodes.get_quote.outputs.amountOut" }
+    deps:
       - get_quote
 outputs:
-  amount_out: "nodes.swap.outputs.amountOut"
+  amount_out: { ref: "nodes.swap.outputs.amountOut" }
 `;
 
 beforeAll(async () => {
@@ -338,7 +397,7 @@ describe('Integration: Load Protocols', () => {
   it('resolves protocol metadata', () => {
     const uniswap = ctx.protocols.get('uniswap-v3')!;
     expect(uniswap.meta.name).toBe('Uniswap V3');
-    expect(uniswap.meta.version).toBe('1.0.0');
+    expect(uniswap.meta.version).toBe('0.0.2');
   });
 
   it('resolves actions', () => {
@@ -386,7 +445,7 @@ describe('Integration: Pack Operations', () => {
 
   it('loads pack metadata', () => {
     expect(pack.name).toBe('safe-defi-pack');
-    expect(pack.version).toBe('1.0.0');
+    expect(pack.version).toBe('0.0.2');
   });
 
   it('expands pack skill references', () => {
@@ -451,10 +510,10 @@ describe('Integration: Workflow Operations', () => {
 
   it('extracts workflow dependencies', () => {
     const deps = getWorkflowDependencies(workflow);
-    expect(deps).toContain('erc20@1.0.0/allowance');
-    expect(deps).toContain('erc20@1.0.0/approve');
-    expect(deps).toContain('uniswap-v3@1.0.0/quote-exact-in');
-    expect(deps).toContain('uniswap-v3@1.0.0/swap-exact-in');
+    expect(deps).toContain('erc20@0.0.2/allowance');
+    expect(deps).toContain('erc20@0.0.2/approve');
+    expect(deps).toContain('uniswap-v3@0.0.2/quote-exact-in');
+    expect(deps).toContain('uniswap-v3@0.0.2/swap-exact-in');
   });
 
   it('validates workflow - all references resolve', () => {
@@ -464,10 +523,10 @@ describe('Integration: Workflow Operations', () => {
   });
 
   it('resolves expressions', () => {
-    setVariable(ctx, 'inputs.target_token', '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48');
-    setVariable(ctx, 'inputs.amount_in', '1000000000000000000');
-    setVariable(ctx, 'ctx.sender', '0xUserAddress');
-    setVariable(ctx, 'ctx.router', '0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45');
+    setRef(ctx, 'inputs.target_token', '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48');
+    setRef(ctx, 'inputs.amount_in', '1000000000000000000');
+    setRef(ctx, 'ctx.sender', '0xUserAddress');
+    setRef(ctx, 'ctx.router', '0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45');
 
     const resolved = resolveExpressionString(
       'Swap ${inputs.amount_in} WETH to ${inputs.target_token} via ${ctx.router}',
@@ -509,11 +568,11 @@ describe('Integration: End-to-End Agent Simulation', () => {
     expect(constraintCheck.valid).toBe(true);
 
     // 7. Set up execution context
-    setVariable(ctx, 'inputs.target_token', '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48');
-    setVariable(ctx, 'inputs.amount_in', '1000000000000000000');
-    setVariable(ctx, 'ctx.chain', 'eip155:1');
-    setVariable(ctx, 'ctx.sender', '0xUserAddress');
-    setVariable(ctx, 'ctx.router', '0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45');
+    setRef(ctx, 'inputs.target_token', '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48');
+    setRef(ctx, 'inputs.amount_in', '1000000000000000000');
+    setRef(ctx, 'ctx.chain', 'eip155:1');
+    setRef(ctx, 'ctx.sender', '0xUserAddress');
+    setRef(ctx, 'ctx.router', '0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45');
 
     // 8. Build execution plan
     const executionPlan = workflow.nodes.map(node => {
@@ -523,8 +582,17 @@ describe('Integration: End-to-End Agent Simulation', () => {
       if (node.type === 'action_ref' && node.action) {
         const action = protocol.actions[node.action];
         const execSpec = action?.execution?.['eip155:*'] || action?.execution?.['*'];
-        const contractName = execSpec && 'contract' in execSpec ? execSpec.contract : null;
-        const address = contractName ? getContractAddress(protocol, 'eip155:1', contractName) : null;
+        let address: string | null = null;
+        if (execSpec && 'to' in execSpec) {
+          const to = (execSpec as { to: unknown }).to as Record<string, unknown> | undefined;
+          if (to && typeof to === 'object') {
+            if (typeof to.lit === 'string') address = to.lit;
+            if (typeof to.ref === 'string' && to.ref.startsWith('contracts.')) {
+              const contractName = to.ref.split('.', 2)[1];
+              if (contractName) address = getContractAddress(protocol, 'eip155:1', contractName);
+            }
+          }
+        }
         return {
           nodeId: node.id,
           type: 'action',

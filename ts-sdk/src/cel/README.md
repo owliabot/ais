@@ -8,6 +8,7 @@ Common Expression Language (CEL) parser and evaluator for AIS calculated fields 
 |------|---------|
 | `lexer.ts` | Tokenizer — converts expression string to tokens |
 | `parser.ts` | Parser — builds AST from tokens |
+| `numeric.ts` | Numeric model — `int` (`bigint`) + exact `decimal` helpers |
 | `evaluator.ts` | Evaluator — executes AST against context, includes builtins |
 | `index.ts` | Re-exports all CEL APIs |
 
@@ -19,35 +20,16 @@ Common Expression Language (CEL) parser and evaluator for AIS calculated fields 
 import { evaluateCEL, CELEvaluator } from '@owliabot/ais-ts-sdk';
 
 // One-shot evaluation
-const result = evaluateCEL('amount * 1.05', { amount: 100 });
-// Returns: 105
+const result = evaluateCEL('mul_div(amount, 9950, 10000)', { amount: 1000000n });
+// Returns: 995000n
 
 // Reusable evaluator (caches parsed expressions)
 const evaluator = new CELEvaluator();
 const value = evaluator.evaluate('price > 100 && quantity > 0', {
-  price: 150,
-  quantity: 10,
+  price: 150n,
+  quantity: 10n,
 });
 // Returns: true
-```
-
-### Low-Level Components
-
-```ts
-import { CELLexer, CELParser, CELEvaluator } from '@owliabot/ais-ts-sdk';
-
-// Tokenize
-const lexer = new CELLexer('a + b * 2');
-const tokens = lexer.tokenize();
-
-// Parse to AST
-const parser = new CELParser(tokens);
-const ast = parser.parse();
-
-// Evaluate
-const evaluator = new CELEvaluator();
-const result = evaluator.evaluateAST(ast, { a: 1, b: 2 });
-// Returns: 5
 ```
 
 ## Types
@@ -59,7 +41,8 @@ Valid value types in CEL expressions:
 ```ts
 type CELValue =
   | string
-  | number
+  | bigint                     // AIS integers (execution-critical)
+  | { kind: 'decimal'; int: bigint; scale: number } // exact decimals
   | boolean
   | null
   | CELValue[]                    // Lists
@@ -86,7 +69,7 @@ const ctx: CELContext = {
 ```ts
 interface Token {
   type: TokenType;  // 'NUMBER', 'STRING', 'IDENT', 'PLUS', etc.
-  value: string | number | boolean | null;
+  value: string | boolean | null; // NUMBER tokens keep the raw lexeme string
   pos: number;      // Position in source
 }
 ```
@@ -106,8 +89,8 @@ interface Token {
 ### Literals
 
 ```cel
-123           // Integer
-12.34         // Float
+123           // Integer (evaluates to bigint)
+12.34         // Decimal (exact; use string(12.34) to view)
 "hello"       // String (double quotes)
 'world'       // String (single quotes)
 true          // Boolean
@@ -149,6 +132,7 @@ items[0]                // List index
 | `ceil(n)` | Ceiling | `ceil(1.2)` → 2 |
 | `floor(n)` | Floor | `floor(1.8)` → 1 |
 | `round(n)` | Round | `round(1.5)` → 2 |
+| `mul_div(a,b,denom)` | Integer math | `mul_div(quote, 9950, 10000)` |
 
 ### Type Functions
 
@@ -156,7 +140,7 @@ items[0]                // List index
 |----------|-------------|---------|
 | `int(v)` | Convert to integer | `int("42")` → 42 |
 | `uint(v)` | Convert to unsigned int | `uint(-5)` → 5 |
-| `double(v)` | Convert to float | `double("3.14")` → 3.14 |
+| `double(v)` | Convert to decimal | `double("3.14")` → 3.14 |
 | `string(v)` | Convert to string | `string(42)` → "42" |
 | `bool(v)` | Convert to boolean | `bool(1)` → true |
 | `type(v)` | Get type name | `type([1,2])` → "list" |
@@ -173,11 +157,9 @@ items[0]                // List index
 
 | Function | Description |
 |----------|-------------|
-| `to_atomic(amount, decimals)` | Convert to atomic units (e.g., 1.5 USDC → 1500000) |
-| `from_atomic(amount, decimals)` | Convert from atomic units |
-| `format_amount(amount, decimals)` | Format for display |
-| `bps_to_factor(bps)` | Basis points to multiplier (50 → 0.005) |
-| `apply_slippage(amount, bps)` | Apply slippage (amount × (1 - bps/10000)) |
+| `to_atomic(amount, assetOrDecimals)` | Convert decimal amount to atomic `bigint` (no truncation) |
+| `to_human(atomic, assetOrDecimals)` | Convert atomic `bigint` to decimal string |
+| `mul_div(a,b,denom)` | Safe integer math for slippage bounds |
 
 ## Usage in AIS
 
@@ -186,9 +168,9 @@ items[0]                // List index
 ```yaml
 calculated_fields:
   amount_with_slippage:
-    expression: "apply_slippage(params.amount_in, params.slippage_bps)"
+    expression: "mul_div(params.amount_in_atomic, (10000 - params.slippage_bps), 10000)"
   min_output:
-    expression: "query_results.quote * (1 - params.slippage_bps / 10000)"
+    expression: "mul_div(query.quote.amount_out_atomic, (10000 - params.slippage_bps), 10000)"
 ```
 
 ### Conditions
@@ -209,6 +191,7 @@ execution:
 - **No external dependencies**: Pure TypeScript
 - **Caching**: Evaluator caches parsed ASTs for repeated expressions
 - **Error messages**: Include position information for debugging
+- **Numeric model (AIS 0.0.2)**: execution-critical math uses `bigint` and exact decimals; JS `number` is rejected for non-integer paths.
 
 ## Dependencies
 

@@ -172,7 +172,7 @@ export class ProtocolBuilder extends BaseBuilder<ProtocolSpec> {
 
   protected getData(): ProtocolSpec {
     return {
-      schema: 'ais/1.0',
+      schema: 'ais/0.0.2',
       meta: this._meta,
       deployments: this._deployments,
       actions: this._actions,

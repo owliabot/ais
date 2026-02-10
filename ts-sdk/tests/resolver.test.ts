@@ -12,17 +12,17 @@ import {
   extractExpressions,
   resolveExpression,
   resolveExpressionString,
-  setVariable,
+  setRef,
   setQueryResult,
   parseProtocolSpec,
   type ResolverContext,
 } from '../src/index.js';
 
 const SAMPLE_PROTOCOL = `
-schema: "ais/1.0"
+schema: "ais/0.0.2"
 meta:
   protocol: uniswap-v3
-  version: "1.0.0"
+  version: "0.0.2"
 deployments:
   - chain: "eip155:1"
     contracts:
@@ -44,11 +44,16 @@ queries:
     execution:
       "eip155:*":
         type: evm_read
-        contract: factory
-        function: getPool
-        abi: "(address)"
-        mapping:
-          token0: "params.token0"
+        to: { lit: "0x1F98431c8aD98523631AE4a59f267346ea31F984" }
+        abi:
+          type: "function"
+          name: "getPool"
+          inputs:
+            - { name: "token0", type: "address" }
+          outputs:
+            - { name: "pool", type: "address" }
+        args:
+          token0: { ref: "params.token0" }
 actions:
   swap-exact-in:
     description: "Swap exact input amount"
@@ -63,12 +68,17 @@ actions:
     execution:
       "eip155:*":
         type: evm_call
-        contract: router
-        function: exactInputSingle
-        abi: "(address,uint256)"
-        mapping:
-          tokenIn: "params.tokenIn"
-          amountIn: "params.amountIn"
+        to: { lit: "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45" }
+        abi:
+          type: "function"
+          name: "exactInputSingle"
+          inputs:
+            - { name: "tokenIn", type: "address" }
+            - { name: "amountIn", type: "uint256" }
+          outputs: []
+        args:
+          tokenIn: { ref: "params.tokenIn" }
+          amountIn: { ref: "params.amountIn" }
 `;
 
 describe('ResolverContext', () => {
@@ -80,8 +90,8 @@ describe('ResolverContext', () => {
 
   it('creates empty context', () => {
     expect(ctx.protocols.size).toBe(0);
-    expect(Object.keys(ctx.variables)).toHaveLength(0);
-    expect(ctx.queryResults.size).toBe(0);
+    expect(Object.keys(ctx.runtime.inputs)).toHaveLength(0);
+    expect(Object.keys(ctx.runtime.query)).toHaveLength(0);
   });
 
   it('registers protocols', () => {
@@ -120,7 +130,7 @@ describe('resolveProtocolRef', () => {
   });
 
   it('resolves protocol with version', () => {
-    const spec = resolveProtocolRef(ctx, 'uniswap-v3@1.0.0');
+    const spec = resolveProtocolRef(ctx, 'uniswap-v3@0.0.2');
     expect(spec).not.toBeNull();
   });
 
@@ -222,24 +232,25 @@ describe('resolveExpression', () => {
   });
 
   it('resolves input variables', () => {
-    setVariable(ctx, 'inputs.amount', 1000);
+    setRef(ctx, 'inputs.amount', 1000);
     expect(resolveExpression('inputs.amount', ctx)).toBe(1000);
   });
 
   it('resolves node outputs', () => {
-    setVariable(ctx, 'nodes.get_pool', { outputs: { pool: '0xabc', fee: 3000 } });
+    setRef(ctx, 'nodes.get_pool.outputs.pool', '0xabc');
+    setRef(ctx, 'nodes.get_pool.outputs.fee', 3000);
     expect(resolveExpression('nodes.get_pool.outputs.pool', ctx)).toBe('0xabc');
     expect(resolveExpression('nodes.get_pool.outputs.fee', ctx)).toBe(3000);
   });
 
   it('resolves ctx variables', () => {
-    setVariable(ctx, 'ctx.chain', 'eip155:1');
-    setVariable(ctx, 'ctx.sender', '0xuser');
+    setRef(ctx, 'ctx.chain', 'eip155:1');
+    setRef(ctx, 'ctx.sender', '0xuser');
     expect(resolveExpression('ctx.chain', ctx)).toBe('eip155:1');
     expect(resolveExpression('ctx.sender', ctx)).toBe('0xuser');
   });
 
-  it('resolves query results (legacy)', () => {
+  it('resolves query results', () => {
     setQueryResult(ctx, 'get_pool', { pool: '0xabc', fee: 3000 });
     expect(resolveExpression('query.get_pool.pool', ctx)).toBe('0xabc');
   });
@@ -254,8 +265,8 @@ describe('resolveExpressionString', () => {
 
   beforeEach(() => {
     ctx = createContext();
-    setVariable(ctx, 'inputs.amount', 1000);
-    setVariable(ctx, 'inputs.token', '0xWETH');
+    setRef(ctx, 'inputs.amount', 1000);
+    setRef(ctx, 'inputs.token', '0xWETH');
   });
 
   it('resolves all expressions in a string', () => {

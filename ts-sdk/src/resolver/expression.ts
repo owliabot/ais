@@ -2,6 +2,7 @@
  * Expression resolution - resolve ${...} placeholders and CEL-like references
  */
 import type { ResolverContext } from './context.js';
+import { getRef } from './context.js';
 
 const EXPR_PATTERN = /\$\{([^}]+)\}/g;
 
@@ -34,62 +35,7 @@ export function extractExpressions(value: string): string[] {
  * - ctx.sender - Context sender address
  */
 export function resolveExpression(expr: string, ctx: ResolverContext): unknown {
-  const parts = expr.split('.');
-  const namespace = parts[0];
-
-  switch (namespace) {
-    case 'inputs': {
-      const key = parts.slice(1).join('.');
-      return ctx.variables[`inputs.${key}`] ?? ctx.variables[key];
-    }
-
-    case 'nodes': {
-      const nodeId = parts[1];
-      const rest = parts.slice(2).join('.');
-      const nodeKey = `nodes.${nodeId}`;
-      const nodeData = ctx.variables[nodeKey] as Record<string, unknown> | undefined;
-      if (!nodeData) return undefined;
-      
-      // Navigate the rest of the path
-      return getNestedValue(nodeData, rest);
-    }
-
-    case 'ctx': {
-      const ctxKey = parts.slice(1).join('.');
-      return ctx.variables[`ctx.${ctxKey}`];
-    }
-
-    case 'query': {
-      // Legacy support for query.name.field
-      const queryName = parts[1];
-      const field = parts.slice(2).join('.');
-      const result = ctx.queryResults.get(queryName);
-      if (!result) return undefined;
-      return field ? result[field] : result;
-    }
-
-    default:
-      // Direct variable lookup
-      return ctx.variables[expr];
-  }
-}
-
-/**
- * Get a nested value from an object using dot notation
- */
-function getNestedValue(obj: Record<string, unknown>, path: string): unknown {
-  if (!path) return obj;
-  
-  const parts = path.split('.');
-  let current: unknown = obj;
-  
-  for (const part of parts) {
-    if (current === null || current === undefined) return undefined;
-    if (typeof current !== 'object') return undefined;
-    current = (current as Record<string, unknown>)[part];
-  }
-  
-  return current;
+  return getRef(ctx, expr);
 }
 
 /**

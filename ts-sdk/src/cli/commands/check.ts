@@ -6,6 +6,7 @@ import {
   loadDirectoryAsContext,
   parseAIS,
   validateWorkflow,
+  validateWorkspaceReferences,
 } from '../../index.js';
 import { readFile, stat } from 'node:fs/promises';
 import { relative } from 'node:path';
@@ -33,6 +34,25 @@ export async function checkCommand(options: CLIOptions, useColor: boolean): Prom
       const { context, result: dirResult } = await loadDirectoryAsContext(inputPath, {
         recursive: options.recursive,
       });
+
+      // Cross-file checks (workflow → pack → protocol)
+      const wsIssues = validateWorkspaceReferences({
+        protocols: dirResult.protocols,
+        packs: dirResult.packs,
+        workflows: dirResult.workflows,
+      });
+      for (const issue of wsIssues) {
+        const msgParts: string[] = [];
+        if (issue.field_path) msgParts.push(`${issue.field_path}:`);
+        msgParts.push(issue.message);
+        if (issue.related_path) msgParts.push(`(related: ${relative(process.cwd(), issue.related_path)})`);
+        results.push({
+          path: relative(process.cwd(), issue.path),
+          type: issue.severity === 'warning' ? 'warning' : issue.severity === 'info' ? 'info' : 'error',
+          message: msgParts.join(' '),
+        });
+        if (issue.severity === 'error') hasErrors = true;
+      }
 
       // Report schema validation results
       for (const { path, document } of dirResult.protocols) {
@@ -68,23 +88,14 @@ export async function checkCommand(options: CLIOptions, useColor: boolean): Prom
       }
 
       for (const { path, document } of dirResult.packs) {
+        const name = document.meta?.name ?? document.name ?? '(unknown-pack)';
+        const version = document.meta?.version ?? document.version ?? '(unknown-version)';
         results.push({
           path: relative(process.cwd(), path),
           type: 'success',
-          message: `✓ Schema valid: ${document.name}@${document.version}`,
+          message: `✓ Schema valid: ${name}@${version}`,
           document,
         });
-
-        // Check skill references
-        for (const skillInclude of document.includes) {
-          if (!context.protocols.has(skillInclude.protocol)) {
-            results.push({
-              path: relative(process.cwd(), path),
-              type: 'warning',
-              message: `Referenced protocol not found locally: ${skillInclude.protocol}@${skillInclude.version}`,
-            });
-          }
-        }
       }
 
       for (const { path, document } of dirResult.workflows) {
@@ -102,7 +113,7 @@ export async function checkCommand(options: CLIOptions, useColor: boolean): Prom
             results.push({
               path: relative(process.cwd(), path),
               type: 'error',
-              message: `Node '${issue.nodeId}': ${issue.message}`,
+              message: `Node '${issue.nodeId}' (${issue.field}): ${issue.message}${issue.reference ? ` [ref=${issue.reference}]` : ''}`,
             });
             hasErrors = true;
           }
@@ -116,12 +127,29 @@ export async function checkCommand(options: CLIOptions, useColor: boolean): Prom
       }
 
       // Report parse errors
-      for (const { path, error } of dirResult.errors) {
-        results.push({
-          path: relative(process.cwd(), path),
-          type: 'error',
-          message: error,
-        });
+      for (const e of dirResult.errors) {
+        const base = e.kind ? `[${e.kind}] ${e.error}` : e.error;
+        if (e.issues && e.issues.length > 0) {
+          for (const issue of e.issues) {
+            results.push({
+              path: relative(process.cwd(), e.path),
+              type: 'error',
+              message: `${base} (${issue.path}: ${issue.message})`,
+            });
+          }
+        } else if (e.field_path) {
+          results.push({
+            path: relative(process.cwd(), e.path),
+            type: 'error',
+            message: `${base} (${e.field_path})`,
+          });
+        } else {
+          results.push({
+            path: relative(process.cwd(), e.path),
+            type: 'error',
+            message: base,
+          });
+        }
         hasErrors = true;
       }
     } else {
@@ -140,7 +168,7 @@ export async function checkCommand(options: CLIOptions, useColor: boolean): Prom
           });
 
           // Type-specific checks
-          if (doc.schema === 'ais/1.0') {
+          if (doc.schema === 'ais/0.0.2') {
             for (const deployment of doc.deployments) {
               for (const [name, address] of Object.entries(deployment.contracts)) {
                 if (!/^0x[a-fA-F0-9]{40}$/.test(address)) {

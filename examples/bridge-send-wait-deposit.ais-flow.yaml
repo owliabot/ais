@@ -1,0 +1,56 @@
+schema: "ais-flow/0.0.2"
+
+meta:
+  name: "bridge-send-wait-deposit"
+  version: "0.0.2"
+  description: "Reference: EVM bridge send → poll Solana arrival → Solana deposit"
+
+default_chain: "eip155:1"
+
+inputs:
+  evm_amount:
+    type: uint256
+    required: true
+    example: 1000000
+  solana_address:
+    type: address
+    required: true
+    example: "BPFLoaderUpgradeab1e11111111111111111111111"
+
+nodes:
+  - id: bridge_send
+    type: action_ref
+    skill: "bridge-demo@0.0.2"
+    action: "send"
+    args:
+      amount: { ref: "inputs.evm_amount" }
+      recipient: { lit: "0x2222222222222222222222222222222222222222" }
+
+  - id: wait_arrival
+    chain: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
+    type: query_ref
+    skill: "solana-rpc@0.0.2"
+    query: "balance"
+    deps: ["bridge_send"]
+    args:
+      address: { ref: "inputs.solana_address" }
+    retry:
+      interval_ms: 2000
+      max_attempts: 600
+      backoff: "fixed"
+    timeout_ms: 1200000
+    until: { cel: "nodes.wait_arrival.outputs.lamports > 0" }
+
+  - id: solana_deposit
+    chain: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
+    type: action_ref
+    skill: "solana-vault-demo@0.0.2"
+    action: "deposit"
+    deps: ["wait_arrival"]
+    args:
+      user: { ref: "inputs.solana_address" }
+
+outputs:
+  evm_tx: { ref: "nodes.bridge_send.outputs.tx_hash" }
+  solana_signature: { ref: "nodes.solana_deposit.outputs.signature" }
+

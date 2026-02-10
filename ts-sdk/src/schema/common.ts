@@ -30,6 +30,19 @@ export const HexAddressSchema = z.string().regex(
 export const AddressSchema = z.string().min(1);
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Extensions (strict schemas)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Reserved extensibility slot.
+ *
+ * All AIS 0.0.2 core objects are strict: unknown fields MUST be rejected.
+ * If an implementation needs to attach extra metadata, it MUST do so under
+ * an `extensions` object.
+ */
+export const ExtensionsSchema = z.record(z.unknown()).optional();
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Asset Types
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -42,16 +55,21 @@ export const AssetSchema = z.object({
   address: AddressSchema,
   symbol: z.string().optional(),
   decimals: z.number().int().min(0).max(77).optional(),
-});
+  extensions: ExtensionsSchema,
+}).strict();
 
 /**
- * Token amount - human-readable amount bound to an asset
+ * Token amount (AIS 0.0.2)
+ *
+ * Human-facing decimal string (no exponent). Binding to an `asset` is defined
+ * by the Param definition's `asset_ref` field (not by the value itself).
  */
-export const TokenAmountSchema = z.object({
-  asset: z.union([AssetSchema, z.string()]),
-  amount: z.string(),
-  human_readable: z.string().optional(),
-});
+export const TokenAmountSchema = z
+  .string()
+  .min(1)
+  .refine((v) => v === 'max' || /^\d+(\.\d+)?$/.test(v), {
+    message: 'token_amount must be a decimal string (e.g., "1.23") or "max"',
+  });
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // AIS Type System
@@ -60,29 +78,74 @@ export const TokenAmountSchema = z.object({
 /**
  * Valid AIS parameter types
  */
-export const AISTypeSchema = z.enum([
+const EvmIntTypeSchema = z
+  .string()
+  .regex(/^(u?int)\d{1,3}$/)
+  .refine((t) => {
+    const isUint = t.startsWith('uint');
+    const bitsStr = t.slice(isUint ? 4 : 3);
+    const bits = Number(bitsStr);
+    return Number.isInteger(bits) && bits >= 8 && bits <= 256 && bits % 8 === 0;
+  }, { message: 'int/uint types must be a multiple of 8 bits (8..256), e.g., uint24, int128' });
+
+const EvmFixedBytesTypeSchema = z
+  .string()
+  .regex(/^bytes\d{1,2}$/)
+  .refine((t) => {
+    const n = Number(t.slice('bytes'.length));
+    return Number.isInteger(n) && n >= 1 && n <= 32;
+  }, { message: 'Fixed bytes types must be bytes1..bytes32' });
+
+export const AISTypeSchema = z.union([
   // Basic types
-  'address',
-  'bool',
-  'string',
-  'bytes',
-  'float',
-  // Unsigned integers
-  'uint8', 'uint16', 'uint32', 'uint64', 'uint128', 'uint256',
-  // Signed integers
-  'int8', 'int16', 'int32', 'int64', 'int128', 'int256',
-  // Fixed bytes
-  'bytes1', 'bytes2', 'bytes4', 'bytes8', 'bytes16', 'bytes32',
+  z.enum(['address', 'bool', 'string', 'bytes', 'float']),
+  // EVM scalar types
+  EvmIntTypeSchema,
+  EvmFixedBytesTypeSchema,
   // Composite types
-  'asset',
-  'token_amount',
-]).or(
+  z.enum(['asset', 'token_amount']),
   // Array and tuple types: array<T>, tuple<T1,T2,...>
-  z.string().regex(/^(array|tuple)<.+>$/)
-);
+  z.string().regex(/^(array|tuple)<.+>$/),
+]);
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ValueRef (AIS 0.0.2)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export const DetectKindSchema = z.enum(['choose_one', 'best_quote', 'best_path', 'protocol_specific']);
+
+export const DetectSchema = z.object({
+  kind: DetectKindSchema,
+  provider: z.string().optional(),
+  candidates: z.array(z.unknown()).optional(),
+  constraints: z.record(z.unknown()).optional(),
+  requires_capabilities: z.array(z.string()).optional(),
+  extensions: ExtensionsSchema,
+}).strict();
 
 // Inferred types
 export type ChainId = z.infer<typeof ChainIdSchema>;
 export type Asset = z.infer<typeof AssetSchema>;
 export type TokenAmount = z.infer<typeof TokenAmountSchema>;
 export type AISType = z.infer<typeof AISTypeSchema>;
+export type Detect = z.infer<typeof DetectSchema>;
+export type Extensions = z.infer<typeof ExtensionsSchema>;
+
+export type ValueRef =
+  | { lit: unknown }
+  | { ref: string }
+  | { cel: string }
+  | { detect: Detect }
+  | { object: Record<string, ValueRef> }
+  | { array: ValueRef[] };
+
+export const ValueRefSchema: z.ZodType<ValueRef> = z.lazy(() =>
+  z.union([
+    z.object({ lit: z.unknown() }).strict(),
+    z.object({ ref: z.string() }).strict(),
+    z.object({ cel: z.string() }).strict(),
+    z.object({ detect: DetectSchema }).strict(),
+    z.object({ object: z.record(ValueRefSchema) }).strict(),
+    z.object({ array: z.array(ValueRefSchema) }).strict(),
+  ])
+) as z.ZodType<ValueRef>;

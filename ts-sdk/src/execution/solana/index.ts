@@ -1,88 +1,35 @@
 /**
- * Solana execution module for AIS SDK
- * 
- * Provides instruction building, account resolution, and serialization
- * for Solana programs defined in AIS specs.
+ * Solana execution helpers (AIS 0.0.2)
+ *
+ * Uses `@solana/web3.js` and `@solana/spl-token` instead of custom crypto/types.
  */
 
-// Constants
-export * from './constants.js';
+export { PublicKey, TransactionInstruction, SystemProgram } from '@solana/web3.js';
+export type { AccountMeta } from '@solana/web3.js';
 
-// Types
-export type {
-  PublicKey,
-  AccountMeta,
-  TransactionInstruction,
-  SolanaInstructionResult,
-  SolanaAccountSpec,
-  SolanaExecutionSpec,
-  SolanaResolverContext,
-  SolanaBuildOptions,
-} from './types.js';
-
-// Base58 encoding
 export {
-  base58Encode,
-  base58Decode,
-  isValidBase58,
-  isValidPublicKey,
-} from './base58.js';
-
-// Public key utilities
-export {
-  publicKeyFromBase58,
-  publicKeyFromBytes,
-  publicKeyFromHex,
-  publicKeysEqual,
-  publicKeyToHex,
-  isPublicKeyLike,
-  toPublicKey,
-} from './pubkey.js';
-
-// SHA-256 hashing
-export {
-  sha256,
-  sha256Sync,
-} from './sha256.js';
-
-// PDA derivation
-export {
-  findProgramAddressSync,
-  findProgramAddress,
-  createProgramAddressSync,
-  derivePdaFromSpec,
-} from './pda.js';
-
-// ATA derivation
-export {
+  TOKEN_PROGRAM_ID,
+  TOKEN_2022_PROGRAM_ID,
+  ASSOCIATED_TOKEN_PROGRAM_ID,
   getAssociatedTokenAddressSync,
-  getAssociatedTokenAddress,
-  createAssociatedTokenAccountInstruction,
   createAssociatedTokenAccountIdempotentInstruction,
-  deriveAtaFromSpec,
-} from './ata.js';
+  createTransferInstruction,
+  createTransferCheckedInstruction,
+  createApproveInstruction,
+} from '@solana/spl-token';
 
-// Borsh serialization
 export {
-  BorshWriter,
-  BorshReader,
-  serializeSplTransfer,
-  serializeSplTransferChecked,
-  serializeSplApprove,
-} from './borsh.js';
+  compileSolanaInstruction,
+  compileSolanaInstructionAsync,
+  createDefaultSolanaInstructionCompilerRegistry,
+  type CompileSolanaOptions,
+  type CompiledSolanaInstructionRequest,
+  SolanaCompileError,
+} from './compiler.js';
 
-// Account resolution
 export {
-  resolveAccount,
-  resolveAccounts,
-  createAccountResolver,
-} from './accounts.js';
-
-// Instruction building
-export {
-  buildSolanaInstruction,
-  buildSplTransfer,
-  buildSplApprove,
-  buildSplTransferWithAtaCreation,
-  serializeInstruction,
-} from './builder.js';
+  SolanaInstructionCompilerRegistry,
+  type SolanaInstructionCompiler,
+  type SolanaInstructionCompilerContext,
+  type SolanaCompiledAccount,
+} from './registry.js';

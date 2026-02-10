@@ -5,15 +5,14 @@ describe('ProtocolBuilder', () => {
   const testExecution = {
     'eip155:*': {
       type: 'evm_call' as const,
-      contract: 'router',
-      function: 'test',
-      abi: '()',
-      mapping: {},
+      to: { ref: 'contracts.router' },
+      abi: { type: 'function' as const, name: 'test', inputs: [], outputs: [] },
+      args: {},
     },
   };
 
   it('builds a minimal protocol', () => {
-    const spec = protocol('test-protocol', '1.0.0')
+    const spec = protocol('test-protocol', '0.0.2')
       .deployment('eip155:1', { router: '0x1234567890123456789012345678901234567890' })
       .action('test', {
         description: 'Test action',
@@ -22,9 +21,9 @@ describe('ProtocolBuilder', () => {
       })
       .build();
 
-    expect(spec.schema).toBe('ais/1.0');
+    expect(spec.schema).toBe('ais/0.0.2');
     expect(spec.meta.protocol).toBe('test-protocol');
-    expect(spec.meta.version).toBe('1.0.0');
+    expect(spec.meta.version).toBe('0.0.2');
     expect(spec.deployments).toHaveLength(1);
     expect(spec.actions.test.description).toBe('Test action');
   });
@@ -33,14 +32,23 @@ describe('ProtocolBuilder', () => {
     const swapExecution = {
       'eip155:*': {
         type: 'evm_call' as const,
-        contract: 'router',
-        function: 'exactInputSingle',
-        abi: '(address,address,uint256,uint256)',
-        mapping: {
-          tokenIn: 'params.tokenIn',
-          tokenOut: 'params.tokenOut',
-          amountIn: 'params.amountIn',
-          amountOutMin: 'params.amountOutMin',
+        to: { ref: 'contracts.router' },
+        abi: {
+          type: 'function' as const,
+          name: 'exactInputSingle',
+          inputs: [
+            { name: 'tokenIn', type: 'address' },
+            { name: 'tokenOut', type: 'address' },
+            { name: 'amountIn', type: 'uint256' },
+            { name: 'amountOutMin', type: 'uint256' },
+          ],
+          outputs: [],
+        },
+        args: {
+          tokenIn: { ref: 'params.tokenIn' },
+          tokenOut: { ref: 'params.tokenOut' },
+          amountIn: { ref: 'params.amountIn' },
+          amountOutMin: { ref: 'params.amountOutMin' },
         },
       },
     };
@@ -48,18 +56,26 @@ describe('ProtocolBuilder', () => {
     const queryExecution = {
       'eip155:*': {
         type: 'evm_read' as const,
-        contract: 'quoter',
-        function: 'quoteExactInputSingle',
-        abi: '(address,address,uint256)',
-        mapping: {
-          tokenIn: 'params.tokenIn',
-          tokenOut: 'params.tokenOut',
-          amountIn: 'params.amountIn',
+        to: { ref: 'contracts.quoter' },
+        abi: {
+          type: 'function' as const,
+          name: 'quoteExactInputSingle',
+          inputs: [
+            { name: 'tokenIn', type: 'address' },
+            { name: 'tokenOut', type: 'address' },
+            { name: 'amountIn', type: 'uint256' },
+          ],
+          outputs: [{ name: 'amountOut', type: 'uint256' }],
+        },
+        args: {
+          tokenIn: { ref: 'params.tokenIn' },
+          tokenOut: { ref: 'params.tokenOut' },
+          amountIn: { ref: 'params.amountIn' },
         },
       },
     };
 
-    const spec = protocol('uniswap-v3', '1.0.0')
+    const spec = protocol('uniswap-v3', '0.0.2')
       .name('Uniswap V3')
       .description('Decentralized exchange protocol')
       .homepage('https://uniswap.org')
@@ -107,7 +123,7 @@ describe('ProtocolBuilder', () => {
   });
 
   it('converts to YAML', () => {
-    const yaml = protocol('test', '1.0.0')
+    const yaml = protocol('test', '0.0.2')
       .deployment('eip155:1', { router: '0x1234567890123456789012345678901234567890' })
       .action('test', {
         description: 'Test',
@@ -116,12 +132,12 @@ describe('ProtocolBuilder', () => {
       })
       .toYAML();
 
-    expect(yaml).toContain('schema: ais/1.0');
+    expect(yaml).toContain('schema: ais/0.0.2');
     expect(yaml).toContain('protocol: test');
   });
 
   it('converts to JSON', () => {
-    const json = protocol('test', '1.0.0')
+    const json = protocol('test', '0.0.2')
       .deployment('eip155:1', { router: '0x1234567890123456789012345678901234567890' })
       .action('test', {
         description: 'Test',
@@ -131,28 +147,28 @@ describe('ProtocolBuilder', () => {
       .toJSON();
 
     const parsed = JSON.parse(json);
-    expect(parsed.schema).toBe('ais/1.0');
+    expect(parsed.schema).toBe('ais/0.0.2');
   });
 });
 
 describe('PackBuilder', () => {
   it('builds a minimal pack', () => {
-    const p = pack('test-pack', '1.0.0')
-      .include('protocol-a', '1.0.0')
+    const p = pack('test-pack', '0.0.2')
+      .include('protocol-a', '0.0.2')
       .build();
 
-    expect(p.schema).toBe('ais-pack/1.0');
+    expect(p.schema).toBe('ais-pack/0.0.2');
     expect(p.name).toBe('test-pack');
     expect(p.includes).toHaveLength(1);
     expect(p.includes[0].protocol).toBe('protocol-a');
   });
 
   it('builds a full pack', () => {
-    const p = pack('safe-defi', '1.0.0')
+    const p = pack('safe-defi', '0.0.2')
       .description('Safe DeFi operations pack')
-      .include('uniswap-v3', '1.0.0')
-      .include('aave-v3', '1.0.0')
-      .include('erc20', '1.0.0')
+      .include('uniswap-v3', '0.0.2')
+      .include('aave-v3', '0.0.2')
+      .include('erc20', '0.0.2')
       .approvals({
         auto_execute_max_risk_level: 2,
         require_approval_min_risk_level: 3,
@@ -188,8 +204,8 @@ describe('PackBuilder', () => {
   });
 
   it('supports shorthand constraint methods', () => {
-    const p = pack('test', '1.0.0')
-      .include('a', '1.0.0')
+    const p = pack('test', '0.0.2')
+      .include('a', '0.0.2')
       .maxSlippage(50)
       .disallowUnlimitedApproval()
       .build();
@@ -201,40 +217,40 @@ describe('PackBuilder', () => {
 
 describe('WorkflowBuilder', () => {
   it('builds a minimal workflow', () => {
-    const w = workflow('test-flow', '1.0.0')
+    const w = workflow('test-flow', '0.0.2')
       .node('step1', {
         type: 'action_ref',
-        skill: 'erc20@1.0.0',
+        skill: 'erc20@0.0.2',
         action: 'transfer',
       })
       .build();
 
-    expect(w.schema).toBe('ais-flow/1.0');
+    expect(w.schema).toBe('ais-flow/0.0.2');
     expect(w.meta.name).toBe('test-flow');
     expect(w.nodes).toHaveLength(1);
   });
 
   it('builds a full workflow', () => {
-    const w = workflow('swap-to-token', '1.0.0')
+    const w = workflow('swap-to-token', '0.0.2')
       .description('Swap ETH to target token')
-      .requiresPack('safe-defi', '1.0.0')
+      .requiresPack('safe-defi', '0.0.2')
       .requiredInput('target_token', 'address')
       .requiredInput('amount_in', 'uint256')
       .optionalInput('slippage_bps', 'uint256', 50)
-      .query('get_quote', 'uniswap-v3@1.0.0', 'quote-exact-in', {
+      .query('get_quote', 'uniswap-v3@0.0.2', 'quote-exact-in', {
         args: {
           tokenIn: '${inputs.weth}',
           tokenOut: '${inputs.target_token}',
           amountIn: '${inputs.amount_in}',
         },
       })
-      .action('approve', 'erc20@1.0.0', 'approve', {
+      .action('approve', 'erc20@0.0.2', 'approve', {
         args: {
           spender: '${ctx.router}',
           amount: '${inputs.amount_in}',
         },
       })
-      .action('swap', 'uniswap-v3@1.0.0', 'swap-exact-in', {
+      .action('swap', 'uniswap-v3@0.0.2', 'swap-exact-in', {
         args: {
           tokenOut: '${inputs.target_token}',
           amountIn: '${inputs.amount_in}',
@@ -247,18 +263,19 @@ describe('WorkflowBuilder', () => {
       .build();
 
     expect(w.meta.description).toBe('Swap ETH to target token');
-    expect(w.requires_pack).toEqual({ name: 'safe-defi', version: '1.0.0' });
+    expect(w.requires_pack).toEqual({ name: 'safe-defi', version: '0.0.2' });
     expect(Object.keys(w.inputs ?? {})).toHaveLength(3);
     expect(w.inputs?.slippage_bps.default).toBe(50);
     expect(w.nodes).toHaveLength(3);
-    expect(w.nodes[2].requires_queries).toContain('approve');
-    expect(w.outputs?.amount_out).toBe('nodes.swap.outputs.amountOut');
+    expect(w.nodes[2].deps).toContain('approve');
+    expect(w.nodes[2].condition).toEqual({ cel: 'nodes.approve.outputs.success == true' });
+    expect(w.outputs?.amount_out).toEqual({ ref: 'nodes.swap.outputs.amountOut' });
   });
 
   it('supports shorthand action/query methods', () => {
-    const w = workflow('test', '1.0.0')
-      .action('a1', 'proto@1.0.0', 'do-action')
-      .query('q1', 'proto@1.0.0', 'get-data')
+    const w = workflow('test', '0.0.2')
+      .action('a1', 'proto@0.0.2', 'do-action')
+      .query('q1', 'proto@0.0.2', 'get-data')
       .build();
 
     expect(w.nodes[0].type).toBe('action_ref');
@@ -295,25 +312,23 @@ describe('Builder chaining', () => {
   const testExecution = {
     'eip155:*': {
       type: 'evm_call' as const,
-      contract: 'r',
-      function: 'm',
-      abi: '()',
-      mapping: {},
+      to: { ref: 'contracts.r' },
+      abi: { type: 'function' as const, name: 'm', inputs: [], outputs: [] },
+      args: {},
     },
   };
 
   const testQueryExecution = {
     'eip155:*': {
       type: 'evm_read' as const,
-      contract: 'r',
-      function: 'm',
-      abi: '()',
-      mapping: {},
+      to: { ref: 'contracts.r' },
+      abi: { type: 'function' as const, name: 'm', inputs: [], outputs: [] },
+      args: {},
     },
   };
 
   it('supports method chaining', () => {
-    const spec = protocol('chain-test', '1.0.0')
+    const spec = protocol('chain-test', '0.0.2')
       .description('Test')
       .deployment('eip155:1', { r: '0x1234567890123456789012345678901234567890' })
       .action('a', { description: 'A', risk_level: 1, execution: testExecution })
@@ -326,7 +341,7 @@ describe('Builder chaining', () => {
   });
 
   it('is immutable-like (each method returns this)', () => {
-    const builder = protocol('test', '1.0.0');
+    const builder = protocol('test', '0.0.2');
     const result = builder.description('desc');
     expect(result).toBe(builder);
   });

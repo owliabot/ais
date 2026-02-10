@@ -1,0 +1,26 @@
+{
+  "name": "@owliabot/ais-runner",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Internal AIS runner for verifying ts-sdk end-to-end behavior",
+  "bin": {
+    "ais-runner": "./dist/main.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/main.js",
+    "dev": "node dist/main.js",
+    "test": "npm run build && node --test"
+  },
+  "dependencies": {
+    "yaml": "^2.3.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

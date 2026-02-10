@@ -1,24 +1,21 @@
-schema: "ais-flow/1.0"
+schema: "ais-flow/0.0.2"
 
 meta:
   name: "swap-to-token"
-  version: "1.0.0"
+  version: "0.0.2"
   description: "Quote then swap using Uniswap V3 exact-in"
+
+default_chain: "eip155:1"
 
 requires_pack:
   name: "safe-defi-pack"
-  version: "1.0.0"
+  version: "0.0.2"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # INPUTS
 # ═══════════════════════════════════════════════════════════════════════════════
 
 inputs:
-  chain_id:
-    type: string
-    required: true
-    example: "eip155:8453"
-
   token_in:
     type: asset
     required: true
@@ -34,7 +31,7 @@ inputs:
   slippage_bps:
     type: uint32
     required: true
-    default: 50
+    default: "50"
 
   recipient:
     type: address
@@ -47,36 +44,36 @@ inputs:
 nodes:
   - id: q_quote
     type: query_ref
-    skill: "uniswap-v3@1.0.0"
+    skill: "uniswap-v3@0.0.2"
     query: "quote-exact-in-single"
     args:
-      token_in: "inputs.token_in"
-      token_out: "inputs.token_out"
-      amount_in: "inputs.amount_in"
-      fee: null
+      token_in: { ref: "inputs.token_in" }
+      token_out: { ref: "inputs.token_out" }
+      amount_in: { ref: "inputs.amount_in" }
+      fee: { lit: null }
 
   - id: q_allowance
     type: query_ref
-    skill: "uniswap-v3@1.0.0"
+    skill: "uniswap-v3@0.0.2"
     query: "allowance-token-in"
     args:
-      token_in: "inputs.token_in"
+      token_in: { ref: "inputs.token_in" }
 
   - id: a_swap
     type: action_ref
-    skill: "uniswap-v3@1.0.0"
+    skill: "uniswap-v3@0.0.2"
     action: "swap-exact-in"
     args:
-      token_in: "inputs.token_in"
-      token_out: "inputs.token_out"
-      amount_in: "inputs.amount_in"
-      slippage_bps: "inputs.slippage_bps"
-      fee: "nodes.q_quote.outputs.fee_tier"
-      recipient: "inputs.recipient"
+      token_in: { ref: "inputs.token_in" }
+      token_out: { ref: "inputs.token_out" }
+      amount_in: { ref: "inputs.amount_in" }
+      slippage_bps: { ref: "inputs.slippage_bps" }
+      fee: { ref: "nodes.q_quote.outputs.fee_tier" }
+      recipient: { ref: "inputs.recipient" }
     calculated_overrides:
       min_out_atomic:
-        expr: "floor(nodes.q_quote.outputs.amount_out_atomic * (1.0 - inputs.slippage_bps / 10000.0))"
-    requires_queries: ["q_quote", "q_allowance"]
+        expr: { cel: "mul_div(nodes.q_quote.outputs.amount_out_atomic, (10000 - inputs.slippage_bps), 10000)" }
+    deps: ["q_quote", "q_allowance"]
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # POLICY
@@ -88,7 +85,7 @@ policy:
 
   hard_constraints:
     tighten_only: true
-    max_slippage_bps: "inputs.slippage_bps"
+    max_slippage_bps: { ref: "inputs.slippage_bps" }
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PREFLIGHT
@@ -104,6 +101,6 @@ preflight:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 outputs:
-  expected_amount_out_atomic: "nodes.q_quote.outputs.amount_out_atomic"
-  min_out_atomic: "nodes.a_swap.calculated.min_out_atomic"
-  action_tx: "nodes.a_swap.tx"
+  expected_amount_out_atomic: { ref: "nodes.q_quote.outputs.amount_out_atomic" }
+  min_out_atomic: { ref: "nodes.a_swap.calculated.min_out_atomic" }
+  action_tx: { ref: "nodes.a_swap.tx" }

@@ -1,0 +1,165 @@
+{
+  "schema": "ais-conformance/0.0.2",
+  "cases": [
+    {
+      "id": "pattern-exact-over-namespace-over-global",
+      "kind": "select_execution_spec",
+      "input": {
+        "chain": "eip155:1",
+        "execution": {
+          "*": {
+            "type": "evm_call",
+            "to": { "lit": "0x0000000000000000000000000000000000000000" },
+            "abi": { "type": "function", "name": "g", "inputs": [], "outputs": [] },
+            "args": {}
+          },
+          "eip155:*": {
+            "type": "evm_read",
+            "to": { "lit": "0x0000000000000000000000000000000000000000" },
+            "abi": { "type": "function", "name": "n", "inputs": [], "outputs": [] },
+            "args": {}
+          },
+          "eip155:1": {
+            "type": "evm_multicall",
+            "to": { "lit": "0x0000000000000000000000000000000000000000" },
+            "calls": [
+              {
+                "abi": { "type": "function", "name": "e", "inputs": [], "outputs": [] },
+                "args": {}
+              }
+            ]
+          }
+        }
+      },
+      "expect": { "type": "evm_multicall" }
+    },
+    {
+      "id": "pattern-namespace-over-global",
+      "kind": "select_execution_spec",
+      "input": {
+        "chain": "eip155:10",
+        "execution": {
+          "*": {
+            "type": "evm_call",
+            "to": { "lit": "0x0000000000000000000000000000000000000000" },
+            "abi": { "type": "function", "name": "g", "inputs": [], "outputs": [] },
+            "args": {}
+          },
+          "eip155:*": {
+            "type": "evm_read",
+            "to": { "lit": "0x0000000000000000000000000000000000000000" },
+            "abi": { "type": "function", "name": "n", "inputs": [], "outputs": [] },
+            "args": {}
+          }
+        }
+      },
+      "expect": { "type": "evm_read" }
+    },
+    {
+      "id": "pattern-global-only",
+      "kind": "select_execution_spec",
+      "input": {
+        "chain": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+        "execution": {
+          "*": { "type": "solana_read", "method": "getBalance" }
+        }
+      },
+      "expect": { "type": "solana_read" }
+    },
+    {
+      "id": "pattern-solana-namespace-wildcard",
+      "kind": "select_execution_spec",
+      "input": {
+        "chain": "solana:devnet",
+        "execution": {
+          "solana:*": { "type": "solana_read", "method": "getBalance" }
+        }
+      },
+      "expect": { "type": "solana_read" }
+    },
+    {
+      "id": "pattern-solana-exact-over-namespace",
+      "kind": "select_execution_spec",
+      "input": {
+        "chain": "solana:devnet",
+        "execution": {
+          "solana:*": { "type": "solana_read", "method": "getBalance" },
+          "solana:devnet": {
+            "type": "solana_instruction",
+            "program": { "lit": "11111111111111111111111111111111" },
+            "instruction": "noop",
+            "accounts": [],
+            "data": { "lit": "0x" }
+          }
+        }
+      },
+      "expect": { "type": "solana_instruction" }
+    },
+    {
+      "id": "pattern-bitcoin-exact",
+      "kind": "select_execution_spec",
+      "input": {
+        "chain": "bip122:000000000019d6689c085ae165831e93",
+        "execution": {
+          "bip122:000000000019d6689c085ae165831e93": {
+            "type": "bitcoin_psbt",
+            "script_type": "p2wpkh",
+            "mapping": {}
+          }
+        }
+      },
+      "expect": { "type": "bitcoin_psbt" }
+    },
+    {
+      "id": "pattern-missing-no-global",
+      "kind": "select_execution_spec_error",
+      "input": {
+        "chain": "eip155:1",
+        "execution": {
+          "solana:*": { "type": "solana_read", "method": "getBalance" }
+        }
+      },
+      "expect": { "message_includes": "No execution matches chain" }
+    },
+    {
+      "id": "pattern-missing-empty-execution-block",
+      "kind": "select_execution_spec_error",
+      "input": { "chain": "eip155:1", "execution": {} },
+      "expect": { "message_includes": "No execution matches chain" }
+    },
+    {
+      "id": "pattern-missing-only-namespace-other",
+      "kind": "select_execution_spec_error",
+      "input": {
+        "chain": "eip155:42161",
+        "execution": {
+          "eip155:1": {
+            "type": "evm_call",
+            "to": { "lit": "0x0000000000000000000000000000000000000000" },
+            "abi": { "type": "function", "name": "x", "inputs": [], "outputs": [] },
+            "args": {}
+          }
+        }
+      },
+      "expect": { "message_includes": "No execution matches chain" }
+    },
+    {
+      "id": "pattern-exact-beats-global",
+      "kind": "select_execution_spec",
+      "input": {
+        "chain": "solana:mainnet",
+        "execution": {
+          "*": { "type": "solana_read", "method": "getBalance" },
+          "solana:mainnet": {
+            "type": "solana_instruction",
+            "program": { "lit": "11111111111111111111111111111111" },
+            "instruction": "noop",
+            "accounts": [],
+            "data": { "lit": "0x" }
+          }
+        }
+      },
+      "expect": { "type": "solana_instruction" }
+    }
+  ]
+}

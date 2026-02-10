@@ -1,11 +1,11 @@
-schema: "ais/1.0"
+schema: "ais/0.0.2"
 
 meta:
   protocol: "aave-v3"
-  version: "1.0.0"
+  version: "0.0.2"
   name: "Aave V3"
   homepage: "https://aave.com"
-  description: "Decentralized lending and borrowing protocol"
+  description: "Decentralized lending protocol (supply/withdraw subset)"
   tags: ["lending", "borrowing", "yield", "defi"]
   maintainer: "aave.eth"
 
@@ -18,20 +18,14 @@ deployments:
   - chain: "eip155:1"
     contracts:
       pool: "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2"
-      oracle: "0x54586bE62E3c3580375aE3723C145253060Ca0C2"
-      data_provider: "0x7B4EB56E7CD4b454BA8ff71E4518426c84552Dc7"
 
   - chain: "eip155:8453"
     contracts:
       pool: "0xA238Dd80C259a72e81d7e4664a9801593F98d1c5"
-      oracle: "0x2Cc0Fc26eD4563A5ce5e8bdcfe1A2878676Ae156"
-      data_provider: "0x2d8A3C5677189723C4cB8873CfC9C8976FDF38Ac"
 
   - chain: "eip155:42161"
     contracts:
       pool: "0x794a61358D6845594F94dc1DB02A252b5b4814aD"
-      oracle: "0xb56c2F0B653B2e0b10C9b928C8580Ac5Df02C7C7"
-      data_provider: "0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654"
 
 supported_assets:
   - symbol: "WETH"
@@ -58,41 +52,94 @@ supported_assets:
       eip155:42161: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
     tags: ["stable", "collateral"]
 
-  - symbol: "WBTC"
-    name: "Wrapped BTC"
-    decimals:
-      eip155:1: 8
-    addresses:
-      eip155:1: "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599"
-    tags: ["wrapped", "collateral"]
-
-  - symbol: "DAI"
-    name: "Dai Stablecoin"
-    decimals:
-      eip155:1: 18
-    addresses:
-      eip155:1: "0x6B175474E89094C44Da98b954EedeAC495271d0F"
-    tags: ["stable", "collateral"]
-
 risks:
-  - level: "critical"
-    text: "Borrowing creates a debt position. If health factor drops below 1.0, your collateral will be liquidated."
-    applies_to: ["borrow"]
   - level: "warning"
-    text: "Variable borrow rates can change significantly based on pool utilization."
-    applies_to: ["borrow"]
-  - level: "warning"
-    text: "Withdrawing collateral reduces health factor and may trigger liquidation if debt exists."
+    text: "Withdrawing collateral can reduce health factor and may lead to liquidation if debt exists."
     applies_to: ["withdraw"]
-  - level: "info"
-    text: "Supplied assets can be used as collateral for borrowing."
-    applies_to: ["supply"]
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# ACTIONS
-# ═══════════════════════════════════════════════════════════════════════════════
 
 actions:
+  supply-raw:
+    description: "Supply tokens to Aave pool (raw; expects atomic amount; no composite/auto-approve)."
+    risk_level: 3
+    risk_tags: ["approval", "custody"]
+
+    params:
+      - name: token
+        type: asset
+        description: "Token asset to supply"
+        required: true
+      - name: amount_atomic
+        type: uint256
+        description: "Atomic amount to supply"
+        required: true
+      - name: on_behalf_of
+        type: address
+        required: false
+        description: "Credit recipient (defaults to sender)"
+
+    execution:
+      "eip155:*":
+        type: evm_call
+        to: { ref: "contracts.pool" }
+        abi:
+          type: "function"
+          name: "supply"
+          inputs:
+            - { name: "asset", type: "address" }
+            - { name: "amount", type: "uint256" }
+            - { name: "onBehalfOf", type: "address" }
+            - { name: "referralCode", type: "uint16" }
+          outputs: []
+        args:
+          asset: { ref: "params.token.address" }
+          amount: { ref: "params.amount_atomic" }
+          onBehalfOf: { cel: "params.on_behalf_of != null ? params.on_behalf_of : ctx.wallet_address" }
+          referralCode: { lit: "0" }
+
+  borrow-raw:
+    description: "Borrow tokens from Aave pool (raw; expects atomic amount)."
+    risk_level: 4
+    risk_tags: ["borrow", "debt"]
+
+    params:
+      - name: token
+        type: asset
+        description: "Token asset to borrow"
+        required: true
+      - name: amount_atomic
+        type: uint256
+        description: "Atomic amount to borrow"
+        required: true
+      - name: interest_rate_mode
+        type: uint8
+        required: false
+        description: "1=stable, 2=variable (defaults to 2)"
+      - name: on_behalf_of
+        type: address
+        required: false
+        description: "Debt recipient (defaults to sender)"
+
+    execution:
+      "eip155:*":
+        type: evm_call
+        to: { ref: "contracts.pool" }
+        abi:
+          type: "function"
+          name: "borrow"
+          inputs:
+            - { name: "asset", type: "address" }
+            - { name: "amount", type: "uint256" }
+            - { name: "interestRateMode", type: "uint256" }
+            - { name: "referralCode", type: "uint16" }
+            - { name: "onBehalfOf", type: "address" }
+          outputs: []
+        args:
+          asset: { ref: "params.token.address" }
+          amount: { ref: "params.amount_atomic" }
+          interestRateMode: { cel: "params.interest_rate_mode != null ? params.interest_rate_mode : 2" }
+          referralCode: { lit: "0" }
+          onBehalfOf: { cel: "params.on_behalf_of != null ? params.on_behalf_of : ctx.wallet_address" }
+
   supply:
     description: "Supply (deposit) tokens to earn interest and optionally use as collateral."
     risk_level: 2
@@ -104,30 +151,25 @@ actions:
         description: "Token asset to supply"
       - name: amount
         type: token_amount
-        description: "Amount to supply"
+        description: "Human amount to supply"
         asset_ref: "token"
       - name: on_behalf_of
         type: address
         required: false
         description: "Credit recipient (defaults to sender)"
 
-    returns:
-      - name: tx_hash
-        type: string
-        description: "Transaction hash"
-
     requires_queries:
       - "allowance-token"
 
     hard_constraints:
-      allow_unlimited_approval: false
+      allow_unlimited_approval: { lit: false }
 
     calculated_fields:
       amount_atomic:
-        expr: "to_atomic(params.amount, params.token)"
+        expr: { cel: "to_atomic(params.amount, params.token)" }
         inputs: ["params.amount", "params.token"]
       recipient:
-        expr: "params.on_behalf_of != null ? params.on_behalf_of : ctx.wallet_address"
+        expr: { cel: "params.on_behalf_of != null ? params.on_behalf_of : ctx.wallet_address" }
         inputs: ["params.on_behalf_of", "ctx.wallet_address"]
 
     execution:
@@ -135,32 +177,41 @@ actions:
         type: composite
         steps:
           - id: approve_if_needed
-            type: evm_call
             description: "Approve pool to spend token if allowance insufficient"
-            contract: "params.token.address"
-            function: "approve"
-            abi: "(address,uint256)"
-            mapping:
-              spender: "contracts.pool"
-              amount: "calculated.amount_atomic"
-            condition: |
-              query.allowance-token.allowance_atomic < calculated.amount_atomic
+            condition: { cel: "query[\"allowance-token\"].allowance_atomic < calculated.amount_atomic" }
+            execution:
+              type: evm_call
+              to: { ref: "params.token.address" }
+              abi:
+                type: "function"
+                name: "approve"
+                inputs:
+                  - { name: "spender", type: "address" }
+                  - { name: "amount", type: "uint256" }
+                outputs: []
+              args:
+                spender: { ref: "contracts.pool" }
+                amount: { ref: "calculated.amount_atomic" }
 
           - id: supply
-            type: evm_call
             description: "Supply tokens to Aave pool"
-            contract: "pool"
-            function: "supply"
-            abi: "(address,uint256,address,uint16)"
-            mapping:
-              asset: "params.token.address"
-              amount: "calculated.amount_atomic"
-              onBehalfOf: "calculated.recipient"
-              referralCode: "0"
-
-    side_effects:
-      - "Grants token approval to Aave pool if needed"
-      - "Receives aToken (interest-bearing) in return"
+            execution:
+              type: evm_call
+              to: { ref: "contracts.pool" }
+              abi:
+                type: "function"
+                name: "supply"
+                inputs:
+                  - { name: "asset", type: "address" }
+                  - { name: "amount", type: "uint256" }
+                  - { name: "onBehalfOf", type: "address" }
+                  - { name: "referralCode", type: "uint16" }
+                outputs: []
+              args:
+                asset: { ref: "params.token.address" }
+                amount: { ref: "calculated.amount_atomic" }
+                onBehalfOf: { ref: "calculated.recipient" }
+                referralCode: { lit: "0" }
 
   withdraw:
     description: "Withdraw supplied tokens from Aave."
@@ -173,383 +224,63 @@ actions:
         description: "Token to withdraw (underlying, not aToken)"
       - name: amount
         type: token_amount
-        description: "Amount to withdraw (use 'max' for all)"
+        description: "Human amount to withdraw (use 'max' for all)"
         asset_ref: "token"
       - name: recipient
         type: address
         required: false
         description: "Recipient of withdrawn tokens (defaults to sender)"
 
-    returns:
-      - name: amount_withdrawn
-        type: uint256
-        description: "Actual amount withdrawn in atomic units"
-      - name: tx_hash
-        type: string
-
-    requires_queries:
-      - "user-position"
-
-    hard_constraints:
-      min_health_factor_after: "1.05"
-
     calculated_fields:
       amount_atomic:
-        expr: "params.amount == 'max' ? '115792089237316195423570985008687907853269984665640564039457584007913129639935' : to_atomic(params.amount, params.token)"
+        expr: { cel: "params.amount == 'max' ? MAX_UINT256 : to_atomic(params.amount, params.token)" }
         inputs: ["params.amount", "params.token"]
       recipient:
-        expr: "params.recipient != null ? params.recipient : ctx.wallet_address"
+        expr: { cel: "params.recipient != null ? params.recipient : ctx.wallet_address" }
         inputs: ["params.recipient", "ctx.wallet_address"]
 
     execution:
       "eip155:*":
         type: evm_call
-        contract: "pool"
-        function: "withdraw"
-        abi: "(address,uint256,address)"
-        mapping:
-          asset: "params.token.address"
-          amount: "calculated.amount_atomic"
-          to: "calculated.recipient"
-
-    pre_conditions:
-      - "Sufficient aToken balance"
-      - "Health factor will remain above 1.0 after withdrawal (if debt exists)"
-
-  borrow:
-    description: "Borrow tokens against supplied collateral."
-    risk_level: 4
-    risk_tags: ["custody", "oracle_dependency", "irreversible"]
-
-    params:
-      - name: token
-        type: asset
-        description: "Token to borrow"
-      - name: amount
-        type: token_amount
-        description: "Amount to borrow"
-        asset_ref: "token"
-      - name: rate_mode
-        type: uint8
-        default: 2
-        description: "Interest rate mode: 1 = stable, 2 = variable"
-        constraints:
-          enum: [1, 2]
-
-    returns:
-      - name: tx_hash
-        type: string
-
-    requires_queries:
-      - "user-position"
-      - "reserve-data"
-
-    hard_constraints:
-      min_health_factor_after: "1.1"
-
-    calculated_fields:
-      amount_atomic:
-        expr: "to_atomic(params.amount, params.token)"
-        inputs: ["params.amount", "params.token"]
-      projected_health_factor:
-        expr: "query.user-position.health_factor_after_borrow"
-        inputs: ["query.user-position.health_factor_after_borrow"]
-
-    execution:
-      "eip155:*":
-        type: evm_call
-        contract: "pool"
-        function: "borrow"
-        abi: "(address,uint256,uint256,uint16,address)"
-        mapping:
-          asset: "params.token.address"
-          amount: "calculated.amount_atomic"
-          interestRateMode: "params.rate_mode"
-          referralCode: "0"
-          onBehalfOf: "ctx.wallet_address"
-
-    pre_conditions:
-      - "Sufficient collateral deposited"
-      - "Health factor will remain above 1.0 after borrow"
-    side_effects:
-      - "Creates a debt position"
-      - "Reduces health factor"
-
-  repay:
-    description: "Repay borrowed tokens to reduce debt position."
-    risk_level: 2
-    risk_tags: ["approval"]
-
-    params:
-      - name: token
-        type: asset
-        description: "Token to repay"
-      - name: amount
-        type: token_amount
-        description: "Amount to repay (use 'max' for full repay)"
-        asset_ref: "token"
-      - name: rate_mode
-        type: uint8
-        default: 2
-        description: "Interest rate mode of debt to repay: 1 = stable, 2 = variable"
-        constraints:
-          enum: [1, 2]
-
-    returns:
-      - name: tx_hash
-        type: string
-
-    requires_queries:
-      - "allowance-token"
-      - "user-debt"
-
-    hard_constraints:
-      allow_unlimited_approval: false
-
-    calculated_fields:
-      amount_atomic:
-        expr: "params.amount == 'max' ? '115792089237316195423570985008687907853269984665640564039457584007913129639935' : to_atomic(params.amount, params.token)"
-        inputs: ["params.amount", "params.token"]
-      approval_amount:
-        expr: "params.amount == 'max' ? query.user-debt.debt_atomic : calculated.amount_atomic"
-        inputs: ["params.amount", "query.user-debt.debt_atomic", "calculated.amount_atomic"]
-
-    execution:
-      "eip155:*":
-        type: composite
-        steps:
-          - id: approve_if_needed
-            type: evm_call
-            description: "Approve pool to spend token if allowance insufficient"
-            contract: "params.token.address"
-            function: "approve"
-            abi: "(address,uint256)"
-            mapping:
-              spender: "contracts.pool"
-              amount: "calculated.approval_amount"
-            condition: |
-              query.allowance-token.allowance_atomic < calculated.approval_amount
-
-          - id: repay
-            type: evm_call
-            description: "Repay debt to Aave pool"
-            contract: "pool"
-            function: "repay"
-            abi: "(address,uint256,uint256,address)"
-            mapping:
-              asset: "params.token.address"
-              amount: "calculated.amount_atomic"
-              interestRateMode: "params.rate_mode"
-              onBehalfOf: "ctx.wallet_address"
-
-    side_effects:
-      - "Grants token approval to Aave pool if needed"
-      - "Reduces debt position"
-      - "Improves health factor"
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# QUERIES
-# ═══════════════════════════════════════════════════════════════════════════════
+        to: { ref: "contracts.pool" }
+        abi:
+          type: "function"
+          name: "withdraw"
+          inputs:
+            - { name: "asset", type: "address" }
+            - { name: "amount", type: "uint256" }
+            - { name: "to", type: "address" }
+          outputs: []
+        args:
+          asset: { ref: "params.token.address" }
+          amount: { ref: "calculated.amount_atomic" }
+          to: { ref: "calculated.recipient" }
 
 queries:
-  user-position:
-    description: "Get user's account data including collateral, debt, and health factor."
-    params:
-      - name: user
-        type: address
-        required: false
-        description: "User address (defaults to sender)"
-
-    returns:
-      - name: total_collateral_base
-        type: uint256
-        description: "Total collateral in base currency (8 decimals)"
-      - name: total_debt_base
-        type: uint256
-        description: "Total debt in base currency (8 decimals)"
-      - name: available_borrow_base
-        type: uint256
-        description: "Available to borrow in base currency"
-      - name: current_liquidation_threshold
-        type: uint256
-        description: "Liquidation threshold in basis points"
-      - name: ltv
-        type: uint256
-        description: "Loan to value in basis points"
-      - name: health_factor
-        type: uint256
-        description: "Health factor (18 decimals). Below 1e18 = liquidatable"
-
-    cache_ttl: 30
-    consistency:
-      block_tag: "latest"
-      require_same_block: false
-
-    execution:
-      "eip155:*":
-        type: evm_read
-        contract: "pool"
-        function: "getUserAccountData"
-        abi: "(address)"
-        mapping:
-          user: "params.user != null ? params.user : ctx.wallet_address"
-
-  reserve-data:
-    description: "Get reserve data including supply/borrow APY for a token."
-    params:
-      - name: token
-        type: asset
-        description: "Token to query"
-
-    returns:
-      - name: unbacked
-        type: uint256
-      - name: accrued_to_treasury_scaled
-        type: uint256
-      - name: total_atoken
-        type: uint256
-        description: "Total supplied (in atomic units)"
-      - name: total_stable_debt
-        type: uint256
-      - name: total_variable_debt
-        type: uint256
-      - name: liquidity_rate
-        type: uint256
-        description: "Supply APY (27 decimals, RAY)"
-      - name: variable_borrow_rate
-        type: uint256
-        description: "Variable borrow APY (27 decimals, RAY)"
-      - name: stable_borrow_rate
-        type: uint256
-        description: "Stable borrow APY (27 decimals, RAY)"
-      - name: liquidity_index
-        type: uint256
-      - name: variable_borrow_index
-        type: uint256
-
-    cache_ttl: 60
-    consistency:
-      block_tag: "latest"
-      require_same_block: false
-
-    execution:
-      "eip155:*":
-        type: evm_read
-        contract: "data_provider"
-        function: "getReserveData"
-        abi: "(address)"
-        mapping:
-          asset: "params.token.address"
-
   allowance-token:
-    description: "Read token allowance for Aave pool."
+    description: "Read token allowance for Aave pool"
     params:
       - name: token
         type: asset
-        description: "Token to check allowance"
+        description: "Token asset"
 
     returns:
       - name: allowance_atomic
         type: uint256
-        description: "Allowance in atomic units"
 
     cache_ttl: 10
     execution:
       "eip155:*":
         type: evm_read
-        contract: "params.token.address"
-        function: "allowance"
-        abi: "(address,address)"
-        mapping:
-          owner: "ctx.wallet_address"
-          spender: "contracts.pool"
-
-  user-debt:
-    description: "Get user's debt for a specific token."
-    params:
-      - name: token
-        type: asset
-        description: "Token to query debt for"
-      - name: user
-        type: address
-        required: false
-        description: "User address (defaults to sender)"
-
-    returns:
-      - name: debt_atomic
-        type: uint256
-        description: "Current debt in atomic units (variable + stable)"
-
-    cache_ttl: 30
-    consistency:
-      block_tag: "latest"
-      require_same_block: false
-
-    execution:
-      "eip155:*":
-        type: evm_read
-        contract: "data_provider"
-        function: "getUserReserveData"
-        abi: "(address,address)"
-        mapping:
-          asset: "params.token.address"
-          user: "params.user != null ? params.user : ctx.wallet_address"
-
-  balance-atoken:
-    description: "Get user's aToken balance (supplied amount + accrued interest)."
-    params:
-      - name: token
-        type: asset
-        description: "Underlying token (not aToken address)"
-      - name: user
-        type: address
-        required: false
-        description: "User address (defaults to sender)"
-
-    returns:
-      - name: balance_atomic
-        type: uint256
-        description: "aToken balance in atomic units"
-
-    cache_ttl: 30
-    execution:
-      "eip155:*":
-        type: evm_read
-        contract: "data_provider"
-        function: "getUserReserveData"
-        abi: "(address,address)"
-        mapping:
-          asset: "params.token.address"
-          user: "params.user != null ? params.user : ctx.wallet_address"
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# TEST VECTORS
-# ═══════════════════════════════════════════════════════════════════════════════
-
-tests:
-  - name: "supply-usdc-base"
-    action: "supply"
-    params:
-      token:
-        chain_id: "eip155:8453"
-        address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
-        decimals: 6
-      amount: "100.0"
-    expect:
-      calculated:
-        amount_atomic: "100000000"
-      execution_type: "composite"
-
-  - name: "borrow-eth-mainnet"
-    action: "borrow"
-    params:
-      token:
-        chain_id: "eip155:1"
-        address: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
-        decimals: 18
-      amount: "0.5"
-      rate_mode: 2
-    expect:
-      calculated:
-        amount_atomic: "500000000000000000"
-      execution_type: "evm_call"
+        to: { ref: "params.token.address" }
+        abi:
+          type: "function"
+          name: "allowance"
+          inputs:
+            - { name: "owner", type: "address" }
+            - { name: "spender", type: "address" }
+          outputs:
+            - { name: "allowance_atomic", type: "uint256" }
+        args:
+          owner: { ref: "ctx.wallet_address" }
+          spender: { ref: "contracts.pool" }

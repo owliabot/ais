@@ -1,0 +1,561 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ais:0.0.2:conformance",
+  "title": "AIS Conformance Vectors (ais-conformance/0.0.2)",
+  "$ref": "#/$defs/Root_1",
+  "$defs": {
+    "extensions_10": {
+      "type": "object",
+      "additionalProperties": {}
+    },
+    "input_8": {
+      "type": "object",
+      "properties": {
+        "value": {},
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "additionalProperties": false
+    },
+    "expect_12": {
+      "type": "object",
+      "properties": {
+        "canonical": {
+          "type": "string"
+        },
+        "specHashKeccak256": {
+          "type": "string"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "canonical",
+        "specHashKeccak256"
+      ],
+      "additionalProperties": false
+    },
+    "Union5_0_5": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "const": "jcs_canonicalize"
+        },
+        "input": {
+          "$ref": "#/$defs/input_8"
+        },
+        "expect": {
+          "$ref": "#/$defs/expect_12"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "input",
+        "expect"
+      ],
+      "additionalProperties": false
+    },
+    "context_20": {
+      "type": "object",
+      "additionalProperties": {}
+    },
+    "input_18": {
+      "type": "object",
+      "properties": {
+        "expression": {
+          "type": "string"
+        },
+        "context": {
+          "$ref": "#/$defs/context_20"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "expression"
+      ],
+      "additionalProperties": false
+    },
+    "expect_22": {
+      "type": "object",
+      "properties": {
+        "value_bigint": {
+          "type": "string"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "value_bigint"
+      ],
+      "additionalProperties": false
+    },
+    "Union15_1_15": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "const": "cel_eval"
+        },
+        "input": {
+          "$ref": "#/$defs/input_18"
+        },
+        "expect": {
+          "$ref": "#/$defs/expect_22"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "input",
+        "expect"
+      ],
+      "additionalProperties": false
+    },
+    "context_29": {
+      "type": "object",
+      "additionalProperties": {}
+    },
+    "input_27": {
+      "type": "object",
+      "properties": {
+        "expression": {
+          "type": "string"
+        },
+        "context": {
+          "$ref": "#/$defs/context_29"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "expression"
+      ],
+      "additionalProperties": false
+    },
+    "expect_31": {
+      "type": "object",
+      "properties": {
+        "value_string": {
+          "type": "string"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "value_string"
+      ],
+      "additionalProperties": false
+    },
+    "Union24_2_24": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "const": "cel_eval_string"
+        },
+        "input": {
+          "$ref": "#/$defs/input_27"
+        },
+        "expect": {
+          "$ref": "#/$defs/expect_31"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "input",
+        "expect"
+      ],
+      "additionalProperties": false
+    },
+    "context_38": {
+      "type": "object",
+      "additionalProperties": {}
+    },
+    "input_36": {
+      "type": "object",
+      "properties": {
+        "expression": {
+          "type": "string"
+        },
+        "context": {
+          "$ref": "#/$defs/context_38"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "expression"
+      ],
+      "additionalProperties": false
+    },
+    "expect_40": {
+      "type": "object",
+      "properties": {
+        "message_includes": {
+          "type": "string"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Union33_3_33": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "const": "cel_eval_error"
+        },
+        "input": {
+          "$ref": "#/$defs/input_36"
+        },
+        "expect": {
+          "$ref": "#/$defs/expect_40"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "input",
+        "expect"
+      ],
+      "additionalProperties": false
+    },
+    "args_47": {
+      "type": "object",
+      "additionalProperties": {}
+    },
+    "input_45": {
+      "type": "object",
+      "properties": {
+        "abi": {},
+        "args": {
+          "$ref": "#/$defs/args_47"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "abi",
+        "args"
+      ],
+      "additionalProperties": false
+    },
+    "expect_49": {
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "string"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "Union42_4_42": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "const": "evm_json_abi_encode"
+        },
+        "input": {
+          "$ref": "#/$defs/input_45"
+        },
+        "expect": {
+          "$ref": "#/$defs/expect_49"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "input",
+        "expect"
+      ],
+      "additionalProperties": false
+    },
+    "execution_56": {
+      "type": "object",
+      "additionalProperties": {}
+    },
+    "input_54": {
+      "type": "object",
+      "properties": {
+        "chain": {
+          "type": "string"
+        },
+        "execution": {
+          "$ref": "#/$defs/execution_56"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "chain",
+        "execution"
+      ],
+      "additionalProperties": false
+    },
+    "expect_58": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "additionalProperties": false
+    },
+    "Union51_5_51": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "const": "select_execution_spec"
+        },
+        "input": {
+          "$ref": "#/$defs/input_54"
+        },
+        "expect": {
+          "$ref": "#/$defs/expect_58"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "input",
+        "expect"
+      ],
+      "additionalProperties": false
+    },
+    "execution_65": {
+      "type": "object",
+      "additionalProperties": {}
+    },
+    "input_63": {
+      "type": "object",
+      "properties": {
+        "chain": {
+          "type": "string"
+        },
+        "execution": {
+          "$ref": "#/$defs/execution_65"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "chain",
+        "execution"
+      ],
+      "additionalProperties": false
+    },
+    "expect_67": {
+      "type": "object",
+      "properties": {
+        "message_includes": {
+          "type": "string"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Union60_6_60": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "const": "select_execution_spec_error"
+        },
+        "input": {
+          "$ref": "#/$defs/input_63"
+        },
+        "expect": {
+          "$ref": "#/$defs/expect_67"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "input",
+        "expect"
+      ],
+      "additionalProperties": false
+    },
+    "input_72": {
+      "type": "object",
+      "properties": {
+        "protocols_yaml": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "workflow_yaml": {
+          "type": "string"
+        },
+        "golden_file": {
+          "type": "string"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "protocols_yaml",
+        "workflow_yaml",
+        "golden_file"
+      ],
+      "additionalProperties": false
+    },
+    "expect_77": {
+      "type": "object",
+      "properties": {
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Union69_7_69": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "const": "workflow_plan"
+        },
+        "input": {
+          "$ref": "#/$defs/input_72"
+        },
+        "expect": {
+          "$ref": "#/$defs/expect_77"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "input"
+      ],
+      "additionalProperties": false
+    },
+    "Def_4": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Union5_0_5"
+        },
+        {
+          "$ref": "#/$defs/Union15_1_15"
+        },
+        {
+          "$ref": "#/$defs/Union24_2_24"
+        },
+        {
+          "$ref": "#/$defs/Union33_3_33"
+        },
+        {
+          "$ref": "#/$defs/Union42_4_42"
+        },
+        {
+          "$ref": "#/$defs/Union51_5_51"
+        },
+        {
+          "$ref": "#/$defs/Union60_6_60"
+        },
+        {
+          "$ref": "#/$defs/Union69_7_69"
+        }
+      ]
+    },
+    "Root_1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "ais-conformance/0.0.2"
+        },
+        "cases": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Def_4"
+          }
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "schema",
+        "cases"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

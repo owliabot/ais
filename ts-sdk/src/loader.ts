@@ -3,10 +3,11 @@
  */
 import { readFile, readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { parseAIS, parseProtocolSpec, parsePack, parseWorkflow } from './parser.js';
+import { AISParseError, parseAIS, parseProtocolSpec, parsePack, parseWorkflow } from './parser.js';
 import { createContext, registerProtocol } from './resolver/index.js';
 import type { ResolverContext } from './resolver/index.js';
 import type { AnyAISDocument, ProtocolSpec, Pack, Workflow } from './schema/index.js';
+import type { ExecutionTypeRegistry } from './plugins/index.js';
 
 export interface LoadResult<T> {
   path: string;
@@ -16,6 +17,11 @@ export interface LoadResult<T> {
 export interface LoadError {
   path: string;
   error: string;
+  kind?: 'yaml' | 'schema' | 'plugin_unknown_execution' | 'plugin_schema' | 'unknown';
+  issues?: Array<{ path: string; message: string }>;
+  execution_type?: string;
+  field_path?: string;
+  details?: unknown;
 }
 
 export interface DirectoryLoadResult {
@@ -62,15 +68,15 @@ export async function loadWorkflow(filePath: string): Promise<Workflow> {
  */
 function getExpectedTypeFromFilename(
   filename: string
-): 'ais/1.0' | 'ais-pack/1.0' | 'ais-flow/1.0' | null {
+): 'ais/0.0.2' | 'ais-pack/0.0.2' | 'ais-flow/0.0.2' | null {
   if (filename.endsWith('.ais-pack.yaml') || filename.endsWith('.ais-pack.yml')) {
-    return 'ais-pack/1.0';
+    return 'ais-pack/0.0.2';
   }
   if (filename.endsWith('.ais-flow.yaml') || filename.endsWith('.ais-flow.yml')) {
-    return 'ais-flow/1.0';
+    return 'ais-flow/0.0.2';
   }
   if (filename.endsWith('.ais.yaml') || filename.endsWith('.ais.yml')) {
-    return 'ais/1.0';
+    return 'ais/0.0.2';
   }
   return null;
 }
@@ -87,7 +93,15 @@ function isAISFile(filename: string): boolean {
  */
 export async function loadDirectory(
   dirPath: string,
-  options: { recursive?: boolean } = {}
+  options: {
+    recursive?: boolean;
+    execution_registry?: ExecutionTypeRegistry;
+    /**
+     * Optional ignore predicate. When it returns true, the file/dir is skipped.
+     * Useful for excluding build artifacts, vendor folders, etc.
+     */
+    ignore?: (fullPath: string) => boolean;
+  } = {}
 ): Promise<DirectoryLoadResult> {
   const { recursive = true } = options;
   const result: DirectoryLoadResult = {
@@ -102,6 +116,7 @@ export async function loadDirectory(
 
     for (const entry of entries) {
       const fullPath = join(currentPath, entry);
+      if (options.ignore?.(fullPath)) continue;
       const stats = await stat(fullPath);
 
       if (stats.isDirectory()) {
@@ -117,24 +132,21 @@ export async function loadDirectory(
 
       try {
         const content = await readFile(fullPath, 'utf-8');
-        const doc = parseAIS(content, { source: fullPath });
+        const doc = parseAIS(content, { source: fullPath, execution_registry: options.execution_registry });
 
         switch (doc.schema) {
-          case 'ais/1.0':
+          case 'ais/0.0.2':
             result.protocols.push({ path: fullPath, document: doc });
             break;
-          case 'ais-pack/1.0':
+          case 'ais-pack/0.0.2':
             result.packs.push({ path: fullPath, document: doc });
             break;
-          case 'ais-flow/1.0':
+          case 'ais-flow/0.0.2':
             result.workflows.push({ path: fullPath, document: doc });
             break;
         }
       } catch (err) {
-        result.errors.push({
-          path: fullPath,
-          error: err instanceof Error ? err.message : String(err),
-        });
+        result.errors.push(toLoadError(fullPath, err));
       }
     }
   }
@@ -148,7 +160,11 @@ export async function loadDirectory(
  */
 export async function loadDirectoryAsContext(
   dirPath: string,
-  options: { recursive?: boolean } = {}
+  options: {
+    recursive?: boolean;
+    execution_registry?: ExecutionTypeRegistry;
+    ignore?: (fullPath: string) => boolean;
+  } = {}
 ): Promise<{ context: ResolverContext; result: DirectoryLoadResult }> {
   const result = await loadDirectory(dirPath, options);
   const context = createContext();
@@ -158,4 +174,33 @@ export async function loadDirectoryAsContext(
   }
 
   return { context, result };
+}
+
+function toLoadError(path: string, err: unknown): LoadError {
+  if (err instanceof AISParseError) {
+    const details = err.details;
+
+    // Zod issues array
+    if (Array.isArray(details) && details.every((d) => d && typeof d === 'object' && 'path' in d && 'message' in d)) {
+      const issues = (details as any[]).map((i) => ({
+        path: Array.isArray(i.path) ? i.path.join('.') : String(i.path),
+        message: String(i.message),
+      }));
+      return { path, error: err.message, kind: err.message.includes('Invalid YAML') ? 'yaml' : 'schema', issues, details };
+    }
+
+    // Plugin errors from execution type validation
+    if (details && typeof details === 'object' && 'type' in details) {
+      const d = details as any;
+      const type = typeof d.type === 'string' ? d.type : undefined;
+      const fieldPath = typeof d.path === 'string' ? d.path : undefined;
+      const kind =
+        err.message.includes('Unknown execution type') ? 'plugin_unknown_execution' : 'plugin_schema';
+      return { path, error: err.message, kind, execution_type: type, field_path: fieldPath, details };
+    }
+
+    return { path, error: err.message, kind: err.message.includes('Invalid YAML') ? 'yaml' : 'unknown', details };
+  }
+
+  return { path, error: err instanceof Error ? err.message : String(err), kind: 'unknown' };
 }

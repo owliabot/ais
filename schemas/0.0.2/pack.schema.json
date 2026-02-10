@@ -1,0 +1,470 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ais:0.0.2:pack",
+  "title": "AIS Pack (ais-pack/0.0.2)",
+  "$ref": "#/$defs/Root_1",
+  "$defs": {
+    "extensions_10": {
+      "type": "object",
+      "additionalProperties": {}
+    },
+    "meta_6": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+$"
+        },
+        "description": {
+          "type": "string"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "additionalProperties": false
+    },
+    "Def_13": {
+      "type": "object",
+      "properties": {
+        "protocol": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "registry",
+            "local",
+            "uri"
+          ]
+        },
+        "uri": {
+          "type": "string"
+        },
+        "chain_scope": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^(eip155|solana|cosmos|bip122|aptos|sui):[a-zA-Z0-9._-]+$"
+          }
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "protocol",
+        "version"
+      ],
+      "additionalProperties": false
+    },
+    "approvals_21": {
+      "type": "object",
+      "properties": {
+        "auto_execute_max_risk_level": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "require_approval_min_risk_level": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "additionalProperties": false
+    },
+    "hard_constraints_defaults_24": {
+      "type": "object",
+      "properties": {
+        "max_spend": {
+          "type": "string"
+        },
+        "max_approval": {
+          "type": "string"
+        },
+        "max_slippage_bps": {
+          "type": "integer"
+        },
+        "allow_unlimited_approval": {
+          "type": "boolean"
+        },
+        "max_approval_multiplier": {
+          "type": "number"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "additionalProperties": false
+    },
+    "policy_20": {
+      "type": "object",
+      "properties": {
+        "approvals": {
+          "$ref": "#/$defs/approvals_21"
+        },
+        "hard_constraints_defaults": {
+          "$ref": "#/$defs/hard_constraints_defaults_24"
+        },
+        "risk_threshold": {
+          "type": "integer"
+        },
+        "approval_required": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "hard_constraints": {
+          "$ref": "#/$defs/hard_constraints_defaults_24"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "additionalProperties": false
+    },
+    "resolution_34": {
+      "type": "object",
+      "properties": {
+        "allow_symbol_input": {
+          "type": "boolean"
+        },
+        "require_user_confirm_asset_address": {
+          "type": "boolean"
+        },
+        "require_allowlist_for_symbol_resolution": {
+          "type": "boolean"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Def_39": {
+      "type": "object",
+      "properties": {
+        "chain": {
+          "type": "string",
+          "pattern": "^(eip155|solana|cosmos|bip122|aptos|sui):[a-zA-Z0-9._-]+$"
+        },
+        "symbol": {
+          "type": "string"
+        },
+        "address": {
+          "type": "string"
+        },
+        "decimals": {
+          "type": "integer"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "chain",
+        "symbol",
+        "address"
+      ],
+      "additionalProperties": false
+    },
+    "token_policy_33": {
+      "type": "object",
+      "properties": {
+        "resolution": {
+          "$ref": "#/$defs/resolution_34"
+        },
+        "allowlist": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Def_39"
+          }
+        },
+        "strict": {
+          "type": "boolean"
+        },
+        "permissive": {
+          "type": "boolean"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Def_51": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string"
+        },
+        "chains": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^(eip155|solana|cosmos|bip122|aptos|sui):[a-zA-Z0-9._-]+$"
+          }
+        },
+        "priority": {
+          "type": "integer"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "provider"
+      ],
+      "additionalProperties": false
+    },
+    "quote_49": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Def_51"
+          }
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Def_58": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "choose_one",
+            "best_quote",
+            "best_path",
+            "protocol_specific"
+          ]
+        },
+        "provider": {
+          "type": "string"
+        },
+        "chains": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^(eip155|solana|cosmos|bip122|aptos|sui):[a-zA-Z0-9._-]+$"
+          }
+        },
+        "candidates": {
+          "type": "array",
+          "items": {}
+        },
+        "rule": {
+          "type": "string"
+        },
+        "priority": {
+          "type": "integer"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "kind",
+        "provider"
+      ],
+      "additionalProperties": false
+    },
+    "detect_56": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Def_58"
+          }
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "additionalProperties": false
+    },
+    "providers_48": {
+      "type": "object",
+      "properties": {
+        "quote": {
+          "$ref": "#/$defs/quote_49"
+        },
+        "detect": {
+          "$ref": "#/$defs/detect_56"
+        },
+        "routing": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Def_72": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "chains": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^(eip155|solana|cosmos|bip122|aptos|sui):[a-zA-Z0-9._-]+$"
+          }
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "additionalProperties": false
+    },
+    "execution_70": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Def_72"
+          }
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "additionalProperties": false
+    },
+    "plugins_69": {
+      "type": "object",
+      "properties": {
+        "execution": {
+          "$ref": "#/$defs/execution_70"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Def_78": {
+      "type": "object",
+      "properties": {
+        "risk_tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "hard_constraints": {
+          "$ref": "#/$defs/hard_constraints_defaults_24"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "additionalProperties": false
+    },
+    "actions_77": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/Def_78"
+      }
+    },
+    "overrides_76": {
+      "type": "object",
+      "properties": {
+        "actions": {
+          "$ref": "#/$defs/actions_77"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Root_1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "ais-pack/0.0.2"
+        },
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "meta": {
+          "$ref": "#/$defs/meta_6"
+        },
+        "includes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Def_13"
+          }
+        },
+        "policy": {
+          "$ref": "#/$defs/policy_20"
+        },
+        "token_policy": {
+          "$ref": "#/$defs/token_policy_33"
+        },
+        "providers": {
+          "$ref": "#/$defs/providers_48"
+        },
+        "plugins": {
+          "$ref": "#/$defs/plugins_69"
+        },
+        "overrides": {
+          "$ref": "#/$defs/overrides_76"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "schema",
+        "includes"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

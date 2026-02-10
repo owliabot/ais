@@ -1,252 +1,147 @@
 /**
- * Tests for Solana execution module
+ * Tests for Solana execution compilation (AIS 0.0.2)
  */
 
 import { describe, it, expect } from 'vitest';
 import {
-  base58Encode,
-  base58Decode,
-  isValidBase58,
-  isValidPublicKey,
-  publicKeyFromBase58,
-  publicKeyFromBytes,
-  toPublicKey,
-  sha256Sync,
-  findProgramAddressSync,
-  getAssociatedTokenAddressSync,
-  BorshWriter,
-  BorshReader,
-  serializeSplTransfer,
-  serializeSplTransferChecked,
-  buildSplTransfer,
+  compileSolanaInstruction,
+  createDefaultSolanaInstructionCompilerRegistry,
+  type SolanaInstructionCompilerRegistry,
   TOKEN_PROGRAM_ID,
   ASSOCIATED_TOKEN_PROGRAM_ID,
-  SYSTEM_PROGRAM_ID,
+  SystemProgram,
+  PublicKey,
+  TransactionInstruction,
 } from '../src/execution/solana/index.js';
+import { createContext } from '../src/resolver/context.js';
 
-describe('Base58', () => {
-  it('should encode bytes to base58', () => {
-    const bytes = new Uint8Array([0, 0, 0, 1]);
-    const encoded = base58Encode(bytes);
-    expect(encoded).toBe('1112');
-  });
+describe('compileSolanaInstruction', () => {
+  it('compiles SPL Token transfer', () => {
+    const ctx = createContext();
+    ctx.runtime.ctx.wallet_address = 'BPFLoaderUpgradeab1e11111111111111111111111';
+    ctx.runtime.calculated.sender_ata = 'DYw8jCTfwHNRJhhmFcbXvVDTqWMEVFBX6ZKUmG5CNSKK';
+    ctx.runtime.calculated.recipient_ata = '9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM';
+    ctx.runtime.calculated.amount_atomic = '1000000';
+    ctx.runtime.contracts.token_program = TOKEN_PROGRAM_ID.toBase58();
 
-  it('should decode base58 to bytes', () => {
-    const decoded = base58Decode('1112');
-    expect(decoded).toEqual(new Uint8Array([0, 0, 0, 1]));
-  });
-
-  it('should roundtrip encode/decode', () => {
-    const original = new Uint8Array(32).fill(42);
-    const encoded = base58Encode(original);
-    const decoded = base58Decode(encoded);
-    expect(decoded).toEqual(original);
-  });
-
-  it('should validate base58 strings', () => {
-    expect(isValidBase58('123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz')).toBe(true);
-    expect(isValidBase58('0OIl')).toBe(false); // Invalid chars
-    expect(isValidBase58('')).toBe(false);
-  });
-
-  it('should validate public keys', () => {
-    expect(isValidPublicKey(TOKEN_PROGRAM_ID)).toBe(true);
-    expect(isValidPublicKey('invalid')).toBe(false);
-    expect(isValidPublicKey(SYSTEM_PROGRAM_ID)).toBe(true);
-  });
-});
-
-describe('PublicKey', () => {
-  it('should create from base58', () => {
-    const pk = publicKeyFromBase58(TOKEN_PROGRAM_ID);
-    expect(pk.base58).toBe(TOKEN_PROGRAM_ID);
-    expect(pk.bytes.length).toBe(32);
-  });
-
-  it('should create from bytes', () => {
-    const bytes = new Uint8Array(32).fill(1);
-    const pk = publicKeyFromBytes(bytes);
-    expect(pk.bytes).toEqual(bytes);
-    expect(pk.base58.length).toBeGreaterThan(0);
-  });
-
-  it('should convert using toPublicKey', () => {
-    // From string
-    const pk1 = toPublicKey(TOKEN_PROGRAM_ID);
-    expect(pk1.base58).toBe(TOKEN_PROGRAM_ID);
-
-    // From bytes
-    const bytes = new Uint8Array(32).fill(2);
-    const pk2 = toPublicKey(bytes);
-    expect(pk2.bytes).toEqual(bytes);
-
-    // From PublicKey
-    const pk3 = toPublicKey(pk1);
-    expect(pk3.base58).toBe(pk1.base58);
-  });
-
-  it('should throw on invalid public key', () => {
-    expect(() => publicKeyFromBase58('invalid')).toThrow();
-    expect(() => publicKeyFromBytes(new Uint8Array(31))).toThrow();
-  });
-});
-
-describe('SHA-256', () => {
-  it('should hash empty input', () => {
-    const hash = sha256Sync(new Uint8Array(0));
-    // SHA-256 of empty string
-    expect(hash.length).toBe(32);
-  });
-
-  it('should hash known input', () => {
-    const input = new TextEncoder().encode('hello');
-    const hash = sha256Sync(input);
-    expect(hash.length).toBe(32);
-    // First few bytes of SHA-256("hello")
-    expect(hash[0]).toBe(0x2c);
-    expect(hash[1]).toBe(0xf2);
-  });
-});
-
-describe('PDA Derivation', () => {
-  it('should find program address', () => {
-    const [pda, bump] = findProgramAddressSync(
-      ['test'],
-      TOKEN_PROGRAM_ID
+    const compiled = compileSolanaInstruction(
+      {
+        type: 'solana_instruction',
+        program: { ref: 'contracts.token_program' },
+        instruction: 'transfer',
+        discriminator: { lit: '0x03' },
+        accounts: [
+          { name: 'source', pubkey: { ref: 'calculated.sender_ata' }, signer: { lit: false }, writable: { lit: true } },
+          {
+            name: 'destination',
+            pubkey: { ref: 'calculated.recipient_ata' },
+            signer: { lit: false },
+            writable: { lit: true },
+          },
+          { name: 'authority', pubkey: { ref: 'ctx.wallet_address' }, signer: { lit: true }, writable: { lit: false } },
+        ],
+        data: { object: { amount: { ref: 'calculated.amount_atomic' } } },
+        compute_units: { lit: '10000' },
+      },
+      ctx,
+      { chain: 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp' }
     );
-    expect(pda.bytes.length).toBe(32);
-    expect(bump).toBeGreaterThanOrEqual(0);
-    expect(bump).toBeLessThanOrEqual(255);
+
+    expect(compiled.programId.toBase58()).toBe(TOKEN_PROGRAM_ID.toBase58());
+    expect(compiled.tx.programId.toBase58()).toBe(TOKEN_PROGRAM_ID.toBase58());
+    expect(compiled.tx.keys.length).toBe(3);
+    expect(compiled.tx.data[0]).toBe(3); // Transfer
+    expect(compiled.computeUnits).toBe(10000);
   });
 
-  it('should derive same address for same seeds', () => {
-    const [pda1] = findProgramAddressSync(['seed1', 'seed2'], TOKEN_PROGRAM_ID);
-    const [pda2] = findProgramAddressSync(['seed1', 'seed2'], TOKEN_PROGRAM_ID);
-    expect(pda1.base58).toBe(pda2.base58);
+  it('compiles ATA create_idempotent', () => {
+    const ctx = createContext();
+    ctx.runtime.ctx.wallet_address = 'BPFLoaderUpgradeab1e11111111111111111111111';
+    ctx.runtime.calculated.recipient_ata = '9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM';
+    ctx.runtime.params.recipient = 'DYw8jCTfwHNRJhhmFcbXvVDTqWMEVFBX6ZKUmG5CNSKK';
+    ctx.runtime.params.mint = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+    ctx.runtime.contracts.ata_program = ASSOCIATED_TOKEN_PROGRAM_ID.toBase58();
+    ctx.runtime.contracts.token_program = TOKEN_PROGRAM_ID.toBase58();
+    ctx.runtime.contracts.system_program = SystemProgram.programId.toBase58();
+
+    const compiled = compileSolanaInstruction(
+      {
+        type: 'solana_instruction',
+        program: { ref: 'contracts.ata_program' },
+        instruction: 'create_idempotent',
+        discriminator: { lit: '0x01' },
+        accounts: [
+          { name: 'payer', pubkey: { ref: 'ctx.wallet_address' }, signer: { lit: true }, writable: { lit: true } },
+          { name: 'associated_token', pubkey: { ref: 'calculated.recipient_ata' }, signer: { lit: false }, writable: { lit: true } },
+          { name: 'owner', pubkey: { ref: 'params.recipient' }, signer: { lit: false }, writable: { lit: false } },
+          { name: 'mint', pubkey: { ref: 'params.mint' }, signer: { lit: false }, writable: { lit: false } },
+          { name: 'system_program', pubkey: { ref: 'contracts.system_program' }, signer: { lit: false }, writable: { lit: false } },
+          { name: 'token_program', pubkey: { ref: 'contracts.token_program' }, signer: { lit: false }, writable: { lit: false } },
+        ],
+        data: { object: {} },
+      },
+      ctx,
+      { chain: 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp' }
+    );
+
+    expect(compiled.programId.toBase58()).toBe(ASSOCIATED_TOKEN_PROGRAM_ID.toBase58());
+    expect(compiled.tx.programId.toBase58()).toBe(ASSOCIATED_TOKEN_PROGRAM_ID.toBase58());
+    expect(compiled.tx.data[0]).toBe(1); // CreateIdempotent
+    expect(compiled.tx.keys.length).toBe(6);
+    // includes SystemProgram + token program from SPL helper
+    expect(compiled.tx.keys[4]!.pubkey.toBase58()).toBe(SystemProgram.programId.toBase58());
+    expect(compiled.tx.keys[5]!.pubkey.toBase58()).toBe(TOKEN_PROGRAM_ID.toBase58());
   });
 
-  it('should derive different address for different seeds', () => {
-    const [pda1] = findProgramAddressSync(['seed1'], TOKEN_PROGRAM_ID);
-    const [pda2] = findProgramAddressSync(['seed2'], TOKEN_PROGRAM_ID);
-    expect(pda1.base58).not.toBe(pda2.base58);
+  it('falls back to generic instruction with bytes data', () => {
+    const ctx = createContext();
+    const program = new PublicKey('BPFLoaderUpgradeab1e11111111111111111111111').toBase58();
+    ctx.runtime.params.program = program;
+    ctx.runtime.params.acc = program;
+
+    const compiled = compileSolanaInstruction(
+      {
+        type: 'solana_instruction',
+        program: { ref: 'params.program' },
+        instruction: 'custom',
+        discriminator: { lit: '0x01' },
+        accounts: [{ name: 'a', pubkey: { ref: 'params.acc' }, signer: { lit: false }, writable: { lit: false } }],
+        data: { lit: '0x0203' },
+      },
+      ctx,
+      { chain: 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp' }
+    );
+
+    expect(compiled.tx.data).toEqual(Buffer.from([0x01, 0x02, 0x03]));
   });
 
-  it('should accept Uint8Array seeds', () => {
-    const seed = new Uint8Array([1, 2, 3, 4]);
-    const [pda, bump] = findProgramAddressSync([seed], TOKEN_PROGRAM_ID);
-    expect(pda.bytes.length).toBe(32);
-    expect(bump).toBeDefined();
-  });
-});
+  it('uses compiler registry by (programId, instruction)', () => {
+    const ctx = createContext();
+    const program = new PublicKey('BPFLoaderUpgradeab1e11111111111111111111111');
+    ctx.runtime.params.program = program.toBase58();
+    ctx.runtime.params.acc = program.toBase58();
 
-describe('ATA Derivation', () => {
-  const testWallet = 'DYw8jCTfwHNRJhhmFcbXvVDTqWMEVFBX6ZKUmG5CNSKK';
-  const testMint = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'; // USDC
-
-  it('should derive ATA address', () => {
-    const ata = getAssociatedTokenAddressSync(testWallet, testMint);
-    expect(ata.bytes.length).toBe(32);
-    expect(ata.base58.length).toBeGreaterThan(0);
-  });
-
-  it('should derive same ATA for same wallet/mint', () => {
-    const ata1 = getAssociatedTokenAddressSync(testWallet, testMint);
-    const ata2 = getAssociatedTokenAddressSync(testWallet, testMint);
-    expect(ata1.base58).toBe(ata2.base58);
-  });
-
-  it('should derive different ATA for different mint', () => {
-    const mint2 = 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'; // USDT
-    const ata1 = getAssociatedTokenAddressSync(testWallet, testMint);
-    const ata2 = getAssociatedTokenAddressSync(testWallet, mint2);
-    expect(ata1.base58).not.toBe(ata2.base58);
-  });
-});
-
-describe('Borsh Serialization', () => {
-  it('should write and read u8', () => {
-    const writer = new BorshWriter();
-    writer.writeU8(42);
-    const reader = new BorshReader(writer.toBytes());
-    expect(reader.readU8()).toBe(42);
-  });
-
-  it('should write and read u64', () => {
-    const writer = new BorshWriter();
-    writer.writeU64(BigInt('1000000000000'));
-    const reader = new BorshReader(writer.toBytes());
-    expect(reader.readU64()).toBe(BigInt('1000000000000'));
-  });
-
-  it('should write and read string', () => {
-    const writer = new BorshWriter();
-    writer.writeString('hello solana');
-    const reader = new BorshReader(writer.toBytes());
-    expect(reader.readString()).toBe('hello solana');
-  });
-
-  it('should write and read boolean', () => {
-    const writer = new BorshWriter();
-    writer.writeBool(true);
-    writer.writeBool(false);
-    const reader = new BorshReader(writer.toBytes());
-    expect(reader.readBool()).toBe(true);
-    expect(reader.readBool()).toBe(false);
-  });
-
-  it('should serialize SPL transfer', () => {
-    const data = serializeSplTransfer(BigInt(1000000));
-    expect(data.length).toBe(9);
-    expect(data[0]).toBe(3); // Transfer instruction
-  });
-
-  it('should serialize SPL transfer checked', () => {
-    const data = serializeSplTransferChecked(BigInt(1000000), 6);
-    expect(data.length).toBe(10);
-    expect(data[0]).toBe(12); // TransferChecked instruction
-    expect(data[9]).toBe(6);  // decimals
-  });
-});
-
-describe('SPL Token Instructions', () => {
-  const sourceAta = 'DYw8jCTfwHNRJhhmFcbXvVDTqWMEVFBX6ZKUmG5CNSKK';
-  const destAta = '9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM';
-  const owner = 'BPFLoaderUpgradeab1e11111111111111111111111';
-
-  it('should build transfer instruction', () => {
-    const ix = buildSplTransfer(sourceAta, destAta, owner, BigInt(1000000));
-    
-    expect(ix.programId.base58).toBe(TOKEN_PROGRAM_ID);
-    expect(ix.keys.length).toBe(3);
-    expect(ix.keys[0].isWritable).toBe(true);
-    expect(ix.keys[1].isWritable).toBe(true);
-    expect(ix.keys[2].isSigner).toBe(true);
-    expect(ix.data[0]).toBe(3); // Transfer instruction
-  });
-
-  it('should build transfer checked instruction', () => {
-    const mint = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
-    const ix = buildSplTransfer(sourceAta, destAta, owner, BigInt(1000000), {
-      checked: true,
-      decimals: 6,
-      mint,
+    const registry: SolanaInstructionCompilerRegistry = createDefaultSolanaInstructionCompilerRegistry();
+    registry.register(program, 'custom', ({ programId, accounts }) => {
+      return new TransactionInstruction({
+        programId,
+        keys: accounts.map((a) => ({ pubkey: a.pubkey, isSigner: a.isSigner, isWritable: a.isWritable })),
+        data: Buffer.from([0x09]),
+      });
     });
-    
-    expect(ix.programId.base58).toBe(TOKEN_PROGRAM_ID);
-    expect(ix.keys.length).toBe(4); // source, mint, dest, owner
-    expect(ix.data[0]).toBe(12); // TransferChecked instruction
-  });
-});
 
-describe('Constants', () => {
-  it('should have valid program IDs', () => {
-    expect(isValidPublicKey(TOKEN_PROGRAM_ID)).toBe(true);
-    expect(isValidPublicKey(ASSOCIATED_TOKEN_PROGRAM_ID)).toBe(true);
-    expect(isValidPublicKey(SYSTEM_PROGRAM_ID)).toBe(true);
-  });
+    const compiled = compileSolanaInstruction(
+      {
+        type: 'solana_instruction',
+        program: { ref: 'params.program' },
+        instruction: 'custom',
+        accounts: [{ name: 'a', pubkey: { ref: 'params.acc' }, signer: { lit: false }, writable: { lit: false } }],
+        data: { object: {} },
+      },
+      ctx,
+      { chain: 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp', compiler_registry: registry }
+    );
 
-  it('should have correct system program ID', () => {
-    // System program is all 1s (32 bytes of 0x01 in little-endian = "111...")
-    expect(SYSTEM_PROGRAM_ID).toBe('11111111111111111111111111111111');
+    expect(compiled.tx.data).toEqual(Buffer.from([0x09]));
   });
 });

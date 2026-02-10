@@ -22,7 +22,7 @@ AIS defines a **chain-agnostic schema** for protocol interaction specs:
 ## Quick Example
 
 ```yaml
-schema: "ais/1.0"
+schema: "ais/0.0.2"
 
 meta:
   protocol: "uniswap-v3"
@@ -76,9 +76,7 @@ actions:
 
 | Document | Description |
 |----------|-------------|
-| [AIS-1: Core Schema](./specs/ais-1-core.md) | Protocol specs, packs, workflows, type system, CEL expressions |
-| [AIS-2: Execution Types](./specs/ais-2-execution.md) | Chain-specific execution formats (EVM, Solana, Cosmos, etc.) |
-| [AIS-3: Registry](./specs/ais-3-registry.md) | On-chain registry, discovery layer, governance |
+| [AIS Spec Index (0.0.2)](./specs/index.md) | Current draft spec (split, normative; ValueRef, JSON ABI, cross-chain composite) |
 
 ## Design Principles
 

@@ -137,10 +137,10 @@ describe('validateWorkflow', () => {
     registerProtocol(
       ctx,
       parseProtocolSpec(`
-schema: "ais/1.0"
+schema: "ais/0.0.2"
 meta:
   protocol: uniswap-v3
-  version: "1.0.0"
+  version: "0.0.2"
 deployments:
   - chain: "eip155:1"
     contracts:
@@ -156,20 +156,24 @@ actions:
     execution:
       "eip155:*":
         type: evm_call
-        contract: router
-        function: exactInputSingle
-        abi: "(address)"
-        mapping:
-          tokenIn: "params.tokenIn"
+        to: { ref: "contracts.router" }
+        abi:
+          type: "function"
+          name: "exactInputSingle"
+          inputs:
+            - { name: "tokenIn", type: "address" }
+          outputs: []
+        args:
+          tokenIn: { ref: "params.tokenIn" }
 `)
     );
     registerProtocol(
       ctx,
       parseProtocolSpec(`
-schema: "ais/1.0"
+schema: "ais/0.0.2"
 meta:
   protocol: erc20
-  version: "1.0.0"
+  version: "0.0.2"
 deployments:
   - chain: "eip155:1"
     contracts: {}
@@ -178,60 +182,128 @@ actions:
     description: "Approve spender"
     risk_level: 2
     params:
+      - name: token
+        type: address
+        description: "Token address"
       - name: spender
         type: address
         description: "Spender address"
+      - name: amount
+        type: uint256
+        description: "Amount"
     execution:
       "eip155:*":
         type: evm_call
-        contract: token
-        function: approve
-        abi: "(address)"
-        mapping:
-          spender: "params.spender"
+        to: { ref: "params.token" }
+        abi:
+          type: "function"
+          name: "approve"
+          inputs:
+            - { name: "spender", type: "address" }
+            - { name: "amount", type: "uint256" }
+          outputs: []
+        args:
+          spender: { ref: "params.spender" }
+          amount: { ref: "params.amount" }
 `)
     );
   });
 
   it('validates workflow with valid references', () => {
     const workflow = parseWorkflow(`
-schema: "ais-flow/1.0"
+schema: "ais-flow/0.0.2"
 meta:
   name: test
-  version: "1.0.0"
+  version: "0.0.2"
+default_chain: "eip155:1"
 inputs:
   amount:
     type: uint256
 nodes:
   - id: approve
     type: action_ref
-    skill: "erc20@1.0.0"
+    skill: "erc20@0.0.2"
     action: approve
     args:
-      amount: "\${inputs.amount}"
+      amount: { ref: "inputs.amount" }
   - id: swap
     type: action_ref
-    skill: "uniswap-v3@1.0.0"
+    skill: "uniswap-v3@0.0.2"
     action: swap-exact-in
     args:
-      amount: "\${nodes.approve.outputs.result}"
-    requires_queries:
+      amount: { ref: "nodes.approve.outputs.result" }
+    deps:
       - approve
 `);
     const result = validateWorkflow(workflow, ctx);
     expect(result.valid).toBe(true);
   });
 
-  it('detects unknown protocol reference', () => {
+  it('accepts out-of-order nodes (execution order comes from deps/refs)', () => {
     const workflow = parseWorkflow(`
-schema: "ais-flow/1.0"
+schema: "ais-flow/0.0.2"
 meta:
   name: test
-  version: "1.0.0"
+  version: "0.0.2"
+default_chain: "eip155:1"
+inputs:
+  amount:
+    type: uint256
+nodes:
+  - id: swap
+    type: action_ref
+    skill: "uniswap-v3@0.0.2"
+    action: swap-exact-in
+    args:
+      amount: { ref: "nodes.approve.outputs.result" }
+  - id: approve
+    type: action_ref
+    skill: "erc20@0.0.2"
+    action: approve
+    args:
+      amount: { ref: "inputs.amount" }
+`);
+    const result = validateWorkflow(workflow, ctx);
+    expect(result.valid).toBe(true);
+  });
+
+  it('detects dependency cycles', () => {
+    const workflow = parseWorkflow(`
+schema: "ais-flow/0.0.2"
+meta:
+  name: test
+  version: "0.0.2"
+default_chain: "eip155:1"
+nodes:
+  - id: a
+    type: action_ref
+    skill: "erc20@0.0.2"
+    action: approve
+    args: {}
+    deps: ["b"]
+  - id: b
+    type: action_ref
+    skill: "erc20@0.0.2"
+    action: approve
+    args: {}
+    deps: ["a"]
+`);
+    const result = validateWorkflow(workflow, ctx);
+    expect(result.valid).toBe(false);
+    expect(result.issues.some((i) => i.field === 'deps' && i.message.includes('cycle'))).toBe(true);
+  });
+
+  it('detects unknown protocol reference', () => {
+    const workflow = parseWorkflow(`
+schema: "ais-flow/0.0.2"
+meta:
+  name: test
+  version: "0.0.2"
+default_chain: "eip155:1"
 nodes:
   - id: step1
     type: action_ref
-    skill: "unknown-protocol@1.0.0"
+    skill: "unknown-protocol@0.0.2"
     action: unknown-action
     args: {}
 `);
@@ -242,14 +314,15 @@ nodes:
 
   it('detects unknown action reference', () => {
     const workflow = parseWorkflow(`
-schema: "ais-flow/1.0"
+schema: "ais-flow/0.0.2"
 meta:
   name: test
-  version: "1.0.0"
+  version: "0.0.2"
+default_chain: "eip155:1"
 nodes:
   - id: step1
     type: action_ref
-    skill: "uniswap-v3@1.0.0"
+    skill: "uniswap-v3@0.0.2"
     action: unknown-action
     args: {}
 `);
@@ -260,95 +333,98 @@ nodes:
 
   it('detects undeclared input reference', () => {
     const workflow = parseWorkflow(`
-schema: "ais-flow/1.0"
+schema: "ais-flow/0.0.2"
 meta:
   name: test
-  version: "1.0.0"
+  version: "0.0.2"
+default_chain: "eip155:1"
 inputs: {}
 nodes:
   - id: step1
     type: action_ref
-    skill: "erc20@1.0.0"
+    skill: "erc20@0.0.2"
     action: approve
     args:
-      amount: "\${inputs.undeclared}"
+      amount: { ref: "inputs.undeclared" }
 `);
     const result = validateWorkflow(workflow, ctx);
     expect(result.valid).toBe(false);
     expect(result.issues[0].message).toContain('undeclared');
   });
 
-  it('detects forward node reference', () => {
+  it('accepts forward node reference (execution order inferred from refs)', () => {
     const workflow = parseWorkflow(`
-schema: "ais-flow/1.0"
+schema: "ais-flow/0.0.2"
 meta:
   name: test
-  version: "1.0.0"
+  version: "0.0.2"
+default_chain: "eip155:1"
 nodes:
   - id: step1
     type: action_ref
-    skill: "erc20@1.0.0"
+    skill: "erc20@0.0.2"
     action: approve
     args:
-      value: "\${nodes.step2.outputs.result}"
+      value: { ref: "nodes.step2.outputs.result" }
   - id: step2
     type: action_ref
-    skill: "uniswap-v3@1.0.0"
+    skill: "uniswap-v3@0.0.2"
     action: swap-exact-in
     args: {}
 `);
     const result = validateWorkflow(workflow, ctx);
-    expect(result.valid).toBe(false);
-    expect(result.issues[0].message).toContain('step2');
+    expect(result.valid).toBe(true);
   });
 });
 
 describe('getWorkflowDependencies', () => {
   it('extracts all action references', () => {
     const workflow = parseWorkflow(`
-schema: "ais-flow/1.0"
+schema: "ais-flow/0.0.2"
 meta:
   name: test
-  version: "1.0.0"
+  version: "0.0.2"
+default_chain: "eip155:1"
 nodes:
   - id: s1
     type: action_ref
-    skill: "erc20@1.0.0"
+    skill: "erc20@0.0.2"
     action: approve
     args: {}
   - id: s2
     type: action_ref
-    skill: "uniswap-v3@1.0.0"
+    skill: "uniswap-v3@0.0.2"
     action: swap
     args: {}
 `);
     const deps = getWorkflowDependencies(workflow);
-    expect(deps).toContain('erc20@1.0.0/approve');
-    expect(deps).toContain('uniswap-v3@1.0.0/swap');
+    expect(deps).toContain('erc20@0.0.2/approve');
+    expect(deps).toContain('uniswap-v3@0.0.2/swap');
   });
 });
 
 describe('getWorkflowProtocols', () => {
   it('extracts unique protocols', () => {
     const workflow = parseWorkflow(`
-schema: "ais-flow/1.0"
+schema: "ais-flow/0.0.2"
 meta:
   name: test
-  version: "1.0.0"
+  version: "0.0.2"
+default_chain: "eip155:1"
 nodes:
   - id: s1
     type: action_ref
-    skill: "erc20@1.0.0"
+    skill: "erc20@0.0.2"
     action: approve
     args: {}
   - id: s2
     type: action_ref
-    skill: "uniswap-v3@1.0.0"
+    skill: "uniswap-v3@0.0.2"
     action: swap
     args: {}
   - id: s3
     type: action_ref
-    skill: "erc20@1.0.0"
+    skill: "erc20@0.0.2"
     action: transfer
     args: {}
 `);
