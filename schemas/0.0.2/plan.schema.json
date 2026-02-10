@@ -1,0 +1,838 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ais:0.0.2:plan",
+  "title": "AIS Execution Plan (ais-plan/0.0.2)",
+  "$ref": "#/$defs/Root_1",
+  "$defs": {
+    "extensions_7": {
+      "type": "object",
+      "additionalProperties": {}
+    },
+    "meta_3": {
+      "type": "object",
+      "properties": {
+        "created_at": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_7"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Union18_0_18": {
+      "type": "object",
+      "properties": {
+        "lit": {}
+      },
+      "required": [
+        "lit"
+      ],
+      "additionalProperties": false
+    },
+    "Union20_1_20": {
+      "type": "object",
+      "properties": {
+        "ref": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ref"
+      ],
+      "additionalProperties": false
+    },
+    "Union22_2_22": {
+      "type": "object",
+      "properties": {
+        "cel": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "cel"
+      ],
+      "additionalProperties": false
+    },
+    "constraints_30": {
+      "type": "object",
+      "additionalProperties": {}
+    },
+    "detect_25": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "choose_one",
+            "best_quote",
+            "best_path",
+            "protocol_specific"
+          ]
+        },
+        "provider": {
+          "type": "string"
+        },
+        "candidates": {
+          "type": "array",
+          "items": {}
+        },
+        "constraints": {
+          "$ref": "#/$defs/constraints_30"
+        },
+        "requires_capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_7"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "additionalProperties": false
+    },
+    "Union24_3_24": {
+      "type": "object",
+      "properties": {
+        "detect": {
+          "$ref": "#/$defs/detect_25"
+        }
+      },
+      "required": [
+        "detect"
+      ],
+      "additionalProperties": false
+    },
+    "object_35": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/condition_17"
+      }
+    },
+    "Union34_4_34": {
+      "type": "object",
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/object_35"
+        }
+      },
+      "required": [
+        "object"
+      ],
+      "additionalProperties": false
+    },
+    "Union36_5_36": {
+      "type": "object",
+      "properties": {
+        "array": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/condition_17"
+          }
+        }
+      },
+      "required": [
+        "array"
+      ],
+      "additionalProperties": false
+    },
+    "condition_17": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Union18_0_18"
+        },
+        {
+          "$ref": "#/$defs/Union20_1_20"
+        },
+        {
+          "$ref": "#/$defs/Union22_2_22"
+        },
+        {
+          "$ref": "#/$defs/Union24_3_24"
+        },
+        {
+          "$ref": "#/$defs/Union34_4_34"
+        },
+        {
+          "$ref": "#/$defs/Union36_5_36"
+        }
+      ]
+    },
+    "retry_38": {
+      "type": "object",
+      "properties": {
+        "interval_ms": {
+          "type": "integer",
+          "exclusiveMinimum": 0
+        },
+        "max_attempts": {
+          "type": "integer",
+          "exclusiveMinimum": 0
+        },
+        "backoff": {
+          "type": "string",
+          "enum": [
+            "fixed"
+          ]
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_7"
+        }
+      },
+      "required": [
+        "interval_ms"
+      ],
+      "additionalProperties": false
+    },
+    "params_44": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/condition_17"
+      }
+    },
+    "bindings_43": {
+      "type": "object",
+      "properties": {
+        "params": {
+          "$ref": "#/$defs/params_44"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_7"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Lazy_52": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        },
+        "components": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Lazy_52"
+          }
+        }
+      },
+      "required": [
+        "name",
+        "type"
+      ],
+      "additionalProperties": false
+    },
+    "abi_48": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "function"
+        },
+        "name": {
+          "type": "string"
+        },
+        "inputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Lazy_52"
+          }
+        },
+        "outputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Lazy_52"
+          }
+        }
+      },
+      "required": [
+        "type",
+        "name",
+        "inputs"
+      ],
+      "additionalProperties": false
+    },
+    "args_57": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/condition_17"
+      }
+    },
+    "Union46_0_46": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "evm_read"
+        },
+        "to": {
+          "$ref": "#/$defs/condition_17"
+        },
+        "abi": {
+          "$ref": "#/$defs/abi_48"
+        },
+        "args": {
+          "$ref": "#/$defs/args_57"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_7"
+        }
+      },
+      "required": [
+        "type",
+        "to",
+        "abi",
+        "args"
+      ],
+      "additionalProperties": false
+    },
+    "args_64": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/condition_17"
+      }
+    },
+    "Def_62": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "to": {
+          "$ref": "#/$defs/condition_17"
+        },
+        "abi": {
+          "$ref": "#/$defs/abi_48"
+        },
+        "args": {
+          "$ref": "#/$defs/args_64"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_7"
+        }
+      },
+      "required": [
+        "id",
+        "to",
+        "abi",
+        "args"
+      ],
+      "additionalProperties": false
+    },
+    "Union58_1_58": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "evm_multiread"
+        },
+        "method": {
+          "type": "string",
+          "enum": [
+            "multicall3",
+            "rpc_batch"
+          ]
+        },
+        "calls": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Def_62"
+          }
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_7"
+        }
+      },
+      "required": [
+        "type",
+        "method",
+        "calls"
+      ],
+      "additionalProperties": false
+    },
+    "args_67": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/condition_17"
+      }
+    },
+    "Union65_2_65": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "evm_call"
+        },
+        "to": {
+          "$ref": "#/$defs/condition_17"
+        },
+        "abi": {
+          "$ref": "#/$defs/abi_48"
+        },
+        "args": {
+          "$ref": "#/$defs/args_67"
+        },
+        "value": {
+          "$ref": "#/$defs/condition_17"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_7"
+        }
+      },
+      "required": [
+        "type",
+        "to",
+        "abi",
+        "args"
+      ],
+      "additionalProperties": false
+    },
+    "args_72": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/condition_17"
+      }
+    },
+    "Def_71": {
+      "type": "object",
+      "properties": {
+        "abi": {
+          "$ref": "#/$defs/abi_48"
+        },
+        "args": {
+          "$ref": "#/$defs/args_72"
+        },
+        "condition": {
+          "$ref": "#/$defs/condition_17"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_7"
+        }
+      },
+      "required": [
+        "abi",
+        "args"
+      ],
+      "additionalProperties": false
+    },
+    "Union68_3_68": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "evm_multicall"
+        },
+        "to": {
+          "$ref": "#/$defs/condition_17"
+        },
+        "calls": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Def_71"
+          }
+        },
+        "deadline": {
+          "$ref": "#/$defs/condition_17"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_7"
+        }
+      },
+      "required": [
+        "type",
+        "to",
+        "calls"
+      ],
+      "additionalProperties": false
+    },
+    "Lazy_76": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "description": {
+          "type": "string"
+        },
+        "condition": {
+          "$ref": "#/$defs/condition_17"
+        },
+        "chain": {
+          "type": "string",
+          "pattern": "^(eip155|solana|cosmos|bip122|aptos|sui):[a-zA-Z0-9._-]+$"
+        },
+        "execution": {
+          "$ref": "#/$defs/execution_45"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_7"
+        }
+      },
+      "required": [
+        "id",
+        "execution"
+      ],
+      "additionalProperties": false
+    },
+    "Union73_4_73": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "composite"
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Lazy_76"
+          },
+          "minItems": 1
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_7"
+        }
+      },
+      "required": [
+        "type",
+        "steps"
+      ],
+      "additionalProperties": false
+    },
+    "Def_84": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "pubkey": {
+          "$ref": "#/$defs/condition_17"
+        },
+        "signer": {
+          "$ref": "#/$defs/condition_17"
+        },
+        "writable": {
+          "$ref": "#/$defs/condition_17"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_7"
+        }
+      },
+      "required": [
+        "name",
+        "pubkey",
+        "signer",
+        "writable"
+      ],
+      "additionalProperties": false
+    },
+    "Union80_5_80": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "solana_instruction"
+        },
+        "program": {
+          "$ref": "#/$defs/condition_17"
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "discriminator": {
+          "$ref": "#/$defs/condition_17"
+        },
+        "accounts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Def_84"
+          }
+        },
+        "data": {
+          "$ref": "#/$defs/condition_17"
+        },
+        "compute_units": {
+          "$ref": "#/$defs/condition_17"
+        },
+        "lookup_tables": {
+          "$ref": "#/$defs/condition_17"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_7"
+        }
+      },
+      "required": [
+        "type",
+        "program",
+        "instruction",
+        "accounts",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "Union86_6_86": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "solana_read"
+        },
+        "method": {
+          "type": "string",
+          "minLength": 1
+        },
+        "params": {
+          "$ref": "#/$defs/condition_17"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_7"
+        }
+      },
+      "required": [
+        "type",
+        "method"
+      ],
+      "additionalProperties": false
+    },
+    "mapping_92": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/condition_17"
+      }
+    },
+    "Union89_7_89": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "bitcoin_psbt"
+        },
+        "script_type": {
+          "type": "string",
+          "enum": [
+            "p2wpkh",
+            "p2tr",
+            "p2sh",
+            "p2wsh"
+          ]
+        },
+        "mapping": {
+          "$ref": "#/$defs/mapping_92"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_7"
+        }
+      },
+      "required": [
+        "type",
+        "script_type",
+        "mapping"
+      ],
+      "additionalProperties": false
+    },
+    "Union93_8_93": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "additionalProperties": true
+    },
+    "execution_45": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Union46_0_46"
+        },
+        {
+          "$ref": "#/$defs/Union58_1_58"
+        },
+        {
+          "$ref": "#/$defs/Union65_2_65"
+        },
+        {
+          "$ref": "#/$defs/Union68_3_68"
+        },
+        {
+          "$ref": "#/$defs/Union73_4_73"
+        },
+        {
+          "$ref": "#/$defs/Union80_5_80"
+        },
+        {
+          "$ref": "#/$defs/Union86_6_86"
+        },
+        {
+          "$ref": "#/$defs/Union89_7_89"
+        },
+        {
+          "$ref": "#/$defs/Union93_8_93"
+        }
+      ]
+    },
+    "Def_96": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "set",
+            "merge"
+          ]
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_7"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "workflow_100": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "additionalProperties": false
+    },
+    "source_99": {
+      "type": "object",
+      "properties": {
+        "workflow": {
+          "$ref": "#/$defs/workflow_100"
+        },
+        "node_id": {
+          "type": "string"
+        },
+        "skill": {
+          "type": "string"
+        },
+        "action": {
+          "type": "string"
+        },
+        "query": {
+          "type": "string"
+        },
+        "step_id": {
+          "type": "string"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_7"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Def_10": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "chain": {
+          "type": "string",
+          "pattern": "^(eip155|solana|cosmos|bip122|aptos|sui):[a-zA-Z0-9._-]+$"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "action_ref",
+            "query_ref",
+            "execution"
+          ]
+        },
+        "description": {
+          "type": "string"
+        },
+        "deps": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "condition": {
+          "$ref": "#/$defs/condition_17"
+        },
+        "until": {
+          "$ref": "#/$defs/condition_17"
+        },
+        "retry": {
+          "$ref": "#/$defs/retry_38"
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "exclusiveMinimum": 0
+        },
+        "bindings": {
+          "$ref": "#/$defs/bindings_43"
+        },
+        "execution": {
+          "$ref": "#/$defs/execution_45"
+        },
+        "writes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Def_96"
+          }
+        },
+        "source": {
+          "$ref": "#/$defs/source_99"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_7"
+        }
+      },
+      "required": [
+        "id",
+        "chain",
+        "kind",
+        "execution"
+      ],
+      "additionalProperties": false
+    },
+    "Root_1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "ais-plan/0.0.2"
+        },
+        "meta": {
+          "$ref": "#/$defs/meta_3"
+        },
+        "nodes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Def_10"
+          }
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_7"
+        }
+      },
+      "required": [
+        "schema",
+        "nodes"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

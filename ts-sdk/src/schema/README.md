@@ -6,45 +6,71 @@ Zod-based schema definitions with automatic TypeScript type inference for all AI
 
 - `index.ts` — Module entry point; exports all schemas and the discriminated union `AISDocumentSchema`
 - `common.ts` — Shared primitives: chain IDs (CAIP-2), addresses, assets, token amounts, AIS type system
-- `protocol.ts` — Protocol Spec schema (`ais/1.0`): meta, deployments, actions, queries, risks
-- `pack.ts` — Pack schema (`ais-pack/1.0`): skill bundles with policy and token settings
-- `workflow.ts` — Workflow schema (`ais-flow/1.0`): multi-step execution graphs
-- `execution.ts` — Chain-specific execution specs: EVM, Solana, Cosmos, Bitcoin, Move
+- `protocol.ts` — Protocol Spec schema (`ais/0.0.2`): meta, deployments, actions, queries, risks
+- `pack.ts` — Pack schema (`ais-pack/0.0.2`): skill bundles with policy and token settings
+- `workflow.ts` — Workflow schema (`ais-flow/0.0.2`): multi-step execution graphs (ValueRef everywhere)
+- `execution.ts` — Chain-specific execution specs (AIS 0.0.2): EVM JSON ABI, Solana instructions, composite steps
+- `conformance.ts` — Conformance vector file schema (`ais-conformance/0.0.2`)
 
 ## Core API
+
+### Strict schemas and `extensions`
+
+AIS 0.0.2 core schemas are **strict**: unknown fields are rejected.
+
+If you need to attach implementation-specific metadata, use the reserved `extensions` field (a free-form map). This is the only supported extensibility slot for core objects.
 
 ### Document Schemas
 
 | Schema | Discriminator | Description |
 |--------|---------------|-------------|
-| `ProtocolSpecSchema` | `ais/1.0` | Single protocol definition with actions and queries |
-| `PackSchema` | `ais-pack/1.0` | Bundle of protocol skills with unified policy |
-| `WorkflowSchema` | `ais-flow/1.0` | Multi-step execution flow referencing pack skills |
+| `ProtocolSpecSchema` | `ais/0.0.2` | Single protocol definition with actions and queries |
+| `PackSchema` | `ais-pack/0.0.2` | Bundle of protocol skills with unified policy |
+| `WorkflowSchema` | `ais-flow/0.0.2` | Multi-step execution flow referencing pack skills |
 | `AISDocumentSchema` | — | Discriminated union of all three |
+
+Workflow chain fields:
+- `workflow.default_chain` (CAIP-2) sets the default chain for nodes.
+- `nodes[].chain` (CAIP-2) overrides per node to support multi-chain workflows (e.g. EVM + Solana).
+Workflow polling fields (engine-driven):
+- `nodes[].until` (ValueRef) keeps re-running the node until the expression becomes truthy.
+- `nodes[].retry` / `nodes[].timeout_ms` control polling cadence and limits.
 
 ### Execution Types (in `execution.ts`)
 
 | Schema | Type Field | Use Case |
 |--------|------------|----------|
-| `EvmReadSchema` | `evm_read` | Single `eth_call` |
+| `EvmReadSchema` | `evm_read` | Single `eth_call` (JSON ABI + ValueRef args) |
 | `EvmMultireadSchema` | `evm_multiread` | Batched reads (multicall3 / rpc_batch) |
-| `EvmCallSchema` | `evm_call` | Single write transaction |
-| `EvmMulticallSchema` | `evm_multicall` | Atomic multi-step via router |
-| `CompositeSchema` | `composite` | Conditional multi-step execution |
-| `SolanaInstructionSchema` | `solana_instruction` | Solana program instruction |
-| `CosmosMessageSchema` | `cosmos_message` | Cosmos SDK message |
+| `EvmCallSchema` | `evm_call` | Single write transaction (JSON ABI + ValueRef args) |
+| `EvmMulticallSchema` | `evm_multicall` | Batched write calls (JSON ABI) |
+| `CompositeSchema` | `composite` | Cross-chain step container (`steps[].execution`, optional `steps[].chain`) |
+| `SolanaInstructionSchema` | `solana_instruction` | Solana instruction (program/accounts/data as ValueRef) |
+| `SolanaReadSchema` | `solana_read` | Solana RPC read (balance/account/status queries) |
 | `BitcoinPsbtSchema` | `bitcoin_psbt` | Bitcoin PSBT construction |
-| `MoveEntrySchema` | `move_entry` | Aptos/Sui Move function |
+| `PluginExecutionSpecSchema` | *(plugin)* | Non-core execution types (validated via registry) |
+
+JSON ABI types used by EVM execution:
+- `JsonAbiFunction` — `{ type:"function", name, inputs, outputs? }`
+- `JsonAbiParam` — `{ name, type, components? }` (tuple uses `type:"tuple"` with `components`)
+
+Note: `ExecutionSpec` includes a plugin execution shape (`{ type: string, ... }`) so downstream code should either:
+- handle non-core types explicitly (via plugin registry), or
+- treat unknown execution types as plugin-provided.
 
 ### Common Types (in `common.ts`)
 
 ```ts
 ChainIdSchema      // CAIP-2 chain ID (e.g., "eip155:1", "solana:mainnet")
 HexAddressSchema   // Ethereum 0x address (40 hex chars)
+ExtensionsSchema   // reserved extensibility slot (free-form map)
 AssetSchema        // { chain_id, address, symbol?, decimals? }
-TokenAmountSchema  // { asset, amount, human_readable? }
-AISTypeSchema      // Type enum: address, bool, uint256, asset, token_amount, etc.
+TokenAmountSchema  // decimal string (e.g., "1.23") or "max"
+AISTypeSchema      // address/bool/string/bytes/float + int/uint(8..256 step8) + bytes1..bytes32 + asset/token_amount + array<T>/tuple<...>
+ValueRefSchema     // {lit|ref|cel|detect|object|array}
 ```
+
+`ValueRef` is exported as an explicit TypeScript union type, so downstream code can narrow via `'lit' in v`, `'ref' in v`, etc.
 
 ## Usage Example
 
@@ -55,7 +81,7 @@ import type { ProtocolSpec, Action, ExecutionSpec } from './schema';
 // Parse unknown YAML/JSON
 const doc = AISDocumentSchema.parse(rawData);
 
-if (doc.schema === 'ais/1.0') {
+if (doc.schema === 'ais/0.0.2') {
   // TypeScript knows this is ProtocolSpec
   console.log(doc.meta.protocol);
 }
@@ -91,23 +117,25 @@ Document types are distinguished by the `schema` field using Zod's `discriminate
 
 ```ts
 const AISDocumentSchema = z.discriminatedUnion('schema', [
-  ProtocolSpecSchema,  // schema: 'ais/1.0'
-  PackSchema,          // schema: 'ais-pack/1.0'
-  WorkflowSchema,      // schema: 'ais-flow/1.0'
+  ProtocolSpecSchema,  // schema: 'ais/0.0.2'
+  PackSchema,          // schema: 'ais-pack/0.0.2'
+  WorkflowSchema,      // schema: 'ais-flow/0.0.2'
 ]);
 ```
 
 ### Recursive Types
 
-`MappingValueSchema` (in `execution.ts`) uses `z.lazy()` for recursive nesting:
+`ValueRefSchema` (in `common.ts`) uses `z.lazy()` for recursive nesting:
 
 ```ts
-const MappingValueSchema = z.lazy(() =>
+export const ValueRefSchema = z.lazy(() =>
   z.union([
-    z.string(),
-    z.number(),
-    z.object({ detect: DetectSchema }),
-    z.record(MappingValueSchema),  // ← recursive
+    z.object({ lit: z.unknown() }).strict(),
+    z.object({ ref: z.string() }).strict(),
+    z.object({ cel: z.string() }).strict(),
+    z.object({ detect: DetectSchema }).strict(),
+    z.object({ object: z.record(ValueRefSchema) }).strict(),
+    z.object({ array: z.array(ValueRefSchema) }).strict(),
   ])
 );
 ```

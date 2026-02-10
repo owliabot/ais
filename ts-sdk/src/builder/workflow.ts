@@ -9,17 +9,22 @@ import {
   type WorkflowNode,
   type WorkflowInput,
   type CalculatedOverride,
+  type ValueRef,
 } from '../schema/index.js';
 import type { ZodSchema } from 'zod';
 
 interface NodeDef {
   type: 'action_ref' | 'query_ref';
+  chain?: string;
   skill: string;
   action?: string;
   query?: string;
   args?: Record<string, unknown>;
   calculated_overrides?: Record<string, CalculatedOverride>;
-  condition?: string;
+  condition?: unknown;
+  until?: unknown;
+  retry?: { interval_ms: number; max_attempts?: number; backoff?: 'fixed' };
+  timeout_ms?: number;
   requires?: string[];
 }
 
@@ -29,10 +34,11 @@ export class WorkflowBuilder extends BaseBuilder<Workflow> {
   private _meta: Workflow['meta'];
   private _inputs: Record<string, WorkflowInput> = {};
   private _nodes: WorkflowNode[] = [];
-  private _outputs: Record<string, string> = {};
+  private _outputs: Record<string, ValueRef> = {};
   private _requiresPack?: { name: string; version: string };
   private _policy?: Workflow['policy'];
   private _preflight?: Workflow['preflight'];
+  private _defaultChain?: Workflow['default_chain'];
 
   constructor(name: string, version: string) {
     super();
@@ -42,6 +48,12 @@ export class WorkflowBuilder extends BaseBuilder<Workflow> {
   /** Set workflow description */
   description(desc: string): this {
     this._meta.description = desc;
+    return this;
+  }
+
+  /** Set workflow default chain (CAIP-2) */
+  defaultChain(chain: Workflow['default_chain']): this {
+    this._defaultChain = chain;
     return this;
   }
 
@@ -77,16 +89,24 @@ export class WorkflowBuilder extends BaseBuilder<Workflow> {
 
   /** Add a node (action or query) */
   node(id: string, def: NodeDef): this {
+    const args = def.args ? mapRecordToValueRef(def.args) : undefined;
+    const calculated_overrides = def.calculated_overrides;
+    const condition = def.condition !== undefined ? conditionToValueRef(def.condition) : undefined;
+    const until = def.until !== undefined ? conditionToValueRef(def.until) : undefined;
     this._nodes.push({
       id,
       type: def.type,
+      chain: def.chain,
       skill: def.skill,
       action: def.action,
       query: def.query,
-      args: def.args,
-      calculated_overrides: def.calculated_overrides,
-      condition: def.condition,
-      requires_queries: def.requires,
+      args,
+      calculated_overrides,
+      condition,
+      until,
+      retry: def.retry,
+      timeout_ms: def.timeout_ms,
+      deps: def.requires,
     });
     return this;
   }
@@ -112,8 +132,8 @@ export class WorkflowBuilder extends BaseBuilder<Workflow> {
   }
 
   /** Add an output mapping */
-  output(name: string, ref: string): this {
-    this._outputs[name] = ref;
+  output(name: string, ref: string | ValueRef): this {
+    this._outputs[name] = typeof ref === 'string' ? { ref } : ref;
     return this;
   }
 
@@ -137,8 +157,9 @@ export class WorkflowBuilder extends BaseBuilder<Workflow> {
 
   protected getData(): Workflow {
     return {
-      schema: 'ais-flow/1.0',
+      schema: 'ais-flow/0.0.2',
       meta: this._meta,
+      default_chain: this._defaultChain,
       requires_pack: this._requiresPack,
       inputs: Object.keys(this._inputs).length > 0 ? this._inputs : undefined,
       nodes: this._nodes,
@@ -147,6 +168,62 @@ export class WorkflowBuilder extends BaseBuilder<Workflow> {
       outputs: Object.keys(this._outputs).length > 0 ? this._outputs : undefined,
     };
   }
+}
+
+function isValueRef(v: unknown): v is ValueRef {
+  if (!v || typeof v !== 'object') return false;
+  const keys = Object.keys(v as Record<string, unknown>);
+  if (keys.length !== 1) return false;
+  const k = keys[0];
+  return (
+    k === 'lit' ||
+    k === 'ref' ||
+    k === 'cel' ||
+    k === 'detect' ||
+    k === 'object' ||
+    k === 'array'
+  );
+}
+
+function stringToValueRef(s: string): ValueRef {
+  const m = s.match(/^\$\{(.+)\}$/);
+  if (m) return { ref: m[1]!.trim() };
+  return { lit: s };
+}
+
+function toValueRef(v: unknown): ValueRef {
+  if (isValueRef(v)) return v;
+  if (typeof v === 'string') return stringToValueRef(v);
+  if (Array.isArray(v)) {
+    if (v.every(isValueRef)) return { array: v };
+    return { lit: v };
+  }
+  if (v && typeof v === 'object') {
+    const record = v as Record<string, unknown>;
+    const values = Object.values(record);
+    if (values.length > 0 && values.every(isValueRef)) {
+      const out: Record<string, ValueRef> = {};
+      for (const [k, vv] of Object.entries(record)) out[k] = vv as ValueRef;
+      return { object: out };
+    }
+  }
+  return { lit: v };
+}
+
+function mapRecordToValueRef(record: Record<string, unknown>): Record<string, ValueRef> {
+  const out: Record<string, ValueRef> = {};
+  for (const [k, v] of Object.entries(record)) out[k] = toValueRef(v);
+  return out;
+}
+
+function conditionToValueRef(v: unknown): ValueRef {
+  if (isValueRef(v)) return v;
+  if (typeof v === 'string') {
+    const m = v.match(/^\$\{(.+)\}$/);
+    if (m) return { ref: m[1]!.trim() };
+    return { cel: v };
+  }
+  return toValueRef(v);
 }
 
 /**

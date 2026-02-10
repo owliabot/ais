@@ -2,11 +2,29 @@
  * CEL Evaluator - evaluate AST against a context
  */
 
-import { Parser, ASTNode } from './parser.js';
+import { Parser, type ASTNode } from './parser.js';
+import type { CELDecimal } from './numeric.js';
+import {
+  isCELDecimal,
+  parseDecimalString,
+  decimalToString,
+  normalizeDecimal,
+  decimalAdd,
+  decimalSub,
+  decimalMul,
+  decimalDiv,
+  decimalCompare,
+  decimalAbs,
+  decimalFloor,
+  decimalCeil,
+  decimalRound,
+  pow10,
+} from './numeric.js';
 
 export type CELValue =
   | string
-  | number
+  | bigint
+  | CELDecimal
   | boolean
   | null
   | CELValue[]
@@ -14,20 +32,17 @@ export type CELValue =
 
 export type CELContext = Record<string, CELValue>;
 
-// Built-in functions
 type CELFunction = (args: CELValue[], ctx: CELContext) => CELValue;
 
 const BUILTINS: Record<string, CELFunction> = {
-  // Size functions
   size: (args) => {
     const val = args[0];
-    if (typeof val === 'string') return val.length;
-    if (Array.isArray(val)) return val.length;
-    if (val && typeof val === 'object') return Object.keys(val).length;
+    if (typeof val === 'string') return BigInt(val.length);
+    if (Array.isArray(val)) return BigInt(val.length);
+    if (val && typeof val === 'object') return BigInt(Object.keys(val).length);
     throw new Error('size() requires string, list, or map');
   },
 
-  // String functions
   contains: (args) => {
     const [str, substr] = args;
     if (typeof str !== 'string' || typeof substr !== 'string') {
@@ -78,30 +93,36 @@ const BUILTINS: Record<string, CELFunction> = {
     return str.trim();
   },
 
-  // Type functions
   int: (args) => {
     const val = args[0];
-    if (typeof val === 'number') return Math.floor(val);
-    if (typeof val === 'string') return parseInt(val, 10);
-    throw new Error('int() requires number or string');
+    if (typeof val === 'bigint') return val;
+    if (isCELDecimal(val)) return truncDecimalToInt(val);
+    if (typeof val === 'string') {
+      if (val.toLowerCase().includes('e')) throw new Error('int() does not allow exponent notation');
+      if (/^-?\d+$/.test(val)) return BigInt(val);
+      return truncDecimalToInt(parseDecimalString(val));
+    }
+    throw new Error('int() requires int/decimal/string');
   },
 
   uint: (args) => {
-    const val = args[0];
-    if (typeof val === 'number') return Math.abs(Math.floor(val));
-    if (typeof val === 'string') return Math.abs(parseInt(val, 10));
-    throw new Error('uint() requires number or string');
+    const out = BUILTINS.int(args, {} as any);
+    if (typeof out !== 'bigint') throw new Error('uint() internal error');
+    return out < 0n ? -out : out;
   },
 
   double: (args) => {
     const val = args[0];
-    if (typeof val === 'number') return val;
-    if (typeof val === 'string') return parseFloat(val);
-    throw new Error('double() requires number or string');
+    if (isCELDecimal(val)) return val;
+    if (typeof val === 'bigint') return { kind: 'decimal', int: val, scale: 0 };
+    if (typeof val === 'string') return parseDecimalString(val);
+    throw new Error('double() requires int/decimal/string');
   },
 
   string: (args) => {
     const val = args[0];
+    if (typeof val === 'bigint') return val.toString();
+    if (isCELDecimal(val)) return decimalToString(val);
     return String(val);
   },
 
@@ -109,23 +130,25 @@ const BUILTINS: Record<string, CELFunction> = {
     const val = args[0];
     if (typeof val === 'boolean') return val;
     if (typeof val === 'string') return val === 'true';
-    if (typeof val === 'number') return val !== 0;
+    if (typeof val === 'bigint') return val !== 0n;
+    if (isCELDecimal(val)) return normalizeDecimal(val).int !== 0n;
     return Boolean(val);
   },
 
-  // Type checking
   type: (args) => {
     const val = args[0];
     if (val === null) return 'null';
     if (Array.isArray(val)) return 'list';
+    if (typeof val === 'bigint') return 'int';
+    if (isCELDecimal(val)) return 'decimal';
+    if (val && typeof val === 'object') return 'map';
+    if (typeof val === 'boolean') return 'bool';
     return typeof val;
   },
 
-  // List functions
   exists: (args) => {
     const [list] = args;
     if (!Array.isArray(list)) throw new Error('exists() requires list');
-    // Simplified: just check if any element is truthy
     return list.some((item) => Boolean(item));
   },
 
@@ -135,102 +158,95 @@ const BUILTINS: Record<string, CELFunction> = {
     return list.every((item) => Boolean(item));
   },
 
-  // Math functions
   abs: (args) => {
     const val = args[0];
-    if (typeof val !== 'number') throw new Error('abs() requires number');
-    return Math.abs(val);
+    if (typeof val === 'bigint') return val < 0n ? -val : val;
+    if (isCELDecimal(val)) return decimalAbs(val);
+    throw new Error('abs() requires int or decimal');
   },
 
   min: (args) => {
-    const nums = args.filter((a): a is number => typeof a === 'number');
-    if (nums.length === 0) throw new Error('min() requires numbers');
-    return Math.min(...nums);
+    const nums = args.filter((a): a is bigint | CELDecimal => isNumeric(a));
+    if (nums.length === 0) throw new Error('min() requires numeric args');
+    let best = nums[0]!;
+    for (const v of nums.slice(1)) {
+      if (numericCompare(v, best) < 0) best = v;
+    }
+    return normalizeNumeric(best);
   },
 
   max: (args) => {
-    const nums = args.filter((a): a is number => typeof a === 'number');
-    if (nums.length === 0) throw new Error('max() requires numbers');
-    return Math.max(...nums);
+    const nums = args.filter((a): a is bigint | CELDecimal => isNumeric(a));
+    if (nums.length === 0) throw new Error('max() requires numeric args');
+    let best = nums[0]!;
+    for (const v of nums.slice(1)) {
+      if (numericCompare(v, best) > 0) best = v;
+    }
+    return normalizeNumeric(best);
   },
 
   floor: (args) => {
     const val = args[0];
-    if (typeof val !== 'number') throw new Error('floor() requires number');
-    return Math.floor(val);
+    if (typeof val === 'bigint') return val;
+    if (isCELDecimal(val)) return decimalFloor(val);
+    throw new Error('floor() requires int or decimal');
   },
 
   ceil: (args) => {
     const val = args[0];
-    if (typeof val !== 'number') throw new Error('ceil() requires number');
-    return Math.ceil(val);
+    if (typeof val === 'bigint') return val;
+    if (isCELDecimal(val)) return decimalCeil(val);
+    throw new Error('ceil() requires int or decimal');
   },
 
   round: (args) => {
     const val = args[0];
-    if (typeof val !== 'number') throw new Error('round() requires number');
-    return Math.round(val);
+    if (typeof val === 'bigint') return val;
+    if (isCELDecimal(val)) return decimalRound(val);
+    throw new Error('round() requires int or decimal');
   },
 
-  // AIS-specific functions for token amount conversion
-  // to_atomic(amount, asset) - Convert human amount to atomic using asset decimals
-  // asset should have a 'decimals' property or be a number
   to_atomic: (args) => {
     const [amount, asset] = args;
-    
-    if (typeof amount !== 'number' && typeof amount !== 'string') {
-      throw new Error('to_atomic() first arg must be number or string amount');
+    const decimals = getDecimals(asset);
+    if (decimals < 0 || decimals > 77) throw new Error('to_atomic() decimals out of range');
+
+    const dec = coerceAmountDecimal(amount);
+    if (dec.int < 0n) throw new Error('to_atomic() amount must be non-negative');
+    if (dec.scale > decimals) {
+      throw new Error('to_atomic() disallows truncation: too many fractional digits');
     }
-    
-    // Get decimals from asset
-    let decimals: number;
-    if (typeof asset === 'number') {
-      decimals = asset;
-    } else if (asset && typeof asset === 'object' && 'decimals' in asset) {
-      decimals = (asset as { decimals: number }).decimals;
-    } else {
-      throw new Error('to_atomic() second arg must be asset with decimals or decimal count');
-    }
-    
-    const numAmount = typeof amount === 'string' ? parseFloat(amount) : amount;
-    
-    // Return as number for CEL calculations
-    // The execution builder will convert to BigInt when needed
-    const multiplier = Math.pow(10, decimals);
-    return Math.floor(numAmount * multiplier);
+    return dec.int * pow10(decimals - dec.scale);
   },
 
-  // to_human(atomic, asset) - Convert atomic amount to human readable
   to_human: (args) => {
     const [atomic, asset] = args;
-    
-    if (typeof atomic !== 'number' && typeof atomic !== 'string') {
-      throw new Error('to_human() first arg must be number or string atomic amount');
-    }
-    
-    // Get decimals from asset
-    let decimals: number;
-    if (typeof asset === 'number') {
-      decimals = asset;
-    } else if (asset && typeof asset === 'object' && 'decimals' in asset) {
-      decimals = (asset as { decimals: number }).decimals;
-    } else {
-      throw new Error('to_human() second arg must be asset with decimals or decimal count');
-    }
-    
-    const numAtomic = typeof atomic === 'string' ? parseFloat(atomic) : atomic;
-    const divisor = Math.pow(10, decimals);
-    
-    return numAtomic / divisor;
+    const decimals = getDecimals(asset);
+    if (decimals < 0 || decimals > 77) throw new Error('to_human() decimals out of range');
+    const bi = coerceBigInt(atomic, 'to_human.atomic');
+    if (bi < 0n) throw new Error('to_human() atomic must be non-negative');
+    return decimalToString({ kind: 'decimal', int: bi, scale: decimals });
   },
 
-  // pow(base, exponent) - Power function
+  mul_div: (args) => {
+    const [a, b, denom] = args;
+    const aa = coerceBigInt(a, 'mul_div.a');
+    const bb = coerceBigInt(b, 'mul_div.b');
+    const dd = coerceBigInt(denom, 'mul_div.denom');
+    if (aa < 0n || bb < 0n || dd < 0n) throw new Error('mul_div() args must be non-negative');
+    if (dd === 0n) throw new Error('mul_div() denom must be > 0');
+    return (aa * bb) / dd;
+  },
+
   pow: (args) => {
     const [base, exp] = args;
-    if (typeof base !== 'number' || typeof exp !== 'number') {
-      throw new Error('pow() requires two numbers');
-    }
-    return Math.pow(base, exp);
+    const b = coerceBigInt(base, 'pow.base');
+    const e = coerceBigInt(exp, 'pow.exp');
+    if (e < 0n) throw new Error('pow() exponent must be non-negative');
+    if (e > 10_000n) throw new Error('pow() exponent too large');
+    let out = 1n;
+    for (let i = 0n; i < e; i++) out *= b;
+    return out;
   },
 };
 
@@ -327,76 +343,66 @@ export class Evaluator {
         if (typeof left === 'string' || typeof right === 'string') {
           return String(left) + String(right);
         }
-        if (typeof left === 'number' && typeof right === 'number') {
-          return left + right;
-        }
+        if (isNumeric(left) && isNumeric(right)) return normalizeNumeric(decimalAdd(left, right));
         if (Array.isArray(left) && Array.isArray(right)) {
           return [...left, ...right];
         }
         throw new Error(`Cannot add ${typeof left} and ${typeof right}`);
 
       case '-':
-        if (typeof left === 'number' && typeof right === 'number') {
-          return left - right;
-        }
-        throw new Error('Subtraction requires numbers');
+        if (isNumeric(left) && isNumeric(right)) return normalizeNumeric(decimalSub(left, right));
+        throw new Error('Subtraction requires numeric');
 
       case '*':
-        if (typeof left === 'number' && typeof right === 'number') {
-          return left * right;
-        }
-        throw new Error('Multiplication requires numbers');
+        if (isNumeric(left) && isNumeric(right)) return normalizeNumeric(decimalMul(left, right));
+        throw new Error('Multiplication requires numeric');
 
       case '/':
-        if (typeof left === 'number' && typeof right === 'number') {
-          if (right === 0) throw new Error('Division by zero');
-          return left / right;
+        if (isNumeric(left) && isNumeric(right)) {
+          if (typeof left === 'bigint' && typeof right === 'bigint') {
+            if (right === 0n) throw new Error('Division by zero');
+            if (left % right === 0n) return left / right;
+          }
+          return normalizeNumeric(decimalDiv(left, right));
         }
-        throw new Error('Division requires numbers');
+        throw new Error('Division requires numeric');
 
       case '%':
-        if (typeof left === 'number' && typeof right === 'number') {
+        if (typeof left === 'bigint' && typeof right === 'bigint') {
+          if (right === 0n) throw new Error('Division by zero');
           return left % right;
         }
-        throw new Error('Modulo requires numbers');
+        throw new Error('Modulo requires int');
 
       case '==':
-        return this.deepEqual(left, right);
+        return this.celEqual(left, right);
 
       case '!=':
-        return !this.deepEqual(left, right);
+        return !this.celEqual(left, right);
 
       case '<':
-        if (typeof left === 'number' && typeof right === 'number') {
-          return left < right;
-        }
+        if (isNumeric(left) && isNumeric(right)) return numericCompare(left, right) < 0;
         if (typeof left === 'string' && typeof right === 'string') {
           return left < right;
         }
         throw new Error('Comparison requires same types');
 
       case '<=':
-        if (typeof left === 'number' && typeof right === 'number') {
-          return left <= right;
-        }
+        if (isNumeric(left) && isNumeric(right)) return numericCompare(left, right) <= 0;
         if (typeof left === 'string' && typeof right === 'string') {
           return left <= right;
         }
         throw new Error('Comparison requires same types');
 
       case '>':
-        if (typeof left === 'number' && typeof right === 'number') {
-          return left > right;
-        }
+        if (isNumeric(left) && isNumeric(right)) return numericCompare(left, right) > 0;
         if (typeof left === 'string' && typeof right === 'string') {
           return left > right;
         }
         throw new Error('Comparison requires same types');
 
       case '>=':
-        if (typeof left === 'number' && typeof right === 'number') {
-          return left >= right;
-        }
+        if (isNumeric(left) && isNumeric(right)) return numericCompare(left, right) >= 0;
         if (typeof left === 'string' && typeof right === 'string') {
           return left >= right;
         }
@@ -404,7 +410,7 @@ export class Evaluator {
 
       case 'in':
         if (Array.isArray(right)) {
-          return right.some((item) => this.deepEqual(left, item));
+          return right.some((item) => this.celEqual(left, item));
         }
         if (typeof right === 'string' && typeof left === 'string') {
           return right.includes(left);
@@ -430,10 +436,9 @@ export class Evaluator {
         return !operand;
 
       case '-':
-        if (typeof operand === 'number') {
-          return -operand;
-        }
-        throw new Error('Unary minus requires number');
+        if (typeof operand === 'bigint') return -operand;
+        if (isCELDecimal(operand)) return normalizeNumeric({ kind: 'decimal', int: -operand.int, scale: operand.scale });
+        throw new Error('Unary minus requires numeric');
 
       default:
         throw new Error(`Unknown unary operator: ${node.operator}`);
@@ -466,17 +471,13 @@ export class Evaluator {
     const index = this.evalNode(node.index, ctx);
 
     if (Array.isArray(obj)) {
-      if (typeof index !== 'number') {
-        throw new Error('List index must be a number');
-      }
-      return obj[index] ?? null;
+      const i = toIndex(index);
+      return obj[i] ?? null;
     }
 
     if (typeof obj === 'string') {
-      if (typeof index !== 'number') {
-        throw new Error('String index must be a number');
-      }
-      return obj[index] ?? null;
+      const i = toIndex(index);
+      return obj[i] ?? null;
     }
 
     if (obj && typeof obj === 'object') {
@@ -544,6 +545,11 @@ export class Evaluator {
     }
 
     if (typeof a === 'object' && typeof b === 'object') {
+      if (isCELDecimal(a) && isCELDecimal(b)) {
+        const na = normalizeDecimal(a);
+        const nb = normalizeDecimal(b);
+        return na.int === nb.int && na.scale === nb.scale;
+      }
       const keysA = Object.keys(a);
       const keysB = Object.keys(b);
       if (keysA.length !== keysB.length) return false;
@@ -557,6 +563,11 @@ export class Evaluator {
 
     return false;
   }
+
+  private celEqual(a: CELValue, b: CELValue): boolean {
+    if (isNumeric(a) && isNumeric(b)) return numericCompare(a, b) === 0;
+    return this.deepEqual(a, b);
+  }
 }
 
 /**
@@ -565,4 +576,91 @@ export class Evaluator {
 export function evaluateCEL(expression: string, context: CELContext = {}): CELValue {
   const evaluator = new Evaluator();
   return evaluator.evaluate(expression, context);
+}
+
+function isNumeric(v: CELValue): v is bigint | CELDecimal {
+  return typeof v === 'bigint' || isCELDecimal(v);
+}
+
+function numericCompare(a: bigint | CELDecimal, b: bigint | CELDecimal): -1 | 0 | 1 {
+  return decimalCompare(a, b);
+}
+
+function normalizeNumeric(v: bigint | CELDecimal): bigint | CELDecimal {
+  if (typeof v === 'bigint') return v;
+  const n = normalizeDecimal(v);
+  return n.scale === 0 ? n.int : n;
+}
+
+function truncDecimalToInt(d: CELDecimal): bigint {
+  const n = normalizeDecimal(d);
+  if (n.scale === 0) return n.int;
+  return n.int / pow10(n.scale);
+}
+
+function getDecimals(asset: CELValue): number {
+  if (typeof asset === 'bigint') {
+    if (asset > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('decimals too large');
+    return Number(asset);
+  }
+  if (typeof asset === 'string') {
+    if (!/^\d+$/.test(asset)) throw new Error('decimals must be integer string');
+    const n = Number(asset);
+    if (!Number.isSafeInteger(n)) throw new Error('decimals too large');
+    return n;
+  }
+  if (asset && typeof asset === 'object' && !Array.isArray(asset) && 'decimals' in asset) {
+    const d = (asset as { decimals: unknown }).decimals;
+    if (typeof d === 'number') {
+      if (!Number.isSafeInteger(d)) throw new Error('decimals must be int');
+      return d;
+    }
+    if (typeof d === 'bigint') {
+      if (d > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('decimals too large');
+      return Number(d);
+    }
+    if (typeof d === 'string') {
+      if (!/^\d+$/.test(d)) throw new Error('decimals must be integer string');
+      const n = Number(d);
+      if (!Number.isSafeInteger(n)) throw new Error('decimals too large');
+      return n;
+    }
+    throw new Error('decimals must be number/bigint/string');
+  }
+  throw new Error('to_atomic/to_human() second arg must be asset with decimals or decimal count');
+}
+
+function coerceAmountDecimal(amount: CELValue): CELDecimal {
+  if (typeof amount === 'bigint') return { kind: 'decimal', int: amount, scale: 0 };
+  if (isCELDecimal(amount)) return amount;
+  if (typeof amount === 'string') return parseDecimalString(amount);
+  throw new Error('to_atomic() first arg must be int/decimal/string');
+}
+
+function coerceBigInt(v: CELValue, path: string): bigint {
+  if (typeof v === 'bigint') return v;
+  if (isCELDecimal(v)) {
+    const n = normalizeDecimal(v);
+    if (n.scale !== 0) throw new Error(`${path} must be integer`);
+    return n.int;
+  }
+  if (typeof v === 'string') {
+    if (!/^-?\d+$/.test(v)) throw new Error(`${path} must be integer string`);
+    return BigInt(v);
+  }
+  throw new Error(`${path} must be int/decimal/string`);
+}
+
+function toIndex(v: CELValue): number {
+  if (typeof v === 'bigint') {
+    if (v < 0n) throw new Error('Index must be non-negative');
+    if (v > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('Index too large');
+    return Number(v);
+  }
+  if (isCELDecimal(v)) {
+    const n = normalizeDecimal(v);
+    if (n.scale !== 0) throw new Error('Index must be integer');
+    return toIndex(n.int);
+  }
+  throw new Error('Index must be int');
 }

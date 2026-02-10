@@ -154,7 +154,7 @@ export class PackBuilder extends BaseBuilder<Pack> {
 
   protected getData(): Pack {
     return {
-      schema: 'ais-pack/1.0',
+      schema: 'ais-pack/0.0.2',
       name: this._name,
       version: this._version,
       description: this._description,

@@ -9,6 +9,7 @@ export * from './execution.js';
 export * from './protocol.js';
 export * from './pack.js';
 export * from './workflow.js';
+export * from './conformance.js';
 
 // Import for union
 import { ProtocolSpecSchema } from './protocol.js';
@@ -25,4 +26,4 @@ export const AISDocumentSchema = z.discriminatedUnion('schema', [
 ]);
 
 export type AnyAISDocument = z.infer<typeof AISDocumentSchema>;
-export type AISSchemaType = 'ais/1.0' | 'ais-pack/1.0' | 'ais-flow/1.0';
+export type AISSchemaType = 'ais/0.0.2' | 'ais-pack/0.0.2' | 'ais-flow/0.0.2';

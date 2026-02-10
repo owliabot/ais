@@ -1,0 +1,1200 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ais:0.0.2:protocol",
+  "title": "AIS Protocol Spec (ais/0.0.2)",
+  "$ref": "#/$defs/Root_1",
+  "$defs": {
+    "extensions_13": {
+      "type": "object",
+      "additionalProperties": {}
+    },
+    "meta_3": {
+      "type": "object",
+      "properties": {
+        "protocol": {
+          "type": "string",
+          "pattern": "^[a-z0-9-]+$"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+$"
+        },
+        "name": {
+          "type": "string"
+        },
+        "homepage": {
+          "type": "string",
+          "format": "uri"
+        },
+        "logo": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "maintainer": {
+          "type": "string"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_13"
+        }
+      },
+      "required": [
+        "protocol",
+        "version"
+      ],
+      "additionalProperties": false
+    },
+    "contracts_18": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "Def_16": {
+      "type": "object",
+      "properties": {
+        "chain": {
+          "type": "string",
+          "pattern": "^(eip155|solana|cosmos|bip122|aptos|sui):[a-zA-Z0-9._-]+$"
+        },
+        "contracts": {
+          "$ref": "#/$defs/contracts_18"
+        },
+        "rpc_hints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_13"
+        }
+      },
+      "required": [
+        "chain",
+        "contracts"
+      ],
+      "additionalProperties": false
+    },
+    "type_31": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "address",
+            "bool",
+            "string",
+            "bytes",
+            "float"
+          ]
+        },
+        {
+          "type": "string",
+          "pattern": "^(u?int)\\d{1,3}$"
+        },
+        {
+          "type": "string",
+          "pattern": "^bytes\\d{1,2}$"
+        },
+        {
+          "type": "string",
+          "enum": [
+            "asset",
+            "token_amount"
+          ]
+        },
+        {
+          "type": "string",
+          "pattern": "^(array|tuple)<.+>$"
+        }
+      ]
+    },
+    "constraints_41": {
+      "type": "object",
+      "properties": {
+        "min": {
+          "type": "number"
+        },
+        "max": {
+          "type": "number"
+        },
+        "enum": {
+          "type": "array",
+          "items": {}
+        },
+        "pattern": {
+          "type": "string"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_13"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Def_29": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "$ref": "#/$defs/type_31"
+        },
+        "description": {
+          "type": "string"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "default": {},
+        "example": {},
+        "constraints": {
+          "$ref": "#/$defs/constraints_41"
+        },
+        "asset_ref": {
+          "type": "string"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_13"
+        }
+      },
+      "required": [
+        "name",
+        "type",
+        "description"
+      ],
+      "additionalProperties": false
+    },
+    "Def_49": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_13"
+        }
+      },
+      "required": [
+        "name",
+        "type"
+      ],
+      "additionalProperties": false
+    },
+    "Union57_0_57": {
+      "type": "object",
+      "properties": {
+        "lit": {}
+      },
+      "required": [
+        "lit"
+      ],
+      "additionalProperties": false
+    },
+    "Union59_1_59": {
+      "type": "object",
+      "properties": {
+        "ref": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ref"
+      ],
+      "additionalProperties": false
+    },
+    "Union61_2_61": {
+      "type": "object",
+      "properties": {
+        "cel": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "cel"
+      ],
+      "additionalProperties": false
+    },
+    "constraints_69": {
+      "type": "object",
+      "additionalProperties": {}
+    },
+    "detect_64": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "choose_one",
+            "best_quote",
+            "best_path",
+            "protocol_specific"
+          ]
+        },
+        "provider": {
+          "type": "string"
+        },
+        "candidates": {
+          "type": "array",
+          "items": {}
+        },
+        "constraints": {
+          "$ref": "#/$defs/constraints_69"
+        },
+        "requires_capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_13"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "additionalProperties": false
+    },
+    "Union63_3_63": {
+      "type": "object",
+      "properties": {
+        "detect": {
+          "$ref": "#/$defs/detect_64"
+        }
+      },
+      "required": [
+        "detect"
+      ],
+      "additionalProperties": false
+    },
+    "object_74": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/max_slippage_bps_56"
+      }
+    },
+    "Union73_4_73": {
+      "type": "object",
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/object_74"
+        }
+      },
+      "required": [
+        "object"
+      ],
+      "additionalProperties": false
+    },
+    "Union75_5_75": {
+      "type": "object",
+      "properties": {
+        "array": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/max_slippage_bps_56"
+          }
+        }
+      },
+      "required": [
+        "array"
+      ],
+      "additionalProperties": false
+    },
+    "max_slippage_bps_56": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Union57_0_57"
+        },
+        {
+          "$ref": "#/$defs/Union59_1_59"
+        },
+        {
+          "$ref": "#/$defs/Union61_2_61"
+        },
+        {
+          "$ref": "#/$defs/Union63_3_63"
+        },
+        {
+          "$ref": "#/$defs/Union73_4_73"
+        },
+        {
+          "$ref": "#/$defs/Union75_5_75"
+        }
+      ]
+    },
+    "hard_constraints_55": {
+      "type": "object",
+      "properties": {
+        "max_slippage_bps": {
+          "$ref": "#/$defs/max_slippage_bps_56"
+        },
+        "max_spend": {
+          "$ref": "#/$defs/max_slippage_bps_56"
+        },
+        "max_approval": {
+          "$ref": "#/$defs/max_slippage_bps_56"
+        },
+        "allow_unlimited_approval": {
+          "$ref": "#/$defs/max_slippage_bps_56"
+        },
+        "max_price_impact_bps": {
+          "$ref": "#/$defs/max_slippage_bps_56"
+        },
+        "min_health_factor_after": {
+          "$ref": "#/$defs/max_slippage_bps_56"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_13"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Def_78": {
+      "type": "object",
+      "properties": {
+        "expr": {
+          "$ref": "#/$defs/max_slippage_bps_56"
+        },
+        "inputs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_13"
+        }
+      },
+      "required": [
+        "expr"
+      ],
+      "additionalProperties": false
+    },
+    "calculated_fields_77": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/Def_78"
+      }
+    },
+    "Lazy_89": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        },
+        "components": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Lazy_89"
+          }
+        }
+      },
+      "required": [
+        "name",
+        "type"
+      ],
+      "additionalProperties": false
+    },
+    "abi_85": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "function"
+        },
+        "name": {
+          "type": "string"
+        },
+        "inputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Lazy_89"
+          }
+        },
+        "outputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Lazy_89"
+          }
+        }
+      },
+      "required": [
+        "type",
+        "name",
+        "inputs"
+      ],
+      "additionalProperties": false
+    },
+    "args_94": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/max_slippage_bps_56"
+      }
+    },
+    "Union83_0_83": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "evm_read"
+        },
+        "to": {
+          "$ref": "#/$defs/max_slippage_bps_56"
+        },
+        "abi": {
+          "$ref": "#/$defs/abi_85"
+        },
+        "args": {
+          "$ref": "#/$defs/args_94"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_13"
+        }
+      },
+      "required": [
+        "type",
+        "to",
+        "abi",
+        "args"
+      ],
+      "additionalProperties": false
+    },
+    "args_101": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/max_slippage_bps_56"
+      }
+    },
+    "Def_99": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "to": {
+          "$ref": "#/$defs/max_slippage_bps_56"
+        },
+        "abi": {
+          "$ref": "#/$defs/abi_85"
+        },
+        "args": {
+          "$ref": "#/$defs/args_101"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_13"
+        }
+      },
+      "required": [
+        "id",
+        "to",
+        "abi",
+        "args"
+      ],
+      "additionalProperties": false
+    },
+    "Union95_1_95": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "evm_multiread"
+        },
+        "method": {
+          "type": "string",
+          "enum": [
+            "multicall3",
+            "rpc_batch"
+          ]
+        },
+        "calls": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Def_99"
+          }
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_13"
+        }
+      },
+      "required": [
+        "type",
+        "method",
+        "calls"
+      ],
+      "additionalProperties": false
+    },
+    "args_104": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/max_slippage_bps_56"
+      }
+    },
+    "Union102_2_102": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "evm_call"
+        },
+        "to": {
+          "$ref": "#/$defs/max_slippage_bps_56"
+        },
+        "abi": {
+          "$ref": "#/$defs/abi_85"
+        },
+        "args": {
+          "$ref": "#/$defs/args_104"
+        },
+        "value": {
+          "$ref": "#/$defs/max_slippage_bps_56"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_13"
+        }
+      },
+      "required": [
+        "type",
+        "to",
+        "abi",
+        "args"
+      ],
+      "additionalProperties": false
+    },
+    "args_109": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/max_slippage_bps_56"
+      }
+    },
+    "Def_108": {
+      "type": "object",
+      "properties": {
+        "abi": {
+          "$ref": "#/$defs/abi_85"
+        },
+        "args": {
+          "$ref": "#/$defs/args_109"
+        },
+        "condition": {
+          "$ref": "#/$defs/max_slippage_bps_56"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_13"
+        }
+      },
+      "required": [
+        "abi",
+        "args"
+      ],
+      "additionalProperties": false
+    },
+    "Union105_3_105": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "evm_multicall"
+        },
+        "to": {
+          "$ref": "#/$defs/max_slippage_bps_56"
+        },
+        "calls": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Def_108"
+          }
+        },
+        "deadline": {
+          "$ref": "#/$defs/max_slippage_bps_56"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_13"
+        }
+      },
+      "required": [
+        "type",
+        "to",
+        "calls"
+      ],
+      "additionalProperties": false
+    },
+    "Lazy_113": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "description": {
+          "type": "string"
+        },
+        "condition": {
+          "$ref": "#/$defs/max_slippage_bps_56"
+        },
+        "chain": {
+          "type": "string",
+          "pattern": "^(eip155|solana|cosmos|bip122|aptos|sui):[a-zA-Z0-9._-]+$"
+        },
+        "execution": {
+          "$ref": "#/$defs/Lazy_82"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_13"
+        }
+      },
+      "required": [
+        "id",
+        "execution"
+      ],
+      "additionalProperties": false
+    },
+    "Union110_4_110": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "composite"
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Lazy_113"
+          },
+          "minItems": 1
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_13"
+        }
+      },
+      "required": [
+        "type",
+        "steps"
+      ],
+      "additionalProperties": false
+    },
+    "Def_121": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "pubkey": {
+          "$ref": "#/$defs/max_slippage_bps_56"
+        },
+        "signer": {
+          "$ref": "#/$defs/max_slippage_bps_56"
+        },
+        "writable": {
+          "$ref": "#/$defs/max_slippage_bps_56"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_13"
+        }
+      },
+      "required": [
+        "name",
+        "pubkey",
+        "signer",
+        "writable"
+      ],
+      "additionalProperties": false
+    },
+    "Union117_5_117": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "solana_instruction"
+        },
+        "program": {
+          "$ref": "#/$defs/max_slippage_bps_56"
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "discriminator": {
+          "$ref": "#/$defs/max_slippage_bps_56"
+        },
+        "accounts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Def_121"
+          }
+        },
+        "data": {
+          "$ref": "#/$defs/max_slippage_bps_56"
+        },
+        "compute_units": {
+          "$ref": "#/$defs/max_slippage_bps_56"
+        },
+        "lookup_tables": {
+          "$ref": "#/$defs/max_slippage_bps_56"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_13"
+        }
+      },
+      "required": [
+        "type",
+        "program",
+        "instruction",
+        "accounts",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "Union123_6_123": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "solana_read"
+        },
+        "method": {
+          "type": "string",
+          "minLength": 1
+        },
+        "params": {
+          "$ref": "#/$defs/max_slippage_bps_56"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_13"
+        }
+      },
+      "required": [
+        "type",
+        "method"
+      ],
+      "additionalProperties": false
+    },
+    "mapping_129": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/max_slippage_bps_56"
+      }
+    },
+    "Union126_7_126": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "bitcoin_psbt"
+        },
+        "script_type": {
+          "type": "string",
+          "enum": [
+            "p2wpkh",
+            "p2tr",
+            "p2sh",
+            "p2wsh"
+          ]
+        },
+        "mapping": {
+          "$ref": "#/$defs/mapping_129"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_13"
+        }
+      },
+      "required": [
+        "type",
+        "script_type",
+        "mapping"
+      ],
+      "additionalProperties": false
+    },
+    "Union130_8_130": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "additionalProperties": true
+    },
+    "Lazy_82": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Union83_0_83"
+        },
+        {
+          "$ref": "#/$defs/Union95_1_95"
+        },
+        {
+          "$ref": "#/$defs/Union102_2_102"
+        },
+        {
+          "$ref": "#/$defs/Union105_3_105"
+        },
+        {
+          "$ref": "#/$defs/Union110_4_110"
+        },
+        {
+          "$ref": "#/$defs/Union117_5_117"
+        },
+        {
+          "$ref": "#/$defs/Union123_6_123"
+        },
+        {
+          "$ref": "#/$defs/Union126_7_126"
+        },
+        {
+          "$ref": "#/$defs/Union130_8_130"
+        }
+      ]
+    },
+    "execution_81": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/Lazy_82"
+      }
+    },
+    "Def_23": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "risk_level": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "risk_tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "params": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Def_29"
+          }
+        },
+        "returns": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Def_49"
+          }
+        },
+        "requires_queries": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "hard_constraints": {
+          "$ref": "#/$defs/hard_constraints_55"
+        },
+        "calculated_fields": {
+          "$ref": "#/$defs/calculated_fields_77"
+        },
+        "execution": {
+          "$ref": "#/$defs/execution_81"
+        },
+        "pre_conditions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "side_effects": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "capabilities_required": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_13"
+        }
+      },
+      "required": [
+        "description",
+        "risk_level",
+        "execution"
+      ],
+      "additionalProperties": false
+    },
+    "actions_22": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/Def_23"
+      }
+    },
+    "block_tag_145": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "latest",
+            "safe",
+            "finalized"
+          ]
+        },
+        {
+          "type": "integer"
+        }
+      ]
+    },
+    "consistency_144": {
+      "type": "object",
+      "properties": {
+        "block_tag": {
+          "$ref": "#/$defs/block_tag_145"
+        },
+        "require_same_block": {
+          "type": "boolean"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_13"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Def_139": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "params": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Def_29"
+          }
+        },
+        "returns": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Def_49"
+          }
+        },
+        "cache_ttl": {
+          "type": "integer"
+        },
+        "consistency": {
+          "$ref": "#/$defs/consistency_144"
+        },
+        "execution": {
+          "$ref": "#/$defs/execution_81"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_13"
+        }
+      },
+      "required": [
+        "description",
+        "execution"
+      ],
+      "additionalProperties": false
+    },
+    "queries_138": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/Def_139"
+      }
+    },
+    "Def_150": {
+      "type": "object",
+      "properties": {
+        "level": {
+          "type": "string",
+          "enum": [
+            "info",
+            "warning",
+            "critical"
+          ]
+        },
+        "text": {
+          "type": "string"
+        },
+        "applies_to": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_13"
+        }
+      },
+      "required": [
+        "level",
+        "text"
+      ],
+      "additionalProperties": false
+    },
+    "decimals_159": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer"
+      }
+    },
+    "addresses_161": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "Def_156": {
+      "type": "object",
+      "properties": {
+        "symbol": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "decimals": {
+          "$ref": "#/$defs/decimals_159"
+        },
+        "addresses": {
+          "$ref": "#/$defs/addresses_161"
+        },
+        "coingecko_id": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_13"
+        }
+      },
+      "required": [
+        "symbol",
+        "decimals",
+        "addresses"
+      ],
+      "additionalProperties": false
+    },
+    "params_172": {
+      "type": "object",
+      "additionalProperties": {}
+    },
+    "calculated_175": {
+      "type": "object",
+      "additionalProperties": {}
+    },
+    "expect_174": {
+      "type": "object",
+      "properties": {
+        "calculated": {
+          "$ref": "#/$defs/calculated_175"
+        },
+        "execution_type": {
+          "type": "string"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_13"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Def_169": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "action": {
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/$defs/params_172"
+        },
+        "expect": {
+          "$ref": "#/$defs/expect_174"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_13"
+        }
+      },
+      "required": [
+        "name",
+        "action",
+        "params"
+      ],
+      "additionalProperties": false
+    },
+    "Root_1": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "ais/0.0.2"
+        },
+        "meta": {
+          "$ref": "#/$defs/meta_3"
+        },
+        "deployments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Def_16"
+          }
+        },
+        "actions": {
+          "$ref": "#/$defs/actions_22"
+        },
+        "queries": {
+          "$ref": "#/$defs/queries_138"
+        },
+        "risks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Def_150"
+          }
+        },
+        "supported_assets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Def_156"
+          }
+        },
+        "capabilities_required": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tests": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Def_169"
+          }
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_13"
+        }
+      },
+      "required": [
+        "schema",
+        "meta",
+        "deployments",
+        "actions"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

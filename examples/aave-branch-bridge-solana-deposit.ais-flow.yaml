@@ -1,0 +1,163 @@
+schema: "ais-flow/0.0.2"
+
+meta:
+  name: "aave-branch-bridge-solana-deposit"
+  version: "0.0.2"
+  description: "Reference: Aave borrow → branch transfer + bridge → poll Solana arrival → Solana deposit"
+
+# Required runtime context (see examples/README.md):
+# - inputs.*
+# - ctx.wallet_address
+# - contracts.* (auto-filled by solver from protocol deployments when missing)
+
+default_chain: "eip155:8453"
+
+inputs:
+  # Asset objects are used to avoid hardcoding token contract addresses inside the workflow.
+  # In production, an agent/solver typically resolves the asset fields from allowlists/packs.
+  collateral_weth:
+    type: asset
+    required: true
+    example:
+      chain_id: "eip155:8453"
+      address: "0x4200000000000000000000000000000000000006"
+      symbol: "WETH"
+      decimals: 18
+  borrow_usdc:
+    type: asset
+    required: true
+    example:
+      chain_id: "eip155:8453"
+      address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+      symbol: "USDC"
+      decimals: 6
+
+  collateral_amount_atomic:
+    type: uint256
+    required: true
+    description: "WETH collateral amount (atomic)."
+    example: 1000000000000000000
+  borrow_amount_atomic:
+    type: uint256
+    required: true
+    description: "USDC borrow amount (atomic)."
+    example: 850000000
+
+  cex_address:
+    type: address
+    required: true
+    description: "Destination exchange address (EVM)."
+    example: "0x000000000000000000000000000000000000dEaD"
+
+  # Bridge branch parameters (demo)
+  bridge_amount_atomic:
+    type: uint256
+    required: true
+    description: "Amount to bridge (atomic)."
+    example: 500000000
+  solana_address:
+    type: address
+    required: true
+    description: "Destination Solana wallet (base58)."
+    example: "BPFLoaderUpgradeab1e11111111111111111111111"
+
+nodes:
+  # ── Aave collateral + borrow ────────────────────────────────────────────────
+
+  - id: q_weth_allowance_aave
+    type: query_ref
+    skill: "erc20@0.0.2"
+    query: "allowance"
+    args:
+      token: { ref: "inputs.collateral_weth" }
+      owner: { ref: "ctx.wallet_address" }
+      # aave-v3 spec provides `deployments[].contracts.pool`; solver may auto-fill `contracts.pool`
+      spender: { ref: "contracts.pool" }
+
+  - id: approve_weth_to_aave
+    type: action_ref
+    skill: "erc20@0.0.2"
+    action: "approve"
+    deps: ["q_weth_allowance_aave"]
+    # Pre-check: only approve if allowance is insufficient
+    condition: { cel: "nodes.q_weth_allowance_aave.outputs.allowance < inputs.collateral_amount_atomic" }
+    args:
+      token: { ref: "inputs.collateral_weth" }
+      spender: { ref: "contracts.pool" }
+      amount: { ref: "inputs.collateral_amount_atomic" }
+
+  - id: aave_supply
+    type: action_ref
+    skill: "aave-v3@0.0.2"
+    action: "supply-raw"
+    deps: ["approve_weth_to_aave"]
+    args:
+      token: { ref: "inputs.collateral_weth" }
+      amount_atomic: { ref: "inputs.collateral_amount_atomic" }
+
+  - id: aave_borrow
+    type: action_ref
+    skill: "aave-v3@0.0.2"
+    action: "borrow-raw"
+    deps: ["aave_supply"]
+    args:
+      token: { ref: "inputs.borrow_usdc" }
+      amount_atomic: { ref: "inputs.borrow_amount_atomic" }
+      interest_rate_mode: { lit: 2 }
+
+  # ── Branch A: transfer remaining to CEX ─────────────────────────────────────
+
+  - id: transfer_to_cex
+    type: action_ref
+    skill: "erc20@0.0.2"
+    action: "transfer"
+    deps: ["aave_borrow"]
+    args:
+      token: { ref: "inputs.borrow_usdc" }
+      to: { ref: "inputs.cex_address" }
+      # Example: "remaining" is hard-coded; in production, agent computes it.
+      amount: { cel: "inputs.borrow_amount_atomic - inputs.bridge_amount_atomic" }
+
+  # ── Branch B: bridge + wait arrival + Solana deposit ────────────────────────
+
+  - id: bridge_send
+    type: action_ref
+    skill: "bridge-demo@0.0.2"
+    action: "send"
+    deps: ["aave_borrow"]
+    args:
+      amount: { ref: "inputs.bridge_amount_atomic" }
+      # Recipient is opaque in bridge-demo. Real bridges would include token + dst chain + dst addr.
+      recipient: { lit: "0x2222222222222222222222222222222222222222" }
+
+  - id: wait_solana_arrival
+    chain: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
+    type: query_ref
+    skill: "solana-rpc@0.0.2"
+    query: "balance"
+    deps: ["bridge_send"]
+    args:
+      address: { ref: "inputs.solana_address" }
+    retry:
+      interval_ms: 2000
+      max_attempts: 600
+      backoff: "fixed"
+    timeout_ms: 1200000
+    # Post-check polling: treat "balance increased" as arrival signal (demo-only)
+    until: { cel: "nodes.wait_solana_arrival.outputs.lamports > 0" }
+
+  - id: solana_deposit
+    chain: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
+    type: action_ref
+    skill: "solana-vault-demo@0.0.2"
+    action: "deposit"
+    deps: ["wait_solana_arrival"]
+    args:
+      user: { ref: "inputs.solana_address" }
+
+outputs:
+  aave_borrow_tx: { ref: "nodes.aave_borrow.outputs.tx_hash" }
+  transfer_tx: { ref: "nodes.transfer_to_cex.outputs.tx_hash" }
+  bridge_tx: { ref: "nodes.bridge_send.outputs.tx_hash" }
+  solana_signature: { ref: "nodes.solana_deposit.outputs.signature" }
+

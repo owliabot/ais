@@ -1,0 +1,62 @@
+schema: "ais/0.0.2"
+
+meta:
+  protocol: "evm-native-utils"
+  version: "0.0.1"
+  name: "EVM Native Utils"
+  description: "Helpers for reading/sending EVM native currency (ETH) via core execution types."
+  tags: ["evm", "native", "runner"]
+
+capabilities_required:
+  - "cel_v1"
+  - "evm_read"
+  - "evm_call"
+
+deployments:
+  - chain: "eip155:1"
+    contracts: {}
+
+queries:
+  native-balance:
+    description: "Read native balance via a helper contract: getBalance(address) -> uint256."
+    params:
+      - { name: balance_reader, type: address, description: "Contract implementing getBalance(address)", required: true }
+      - { name: addr, type: address, description: "Address to read balance for", required: true }
+    returns:
+      - { name: balance, type: uint256, description: "Native balance (wei)" }
+    execution:
+      "eip155:*":
+        type: evm_read
+        to: { ref: "params.balance_reader" }
+        abi:
+          type: "function"
+          name: "getBalance"
+          inputs:
+            - { name: "addr", type: "address" }
+          outputs:
+            - { name: "balance", type: "uint256" }
+        args:
+          addr: { ref: "params.addr" }
+
+actions:
+  native-transfer:
+    description: "Send native currency to an address (ETH)."
+    risk_level: 3
+    risk_tags: ["transfer"]
+    params:
+      - { name: to, type: address, description: "Recipient address", required: true }
+      - { name: amount, type: token_amount, description: "Human amount in ETH (e.g. \"0.1\")", required: true }
+    execution:
+      "eip155:*":
+        type: evm_call
+        to: { ref: "params.to" }
+        abi:
+          type: "function"
+          name: "noop"
+          inputs: []
+          outputs: []
+        args: {}
+        value: { cel: "to_atomic(params.amount, 18)" }
+
+extensions: {}
+

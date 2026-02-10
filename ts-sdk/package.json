@@ -1,6 +1,6 @@
 {
   "name": "@owliabot/ais-ts-sdk",
-  "version": "0.1.0",
+  "version": "0.0.2",
   "description": "TypeScript SDK for parsing and validating AIS (Agent Interaction Specification) files",
   "type": "module",
   "main": "./dist/index.js",
@@ -19,6 +19,7 @@
   ],
   "scripts": {
     "build": "tsc",
+    "build:schema": "npm run build && node dist/scripts/build-schema.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint src tests",
@@ -35,7 +36,9 @@
   "author": "AIS Protocol",
   "license": "MIT",
   "dependencies": {
-    "js-sha3": "^0.9.3",
+    "@solana/spl-token": "^0.4.14",
+    "@solana/web3.js": "^1.98.4",
+    "ethers": "^6.16.0",
     "yaml": "^2.3.4",
     "zod": "^3.22.4"
   },

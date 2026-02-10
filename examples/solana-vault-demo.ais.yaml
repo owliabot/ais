@@ -1,0 +1,43 @@
+schema: "ais/0.0.2"
+
+meta:
+  protocol: "solana-vault-demo"
+  version: "0.0.2"
+  name: "Solana Vault Demo"
+  description: "Demo Solana vault deposit (solana_instruction)"
+  tags: ["solana", "vault", "demo"]
+
+deployments:
+  - chain: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
+    contracts:
+      vault_program: "BPFLoaderUpgradeab1e11111111111111111111111"
+
+actions:
+  deposit:
+    description: "Deposit into vault (mock instruction bytes)"
+    risk_level: 2
+    risk_tags: ["deposit"]
+    params:
+      - name: user
+        type: address
+        description: "User wallet address"
+        required: true
+    returns:
+      - { name: signature, type: string }
+    execution:
+      "solana:*":
+        type: solana_instruction
+        program: { ref: "contracts.vault_program" }
+        instruction: "deposit"
+        accounts:
+          - name: payer
+            pubkey: { ref: "ctx.wallet_address" }
+            signer: { lit: true }
+            writable: { lit: true }
+          - name: user
+            pubkey: { ref: "params.user" }
+            signer: { lit: false }
+            writable: { lit: false }
+        data: { lit: "0x01" }
+        compute_units: { lit: "20000" }
+

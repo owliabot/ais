@@ -1,137 +1,82 @@
-# Execution Module
+# Execution Module (AIS 0.0.2)
 
-Transaction building and ABI encoding for executing AIS actions on-chain. Converts high-level AIS action specifications into executable transaction calldata.
+Transaction building and ABI encoding for executing AIS actions on-chain.
+
+The execution layer compiles AIS `execution` specs into chain-SDK requests (EVM calldata / Solana instructions) and provides a JSON-serializable `ExecutionPlan` IR for orchestration.
 
 ## File Structure
 
 | File | Purpose |
 |------|---------|
-| `builder.ts` | Main transaction builder — resolves actions to calldata |
-| `encoder.ts` | Lightweight ABI encoder (no external deps) |
-| `keccak.ts` | Keccak-256 hash for function selectors |
-| `multicall.ts` | Batched transaction encoding (multicall3, Universal Router) |
-| `pre-authorize.ts` | Token approval flows (approve, permit, permit2) |
+| `builder.ts` | Legacy builder APIs (not recommended; prefer `ExecutionPlan`) |
+| `plan.ts` | JSON-serializable ExecutionPlan IR (DAG + readiness) |
+| `evm/` | EVM compilation + ABI encode/decode + keccak (`evm_read` / `evm_call`) |
 | `index.ts` | Re-exports all execution APIs |
+| `solana/` | Solana instruction planning helpers |
 
 ## Core API
 
-### Building Transactions
+### Execution Plan IR (JSON) — Recommended entry point
 
-```ts
-import { buildTransaction, buildQuery, buildWorkflowTransactions } from '@owliabot/ais-ts-sdk';
+`ExecutionPlan` is a JSON-serializable DAG IR for coordinating reads/writes and their dependencies. Plan nodes are emitted in a stable topological order based on `deps` plus dependencies inferred from `ValueRef` references to `nodes.*`.
 
-// Build a single action transaction
-const result = await buildTransaction(
-  protocol,
-  'swap',
-  { token_in: '0x...', token_out: '0x...', amount_in: '1000000' },
-  resolverContext,
-  { chain: 'eip155:1' }
-);
+Composite:
+- If an `action_ref` resolves to `execution.type: composite`, the planner expands it into multiple plan nodes (`kind: "execution"`), one per step, with sequential deps.
+- Steps MAY override the chain via `steps[].chain` (cross-chain composite actions).
+- Step outputs are written under `nodes.<parent>.outputs.steps.<step_id>`; the last step also merges into `nodes.<parent>.outputs` for convenience.
 
-if (result.success) {
-  // result.transactions: TransactionRequest[]
-  // result.resolvedParams: Record<string, unknown>
-  // result.preAuthorize?: PreAuthorizeResult
-}
-
-// Build a read query (eth_call)
-const queryResult = await buildQuery(
-  protocol,
-  'getAmountsOut',
-  { amount_in: '1000000', path: ['0x...', '0x...'] },
-  resolverContext,
-  { chain: 'eip155:1' }
-);
-
-// Build all transactions for a workflow
-const workflowTxs = await buildWorkflowTransactions(
-  workflow,
-  inputValues,
-  resolverContext,
-  { chain: 'eip155:1' }
-);
-```
-
-### ABI Encoding
+Chain selection:
+- Each plan node has a concrete `chain` (CAIP-2), derived from `nodes[].chain` or `workflow.default_chain`.
+- Protocol `execution` blocks MAY use wildcards like `eip155:*`; the planner selects the best match using the node's concrete chain.
+Polling:
+- Plan nodes may carry `until` / `retry` / `timeout_ms` (copied from workflow nodes).
+- The engine can use these fields to implement “post-check until satisfied” loops (e.g. wait for bridge arrival).
 
 ```ts
 import {
-  encodeFunctionCall,
-  encodeFunctionSelector,
-  encodeValue,
-  buildFunctionSignature,
+  buildWorkflowExecutionPlan,
+  getNodeReadiness,
+  getNodeReadinessAsync,
+  ExecutionPlanSchema,
 } from '@owliabot/ais-ts-sdk';
 
-// Encode a function call
-const calldata = encodeFunctionCall(
-  'transfer(address,uint256)',
-  ['address', 'uint256'],
-  ['0x1234...', 1000000n]
-);
-// Returns: 0xa9059cbb000000...
+const plan = buildWorkflowExecutionPlan(workflow, resolverContext);
 
-// Just the selector
-const selector = encodeFunctionSelector('transfer(address,uint256)');
-// Returns: 0xa9059cbb
+// Serialize / checkpoint
+const json = JSON.stringify(plan);
+const restored = ExecutionPlanSchema.parse(JSON.parse(json));
+// Note: ExecutionPlan schemas are strict; attach any extra metadata under `extensions`.
 
-// Encode a single value
-const encoded = encodeValue('uint256', 1000000n);
-```
-
-### Multicall Batching
-
-```ts
-import {
-  buildEvmMulticall,
-  encodeMulticall3,
-  encodeUniversalRouter,
-} from '@owliabot/ais-ts-sdk';
-
-// Build multicall from AIS evm_multicall spec
-const multicallTx = buildEvmMulticall(
-  multicallSpec,
-  resolverContext,
-  celContext,
-  evaluator,
-  protocol,
-  { chain: 'eip155:1', style: 'multicall3' }
-);
-
-// Encode as Multicall3 aggregate3
-const data = encodeMulticall3([
-  { target: '0x...', data: '0x...', allowFailure: false },
-]);
-
-// Encode as Uniswap Universal Router
-const routerData = encodeUniversalRouter(commands, inputs, deadline);
-```
-
-### Pre-Authorization (Approvals)
-
-```ts
-import {
-  buildPreAuthorize,
-  getPreAuthorizeQueries,
-  PERMIT2_ADDRESS,
-} from '@owliabot/ais-ts-sdk';
-
-// Build approval flow
-const preAuth = await buildPreAuthorize(
-  preAuthorizeSpec,
-  resolverContext,
-  celContext,
-  evaluator,
-  protocol,
-  { chain: 'eip155:1', walletAddress: '0x...' }
-);
-
-if (preAuth.needed) {
-  // preAuth.approveTx — standard approve transaction
-  // preAuth.permitData — EIP-712 data for wallet to sign
-  // preAuth.permit2ApproveTx — approve Permit2 contract first
+// Before executing a node, check readiness (missing refs / detect requirements)
+for (const node of restored.nodes) {
+  const r = getNodeReadiness(node, resolverContext);
+  if (r.state === 'blocked') {
+    // ask solver to patch runtime with r.missing_refs, or handle detect
+  }
 }
 ```
+
+If a workflow uses async `{ detect: ... }` resolution (e.g. needs network IO for routing/quotes), use `getNodeReadinessAsync(node, ctx, { detect })` and compile via the `*Async` compilers.
+
+### ABI Encoding (EVM)
+
+```ts
+import { encodeJsonAbiFunctionCall, decodeJsonAbiFunctionResult } from '@owliabot/ais-ts-sdk';
+
+const abi = {
+  type: 'function',
+  name: 'q',
+  inputs: [{ name: 'x', type: 'uint256' }],
+  outputs: [{ name: 'y', type: 'uint256' }],
+} as const;
+
+const data = encodeJsonAbiFunctionCall(abi, { x: 42n });
+const out = decodeJsonAbiFunctionResult(abi, '0x' + '00'.repeat(32));
+```
+
+### Multicall and Pre-Authorization
+
+Multicall batching and token approval helpers will be reintroduced after the 0.0.2 execution refactor is complete.
 
 ## Types
 
@@ -171,9 +116,9 @@ interface PreAuthorizeResult {
 }
 ```
 
-## Execution Types (AIS-2)
+## Execution Types (AIS 0.0.2)
 
-The builder supports all AIS-2 execution types:
+The schema layer defines the AIS 0.0.2 execution types (see `src/schema/execution.ts`). The builder implementation is currently in progress.
 
 | Type | Description |
 |------|-------------|
@@ -182,10 +127,10 @@ The builder supports all AIS-2 execution types:
 | `evm_multiread` | Batched read calls |
 | `evm_multicall` | Batched write calls (atomic) |
 | `composite` | Multi-step with conditions |
-| `solana_instruction` | Solana instruction (planned) |
-| `cosmos_message` | Cosmos message (planned) |
-| `bitcoin_psbt` | Bitcoin PSBT (planned) |
-| `move_entry` | Move entry function (planned) |
+| `solana_instruction` | Solana instruction (compiler + RPC executor) |
+| `solana_read` | Solana RPC read (balance/account/status queries) |
+| `bitcoin_psbt` | Bitcoin PSBT construction (core) |
+| *(plugin)* | All non-core execution types (registry-driven) |
 
 ## Chain Pattern Matching
 
@@ -208,10 +153,12 @@ The builder matches in order: exact → namespace wildcard → global fallback.
 
 ## Implementation Notes
 
-- **Zero dependencies**: Encoder uses native JS (TextEncoder, BigInt) — no ethers/viem required
+- **Uses standard chain SDKs**: EVM ABI uses `ethers`; Solana uses `@solana/web3.js` / `@solana/spl-token`
+- **Engine handles network IO**: execution module compiles requests; IO happens in `engine` executors
 - **CEL integration**: Mapping values can contain CEL expressions for dynamic computation
 - **Composite steps**: Each step can have conditions evaluated via CEL
 - **Pre-authorize aware**: Automatically handles approve/permit/permit2 flows
+- **Solana extensibility**: for non-standard Solana program encodings, use `solana.SolanaInstructionCompilerRegistry` to register `(programId, instruction)` compilers.
 
 ## Dependencies
 

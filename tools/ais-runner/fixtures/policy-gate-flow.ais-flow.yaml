@@ -1,0 +1,31 @@
+schema: "ais-flow/0.0.2"
+
+meta:
+  name: "runner-policy-gate"
+  version: "0.0.1"
+  description: "Fixture workflow for verifying runner policy gates"
+
+default_chain: "eip155:1"
+
+requires_pack:
+  name: "runner-policy-gate-pack"
+  version: "0.0.1"
+
+nodes:
+  - id: approve
+    type: action_ref
+    skill: "erc20@0.0.2"
+    action: "approve"
+    args:
+      token:
+        lit:
+          chain_id: "eip155:1"
+          symbol: "WETH"
+          address: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+          decimals: 18
+      spender:
+        lit: "0x1111111111111111111111111111111111111111"
+      amount:
+        lit: "1"
+
+extensions: {}

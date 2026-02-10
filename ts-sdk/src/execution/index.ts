@@ -14,36 +14,45 @@ export {
 } from './builder.js';
 
 export {
-  encodeFunctionCall,
   encodeFunctionSelector,
-  encodeValue,
-  buildFunctionSignature,
-  isDynamicType,
-} from './encoder.js';
-
-export { keccak256 } from './keccak.js';
-
-export {
-  buildPreAuthorize,
-  buildAllowanceCheckData,
-  getPreAuthorizeQueries,
-  PERMIT2_ADDRESS,
-  MAX_UINT256,
-  type PreAuthorizeConfig,
-  type PreAuthorizeResult,
-  type PreAuthorizeContext,
-  type PermitData,
-} from './pre-authorize.js';
-
-export {
-  buildEvmMulticall,
-  buildMulticallCalls,
-  encodeStandardMulticall,
-  encodeMulticall3,
-  encodeUniversalRouter,
-  type MulticallBuildOptions,
-  type EncodedCall,
-} from './multicall.js';
+  encodeJsonAbiFunctionCall,
+  decodeJsonAbiFunctionResult,
+  buildFunctionSignatureFromJsonAbi,
+  AbiArgsError,
+  AbiEncodingError,
+  AbiDecodingError,
+  keccak256,
+  compileEvmExecution,
+  compileEvmExecutionAsync,
+  compileEvmCall,
+  compileEvmCallAsync,
+  compileEvmRead,
+  compileEvmReadAsync,
+  compileEvmGetBalance,
+  compileEvmGetBalanceAsync,
+  type CompileEvmOptions,
+  type CompiledEvmRequest,
+  type CompiledEvmAbiRequest,
+  type CompiledEvmGetBalanceRequest,
+  EvmCompileError,
+} from './evm/index.js';
 
 // Solana execution
 export * as solana from './solana/index.js';
+export * as evm from './evm/index.js';
+
+// Execution plan IR
+export {
+  ExecutionPlanSchema,
+  ExecutionPlanNodeSchema,
+  buildWorkflowExecutionPlan,
+  selectExecutionSpec,
+  getNodeReadiness,
+  getNodeReadinessAsync,
+  type ExecutionPlan,
+  type ExecutionPlanNode,
+  type PlanWrite,
+  type NodeReadinessResult,
+  type NodeRunState,
+  PlanBuildError,
+} from './plan.js';

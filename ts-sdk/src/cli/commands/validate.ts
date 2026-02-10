@@ -39,10 +39,12 @@ export async function validateCommand(options: CLIOptions, useColor: boolean): P
       }
 
       for (const { path, document } of dirResult.packs) {
+        const name = document.meta?.name ?? document.name ?? '(unknown-pack)';
+        const version = document.meta?.version ?? document.version ?? '(unknown-version)';
         results.push({
           path: relative(process.cwd(), path),
           type: 'success',
-          message: `Valid pack: ${document.name}@${document.version}`,
+          message: `Valid pack: ${name}@${version}`,
           document,
         });
       }
@@ -57,12 +59,29 @@ export async function validateCommand(options: CLIOptions, useColor: boolean): P
       }
 
       // Report errors
-      for (const { path, error } of dirResult.errors) {
-        results.push({
-          path: relative(process.cwd(), path),
-          type: 'error',
-          message: error,
-        });
+      for (const e of dirResult.errors) {
+        const base = e.kind ? `[${e.kind}] ${e.error}` : e.error;
+        if (e.issues && e.issues.length > 0) {
+          for (const issue of e.issues) {
+            results.push({
+              path: relative(process.cwd(), e.path),
+              type: 'error',
+              message: `${base} (${issue.path}: ${issue.message})`,
+            });
+          }
+        } else if (e.field_path) {
+          results.push({
+            path: relative(process.cwd(), e.path),
+            type: 'error',
+            message: `${base} (${e.field_path})`,
+          });
+        } else {
+          results.push({
+            path: relative(process.cwd(), e.path),
+            type: 'error',
+            message: base,
+          });
+        }
         hasErrors = true;
       }
     } else {

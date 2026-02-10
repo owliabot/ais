@@ -1,0 +1,213 @@
+{
+  "schema": "ais-conformance/0.0.2",
+  "cases": [
+    {
+      "id": "to-atomic-zero-usdc",
+      "kind": "cel_eval",
+      "input": { "expression": "to_atomic(\"0\", 6)" },
+      "expect": { "value_bigint": "0" }
+    },
+    {
+      "id": "to-atomic-one-decimals0",
+      "kind": "cel_eval",
+      "input": { "expression": "to_atomic(\"1\", 0)" },
+      "expect": { "value_bigint": "1" }
+    },
+    {
+      "id": "to-atomic-usdc-basic",
+      "kind": "cel_eval",
+      "input": { "expression": "to_atomic(\"1.23\", 6)" },
+      "expect": { "value_bigint": "1230000" }
+    },
+    {
+      "id": "to-atomic-leading-zeros-ok",
+      "kind": "cel_eval",
+      "input": { "expression": "to_atomic(\"0001.2300\", 6)" },
+      "expect": { "value_bigint": "1230000" }
+    },
+    {
+      "id": "to-atomic-8-decimals-min-unit",
+      "kind": "cel_eval",
+      "input": { "expression": "to_atomic(\"0.00000001\", 8)" },
+      "expect": { "value_bigint": "1" }
+    },
+    {
+      "id": "to-atomic-9-decimals-min-unit",
+      "kind": "cel_eval",
+      "input": { "expression": "to_atomic(\"0.000000001\", 9)" },
+      "expect": { "value_bigint": "1" }
+    },
+    {
+      "id": "to-atomic-18-decimals-min-unit",
+      "kind": "cel_eval",
+      "input": { "expression": "to_atomic(\"0.000000000000000001\", 18)" },
+      "expect": { "value_bigint": "1" }
+    },
+    {
+      "id": "to-atomic-trailing-zeros-normalize",
+      "kind": "cel_eval",
+      "input": { "expression": "to_atomic(\"1.000000\", 6)" },
+      "expect": { "value_bigint": "1000000" }
+    },
+
+    {
+      "id": "to-atomic-error-fractional-with-decimals0",
+      "kind": "cel_eval_error",
+      "input": { "expression": "to_atomic(\"0.1\", 0)" },
+      "expect": { "message_includes": "too many fractional digits" }
+    },
+    {
+      "id": "to-atomic-error-too-many-fractional-digits",
+      "kind": "cel_eval_error",
+      "input": { "expression": "to_atomic(\"1.234\", 2)" },
+      "expect": { "message_includes": "too many fractional digits" }
+    },
+    {
+      "id": "to-atomic-error-negative",
+      "kind": "cel_eval_error",
+      "input": { "expression": "to_atomic(\"-1\", 6)" },
+      "expect": { "message_includes": "non-negative" }
+    },
+    {
+      "id": "to-atomic-error-dot-leading",
+      "kind": "cel_eval_error",
+      "input": { "expression": "to_atomic(\".5\", 6)" },
+      "expect": { "message_includes": "invalid decimal" }
+    },
+    {
+      "id": "to-atomic-error-dot-trailing",
+      "kind": "cel_eval_error",
+      "input": { "expression": "to_atomic(\"1.\", 6)" },
+      "expect": { "message_includes": "invalid decimal" }
+    },
+    {
+      "id": "to-atomic-error-exponent",
+      "kind": "cel_eval_error",
+      "input": { "expression": "to_atomic(\"1e2\", 6)" },
+      "expect": { "message_includes": "exponent" }
+    },
+    {
+      "id": "to-atomic-error-empty",
+      "kind": "cel_eval_error",
+      "input": { "expression": "to_atomic(\"\", 6)" },
+      "expect": { "message_includes": "empty" }
+    },
+    {
+      "id": "to-atomic-error-whitespace",
+      "kind": "cel_eval_error",
+      "input": { "expression": "to_atomic(\" 1\", 6)" },
+      "expect": { "message_includes": "invalid decimal" }
+    },
+    {
+      "id": "to-atomic-error-decimals-out-of-range",
+      "kind": "cel_eval_error",
+      "input": { "expression": "to_atomic(\"1\", 78)" },
+      "expect": { "message_includes": "out of range" }
+    },
+
+    {
+      "id": "to-human-zero",
+      "kind": "cel_eval_string",
+      "input": { "expression": "to_human(0, 6)" },
+      "expect": { "value_string": "0" }
+    },
+    {
+      "id": "to-human-min-unit-usdc",
+      "kind": "cel_eval_string",
+      "input": { "expression": "to_human(1, 6)" },
+      "expect": { "value_string": "0.000001" }
+    },
+    {
+      "id": "to-human-usdc-basic",
+      "kind": "cel_eval_string",
+      "input": { "expression": "to_human(1230000, 6)" },
+      "expect": { "value_string": "1.23" }
+    },
+    {
+      "id": "to-human-strip-trailing-zeros",
+      "kind": "cel_eval_string",
+      "input": { "expression": "to_human(1000000, 6)" },
+      "expect": { "value_string": "1" }
+    },
+    {
+      "id": "to-human-decimals0",
+      "kind": "cel_eval_string",
+      "input": { "expression": "to_human(10, 0)" },
+      "expect": { "value_string": "10" }
+    },
+    {
+      "id": "to-human-18-decimals-min-unit",
+      "kind": "cel_eval_string",
+      "input": { "expression": "to_human(1, 18)" },
+      "expect": { "value_string": "0.000000000000000001" }
+    },
+    {
+      "id": "to-human-error-negative",
+      "kind": "cel_eval_error",
+      "input": { "expression": "to_human(-1, 6)" },
+      "expect": { "message_includes": "non-negative" }
+    },
+    {
+      "id": "to-human-error-decimals-out-of-range",
+      "kind": "cel_eval_error",
+      "input": { "expression": "to_human(1, 78)" },
+      "expect": { "message_includes": "out of range" }
+    },
+    {
+      "id": "to-human-error-non-integer-atomic-string",
+      "kind": "cel_eval_error",
+      "input": { "expression": "to_human(\"1.1\", 6)" },
+      "expect": { "message_includes": "integer" }
+    },
+
+    {
+      "id": "mul-div-bps-example",
+      "kind": "cel_eval",
+      "input": { "expression": "mul_div(100, 9950, 10000)" },
+      "expect": { "value_bigint": "99" }
+    },
+    {
+      "id": "mul-div-floor",
+      "kind": "cel_eval",
+      "input": { "expression": "mul_div(1, 1, 2)" },
+      "expect": { "value_bigint": "0" }
+    },
+    {
+      "id": "mul-div-half",
+      "kind": "cel_eval",
+      "input": { "expression": "mul_div(200, 5000, 10000)" },
+      "expect": { "value_bigint": "100" }
+    },
+    {
+      "id": "mul-div-zero",
+      "kind": "cel_eval",
+      "input": { "expression": "mul_div(0, 123, 1)" },
+      "expect": { "value_bigint": "0" }
+    },
+    {
+      "id": "mul-div-denom-one",
+      "kind": "cel_eval",
+      "input": { "expression": "mul_div(1, 2, 1)" },
+      "expect": { "value_bigint": "2" }
+    },
+    {
+      "id": "mul-div-error-denom-zero",
+      "kind": "cel_eval_error",
+      "input": { "expression": "mul_div(1, 2, 0)" },
+      "expect": { "message_includes": "denom" }
+    },
+    {
+      "id": "mul-div-error-negative",
+      "kind": "cel_eval_error",
+      "input": { "expression": "mul_div(-1, 2, 3)" },
+      "expect": { "message_includes": "non-negative" }
+    },
+    {
+      "id": "mul-div-error-non-integer-input",
+      "kind": "cel_eval_error",
+      "input": { "expression": "mul_div(1, \"1.1\", 2)" },
+      "expect": { "message_includes": "integer" }
+    }
+  ]
+}
+

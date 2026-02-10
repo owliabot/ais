@@ -3,6 +3,7 @@
  */
 
 import { Lexer, Token, TokenType } from './lexer.js';
+import { parseNumericLiteral, type CELDecimal } from './numeric.js';
 
 export type ASTNode =
   | LiteralNode
@@ -18,7 +19,7 @@ export type ASTNode =
 
 export interface LiteralNode {
   type: 'Literal';
-  value: string | number | boolean | null;
+  value: string | boolean | null | bigint | CELDecimal;
 }
 
 export interface IdentifierNode {
@@ -278,6 +279,9 @@ export class Parser {
       case 'BOOL':
       case 'NULL':
         this.advance();
+        if (token.type === 'NUMBER') {
+          return { type: 'Literal', value: parseNumericLiteral(token.value as string) };
+        }
         return { type: 'Literal', value: token.value };
 
       case 'IDENT':

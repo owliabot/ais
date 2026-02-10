@@ -8,6 +8,9 @@ Validation logic for AIS documents — constraint checking against Pack policies
 |------|---------|
 | `constraint.ts` | Validate values against Pack policy constraints (tokens, slippage, approvals) |
 | `workflow.ts` | Validate workflow node references, dependencies, and expression bindings |
+| `lint.ts` | Best-practice lint rules for AIS documents (pluggable) |
+| `plugins.ts` | Validator plugin registry (lint + validate injection) |
+| `workspace.ts` | Cross-file validation (workflow→pack→protocol), versions, and enabled detect providers |
 | `index.ts` | Re-exports all validators |
 
 ## Core API
@@ -44,6 +47,9 @@ const limits = getHardConstraints(pack.policy);
 ```ts
 import {
   validateWorkflow,
+  validateWorkspaceReferences,
+  createValidatorRegistry,
+  lintDocument,
   getWorkflowProtocols,
   getWorkflowDependencies,
   getExecutionOrder,
@@ -65,8 +71,57 @@ const protocols = getWorkflowProtocols(workflow);
 const deps = getWorkflowDependencies(workflow);
 // ['uniswap-v3/swap', 'aave-v3/supply']
 
-// Get execution order (respects requires_queries)
+// Get execution order (respects deps)
 const orderedNodes = getExecutionOrder(workflow);
+```
+
+### Workspace Validation (cross-file)
+
+Use this when validating a directory/workspace (multiple files). It checks relationships like:
+- `workflow.requires_pack` → existing pack
+- pack `includes[]` → existing protocols with matching versions
+- workflow node `skill/action/query` → resolvable protocol/action/query
+- detect kinds/providers used by a workflow → enabled in the required pack
+
+```ts
+import { loadDirectory, validateWorkspaceReferences } from '@owliabot/ais-ts-sdk';
+
+const dir = await loadDirectory('./examples', { recursive: true });
+const issues = validateWorkspaceReferences({
+  protocols: dir.protocols,
+  packs: dir.packs,
+  workflows: dir.workflows,
+});
+```
+
+### Lint (best practices)
+
+```ts
+import { lintDocument } from '@owliabot/ais-ts-sdk';
+
+const issues = lintDocument(doc, { file_path: './examples/foo.ais.yaml' });
+```
+
+### Plugins (custom lint/validate)
+
+```ts
+import { createValidatorRegistry, validateWorkflow, lintDocument } from '@owliabot/ais-ts-sdk';
+
+const registry = createValidatorRegistry();
+registry.register({
+  id: 'my-plugin',
+  lint_rules: [
+    {
+      id: 'require-tags',
+      severity: 'warning',
+      check: (doc) => (doc.schema === 'ais/0.0.2' && !doc.meta.tags ? [{ rule: 'require-tags', severity: 'warning', message: 'Add tags' }] : []),
+    },
+  ],
+  validate_workflow: (wf) => (wf.nodes.length === 0 ? [{ nodeId: '(workflow)', field: 'nodes', message: 'empty workflow' }] : []),
+});
+
+const validation = validateWorkflow(workflow, resolverContext, { registry });
+const lint = lintDocument(workflow, { registry });
 ```
 
 ## Types
@@ -122,9 +177,13 @@ interface WorkflowValidationResult {
 
 1. **Protocol existence** — Do all `skill` references resolve?
 2. **Action/query existence** — Do referenced actions/queries exist in protocol?
-3. **Input binding** — Do `${inputs.x}` references match declared inputs?
-4. **Node ordering** — Do `${nodes.x}` references point to earlier nodes?
-5. **requires_queries** — Are required nodes defined before usage?
+3. **Chain presence** — Does each node resolve a chain via `nodes[].chain` or `workflow.default_chain`?
+4. **Ref binding** — Do `ValueRef` paths like `{ ref: "inputs.x" }` match declared inputs?
+5. **Node references** — Do `ValueRef` paths like `{ ref: "nodes.x.outputs.y" }` point to existing nodes?
+6. **deps (DAG)** — Are all `deps` valid node ids, and is the dependency graph acyclic?
+
+Note:
+- `nodes[].until` is evaluated *after* the node runs, so it may reference its own outputs (e.g. `nodes.wait.outputs.*`).
 
 ## Dependencies
 

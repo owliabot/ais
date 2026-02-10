@@ -1,6 +1,6 @@
 # Resolver
 
-Reference resolution and expression evaluation for AIS documents. Handles protocol lookups, action/query references, and `${...}` placeholder substitution.
+Reference resolution and ValueRef evaluation for AIS documents. Handles protocol lookups, action/query references, `${...}` placeholder substitution (optional), and `ValueRef` evaluation (`{lit|ref|cel|detect|object|array}`).
 
 ## File Structure
 
@@ -8,6 +8,7 @@ Reference resolution and expression evaluation for AIS documents. Handles protoc
 - `context.ts` — `ResolverContext` state container for loaded protocols and runtime variables
 - `reference.ts` — Protocol, action, and query reference resolution
 - `expression.ts` — `${...}` placeholder parsing and substitution
+- `value-ref.ts` — `ValueRef` evaluation (`lit/ref/cel/detect/object/array`)
 
 ## Core API
 
@@ -15,14 +16,16 @@ Reference resolution and expression evaluation for AIS documents. Handles protoc
 
 ```ts
 createContext(): ResolverContext
-setVariable(ctx, key, value): void
-setQueryResult(ctx, queryName, result): void
+getRuntimeRoot(ctx): Record<string, unknown>
+getRef(ctx, refPath): unknown
+setRef(ctx, refPath, value): void
+setQueryResult(ctx, queryId, result): void
+setNodeOutputs(ctx, nodeId, outputs, options?): void
 ```
 
 The `ResolverContext` holds:
 - `protocols` — Map of loaded protocol specs by name
-- `variables` — Runtime variables (inputs, node outputs, context)
-- `queryResults` — Cached query results
+- `runtime` — Structured runtime state: `inputs/params/ctx/query/contracts/calculated/policy/nodes`
 
 ### Reference Resolution (`reference.ts`)
 
@@ -47,10 +50,22 @@ resolveExpressionString(template, ctx): string
 resolveExpressionObject(obj, ctx): Record<string, unknown>
 ```
 
+### ValueRef Evaluation (`value-ref.ts`)
+
+```ts
+evaluateValueRef(valueRef, ctx, options?): unknown
+evaluateValueRefAsync(valueRef, ctx, options?): Promise<unknown>
+```
+
+Notes:
+- `{ref:"..."}` uses the same dot-path resolution as `resolveExpression()`.
+- `{cel:"..."}` runs CEL against the runtime root object (plus optional `root_overrides`). Numeric values are evaluated using AIS 0.0.2 numeric rules (integers as `bigint`, decimals as exact decimals; JS `number` is rejected on execution-critical paths).
+- `{detect:{...}}` requires a `DetectResolver` unless `kind: choose_one` with `candidates`.
+
 ## Usage Example
 
 ```ts
-import { createContext, registerProtocol, setVariable, resolveAction, resolveExpressionString } from './resolver';
+import { createContext, registerProtocol, setRef, resolveAction, resolveExpressionString } from './resolver';
 import { parseAisFile } from '../index.js';
 
 // 1. Create context and load protocols
@@ -64,9 +79,9 @@ if (result) {
   console.log(result.action.description);
 }
 
-// 3. Set runtime variables
-setVariable(ctx, 'inputs.amount', '1000000000000000000');
-setVariable(ctx, 'ctx.sender', '0x1234...');
+// 3. Set runtime variables (structured)
+setRef(ctx, 'inputs.amount', '1000000000000000000');
+setRef(ctx, 'ctx.sender', '0x1234...');
 
 // 4. Resolve expressions
 const template = 'Swapping ${inputs.amount} from ${ctx.sender}';
@@ -94,7 +109,7 @@ Expressions follow the pattern `${namespace.path}`:
 | `inputs` | `${inputs.token_in}` | Workflow input parameter |
 | `nodes` | `${nodes.step1.outputs.amount_out}` | Previous node output |
 | `ctx` | `${ctx.sender}` | Execution context (chain, sender) |
-| `query` | `${query.pool_data.fee}` | Cached query result (legacy) |
+| `query` | `${query.quote.amountOut}` | Query results (by query id) |
 
 ### Pack Expansion
 

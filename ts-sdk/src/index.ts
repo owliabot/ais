@@ -12,17 +12,20 @@ export {
   AssetSchema,
   TokenAmountSchema,
   AISTypeSchema,
+  DetectSchema,
+  ValueRefSchema,
   type ChainId,
   type Asset,
   type TokenAmount,
   type AISType,
+  type Detect,
+  type ValueRef,
 
   // Execution
   ExecutionSpecSchema,
   ExecutionBlockSchema,
-  type Detect,
-  type MappingValue,
-  type Mapping,
+  type JsonAbiParam,
+  type JsonAbiFunction,
   type ExecutionSpec,
   type ExecutionBlock,
   type CompositeStep,
@@ -32,9 +35,11 @@ export {
   type EvmMulticall,
   type Composite,
   type SolanaInstruction,
-  type CosmosMessage,
+  type SolanaRead,
   type BitcoinPsbt,
-  type MoveEntry,
+  CORE_EXECUTION_TYPES,
+  type CoreExecutionType,
+  type PluginExecutionSpec,
 
   // Protocol
   ProtocolSpecSchema,
@@ -83,6 +88,18 @@ export {
   type AISSchemaType,
 } from './schema/index.js';
 
+// Plugins
+export {
+  createExecutionTypeRegistry,
+  defaultExecutionTypeRegistry,
+  registerExecutionType,
+  validateProtocolExecutionTypes,
+  UnknownExecutionTypeError,
+  PluginExecutionSchemaError,
+  type ExecutionTypePlugin,
+  type ExecutionTypeRegistry,
+} from './plugins/index.js';
+
 // Parser
 export {
   parseAIS,
@@ -99,9 +116,14 @@ export {
 export {
   // Context
   createContext,
-  setVariable,
+  getRuntimeRoot,
+  getRef,
+  setRef,
   setQueryResult,
+  setNodeOutputs,
   type ResolverContext,
+  type RuntimeContext,
+  type RuntimeNodeState,
 
   // References
   registerProtocol,
@@ -119,6 +141,13 @@ export {
   resolveExpression,
   resolveExpressionString,
   resolveExpressionObject,
+
+  // ValueRef evaluation
+  evaluateValueRef,
+  evaluateValueRefAsync,
+  ValueRefEvalError,
+  type DetectResolver,
+  type EvaluateValueRefOptions,
 } from './resolver/index.js';
 
 // Validator
@@ -137,6 +166,25 @@ export {
   getExecutionOrder,
   type WorkflowIssue,
   type WorkflowValidationResult,
+
+  // Workspace (cross-file)
+  validateWorkspaceReferences,
+  type WorkspaceIssue,
+  type WorkspaceIssueSeverity,
+  type WorkspaceDocuments,
+
+  // Lint
+  lintDocument,
+  type LintIssue,
+  type LintRule,
+  type LintSeverity,
+
+  // Plugins
+  createValidatorRegistry,
+  defaultValidatorRegistry,
+  registerValidatorPlugin,
+  type ValidatorPlugin,
+  type ValidatorRegistry,
 } from './validator/index.js';
 
 // Loader
@@ -157,17 +205,115 @@ export {
   buildTransaction,
   buildQuery,
   buildWorkflowTransactions,
-  encodeFunctionCall,
+  solana,
+  evm,
   encodeFunctionSelector,
-  encodeValue,
-  buildFunctionSignature,
+  encodeJsonAbiFunctionCall,
+  decodeJsonAbiFunctionResult,
+  buildFunctionSignatureFromJsonAbi,
+  AbiArgsError,
+  AbiEncodingError,
+  AbiDecodingError,
+  compileEvmExecution,
+  compileEvmExecutionAsync,
+  compileEvmCall,
+  compileEvmCallAsync,
+  compileEvmRead,
+  compileEvmReadAsync,
+  type CompileEvmOptions,
+  type CompiledEvmRequest,
+  EvmCompileError,
   keccak256,
+  ExecutionPlanSchema,
+  ExecutionPlanNodeSchema,
+  buildWorkflowExecutionPlan,
+  selectExecutionSpec,
+  getNodeReadiness,
+  getNodeReadinessAsync,
+  type ExecutionPlan,
+  type ExecutionPlanNode,
+  type PlanWrite,
+  type NodeReadinessResult,
+  type NodeRunState,
+  PlanBuildError,
   type TransactionRequest,
   type BuildOptions,
   type BuildResult,
   type BuildError,
   type BuildOutput,
 } from './execution/index.js';
+
+// Registry
+export {
+  canonicalizeJcs,
+  specHashKeccak256,
+  JcsCanonicalizeError,
+} from './registry/index.js';
+
+// Detect
+export {
+  DetectProviderRegistry,
+  createDetectProviderRegistry,
+  defaultDetectProviderRegistry,
+  registerDetectProvider,
+  createDetectResolver,
+  type DetectProvider,
+  type CreateDetectResolverOptions,
+} from './detect/index.js';
+
+// Engine (interfaces + patches)
+export {
+  type RuntimePatchOp,
+  type RuntimePatch,
+  RuntimePatchError,
+  applyRuntimePatch,
+  applyRuntimePatches,
+  type ApplyRuntimePatchOptions,
+  type ApplyRuntimePatchResult,
+  type EngineEvent,
+  type EngineCheckpoint,
+  type CheckpointStore,
+  type SolverResult,
+  type Solver,
+  type ExecutorResult,
+  type Executor,
+  EvmJsonRpcExecutor,
+  SolanaRpcExecutor,
+  type SolanaRpcExecutorOptions,
+  type SolanaRpcConnectionLike,
+  type SolanaSigner,
+  type JsonRpcTransport,
+  type EvmSigner,
+  type EvmTxRequest,
+  type EvmJsonRpcExecutorOptions,
+  solver,
+  createSolver,
+  type SolverOptions,
+  runPlan,
+  type RunPlanOptions,
+  serializeCheckpoint,
+  deserializeCheckpoint,
+  checkpointJsonReplacer,
+  checkpointJsonReviver,
+  type SerializeCheckpointOptions,
+  AIS_JSON_TYPE_KEY,
+  stringifyAisJson,
+  parseAisJson,
+  aisJsonReplacer,
+  aisJsonReviver,
+  type ExecutionTraceSink,
+  type ExecutionTraceRecord,
+  createJsonlTraceSink,
+  createJsonlTraceSinkFromWritable,
+  createEngineEventJsonlWriter,
+  engineEventsToJsonl,
+  encodeEngineEventJsonlRecord,
+  decodeEngineEventJsonlRecord,
+  type EngineEventJsonlRecord,
+  createJsonlRpcPeer,
+  type JsonlRpcPeer,
+  type JsonlRpcPeerOptions,
+} from './engine/index.js';
 
 // CEL Expression Evaluator
 export {

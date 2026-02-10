@@ -1,13 +1,13 @@
-schema: "ais-pack/1.0"
+schema: "ais-pack/0.0.2"
 
 meta:
   name: "safe-defi-pack"
-  version: "1.0.0"
+  version: "0.0.2"
   description: "Enable Uniswap V3 swap with conservative defaults"
 
 includes:
   - protocol: "uniswap-v3"
-    version: "1.0.0"
+    version: "0.0.2"
     source: "registry"
     chain_scope: ["eip155:8453"]
 
@@ -55,7 +55,7 @@ providers:
 
   detect:
     enabled:
-      - kind: "fee_tier"
+      - kind: "best_quote"
         provider: "uniswap-v3-fee-detect"
         chains: ["eip155:8453"]
         candidates: [100, 500, 3000, 10000]

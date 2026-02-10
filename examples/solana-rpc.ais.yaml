@@ -1,0 +1,50 @@
+schema: "ais/0.0.2"
+
+meta:
+  protocol: "solana-rpc"
+  version: "0.0.2"
+  name: "Solana RPC"
+  description: "Minimal Solana RPC read helpers (solana_read) for workflows (polling/arrival checks)"
+  tags: ["solana", "rpc", "read"]
+
+deployments:
+  - chain: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
+    contracts: {}
+
+queries:
+  balance:
+    description: "Get SOL balance (lamports) for an address"
+    params:
+      - name: address
+        type: address
+        description: "Base58 public key"
+        required: true
+    returns:
+      - { name: lamports, type: uint64, description: "Lamports (bigint)" }
+    execution:
+      "solana:*":
+        type: solana_read
+        method: "getBalance"
+        params:
+          object:
+            address: { ref: "params.address" }
+
+  signature_statuses:
+    description: "Get signature statuses"
+    params:
+      - name: signatures
+        type: "array<string>"
+        description: "Signature list (base58 strings)"
+        required: true
+    returns:
+      - { name: statuses, type: "array<string>" }
+    execution:
+      "solana:*":
+        type: solana_read
+        method: "getSignatureStatuses"
+        params:
+          object:
+            signatures: { ref: "params.signatures" }
+            searchTransactionHistory: { lit: true }
+
+actions: {}

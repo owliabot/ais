@@ -35,7 +35,7 @@ export type TokenType =
 
 export interface Token {
   type: TokenType;
-  value: string | number | boolean | null;
+  value: string | boolean | null;
   pos: number;
 }
 
@@ -173,7 +173,7 @@ export class Lexer {
     const value = this.input.slice(start, this.pos);
     return {
       type: 'NUMBER',
-      value: hasDecimal ? parseFloat(value) : parseInt(value, 10),
+      value,
       pos: start,
     };
   }

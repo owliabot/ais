@@ -1,0 +1,45 @@
+schema: "ais/0.0.2"
+
+meta:
+  protocol: "bridge-demo"
+  version: "0.0.2"
+  name: "Bridge Demo"
+  description: "Demo bridge: send on EVM, then wait + deposit on Solana (reference only)"
+  tags: ["bridge", "evm", "demo"]
+
+deployments:
+  - chain: "eip155:1"
+    contracts:
+      bridge: "0x1111111111111111111111111111111111111111"
+
+actions:
+  send:
+    description: "Bridge send (mock)"
+    risk_level: 3
+    risk_tags: ["bridge"]
+    params:
+      - name: amount
+        type: uint256
+        description: "Amount (atomic) for demo"
+        required: true
+      - name: recipient
+        type: address
+        description: "Recipient (opaque for demo)"
+        required: true
+    returns:
+      - { name: tx_hash, type: string }
+    execution:
+      "eip155:*":
+        type: evm_call
+        to: { ref: "contracts.bridge" }
+        abi:
+          type: "function"
+          name: "send"
+          inputs:
+            - { name: amount, type: "uint256" }
+            - { name: recipient, type: "address" }
+          outputs: []
+        args:
+          amount: { ref: "params.amount" }
+          recipient: { ref: "params.recipient" }
+

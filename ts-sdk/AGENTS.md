@@ -11,6 +11,8 @@ ts-sdk/
 │   ├── resolver/    # Reference + expression resolution (see src/resolver/README.md)
 │   ├── validator/   # Constraint + workflow validation (see src/validator/README.md)
 │   ├── execution/   # Transaction building + ABI encoding (see src/execution/README.md)
+│   ├── registry/    # Registry helpers (JCS canonicalization) (see src/registry/README.md)
+│   ├── detect/      # Detect provider registry (see src/detect/README.md)
 │   ├── cel/         # CEL expression parser/evaluator (see src/cel/README.md)
 │   ├── builder/     # Fluent DSL for building AIS docs (see src/builder/README.md)
 │   ├── cli/         # Command-line tools (see src/cli/README.md)
@@ -59,7 +61,7 @@ cli ← schema, loader, parser
 
 ## Key Design Decisions
 
-1. **Zero external deps for encoding**: `execution/encoder.ts` uses native JS only (no ethers/viem)
+1. **Use standard chain SDKs**: EVM ABI encoding/decoding uses `ethers`; Solana helpers use `@solana/web3.js` / `@solana/spl-token`.
 2. **Zod for schemas**: All types inferred from Zod schemas via `z.infer<>`
 3. **CEL for expressions**: Custom parser, not Google's heavy implementation
 4. **Fluent builders**: Chainable API for programmatic document construction

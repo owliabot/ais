@@ -1,4 +1,4 @@
-# Builder Module
+# Builder Module (AIS 0.0.2)
 
 Fluent DSL for programmatically constructing AIS documents (Protocol Specs, Packs, Workflows) with full TypeScript type safety.
 
@@ -19,7 +19,7 @@ Fluent DSL for programmatically constructing AIS documents (Protocol Specs, Pack
 ```ts
 import { protocol, param, output } from '@owliabot/ais-ts-sdk';
 
-const uniswap = protocol('uniswap-v3', '1.0.0')
+const uniswap = protocol('uniswap-v3', '0.0.2')
   .name('Uniswap V3')
   .description('Decentralized exchange protocol')
   .homepage('https://uniswap.org')
@@ -45,14 +45,8 @@ const uniswap = protocol('uniswap-v3', '1.0.0')
     returns: [
       output('amount_out', 'token_amount'),
     ],
-    execution: {
-      'eip155:*': {
-        type: 'evm_call',
-        contract: 'router',
-        method: 'exactInputSingle',
-        params: [/* ... */],
-      },
-    },
+    // ExecutionSpec is AIS 0.0.2 (ValueRef + JSON ABI). See specs/ais-2-evm.md.
+    execution: { /* ... */ },
   })
   .query('quote', {
     description: 'Get swap quote',
@@ -64,14 +58,7 @@ const uniswap = protocol('uniswap-v3', '1.0.0')
     returns: [
       output('amount_out', 'token_amount'),
     ],
-    execution: {
-      'eip155:*': {
-        type: 'evm_read',
-        contract: 'quoter',
-        method: 'quoteExactInputSingle',
-        params: [/* ... */],
-      },
-    },
+    execution: { /* ... */ },
   })
   .build();  // Validates and returns ProtocolSpec
 ```
@@ -81,22 +68,13 @@ const uniswap = protocol('uniswap-v3', '1.0.0')
 ```ts
 import { pack } from '@owliabot/ais-ts-sdk';
 
-const defiPack = pack('defi-essentials', '1.0.0')
+const defiPack = pack('defi-essentials', '0.0.2')
   .description('Essential DeFi protocols')
-  .include('uniswap-v3', { version: '>=1.0.0' })
-  .include('aave-v3', { version: '>=1.0.0' })
-  .tokenAllowlist([
-    { symbol: 'USDC', address: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', chain: 'eip155:1' },
-    { symbol: 'WETH', address: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2', chain: 'eip155:1' },
-  ])
-  .hardConstraints({
-    max_slippage_bps: 100,
-    allow_unlimited_approval: false,
-  })
-  .approvalPolicy({
-    auto_execute_max_risk_level: 2,
-    require_approval_min_risk_level: 3,
-  })
+  .include('uniswap-v3', '0.0.2')
+  .include('aave-v3', '0.0.2')
+  .maxSlippage(100)
+  .disallowUnlimitedApproval()
+  .approvals({ auto_execute_max_risk_level: 2, require_approval_min_risk_level: 3 })
   .build();
 ```
 
@@ -105,37 +83,43 @@ const defiPack = pack('defi-essentials', '1.0.0')
 ```ts
 import { workflow } from '@owliabot/ais-ts-sdk';
 
-const swapFlow = workflow('token-swap', '1.0.0')
+const swapFlow = workflow('token-swap', '0.0.2')
   .description('Simple token swap')
+  .defaultChain('eip155:1')
   .input('token_in', 'asset', { required: true })
   .input('token_out', 'asset', { required: true })
   .input('amount', 'token_amount', { required: true })
-  .node({
-    id: 'quote',
-    skill: 'uniswap-v3',
-    type: 'query_ref',
-    query: 'quote',
+  .query('quote', 'uniswap-v3@0.0.2', 'quote', {
     args: {
-      token_in: '${inputs.token_in}',
-      token_out: '${inputs.token_out}',
-      amount_in: '${inputs.amount}',
+      token_in: { ref: 'inputs.token_in' },
+      token_out: { ref: 'inputs.token_out' },
+      amount_in: { ref: 'inputs.amount' },
     },
   })
-  .node({
-    id: 'swap',
-    skill: 'uniswap-v3',
-    type: 'action_ref',
-    action: 'swap',
+  .action('swap', 'uniswap-v3@0.0.2', 'swap', {
     args: {
-      token_in: '${inputs.token_in}',
-      token_out: '${inputs.token_out}',
-      amount_in: '${inputs.amount}',
-      min_amount_out: '${nodes.quote.result.amount_out}',
+      token_in: { ref: 'inputs.token_in' },
+      token_out: { ref: 'inputs.token_out' },
+      amount_in: { ref: 'inputs.amount' },
+      min_amount_out: { ref: 'nodes.quote.outputs.amount_out' },
     },
-    requires_queries: ['quote'],
+    requires: ['quote'],
   })
   .build();
 ```
+
+Notes:
+- `args` values are `ValueRef` (`{lit|ref|cel|detect|object|array}`).
+- Chain selection:
+  - Prefer setting `workflow.default_chain` via `.defaultChain(...)`
+  - Override per node via `def.chain` in `.node(...)` / `.action(...)` / `.query(...)`
+- Polling (engine-driven):
+  - Set `def.until` (ValueRef/CEL/ref) to keep re-running a node until the expression becomes truthy
+  - Use `def.retry` and `def.timeout_ms` to control polling cadence and limits
+- Convenience coercions in `WorkflowBuilder`:
+  - Strings like `${inputs.x}` become `{ ref: "inputs.x" }`
+  - Other strings become `{ lit: "..." }`
+  - `condition: "..."` becomes `{ cel: "..." }` (unless you pass an explicit `{ref:...}`/`{cel:...}`)
 
 ## Helper Functions
 
@@ -181,18 +165,22 @@ output('success', 'bool', { description: 'Whether swap succeeded' })
 | `.deployment(chain, contracts)` | Add chain deployment |
 | `.action(id, def)` | Define an action |
 | `.query(id, def)` | Define a query |
-| `.capability(name)` | Declare required capability |
+| `.capabilities(...names)` | Declare required capabilities |
 
 ### PackBuilder
 
 | Method | Description |
 |--------|-------------|
 | `.description(text)` | Set description |
-| `.include(protocol, options?)` | Include a protocol |
-| `.tokenAllowlist(tokens)` | Set allowed tokens |
-| `.hardConstraints(constraints)` | Set hard constraints |
-| `.approvalPolicy(policy)` | Set approval thresholds |
-| `.override(protocol, action, overrides)` | Override action settings |
+| `.include(protocol, version, options?)` | Include a protocol version |
+| `.approvals(policy)` | Set approval thresholds |
+| `.constraints(defaults)` | Set hard constraint defaults |
+| `.maxSlippage(bps)` | Set max slippage |
+| `.disallowUnlimitedApproval()` | Disallow unlimited approvals |
+| `.tokenResolution(config)` | Set token resolution policy |
+| `.allowToken(entry)` | Add token allowlist entry |
+| `.quoteProvider(provider, options?)` | Enable quote provider |
+| `.routingProviders(...providers)` | Enable routing providers |
 
 ### WorkflowBuilder
 
@@ -200,7 +188,8 @@ output('success', 'bool', { description: 'Whether swap succeeded' })
 |--------|-------------|
 | `.description(text)` | Set description |
 | `.input(name, type, options?)` | Declare input parameter |
-| `.node(nodeDef)` | Add workflow node |
+| `.defaultChain(chain)` | Set `workflow.default_chain` (CAIP-2) |
+| `.node(id, def)` | Add workflow node (action/query) |
 | `.policy(policy)` | Set workflow policy |
 
 ## Implementation Notes
