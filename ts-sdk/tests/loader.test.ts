@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import {
   loadFile,
   loadProtocol,
+  loadWorkflowBundle,
   loadDirectory,
   loadDirectoryAsContext,
 } from '../src/index.js';
@@ -78,7 +79,7 @@ includes:
   await writeFile(
     join(TEST_DIR, 'swap-flow.ais-flow.yaml'),
     `
-schema: "ais-flow/0.0.2"
+schema: "ais-flow/0.0.3"
 meta:
   name: swap-flow
   version: "0.0.2"
@@ -88,10 +89,48 @@ inputs:
 nodes:
   - id: swap
     type: action_ref
-    skill: "uniswap-v3@0.0.2"
+    protocol: "uniswap-v3@0.0.2"
     action: swap
     args:
       token: { ref: "inputs.token" }
+`
+  );
+
+  await writeFile(
+    join(TEST_DIR, 'bundle-flow.ais-flow.yaml'),
+    `
+schema: "ais-flow/0.0.3"
+meta:
+  name: bundle-flow
+  version: "0.0.3"
+imports:
+  protocols:
+    - protocol: "uniswap-v3@0.0.2"
+      path: "uniswap-v3.ais.yaml"
+default_chain: "eip155:1"
+nodes:
+  - id: swap
+    type: action_ref
+    protocol: "uniswap-v3@0.0.2"
+    action: swap
+    args: {}
+`
+  );
+
+  await writeFile(
+    join(TEST_DIR, 'bundle-flow-no-validate.ais-flow.yaml'),
+    `
+schema: "ais-flow/0.0.3"
+meta:
+  name: bundle-flow-no-validate
+  version: "0.0.3"
+default_chain: "eip155:1"
+nodes:
+  - id: swap
+    type: action_ref
+    protocol: "uniswap-v3@0.0.2"
+    action: swap
+    args: {}
 `
   );
 
@@ -144,7 +183,7 @@ describe('loadFile', () => {
 
   it('loads and parses a workflow file', async () => {
     const doc = await loadFile(join(TEST_DIR, 'swap-flow.ais-flow.yaml'));
-    expect(doc.schema).toBe('ais-flow/0.0.2');
+    expect(doc.schema).toBe('ais-flow/0.0.3');
   });
 });
 
@@ -162,7 +201,7 @@ describe('loadDirectory', () => {
 
     expect(result.protocols).toHaveLength(2);
     expect(result.packs).toHaveLength(1);
-    expect(result.workflows).toHaveLength(1);
+    expect(result.workflows).toHaveLength(3);
     expect(result.errors).toHaveLength(2);
   });
 
@@ -171,7 +210,7 @@ describe('loadDirectory', () => {
 
     expect(result.protocols).toHaveLength(1);
     expect(result.packs).toHaveLength(1);
-    expect(result.workflows).toHaveLength(1);
+    expect(result.workflows).toHaveLength(3);
   });
 
   it('collects errors for invalid files', async () => {
@@ -193,5 +232,27 @@ describe('loadDirectoryAsContext', () => {
     expect(result.protocols).toHaveLength(2);
     expect(context.protocols.has('uniswap-v3')).toBe(true);
     expect(context.protocols.has('aave-v3')).toBe(true);
+  });
+});
+
+describe('loadWorkflowBundle', () => {
+  it('loads imported protocols into context (imports-only)', async () => {
+    const bundle = await loadWorkflowBundle(join(TEST_DIR, 'bundle-flow.ais-flow.yaml'), {
+      search_paths: [TEST_DIR],
+    });
+    expect(bundle.workflow.meta.name).toBe('bundle-flow');
+    expect(bundle.imports).toHaveLength(1);
+    expect(bundle.context.protocols.has('uniswap-v3')).toBe(true);
+    expect(bundle.context.protocols.has('aave-v3')).toBe(false);
+  });
+
+  it('can skip validation for unresolved imports', async () => {
+    const bundle = await loadWorkflowBundle(join(TEST_DIR, 'bundle-flow-no-validate.ais-flow.yaml'), {
+      validate: false,
+      search_paths: [TEST_DIR],
+    });
+    expect(bundle.workflow.meta.name).toBe('bundle-flow-no-validate');
+    expect(bundle.imports).toHaveLength(0);
+    expect(bundle.context.protocols.size).toBe(0);
   });
 });

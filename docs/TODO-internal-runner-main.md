@@ -315,7 +315,7 @@ Status: `done`
 
 Deliverable:
 - Preflight layer for write nodes:
-  - Resolve the action spec from `node.source.skill/action`
+  - Resolve the action spec from `node.source.protocol/action`
   - If action has `requires_queries`:
     - If those queries exist in `ctx.runtime.query` already, ok
     - Else if `--auto-required-queries` is enabled:

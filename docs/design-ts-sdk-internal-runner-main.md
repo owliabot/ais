@@ -167,7 +167,7 @@ runner 的前置检查来自 3 层：
 
 1. 静态校验
    - `validateWorkspaceReferences()`：workflow -> pack -> protocol 关系是否自洽
-   - `validateWorkflow()`：node skill/action/query 是否存在、ValueRef 引用是否合法、DAG 无环
+   - `validateWorkflow()`：node protocol/action/query 是否存在、ValueRef 引用是否合法、DAG 无环
 2. Readiness (执行前)
    - `getNodeReadiness*()`：缺失 refs、detect 需求、condition=false 跳过
 3. 业务前置检查 (workflow 显式建模)
@@ -190,7 +190,7 @@ runner 的前置检查来自 3 层：
 因此，内部 runner 的最小闭环必须提供一个 “ActionPreflight” 层（推荐以 executor wrapper 方式实现）：
 
 - 在执行任意 `write` 节点前（`action_ref` / composite steps）：
-  1. 根据 `node.source.skill/action` 解析 action spec
+  1. 根据 `node.source.protocol/action` 解析 action spec
   2. 确保 `requires_queries` 的结果存在：
      - 若 workflow 已有对应 `query_ref` 节点：将其结果 fan-out 到 `runtime.query[queryId]`（见 6.3）
      - 若缺失：runner 可选 `--auto-required-queries`，用 action params 自动构造并执行这些 queries（失败则报错/need_user_confirm）

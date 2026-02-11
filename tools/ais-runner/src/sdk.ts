@@ -1,8 +1,9 @@
-let cached: any | null = null;
+import type { RunnerSdkModule } from './types.js';
 
-export async function loadSdk(): Promise<any> {
+let cached: RunnerSdkModule | null = null;
+
+export async function loadSdk(): Promise<RunnerSdkModule> {
   if (cached) return cached;
-  cached = await import('../../../ts-sdk/dist/index.js');
+  cached = (await import('../../../ts-sdk/dist/index.js')) as RunnerSdkModule;
   return cached;
 }
-

@@ -1,8 +1,8 @@
-schema: "ais-flow/0.0.2"
+schema: "ais-flow/0.0.3"
 
 meta:
   name: "runner-policy-gate"
-  version: "0.0.1"
+  version: "0.0.3"
   description: "Fixture workflow for verifying runner policy gates"
 
 default_chain: "eip155:1"
@@ -11,10 +11,14 @@ requires_pack:
   name: "runner-policy-gate-pack"
   version: "0.0.1"
 
+imports:
+  protocols:
+    - { protocol: "erc20@0.0.2", path: "examples/erc20.ais.yaml" }
+
 nodes:
   - id: approve
     type: action_ref
-    skill: "erc20@0.0.2"
+    protocol: "erc20@0.0.2"
     action: "approve"
     args:
       token:

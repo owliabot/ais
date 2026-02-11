@@ -8,7 +8,7 @@
  * This module does NOT perform RPC calls nor broadcast transactions.
  */
 
-import { isCoreExecutionSpec, type EvmCall, type EvmGetBalance, type EvmRead, type ExecutionSpec, type JsonAbiFunction } from '../../schema/index.js';
+import { isCoreExecutionSpec, type EvmCall, type EvmRead, type ExecutionSpec, type JsonAbiFunction } from '../../schema/index.js';
 import type { ResolverContext } from '../../resolver/index.js';
 import { evaluateValueRef, evaluateValueRefAsync, ValueRefEvalError } from '../../resolver/index.js';
 import type { DetectResolver } from '../../resolver/value-ref.js';
@@ -32,15 +32,21 @@ export interface CompiledEvmAbiRequest {
   abi: JsonAbiFunction;
 }
 
-export interface CompiledEvmGetBalanceRequest {
-  kind: 'evm_get_balance';
+export interface CompiledEvmRpcRequest {
+  kind: 'evm_rpc';
   chain: string;
   chainId: number;
-  address: string;
-  blockTag: string;
+  method: string;
+  params: unknown[];
 }
 
-export type CompiledEvmRequest = CompiledEvmAbiRequest | CompiledEvmGetBalanceRequest;
+export type CompiledEvmRequest = CompiledEvmAbiRequest | CompiledEvmRpcRequest;
+
+type EvmRpcExecution = {
+  type: 'evm_rpc';
+  method: string;
+  params?: unknown;
+};
 
 export class EvmCompileError extends Error {
   constructor(message: string, public readonly details?: unknown) {
@@ -55,11 +61,12 @@ export function compileEvmExecution(
   options: CompileEvmOptions
 ): CompiledEvmRequest {
   if (!isCoreExecutionSpec(execution)) {
-    throw new EvmCompileError(`Unsupported execution type for EVM compiler: ${execution.type}`);
+    const t = (execution as any)?.type;
+    if (t === 'evm_rpc') return compileEvmRpc(execution as any as EvmRpcExecution, ctx, options);
+    throw new EvmCompileError(`Unsupported execution type for EVM compiler: ${t}`);
   }
   if (execution.type === 'evm_call') return compileEvmCall(execution, ctx, options);
   if (execution.type === 'evm_read') return compileEvmRead(execution, ctx, options);
-  if (execution.type === 'evm_get_balance') return compileEvmGetBalance(execution, ctx, options);
   throw new EvmCompileError(`Unsupported execution type for EVM compiler: ${execution.type}`);
 }
 
@@ -69,11 +76,12 @@ export async function compileEvmExecutionAsync(
   options: CompileEvmOptions
 ): Promise<CompiledEvmRequest> {
   if (!isCoreExecutionSpec(execution)) {
-    throw new EvmCompileError(`Unsupported execution type for EVM compiler: ${execution.type}`);
+    const t = (execution as any)?.type;
+    if (t === 'evm_rpc') return await compileEvmRpcAsync(execution as any as EvmRpcExecution, ctx, options);
+    throw new EvmCompileError(`Unsupported execution type for EVM compiler: ${t}`);
   }
   if (execution.type === 'evm_call') return await compileEvmCallAsync(execution, ctx, options);
   if (execution.type === 'evm_read') return await compileEvmReadAsync(execution, ctx, options);
-  if (execution.type === 'evm_get_balance') return await compileEvmGetBalanceAsync(execution, ctx, options);
   throw new EvmCompileError(`Unsupported execution type for EVM compiler: ${execution.type}`);
 }
 
@@ -149,43 +157,69 @@ export async function compileEvmReadAsync(
   };
 }
 
-export function compileEvmGetBalance(
-  execution: EvmGetBalance,
+function compileEvmRpc(
+  execution: EvmRpcExecution,
   ctx: ResolverContext,
   options: CompileEvmOptions
 ): CompiledEvmRequest {
+  const method = String(execution?.method ?? '').trim();
+  if (!method) throw new EvmCompileError('evm_rpc.method must be a non-empty string');
+
   const root_overrides = options.params ? { params: options.params } : undefined;
-  const address = evalString(execution.address, ctx, root_overrides, 'address');
-  const blockTag = formatBlockTag(
-    execution.block_tag ? evalAny(execution.block_tag, ctx, root_overrides, 'block_tag') : undefined
-  );
+  const paramsValue = execution.params !== undefined ? evalAny(execution.params as any, ctx, root_overrides, 'params') : [];
+  if (!Array.isArray(paramsValue)) {
+    throw new EvmCompileError(`evm_rpc.params must resolve to an array, got ${typeof paramsValue}`);
+  }
+
+  // Common ergonomic normalization: accept number/bigint for block tag in eth_getBalance.
+  if (method === 'eth_getBalance') {
+    if (paramsValue.length < 2 || paramsValue[1] === undefined || paramsValue[1] === null) {
+      paramsValue[1] = 'latest';
+    } else {
+      paramsValue[1] = formatBlockTag(paramsValue[1]);
+    }
+  }
+
   return {
-    kind: 'evm_get_balance',
+    kind: 'evm_rpc',
     chain: options.chain,
     chainId: parseEip155ChainId(options.chain),
-    address,
-    blockTag,
+    method,
+    params: paramsValue,
   };
 }
 
-export async function compileEvmGetBalanceAsync(
-  execution: EvmGetBalance,
+async function compileEvmRpcAsync(
+  execution: EvmRpcExecution,
   ctx: ResolverContext,
   options: CompileEvmOptions
 ): Promise<CompiledEvmRequest> {
+  const method = String(execution?.method ?? '').trim();
+  if (!method) throw new EvmCompileError('evm_rpc.method must be a non-empty string');
+
   const root_overrides = options.params ? { params: options.params } : undefined;
-  const address = await evalStringAsync(execution.address, ctx, root_overrides, options.detect, 'address');
-  const blockTag = formatBlockTag(
-    execution.block_tag
-      ? await evalAnyAsync(execution.block_tag, ctx, root_overrides, options.detect, 'block_tag')
-      : undefined
-  );
+  const paramsValue =
+    execution.params !== undefined
+      ? await evalAnyAsync(execution.params as any, ctx, root_overrides, options.detect, 'params')
+      : [];
+  if (!Array.isArray(paramsValue)) {
+    throw new EvmCompileError(`evm_rpc.params must resolve to an array, got ${typeof paramsValue}`);
+  }
+
+  if (method === 'eth_getBalance') {
+    if (paramsValue.length < 2 || paramsValue[1] === undefined || paramsValue[1] === null) {
+      paramsValue[1] = 'latest';
+    } else {
+      paramsValue[1] = formatBlockTag(paramsValue[1]);
+    }
+  }
+
   return {
-    kind: 'evm_get_balance',
+    kind: 'evm_rpc',
     chain: options.chain,
     chainId: parseEip155ChainId(options.chain),
-    address,
-    blockTag,
+    method,
+    params: paramsValue,
   };
 }
 

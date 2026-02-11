@@ -5,7 +5,7 @@ import {
   resolveProtocolRef,
   resolveAction,
   resolveQuery,
-  parseSkillRef,
+  parseProtocolRef,
   getContractAddress,
   getSupportedChains,
   hasExpressions,
@@ -101,15 +101,15 @@ describe('ResolverContext', () => {
   });
 });
 
-describe('parseSkillRef', () => {
+describe('parseProtocolRef', () => {
   it('parses protocol only', () => {
-    const ref = parseSkillRef('uniswap-v3');
+    const ref = parseProtocolRef('uniswap-v3');
     expect(ref.protocol).toBe('uniswap-v3');
     expect(ref.version).toBeUndefined();
   });
 
   it('parses protocol with version', () => {
-    const ref = parseSkillRef('uniswap-v3@1.0.0');
+    const ref = parseProtocolRef('uniswap-v3@1.0.0');
     expect(ref.protocol).toBe('uniswap-v3');
     expect(ref.version).toBe('1.0.0');
   });

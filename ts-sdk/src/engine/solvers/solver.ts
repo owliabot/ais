@@ -1,6 +1,6 @@
 import type { Solver, SolverResult } from '../types.js';
 import type { ResolverContext } from '../../resolver/index.js';
-import { parseSkillRef, resolveProtocolRef } from '../../resolver/index.js';
+import { parseProtocolRef, resolveProtocolRef } from '../../resolver/index.js';
 import type { ExecutionPlanNode, NodeReadinessResult } from '../../execution/index.js';
 import type { RuntimePatch } from '../patch.js';
 
@@ -68,10 +68,10 @@ export function createSolver(options: SolverOptions = {}): Solver {
 export const solver: Solver = createSolver();
 
 function fillContractsForNode(node: ExecutionPlanNode, ctx: ResolverContext): RuntimePatch | null {
-  const skill = node.source?.skill;
-  if (!skill) return null;
+  const protocolRef = node.source?.protocol;
+  if (!protocolRef) return null;
 
-  const { protocol } = parseSkillRef(skill);
+  const { protocol } = parseProtocolRef(protocolRef);
   const spec = resolveProtocolRef(ctx, protocol);
   if (!spec) return null;
 
@@ -80,4 +80,3 @@ function fillContractsForNode(node: ExecutionPlanNode, ctx: ResolverContext): Ru
 
   return { op: 'merge', path: 'contracts', value: deployment.contracts };
 }
-

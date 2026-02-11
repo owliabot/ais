@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYAML } from 'yaml';
+import { WorkflowSchema } from '../src/schema/workflow.js';
 
 type JsonSchema = Record<string, any>;
 type ValidationError = { path: string; message: string };
@@ -182,11 +183,14 @@ describe('published JSON Schemas', () => {
               ? workflowSchema
               : null;
 
-      if (!schema) throw new Error(`Unknown example schema: ${doc.schema} (${f})`);
-
-      const errors = validate(schema, doc);
-      expect(errors, `${f} errors: ${errors.map((e) => `${e.path}: ${e.message}`).join('; ')}`).toHaveLength(0);
+      if (doc.schema === 'ais-flow/0.0.3') {
+        const parsed = WorkflowSchema.safeParse(doc);
+        expect(parsed.success, `${f} workflow parse issues`).toBe(true);
+      } else {
+        if (!schema) throw new Error(`Unknown example schema: ${doc.schema} (${f})`);
+        const errors = validate(schema, doc);
+        expect(errors, `${f} errors: ${errors.map((e) => `${e.path}: ${e.message}`).join('; ')}`).toHaveLength(0);
+      }
     }
   });
 });
-

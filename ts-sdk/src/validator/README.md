@@ -80,7 +80,7 @@ const orderedNodes = getExecutionOrder(workflow);
 Use this when validating a directory/workspace (multiple files). It checks relationships like:
 - `workflow.requires_pack` → existing pack
 - pack `includes[]` → existing protocols with matching versions
-- workflow node `skill/action/query` → resolvable protocol/action/query
+- workflow node `protocol/action/query` → resolvable protocol/action/query
 - detect kinds/providers used by a workflow → enabled in the required pack
 
 ```ts
@@ -102,6 +102,10 @@ import { lintDocument } from '@owliabot/ais-ts-sdk';
 const issues = lintDocument(doc, { file_path: './examples/foo.ais.yaml' });
 ```
 
+Built-in reference-format lint rule ids:
+- `pack-protocol-ref-format`
+- `workflow-node-protocol-ref-format`
+
 ### Plugins (custom lint/validate)
 
 ```ts
@@ -120,7 +124,7 @@ registry.register({
   validate_workflow: (wf) => (wf.nodes.length === 0 ? [{ nodeId: '(workflow)', field: 'nodes', message: 'empty workflow' }] : []),
 });
 
-const validation = validateWorkflow(workflow, resolverContext, { registry });
+const validation = validateWorkflow(workflow, resolverContext, { registry, enforce_imports: true });
 const lint = lintDocument(workflow, { registry });
 ```
 
@@ -175,15 +179,17 @@ interface WorkflowValidationResult {
 
 ### Workflow Validation
 
-1. **Protocol existence** — Do all `skill` references resolve?
+1. **Protocol existence** — Do all `protocol` references resolve?
 2. **Action/query existence** — Do referenced actions/queries exist in protocol?
 3. **Chain presence** — Does each node resolve a chain via `nodes[].chain` or `workflow.default_chain`?
 4. **Ref binding** — Do `ValueRef` paths like `{ ref: "inputs.x" }` match declared inputs?
 5. **Node references** — Do `ValueRef` paths like `{ ref: "nodes.x.outputs.y" }` point to existing nodes?
 6. **deps (DAG)** — Are all `deps` valid node ids, and is the dependency graph acyclic?
+7. **Import policy** — In strict mode (`enforce_imports: true`), workspace-scanned protocols must be listed under `workflow.imports.protocols[]` unless source is builtin/manual/import.
 
 Note:
 - `nodes[].until` is evaluated *after* the node runs, so it may reference its own outputs (e.g. `nodes.wait.outputs.*`).
+- `nodes[].assert` is also post-execution; it evaluates once and fails fast when falsy.
 
 ## Dependencies
 

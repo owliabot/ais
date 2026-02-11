@@ -1,5 +1,5 @@
 {
-  "schema": "ais-plan/0.0.2",
+  "schema": "ais-plan/0.0.3",
   "meta": {
     "created_at": "<ignored>",
     "name": "wf"
@@ -28,9 +28,9 @@
       },
       "writes": [{ "path": "nodes.n1.outputs.steps.approve", "mode": "set" }],
       "source": {
-        "workflow": { "name": "wf", "version": "0.0.2" },
+        "workflow": { "name": "wf", "version": "0.0.3" },
         "node_id": "n1",
-        "skill": "demo@0.0.2",
+        "protocol": "demo@0.0.2",
         "action": "do",
         "step_id": "approve"
       }
@@ -62,9 +62,9 @@
         { "path": "nodes.n1.outputs.steps.swap", "mode": "set" }
       ],
       "source": {
-        "workflow": { "name": "wf", "version": "0.0.2" },
+        "workflow": { "name": "wf", "version": "0.0.3" },
         "node_id": "n1",
-        "skill": "demo@0.0.2",
+        "protocol": "demo@0.0.2",
         "action": "do",
         "step_id": "swap"
       }

@@ -1,35 +1,64 @@
-schema: "ais-flow/0.0.2"
+schema: "ais-flow/0.0.3"
 
 meta:
   name: "runner-native-and-erc20-transfer-assert"
-  version: "0.0.1"
+  version: "0.0.3"
   description: "Runner fixture: native+ERC20 transfer (10 + 10) with pre/post balance assertions."
 
-default_chain: "eip155:1"
+default_chain: "eip155:31338"
+
+# Protocol imports (required for workspace-scanned protocols in strict mode).
+imports:
+  protocols:
+    - { protocol: "evm-native-utils@0.0.1", path: "tools/ais-runner/fixtures/evm-native-utils.ais.yaml" }
+    - { protocol: "erc20@0.0.2", path: "examples/erc20.ais.yaml" }
 
 # Prereqs (local testing):
 # - Configure the runner signer to be:
 #   wallet = 0x70997970C51812dc3A010C7d01b50e0d17dc79C8
-# - Note on "asserts":
-#   AIS core does not have a dedicated `assert` node. The engine only supports
-#   hard post-conditions via `until` + `retry`. To "fail fast", set:
-#     retry.max_attempts: 1
-#   so the node runs once and errors immediately if `until` is false.
-# - Provide `inputs.balance_reader`: a deployed helper contract with:
-#     function getBalance(address addr) external view returns (uint256 balance);
+#   (Must match `inputs.wallet`, otherwise pre-checks and the sending account diverge.)
+# - `assert` is used for fail-fast one-shot checks (preconditions).
+# - `until + retry` is kept for post-transfer checks that may need polling.
+# - Native balance reads use `eth_getBalance` via the `evm_rpc` plugin execution type.
 # - Provide `inputs.erc20_token`: deployed token + ensure wallet has >= 10 tokens.
 # - Ensure wallet has > 15 ETH and can send 10 ETH.
 
 inputs:
-  balance_reader:
+  wallet:
     type: address
-    required: true
+    required: false
+    default: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+
+  target:
+    type: address
+    required: false
+    default: "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+
+  native_amount:
+    type: token_amount
+    required: false
+    default: "10"
+
+  erc20_amount:
+    type: token_amount
+    required: false
+    default: "10"
+
+  min_wallet_native:
+    type: token_amount
+    required: false
+    default: "15"
+
+  min_wallet_erc20:
+    type: token_amount
+    required: false
+    default: "10"
 
   erc20_token:
     type: asset
     required: false
     default:
-      chain_id: "eip155:1"
+      chain_id: "eip155:31338"
       symbol: "TST"
       address: "0x8464135c8F25Da09e49BC8782676a84730C318bC"
       decimals: 18
@@ -38,94 +67,94 @@ nodes:
   # 1) Assert wallet native balance > 15 ETH
   - id: q_wallet_native_pre
     type: query_ref
-    skill: "evm-native-utils@0.0.1"
+    protocol: "evm-native-utils@0.0.1"
     query: "native-balance"
     args:
-      balance_reader: { ref: "inputs.balance_reader" }
-      addr: { lit: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8" }
-    until: { cel: "nodes.q_wallet_native_pre.outputs.balance > to_atomic(\"15\", 18)" }
-    retry: { interval_ms: 1, max_attempts: 1 }
+      addr: { ref: "inputs.wallet" }
+    assert: { cel: "nodes.q_wallet_native_pre.outputs.balance > to_atomic(inputs.min_wallet_native, 18)" }
+    assert_message: "wallet native balance is below min_wallet_native"
 
   # 2) Read target native balance (pre)
   - id: q_target_native_pre
     type: query_ref
-    skill: "evm-native-utils@0.0.1"
+    protocol: "evm-native-utils@0.0.1"
     query: "native-balance"
     deps: ["q_wallet_native_pre"]
     args:
-      balance_reader: { ref: "inputs.balance_reader" }
-      addr: { lit: "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266" }
+      addr: { ref: "inputs.target" }
 
   # 3) Assert wallet ERC20 balance > 10 tokens (runs in parallel with q_target_native_pre)
   - id: q_wallet_erc20_pre
     type: query_ref
-    skill: "erc20@0.0.2"
+    protocol: "erc20@0.0.2"
     query: "balance-of"
     deps: ["q_wallet_native_pre"]
     args:
       token: { ref: "inputs.erc20_token" }
-      owner: { lit: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8" }
-    until: { cel: "nodes.q_wallet_erc20_pre.outputs.balance > to_atomic(\"10\", inputs.erc20_token)" }
-    retry: { interval_ms: 1, max_attempts: 1 }
+      owner: { ref: "inputs.wallet" }
+    assert: { cel: "nodes.q_wallet_erc20_pre.outputs.balance > to_atomic(inputs.min_wallet_erc20, inputs.erc20_token)" }
+    assert_message: "wallet ERC20 balance is below min_wallet_erc20"
 
   # 4) Read target ERC20 balance (pre)
   - id: q_target_erc20_pre
     type: query_ref
-    skill: "erc20@0.0.2"
+    protocol: "erc20@0.0.2"
     query: "balance-of"
     deps: ["q_target_native_pre", "q_wallet_erc20_pre"]
     args:
       token: { ref: "inputs.erc20_token" }
-      owner: { lit: "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266" }
+      owner: { ref: "inputs.target" }
 
   # 5) wallet -> target: send 10 ETH
   - id: a_native_send_10
     type: action_ref
-    skill: "evm-native-utils@0.0.1"
+    protocol: "evm-native-utils@0.0.1"
     action: "native-transfer"
     deps: ["q_target_erc20_pre"]
     args:
-      to: { lit: "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266" }
-      amount: { lit: "10" }
+      to: { ref: "inputs.target" }
+      amount: { ref: "inputs.native_amount" }
 
   # 6) wallet -> target: send 10 ERC20 tokens
   - id: a_erc20_send_10
     type: action_ref
-    skill: "erc20@0.0.2"
+    protocol: "erc20@0.0.2"
     action: "transfer"
     deps: ["a_native_send_10"]
     args:
       token: { ref: "inputs.erc20_token" }
-      to: { lit: "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266" }
-      amount: { cel: "to_atomic(\"10\", inputs.erc20_token)" }
+      to: { ref: "inputs.target" }
+      amount: { cel: "to_atomic(inputs.erc20_amount, inputs.erc20_token)" }
 
   # 7) Post-check: target native delta == 10 ETH
   - id: q_target_native_post
     type: query_ref
-    skill: "evm-native-utils@0.0.1"
+    protocol: "evm-native-utils@0.0.1"
     query: "native-balance"
     deps: ["a_erc20_send_10"]
     args:
-      balance_reader: { ref: "inputs.balance_reader" }
-      addr: { lit: "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266" }
+      addr: { ref: "inputs.target" }
     retry: { interval_ms: 1000, max_attempts: 30, backoff: "fixed" }
     until:
-      cel: "nodes.q_target_native_post.outputs.balance - nodes.q_target_native_pre.outputs.balance == to_atomic(\"10\", 18)"
+      cel: "nodes.q_target_native_post.outputs.balance - nodes.q_target_native_pre.outputs.balance == to_atomic(inputs.native_amount, 18)"
 
   # 8) Post-check: target ERC20 delta == 10 tokens
   - id: q_target_erc20_post
     type: query_ref
-    skill: "erc20@0.0.2"
+    protocol: "erc20@0.0.2"
     query: "balance-of"
     deps: ["a_erc20_send_10"]
     args:
       token: { ref: "inputs.erc20_token" }
-      owner: { lit: "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266" }
+      owner: { ref: "inputs.target" }
     retry: { interval_ms: 1000, max_attempts: 30, backoff: "fixed" }
     until:
-      cel: "nodes.q_target_erc20_post.outputs.balance - nodes.q_target_erc20_pre.outputs.balance == to_atomic(\"10\", inputs.erc20_token)"
+      cel: "nodes.q_target_erc20_post.outputs.balance - nodes.q_target_erc20_pre.outputs.balance == to_atomic(inputs.erc20_amount, inputs.erc20_token)"
 
 outputs:
+  native_tx_hash: { ref: "nodes.a_native_send_10.outputs.tx_hash" }
+  erc20_tx_hash: { ref: "nodes.a_erc20_send_10.outputs.tx_hash" }
+
   wallet_native_pre: { ref: "nodes.q_wallet_native_pre.outputs.balance" }
   wallet_erc20_pre: { ref: "nodes.q_wallet_erc20_pre.outputs.balance" }
 

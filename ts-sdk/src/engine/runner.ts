@@ -536,6 +536,59 @@ export async function* runPlan(
       yield ev;
     }
 
+    if (settled.node.assert) {
+      let assertValue: unknown;
+      try {
+        assertValue = options.detect
+          ? await evaluateValueRefAsync(settled.node.assert as any, ctx, { detect: options.detect })
+          : evaluateValueRef(settled.node.assert as any, ctx);
+      } catch (e) {
+        const err = e instanceof ValueRefEvalError ? e : new Error(String(e));
+        const errEv: EngineEvent = { type: 'error', node: settled.node, error: err, retryable: false };
+        maybeRecord(errEv);
+        if (traceSink) {
+          const span = await ensureNodeSpan(settled.node);
+          await traceAppend({ kind: 'event', id: randomUUID(), parent_id: span, node_id: settled.node.id, data: redactEvent(errEv) });
+        }
+        yield errEv;
+        pausedByNodeId.set(settled.node.id, {
+          reason: 'assert evaluation failed',
+          details: { assert: formatValueRefForMessage(settled.node.assert), error: err.message },
+          paused_at_ms: Date.now(),
+        });
+        const ck = await saveCheckpoint();
+        if (ck) yield ck;
+        if (stopOnError) return;
+        continue;
+      }
+
+      if (!Boolean(assertValue)) {
+        const expr = formatValueRefForMessage(settled.node.assert);
+        const message = settled.node.assert_message ?? `Node assert failed: ${expr}`;
+        const errEv: EngineEvent = {
+          type: 'error',
+          node: settled.node,
+          error: new Error(message),
+          retryable: false,
+        };
+        maybeRecord(errEv);
+        if (traceSink) {
+          const span = await ensureNodeSpan(settled.node);
+          await traceAppend({ kind: 'event', id: randomUUID(), parent_id: span, node_id: settled.node.id, data: redactEvent(errEv) });
+        }
+        yield errEv;
+        pausedByNodeId.set(settled.node.id, {
+          reason: 'assert failed',
+          details: { assert: expr, value: assertValue },
+          paused_at_ms: Date.now(),
+        });
+        const ck = await saveCheckpoint();
+        if (ck) yield ck;
+        if (stopOnError) return;
+        continue;
+      }
+    }
+
     if (settled.node.until) {
       if (classifyIo(settled.node) !== 'read') {
         const errEv: EngineEvent = {
@@ -685,7 +738,7 @@ export async function* runPlan(
 function classifyIo(node: ExecutionPlanNode): NodeIoKind {
   if (
     node.execution.type === 'evm_read' ||
-    node.execution.type === 'evm_get_balance' ||
+    node.execution.type === 'evm_rpc' ||
     node.execution.type === 'evm_multiread' ||
     node.execution.type === 'solana_read'
   ) {
@@ -766,4 +819,13 @@ function deepClone<T>(value: T): T {
     return out as any;
   }
   return value;
+}
+
+function formatValueRefForMessage(ref: unknown): string {
+  if (!ref || typeof ref !== 'object') return '<invalid assert>';
+  const v = ref as Record<string, unknown>;
+  if (typeof v.cel === 'string') return `cel(${v.cel})`;
+  if (typeof v.ref === 'string') return `ref(${v.ref})`;
+  if ('lit' in v) return `lit(${String(v.lit)})`;
+  return '<assert>';
 }

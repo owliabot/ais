@@ -116,7 +116,7 @@ export function detectType(yaml: string): AISSchemaType | null {
       if (
         schema === 'ais/0.0.2' ||
         schema === 'ais-pack/0.0.2' ||
-        schema === 'ais-flow/0.0.2'
+        schema === 'ais-flow/0.0.3'
       ) {
         return schema;
       }

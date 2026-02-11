@@ -55,7 +55,7 @@ describe('SolanaRpcExecutor', () => {
     });
 
     const plan: ExecutionPlan = {
-      schema: 'ais-plan/0.0.2',
+      schema: 'ais-plan/0.0.3',
       nodes: [
         {
           id: 'q1',
@@ -114,7 +114,7 @@ describe('SolanaRpcExecutor', () => {
     const executor = new SolanaRpcExecutor({ connection, wait_for_confirmation: false, fee_payer: payer.publicKey });
 
     const plan: ExecutionPlan = {
-      schema: 'ais-plan/0.0.2',
+      schema: 'ais-plan/0.0.3',
       nodes: [
         {
           id: 'q1',
@@ -183,7 +183,7 @@ describe('SolanaRpcExecutor', () => {
     });
 
     const plan: ExecutionPlan = {
-      schema: 'ais-plan/0.0.2',
+      schema: 'ais-plan/0.0.3',
       nodes: [
         {
           id: 's1',

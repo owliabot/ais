@@ -1,18 +1,21 @@
-import { readFile, writeFile } from 'node:fs/promises';
-import { fileURLToPath } from 'node:url';
+import {
+  readFile,
+  writeFile,
+} from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
+  buildWorkflowExecutionPlan,
   createContext,
+  deserializeCheckpoint,
+  EvmJsonRpcExecutor,
   parseProtocolSpec,
   parseWorkflow,
   registerProtocol,
-  buildWorkflowExecutionPlan,
-  solver,
   runPlan,
-  EvmJsonRpcExecutor,
   serializeCheckpoint,
-  deserializeCheckpoint,
+  solver,
 } from '../dist/index.js';
 
 class FileCheckpointStore {
@@ -85,13 +88,13 @@ inputs:
 nodes:
   - id: q1
     type: query_ref
-    skill: "demo@0.0.2"
+    protocol: "demo@0.0.2"
     query: quote
     args:
       x: { ref: "inputs.amount" }
   - id: a1
     type: action_ref
-    skill: "demo@0.0.2"
+    protocol: "demo@0.0.2"
     action: swap
     deps: ["q1"]
     args:

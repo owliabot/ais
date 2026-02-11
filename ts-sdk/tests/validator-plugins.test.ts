@@ -23,13 +23,13 @@ describe('T441 validator plugin points', () => {
     });
 
     const wf = parseWorkflow(`
-schema: "ais-flow/0.0.2"
-meta: { name: w, version: "0.0.2" }
+schema: "ais-flow/0.0.3"
+meta: { name: w, version: "0.0.3" }
 default_chain: "eip155:1"
 nodes:
   - id: bad
     type: action_ref
-    skill: "x@0.0.2"
+    protocol: "x@0.0.2"
     action: "a"
 `);
 
@@ -52,13 +52,13 @@ nodes:
     });
 
     const wf = parseWorkflow(`
-schema: "ais-flow/0.0.2"
-meta: { name: w, version: "0.0.2", description: "d" }
+schema: "ais-flow/0.0.3"
+meta: { name: w, version: "0.0.3", description: "d" }
 default_chain: "eip155:1"
 nodes:
   - id: n1
     type: action_ref
-    skill: "x@0.0.2"
+    protocol: "x@0.0.2"
     action: "a"
 `);
 
@@ -66,4 +66,3 @@ nodes:
     expect(issues.some((i) => i.rule === 'always-warn')).toBe(true);
   });
 });
-

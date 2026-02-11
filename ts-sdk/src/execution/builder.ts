@@ -70,7 +70,7 @@ export function buildQuery(
 
 export function buildWorkflowTransactions(
   _protocols: Map<string, ProtocolSpec>,
-  _nodes: Array<{ skill: string; action?: string; query?: string; args?: Record<string, unknown> }>,
+  _nodes: Array<{ protocol: string; action?: string; query?: string; args?: Record<string, unknown> }>,
   _ctx: ResolverContext,
   _chain: string
 ): Array<BuildOutput & { nodeIndex: number }> {

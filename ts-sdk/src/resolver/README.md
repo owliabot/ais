@@ -25,13 +25,14 @@ setNodeOutputs(ctx, nodeId, outputs, options?): void
 
 The `ResolverContext` holds:
 - `protocols` — Map of loaded protocol specs by name
+- `protocol_sources` — Map of protocol source metadata (`builtin` / `manual` / `import` / `workspace`)
 - `runtime` — Structured runtime state: `inputs/params/ctx/query/contracts/calculated/policy/nodes`
 
 ### Reference Resolution (`reference.ts`)
 
 ```ts
-registerProtocol(ctx, spec): void          // Add a protocol to context
-parseSkillRef(ref): { protocol, version? } // Parse "name@version" format
+registerProtocol(ctx, spec, options?): void // Add a protocol to context (default source: manual)
+parseProtocolRef(ref): { protocol, version? } // Parse "name@version" format
 resolveProtocolRef(ctx, ref): ProtocolSpec | null
 resolveAction(ctx, ref): { protocol, actionId, action } | null
 resolveQuery(ctx, ref): { protocol, queryId, query } | null
@@ -113,7 +114,7 @@ Expressions follow the pattern `${namespace.path}`:
 
 ### Pack Expansion
 
-`expandPack()` resolves all skill includes in a Pack and returns:
+`expandPack()` resolves all protocol includes in a Pack and returns:
 - `protocols` — Successfully resolved protocol specs
 - `missing` — Unresolved references (for error reporting)
 

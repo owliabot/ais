@@ -26,4 +26,4 @@ export const AISDocumentSchema = z.discriminatedUnion('schema', [
 ]);
 
 export type AnyAISDocument = z.infer<typeof AISDocumentSchema>;
-export type AISSchemaType = 'ais/0.0.2' | 'ais-pack/0.0.2' | 'ais-flow/0.0.2';
+export type AISSchemaType = 'ais/0.0.2' | 'ais-pack/0.0.2' | 'ais-flow/0.0.3';

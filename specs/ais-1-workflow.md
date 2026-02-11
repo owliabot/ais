@@ -48,19 +48,19 @@ inputs: { ... }
 nodes:
   - id: "q_quote"
     type: "query_ref"
-    skill: "uniswap-v3@0.0.2"
+    protocol: "uniswap-v3@0.0.2"
     query: "quote"
     args:
       token_in: { ref: "inputs.token_in" }
   - id: "a_swap"
     type: "action_ref"
-    skill: "uniswap-v3@0.0.2"
+    protocol: "uniswap-v3@0.0.2"
     action: "swap"
     deps: ["q_quote"]
   - id: "q_solana_balance"
     type: "query_ref"
     chain: "solana:mainnet"
-    skill: "spl-token@0.0.2"
+    protocol: "spl-token@0.0.2"
     query: "token-balance"
 outputs:
   min_out: { ref: "nodes.a_swap.calculated.min_out" }

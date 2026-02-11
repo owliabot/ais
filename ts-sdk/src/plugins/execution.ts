@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { ProtocolSpec, ExecutionSpec, ValueRef } from '../schema/index.js';
-import { CORE_EXECUTION_TYPES, isCoreExecutionSpec } from '../schema/index.js';
+import { CORE_EXECUTION_TYPES, ExtensionsSchema, ValueRefSchema, isCoreExecutionSpec } from '../schema/index.js';
 
 export interface ExecutionTypePlugin<T extends { type: string } = { type: string }> {
   type: string;
@@ -35,6 +35,25 @@ export class ExecutionTypeRegistry {
 }
 
 export const defaultExecutionTypeRegistry = new ExecutionTypeRegistry();
+
+// Built-in plugin execution types (kept out of AIS core for safety/policy gating).
+//
+// NOTE: These are still validated by the parser via the execution registry, and can be
+// allowlisted/blocked by packs under `plugins.execution.enabled`.
+const EvmRpcExecutionSchema = z
+  .object({
+    type: z.literal('evm_rpc'),
+    method: z.string().min(1),
+    params: ValueRefSchema.optional(),
+    extensions: ExtensionsSchema,
+  })
+  .strict();
+
+defaultExecutionTypeRegistry.register({
+  type: 'evm_rpc',
+  schema: EvmRpcExecutionSchema,
+  readinessRefsCollector: (execution: any) => (execution?.params ? [execution.params as ValueRef] : []),
+});
 
 export interface ValidateProtocolExecutionOptions {
   registry: ExecutionTypeRegistry;

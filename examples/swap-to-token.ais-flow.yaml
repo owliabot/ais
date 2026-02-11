@@ -1,8 +1,8 @@
-schema: "ais-flow/0.0.2"
+schema: "ais-flow/0.0.3"
 
 meta:
   name: "swap-to-token"
-  version: "0.0.2"
+  version: "0.0.3"
   description: "Quote then swap using Uniswap V3 exact-in"
 
 default_chain: "eip155:1"
@@ -10,6 +10,10 @@ default_chain: "eip155:1"
 requires_pack:
   name: "safe-defi-pack"
   version: "0.0.2"
+
+imports:
+  protocols:
+    - { protocol: "uniswap-v3@0.0.2", path: "examples/uniswap-v3.ais.yaml" }
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # INPUTS
@@ -44,7 +48,7 @@ inputs:
 nodes:
   - id: q_quote
     type: query_ref
-    skill: "uniswap-v3@0.0.2"
+    protocol: "uniswap-v3@0.0.2"
     query: "quote-exact-in-single"
     args:
       token_in: { ref: "inputs.token_in" }
@@ -54,14 +58,14 @@ nodes:
 
   - id: q_allowance
     type: query_ref
-    skill: "uniswap-v3@0.0.2"
+    protocol: "uniswap-v3@0.0.2"
     query: "allowance-token-in"
     args:
       token_in: { ref: "inputs.token_in" }
 
   - id: a_swap
     type: action_ref
-    skill: "uniswap-v3@0.0.2"
+    protocol: "uniswap-v3@0.0.2"
     action: "swap-exact-in"
     args:
       token_in: { ref: "inputs.token_in" }

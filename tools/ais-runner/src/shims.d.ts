@@ -12,7 +12,7 @@ declare module 'node:fs/promises' {
 }
 
 declare module 'node:module' {
-  export function createRequire(filename: string | URL): (id: string) => any;
+  export function createRequire(filename: string | URL): (id: string) => unknown;
 }
 
 declare module 'node:path' {
@@ -20,16 +20,19 @@ declare module 'node:path' {
 }
 
 declare module 'yaml' {
-  const YAML: { parse(src: string): any };
+  const YAML: { parse(src: string): unknown };
   export default YAML;
 }
 
 declare module '../../../ts-sdk/dist/index.js' {
-  const mod: any;
+  const mod: unknown;
   export = mod;
 }
 
-declare const fetch: (url: string, init?: any) => Promise<{ json(): Promise<any> }>;
+declare const fetch: (
+  url: string,
+  init?: unknown
+) => Promise<{ json(): Promise<unknown> }>;
 
 declare class Buffer {
   static from(data: Uint8Array): Buffer;

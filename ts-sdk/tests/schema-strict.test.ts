@@ -142,7 +142,7 @@ includes:
     expectUnrecognizedKeys(
       () =>
         parseWorkflow(`
-schema: "ais-flow/0.0.2"
+schema: "ais-flow/0.0.3"
 meta: { name: wf, version: "0.0.2" }
 default_chain: "eip155:1"
 nodes: []
@@ -156,13 +156,13 @@ foo: 1
     expectUnrecognizedKeys(
       () =>
         parseWorkflow(`
-schema: "ais-flow/0.0.2"
+schema: "ais-flow/0.0.3"
 meta: { name: wf, version: "0.0.2" }
 default_chain: "eip155:1"
 nodes:
   - id: n1
     type: query_ref
-    skill: "demo@0.0.2"
+    protocol: "demo@0.0.2"
     query: q
     foo: 1
 `),
@@ -182,7 +182,7 @@ nodes:
 
   it('rejects unknown fields in ExecutionPlan', () => {
     const bad = {
-      schema: 'ais-plan/0.0.2',
+      schema: 'ais-plan/0.0.3',
       nodes: [
         {
           id: 'n1',

@@ -77,21 +77,21 @@ actions:
 `;
 
   const workflowYaml = `
-schema: "ais-flow/0.0.2"
-meta: { name: demo-flow, version: "0.0.2" }
+schema: "ais-flow/0.0.3"
+meta: { name: demo-flow, version: "0.0.3" }
 default_chain: "eip155:1"
 inputs:
   amount: { type: uint256 }
 nodes:
   - id: q1
     type: query_ref
-    skill: "demo@0.0.2"
+    protocol: "demo@0.0.2"
     query: quote
     args:
       x: { ref: "inputs.amount" }
   - id: a1
     type: action_ref
-    skill: "demo@0.0.2"
+    protocol: "demo@0.0.2"
     action: swap
     deps: ["q1"]
     args:
@@ -202,15 +202,15 @@ actions: {}
 `;
 
   const workflowYaml = `
-schema: "ais-flow/0.0.2"
-meta: { name: demo-until, version: "0.0.2" }
+schema: "ais-flow/0.0.3"
+meta: { name: demo-until, version: "0.0.3" }
 default_chain: "eip155:1"
 inputs:
   amount: { type: uint256 }
 nodes:
   - id: q1
     type: query_ref
-    skill: "demo2@0.0.2"
+    protocol: "demo2@0.0.2"
     query: quote
     args:
       x: { ref: "inputs.amount" }

@@ -19,10 +19,10 @@ const PackMetaSchema = z
   .strict();
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Includes (Skill References)
+// Includes (Protocol References)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const SkillIncludeSchema = z
+const ProtocolIncludeSchema = z
   .object({
   protocol: z.string(),
   version: z.string(),
@@ -207,7 +207,7 @@ export const PackSchema = z
   description: z.string().optional(),
   meta: PackMetaSchema.optional(),
   
-  includes: z.array(SkillIncludeSchema),
+  includes: z.array(ProtocolIncludeSchema),
   policy: PolicySchema.optional(),
   token_policy: TokenPolicySchema.optional(),
   providers: ProvidersSchema.optional(),
@@ -223,7 +223,7 @@ export const PackSchema = z
 
 export type Pack = z.infer<typeof PackSchema>;
 export type PackMeta = z.infer<typeof PackMetaSchema>;
-export type SkillInclude = z.infer<typeof SkillIncludeSchema>;
+export type ProtocolInclude = z.infer<typeof ProtocolIncludeSchema>;
 export type Policy = z.infer<typeof PolicySchema>;
 export type HardConstraintsDefaults = z.infer<typeof HardConstraintsDefaultsSchema>;
 export type TokenPolicy = z.infer<typeof TokenPolicySchema>;

@@ -6,7 +6,7 @@ import { BaseBuilder } from './base.js';
 import {
   PackSchema,
   type Pack,
-  type SkillInclude,
+  type ProtocolInclude,
   type Policy,
   type TokenPolicy,
   type TokenAllowlistEntry,
@@ -20,7 +20,7 @@ export class PackBuilder extends BaseBuilder<Pack> {
   private _name: string;
   private _version: string;
   private _description?: string;
-  private _includes: SkillInclude[] = [];
+  private _includes: ProtocolInclude[] = [];
   private _policy?: Policy;
   private _tokenPolicy?: TokenPolicy;
   private _providers?: Pack['providers'];
@@ -37,7 +37,7 @@ export class PackBuilder extends BaseBuilder<Pack> {
     return this;
   }
 
-  /** Include a protocol skill */
+  /** Include a protocol */
   include(
     protocol: string,
     version: string,

@@ -28,7 +28,7 @@ describe('engine.runPlan (reference)', () => {
     const ctx = createContext();
 
     const plan: ExecutionPlan = {
-      schema: 'ais-plan/0.0.2',
+      schema: 'ais-plan/0.0.3',
       nodes: [
         {
           id: 'n1',
@@ -107,7 +107,7 @@ describe('engine.runPlan (reference)', () => {
     const ctx = createContext();
 
     const plan: ExecutionPlan = {
-      schema: 'ais-plan/0.0.2',
+      schema: 'ais-plan/0.0.3',
       nodes: [
         {
           id: 'n1',
@@ -179,7 +179,7 @@ describe('engine.runPlan (reference)', () => {
     const store = new MemoryCheckpointStore();
 
     const plan: ExecutionPlan = {
-      schema: 'ais-plan/0.0.2',
+      schema: 'ais-plan/0.0.3',
       nodes: [
         {
           id: 'q1',
@@ -224,5 +224,91 @@ describe('engine.runPlan (reference)', () => {
     expect(events.some((e) => e.type === 'node_waiting' && e.node.id === 'q1')).toBe(true);
     expect(ctx.runtime.nodes.q1?.outputs).toEqual({ arrived: true });
     expect(store.checkpoint?.completed_node_ids?.sort()).toEqual(['q1']);
+  });
+
+  it('fails fast when node assert is falsy (read node)', async () => {
+    const ctx = createContext();
+    const plan: ExecutionPlan = {
+      schema: 'ais-plan/0.0.3',
+      nodes: [
+        {
+          id: 'q1',
+          chain: 'eip155:1',
+          kind: 'execution',
+          assert: { cel: 'nodes.q1.outputs.ok == true' } as any,
+          assert_message: 'q1 assert failed',
+          execution: {
+            type: 'evm_read',
+            to: lit('0x1111111111111111111111111111111111111111'),
+            abi: { type: 'function', name: 'q', inputs: [], outputs: [] },
+            args: {},
+          },
+          writes: [{ path: 'nodes.q1.outputs', mode: 'set' }],
+        },
+      ],
+    };
+
+    const executor: Executor = {
+      supports() {
+        return true;
+      },
+      async execute() {
+        return { outputs: { ok: false }, patches: [{ op: 'set', path: 'nodes.q1.outputs', value: { ok: false } }] };
+      },
+    };
+
+    const events: EngineEvent[] = [];
+    for await (const ev of runPlan(plan, ctx, { solver: { solve() { return {}; } }, executors: [executor] })) {
+      events.push(ev);
+    }
+
+    const err = events.find((e) => e.type === 'error');
+    expect(err?.type).toBe('error');
+    expect(String((err as any)?.error?.message ?? '')).toContain('q1 assert failed');
+    expect(ctx.runtime.nodes.q1?.outputs).toEqual({ ok: false });
+  });
+
+  it('evaluates assert for write node after execution', async () => {
+    const ctx = createContext();
+    const plan: ExecutionPlan = {
+      schema: 'ais-plan/0.0.3',
+      nodes: [
+        {
+          id: 'a1',
+          chain: 'eip155:1',
+          kind: 'execution',
+          assert: { cel: 'nodes.a1.outputs.tx_hash == "0xok"' } as any,
+          execution: {
+            type: 'evm_call',
+            to: lit('0x1111111111111111111111111111111111111111'),
+            abi: { type: 'function', name: 'f', inputs: [], outputs: [] },
+            args: {},
+            value: lit('0'),
+          },
+          writes: [{ path: 'nodes.a1.outputs', mode: 'merge' }],
+        },
+      ],
+    };
+
+    const executor: Executor = {
+      supports() {
+        return true;
+      },
+      async execute() {
+        return {
+          outputs: { tx_hash: '0xok', receipt: { status: '0x1' } },
+          patches: [{ op: 'merge', path: 'nodes.a1.outputs', value: { tx_hash: '0xok' } }],
+        };
+      },
+    };
+
+    const events: EngineEvent[] = [];
+    for await (const ev of runPlan(plan, ctx, { solver: { solve() { return {}; } }, executors: [executor] })) {
+      events.push(ev);
+    }
+
+    expect(events.some((e) => e.type === 'tx_sent')).toBe(true);
+    expect(events.some((e) => e.type === 'error')).toBe(false);
+    expect(ctx.runtime.nodes.a1?.outputs).toEqual({ tx_hash: '0xok' });
   });
 });

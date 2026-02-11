@@ -16,13 +16,15 @@ import type { ZodSchema } from 'zod';
 interface NodeDef {
   type: 'action_ref' | 'query_ref';
   chain?: string;
-  skill: string;
+  protocol: string;
   action?: string;
   query?: string;
   args?: Record<string, unknown>;
   calculated_overrides?: Record<string, CalculatedOverride>;
   condition?: unknown;
   until?: unknown;
+  assert?: unknown;
+  assert_message?: string;
   retry?: { interval_ms: number; max_attempts?: number; backoff?: 'fixed' };
   timeout_ms?: number;
   requires?: string[];
@@ -93,17 +95,20 @@ export class WorkflowBuilder extends BaseBuilder<Workflow> {
     const calculated_overrides = def.calculated_overrides;
     const condition = def.condition !== undefined ? conditionToValueRef(def.condition) : undefined;
     const until = def.until !== undefined ? conditionToValueRef(def.until) : undefined;
+    const assert = def.assert !== undefined ? conditionToValueRef(def.assert) : undefined;
     this._nodes.push({
       id,
       type: def.type,
       chain: def.chain,
-      skill: def.skill,
+      protocol: def.protocol,
       action: def.action,
       query: def.query,
       args,
       calculated_overrides,
       condition,
       until,
+      assert,
+      assert_message: def.assert_message,
       retry: def.retry,
       timeout_ms: def.timeout_ms,
       deps: def.requires,
@@ -114,21 +119,21 @@ export class WorkflowBuilder extends BaseBuilder<Workflow> {
   /** Add an action node */
   action(
     id: string,
-    skill: string,
+    protocol: string,
     action: string,
-    options?: Omit<NodeDef, 'type' | 'skill' | 'action'>
+    options?: Omit<NodeDef, 'type' | 'protocol' | 'action'>
   ): this {
-    return this.node(id, { type: 'action_ref', skill, action, ...options });
+    return this.node(id, { type: 'action_ref', protocol, action, ...options });
   }
 
   /** Add a query node */
   query(
     id: string,
-    skill: string,
+    protocol: string,
     queryName: string,
-    options?: Omit<NodeDef, 'type' | 'skill' | 'query'>
+    options?: Omit<NodeDef, 'type' | 'protocol' | 'query'>
   ): this {
-    return this.node(id, { type: 'query_ref', skill, query: queryName, ...options });
+    return this.node(id, { type: 'query_ref', protocol, query: queryName, ...options });
   }
 
   /** Add an output mapping */
@@ -157,7 +162,7 @@ export class WorkflowBuilder extends BaseBuilder<Workflow> {
 
   protected getData(): Workflow {
     return {
-      schema: 'ais-flow/0.0.2',
+      schema: 'ais-flow/0.0.3',
       meta: this._meta,
       default_chain: this._defaultChain,
       requires_pack: this._requiresPack,

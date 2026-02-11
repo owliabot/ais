@@ -145,14 +145,14 @@ nodes:
   - id: aave_supply
     chain: "eip155:1"
     type: action_ref
-    skill: "aave@0.0.2"
+    protocol: "aave@0.0.2"
     action: "supply_eth"
     args: { amount: { ref: "inputs.collateral_amount" } }
 
   - id: aave_borrow
     chain: "eip155:1"
     type: action_ref
-    skill: "aave@0.0.2"
+    protocol: "aave@0.0.2"
     action: "borrow_usdc"
     deps: ["aave_supply"]
     args: { amount: { ref: "inputs.borrow_amount" } }
@@ -161,7 +161,7 @@ nodes:
   - id: transfer_to_cex
     chain: "eip155:1"
     type: action_ref
-    skill: "erc20@0.0.2"
+    protocol: "erc20@0.0.2"
     action: "transfer"
     deps: ["aave_borrow"]
     args:
@@ -173,7 +173,7 @@ nodes:
   - id: bridge_allowance
     chain: "eip155:1"
     type: query_ref
-    skill: "erc20@0.0.2"
+    protocol: "erc20@0.0.2"
     query: "allowance"
     deps: ["aave_borrow"]
     args:
@@ -184,7 +184,7 @@ nodes:
   - id: bridge_approve
     chain: "eip155:1"
     type: action_ref
-    skill: "erc20@0.0.2"
+    protocol: "erc20@0.0.2"
     action: "approve"
     deps: ["bridge_allowance"]
     condition: { cel: "nodes.bridge_allowance.outputs.allowance < to_atomic(inputs.bridge_amount, calculated.usdc)" }
@@ -196,7 +196,7 @@ nodes:
   - id: bridge_send
     chain: "eip155:1"
     type: action_ref
-    skill: "some-bridge@0.0.2"
+    protocol: "some-bridge@0.0.2"
     action: "send"
     deps: ["bridge_allowance", "bridge_approve"]  # approve 若 skipped，不会阻塞
     args:
@@ -208,7 +208,7 @@ nodes:
   - id: wait_arrival
     chain: "solana:5eyk..."
     type: query_ref
-    skill: "some-bridge@0.0.2"
+    protocol: "some-bridge@0.0.2"
     query: "arrival_status"
     deps: ["bridge_send"]
     args:
@@ -219,7 +219,7 @@ nodes:
   - id: solana_deposit
     chain: "solana:5eyk..."
     type: action_ref
-    skill: "jlp@0.0.2"
+    protocol: "jlp@0.0.2"
     action: "deposit"
     deps: ["wait_arrival"]
     args:

@@ -113,7 +113,7 @@ const builtinPackRules: LintRule[] = [
     },
   },
   {
-    id: 'pack-skill-ref-format',
+    id: 'pack-protocol-ref-format',
     severity: 'warning',
     check: (doc) => {
       if (doc.schema !== 'ais-pack/0.0.2') return [];
@@ -122,9 +122,9 @@ const builtinPackRules: LintRule[] = [
         const ref = doc.includes[i];
         if (!ref.version) {
           issues.push({
-            rule: 'pack-skill-ref-format',
+            rule: 'pack-protocol-ref-format',
             severity: 'warning',
-            message: `Skill reference '${ref.protocol}' should include version`,
+            message: `Protocol reference '${ref.protocol}' should include version`,
             path: `includes[${i}]`,
           });
         }
@@ -139,7 +139,7 @@ const builtinWorkflowRules: LintRule[] = [
     id: 'workflow-has-description',
     severity: 'warning',
     check: (doc) => {
-      if (doc.schema !== 'ais-flow/0.0.2') return [];
+      if (doc.schema !== 'ais-flow/0.0.3') return [];
       if (!doc.meta.description) {
         return [{ rule: 'workflow-has-description', severity: 'warning', message: 'Workflow should have a description' }];
       }
@@ -150,7 +150,7 @@ const builtinWorkflowRules: LintRule[] = [
     id: 'workflow-has-nodes',
     severity: 'error',
     check: (doc) => {
-      if (doc.schema !== 'ais-flow/0.0.2') return [];
+      if (doc.schema !== 'ais-flow/0.0.3') return [];
       if (doc.nodes.length === 0) {
         return [{ rule: 'workflow-has-nodes', severity: 'error', message: 'Workflow must have at least one node' }];
       }
@@ -161,7 +161,7 @@ const builtinWorkflowRules: LintRule[] = [
     id: 'workflow-node-has-id',
     severity: 'error',
     check: (doc) => {
-      if (doc.schema !== 'ais-flow/0.0.2') return [];
+      if (doc.schema !== 'ais-flow/0.0.3') return [];
       const issues: LintIssue[] = [];
       const ids = new Set<string>();
       for (let i = 0; i < doc.nodes.length; i++) {
@@ -187,19 +187,20 @@ const builtinWorkflowRules: LintRule[] = [
     },
   },
   {
-    id: 'workflow-node-skill-ref-format',
+    id: 'workflow-node-protocol-ref-format',
     severity: 'warning',
     check: (doc) => {
-      if (doc.schema !== 'ais-flow/0.0.2') return [];
+      if (doc.schema !== 'ais-flow/0.0.3') return [];
       const issues: LintIssue[] = [];
       for (let i = 0; i < doc.nodes.length; i++) {
         const node = doc.nodes[i];
-        if (!node.skill.includes('@')) {
+        const proto = (node as any).protocol;
+        if (typeof proto !== 'string' || !proto.includes('@')) {
           issues.push({
-            rule: 'workflow-node-skill-ref-format',
+            rule: 'workflow-node-protocol-ref-format',
             severity: 'warning',
-            message: `Node '${node.id}' skill reference should include version`,
-            path: `nodes[${i}].skill`,
+            message: `Node '${node.id}' protocol reference should include version`,
+            path: `nodes[${i}].protocol`,
           });
         }
       }

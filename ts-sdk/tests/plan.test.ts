@@ -10,7 +10,7 @@ import {
   getNodeReadiness,
 } from '../src/index.js';
 
-describe('ExecutionPlan IR (ais-plan/0.0.2)', () => {
+describe('ExecutionPlan IR (ais-plan/0.0.3)', () => {
   it('builds a JSON-serializable workflow plan and validates schema', () => {
     const ctx = createContext();
     registerProtocol(
@@ -47,21 +47,21 @@ actions:
     );
 
     const wf = parseWorkflow(`
-schema: "ais-flow/0.0.2"
-meta: { name: demo, version: "0.0.2" }
+schema: "ais-flow/0.0.3"
+meta: { name: demo, version: "0.0.3" }
 default_chain: "eip155:1"
 inputs:
   amount: { type: uint256 }
 nodes:
   - id: n1
     type: query_ref
-    skill: "demo@0.0.2"
+    protocol: "demo@0.0.2"
     query: q
     args:
       x: { ref: "inputs.amount" }
   - id: n2
     type: action_ref
-    skill: "demo@0.0.2"
+    protocol: "demo@0.0.2"
     action: a
     args:
       x: { ref: "inputs.amount" }
@@ -69,7 +69,7 @@ nodes:
 `);
 
     const plan = buildWorkflowExecutionPlan(wf, ctx);
-    expect(plan.schema).toBe('ais-plan/0.0.2');
+    expect(plan.schema).toBe('ais-plan/0.0.3');
     expect(plan.nodes).toHaveLength(2);
 
     // JSON roundtrip + schema validation
@@ -114,21 +114,21 @@ actions:
     );
 
     const wf = parseWorkflow(`
-schema: "ais-flow/0.0.2"
-meta: { name: demo, version: "0.0.2" }
+schema: "ais-flow/0.0.3"
+meta: { name: demo, version: "0.0.3" }
 default_chain: "eip155:1"
 inputs:
   amount: { type: uint256 }
 nodes:
   - id: n2
     type: action_ref
-    skill: "demo@0.0.2"
+    protocol: "demo@0.0.2"
     action: a
     args:
       x: { ref: "nodes.n1.outputs.y" }
   - id: n1
     type: query_ref
-    skill: "demo@0.0.2"
+    protocol: "demo@0.0.2"
     query: q
     args:
       x: { ref: "inputs.amount" }
@@ -164,15 +164,15 @@ actions:
     );
 
     const wf = parseWorkflow(`
-schema: "ais-flow/0.0.2"
-meta: { name: demo, version: "0.0.2" }
+schema: "ais-flow/0.0.3"
+meta: { name: demo, version: "0.0.3" }
 default_chain: "eip155:1"
 inputs:
   amount: { type: uint256 }
 nodes:
   - id: n2
     type: action_ref
-    skill: "demo@0.0.2"
+    protocol: "demo@0.0.2"
     action: a
     args:
       x: { ref: "inputs.amount" }

@@ -39,7 +39,7 @@ actions: {}
     );
 
     const wf = parseWorkflow(`
-schema: "ais-flow/0.0.2"
+schema: "ais-flow/0.0.3"
 meta: { name: demo, version: "0.0.2" }
 default_chain: "eip155:1"
 inputs:
@@ -47,7 +47,7 @@ inputs:
 nodes:
   - id: q1
     type: query_ref
-    skill: "demo@0.0.2"
+    protocol: "demo@0.0.2"
     query: q
     args:
       x: { ref: "inputs.amount" }
@@ -81,16 +81,16 @@ nodes:
     });
   });
 
-  it('executes evm_get_balance via eth_getBalance and writes {balance} output', async () => {
+  it('executes evm_rpc eth_getBalance and writes {balance} output', async () => {
     const ctx = createContext();
     const node: any = {
       id: 'q1',
       chain: 'eip155:1',
       kind: 'query_ref',
       execution: {
-        type: 'evm_get_balance',
-        address: { lit: '0x1111111111111111111111111111111111111111' },
-        block_tag: { lit: 'latest' },
+        type: 'evm_rpc',
+        method: 'eth_getBalance',
+        params: { lit: ['0x1111111111111111111111111111111111111111', 'latest'] },
       },
       bindings: {},
       writes: [],

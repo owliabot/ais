@@ -9,11 +9,11 @@ This document specifies registry semantics (not a specific implementation).
 
 AIS 0.0.2 defines:
 
-- `skillId = keccak256(owner, protocol)` (version is NOT part of skillId)
-- `version` is a mutable field of a skill record, updated by the owner.
+- `protocolId = keccak256(owner, protocol)` (version is NOT part of protocolId)
+- `version` is a mutable field of a protocol record, updated by the owner.
 
 Rationale:
-- Avoids semantic contradictions where `update(skillId, version, ...)` changes version but skillId “should have changed”.
+- Avoids semantic contradictions where `update(protocolId, version, ...)` changes version but protocolId “should have changed”.
 
 ## 2. `specHash`
 
@@ -27,5 +27,5 @@ Recommendation:
 
 Registry MUST provide:
 
-- `latestByName[protocol] -> skillId` (or record)
+- `latestByName[protocol] -> protocolId` (or record)
 - a method to fetch the latest verified version

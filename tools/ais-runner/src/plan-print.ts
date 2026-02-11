@@ -1,5 +1,7 @@
-export function formatPlanSummary(plan: any): string {
-  const nodes: any[] = Array.isArray(plan?.nodes) ? plan.nodes : [];
+import type { RunnerPlan } from './types.js';
+
+export function formatPlanSummary(plan: RunnerPlan): string {
+  const nodes = Array.isArray(plan?.nodes) ? plan.nodes : [];
   const lines: string[] = [];
   lines.push(`plan.schema=${String(plan?.schema ?? '')}`);
   lines.push(`plan.nodes=${nodes.length}`);
@@ -13,4 +15,3 @@ export function formatPlanSummary(plan: any): string {
   }
   return `${lines.join('\n')}\n`;
 }
-

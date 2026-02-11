@@ -103,7 +103,7 @@ actions:
    - Domain verification for authority binding
 
 6. **Capability Negotiation**
-   - Skills declare requirements
+   - Protocols declare requirements
    - Engines advertise capabilities
    - Clear failures when incompatible
 

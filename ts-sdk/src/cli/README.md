@@ -60,13 +60,13 @@ Checks for best practices and common issues:
 **Pack rules:**
 - `pack-has-description` (warning) — Pack should have description
 - `pack-has-includes` (error) — Must include ≥1 protocol
-- `pack-skill-ref-format` (warning) — Skill includes should specify a version
+- `pack-protocol-ref-format` (warning) — Protocol includes should specify a version
 
 **Workflow rules:**
 - `workflow-has-description` (warning) — Workflow should have description
 - `workflow-has-nodes` (error) — Must have ≥1 node
 - `workflow-node-has-id` (error) — Nodes must have ids (and ids must be unique)
-- `workflow-node-skill-ref-format` (warning) — Node skill refs should include version
+- `workflow-node-protocol-ref-format` (warning) — Node protocol refs should include version
 
 ```bash
 ais lint <path...>

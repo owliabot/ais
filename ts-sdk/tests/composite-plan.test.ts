@@ -39,15 +39,17 @@ actions:
     );
 
     const wf = parseWorkflow(`
-schema: "ais-flow/0.0.2"
-meta: { name: wf, version: "0.0.2" }
+schema: "ais-flow/0.0.3"
+meta: { name: wf, version: "0.0.3" }
 default_chain: "eip155:1"
 inputs: { amount: { type: uint256 } }
 nodes:
   - id: n1
     type: action_ref
-    skill: "demo@0.0.2"
+    protocol: "demo@0.0.2"
     action: do
+    assert: { cel: "nodes.n1.outputs.steps.swap != null" }
+    assert_message: "swap output missing"
     args:
       x: { ref: "inputs.amount" }
 `);
@@ -66,6 +68,9 @@ nodes:
       { path: 'nodes.n1.outputs', mode: 'merge' },
       { path: 'nodes.n1.outputs.steps.swap', mode: 'set' },
     ]);
+    expect(plan.nodes[0]!.assert).toBeUndefined();
+    expect(plan.nodes[1]!.assert).toEqual({ cel: 'nodes.n1.outputs.steps.swap != null' });
+    expect(plan.nodes[1]!.assert_message).toBe('swap output missing');
   });
 
   it('supports cross-chain composite steps via steps[].chain', () => {
@@ -109,13 +114,13 @@ actions:
     );
 
     const wf = parseWorkflow(`
-schema: "ais-flow/0.0.2"
-meta: { name: wf, version: "0.0.2" }
+schema: "ais-flow/0.0.3"
+meta: { name: wf, version: "0.0.3" }
 default_chain: "eip155:1"
 nodes:
   - id: n1
     type: action_ref
-    skill: "demo@0.0.2"
+    protocol: "demo@0.0.2"
     action: bridge_like
 `);
 
@@ -127,4 +132,3 @@ nodes:
     expect(plan.nodes[1]!.deps).toEqual(['n1__evm_send']);
   });
 });
-

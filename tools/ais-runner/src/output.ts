@@ -1,12 +1,17 @@
 import { writeFile, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import type { RunnerContext, RunnerWorkflow, WorkflowOutputSdk } from './types.js';
 
 export type EvaluatedOutputs = {
   outputs: Record<string, unknown>;
   errors: Record<string, string>;
 };
 
-export function evaluateWorkflowOutputs(sdk: any, workflow: any, ctx: any): EvaluatedOutputs {
+export function evaluateWorkflowOutputs(
+  sdk: WorkflowOutputSdk,
+  workflow: RunnerWorkflow,
+  ctx: RunnerContext
+): EvaluatedOutputs {
   const out: Record<string, unknown> = {};
   const errors: Record<string, string> = {};
   const outputs = workflow?.outputs;
@@ -36,4 +41,3 @@ export function stringifyWithBigInt(value: unknown): string {
     2
   );
 }
-

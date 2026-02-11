@@ -93,3 +93,24 @@ calls:
     condition: { cel: "..." }         # optional
 deadline: { ref: "calculated.deadline" }  # optional
 ```
+
+## 6. Plugin execution type: `evm_rpc` (non-core)
+
+Some EVM information is only exposed via native JSON-RPC methods (e.g. `eth_getBalance`).
+AIS core keeps the execution surface small; engines MAY expose a controlled RPC escape hatch as a **plugin** execution type.
+
+This repository's TypeScript SDK ships a built-in plugin execution type `evm_rpc` that is:
+- validated via the execution plugin registry
+- gated by packs under `plugins.execution.enabled` when a pack is in use
+- executor-enforced to a read-only allowlist of safe methods
+
+Shape (informative):
+
+```yaml
+type: evm_rpc
+method: "eth_getBalance"   # executor allowlist; other methods may be rejected
+params:
+  array:
+    - { lit: "0x..." }     # address
+    - { lit: "latest" }   # block tag (or hex quantity)
+```

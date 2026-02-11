@@ -1,4 +1,4 @@
-# Builder Module (AIS 0.0.2)
+# Builder Module
 
 Fluent DSL for programmatically constructing AIS documents (Protocol Specs, Packs, Workflows) with full TypeScript type safety.
 
@@ -78,12 +78,14 @@ const defiPack = pack('defi-essentials', '0.0.2')
   .build();
 ```
 
+`PackBuilder.include(...)` appends a `ProtocolInclude` entry to `pack.includes`.
+
 ### Building a Workflow
 
 ```ts
 import { workflow } from '@owliabot/ais-ts-sdk';
 
-const swapFlow = workflow('token-swap', '0.0.2')
+const swapFlow = workflow('token-swap', '0.0.3')
   .description('Simple token swap')
   .defaultChain('eip155:1')
   .input('token_in', 'asset', { required: true })
@@ -110,12 +112,15 @@ const swapFlow = workflow('token-swap', '0.0.2')
 
 Notes:
 - `args` values are `ValueRef` (`{lit|ref|cel|detect|object|array}`).
+- Workflow builder emits `schema: "ais-flow/0.0.3"` and uses `nodes[].protocol` (not `skill`).
 - Chain selection:
   - Prefer setting `workflow.default_chain` via `.defaultChain(...)`
   - Override per node via `def.chain` in `.node(...)` / `.action(...)` / `.query(...)`
 - Polling (engine-driven):
   - Set `def.until` (ValueRef/CEL/ref) to keep re-running a node until the expression becomes truthy
   - Use `def.retry` and `def.timeout_ms` to control polling cadence and limits
+- Assertions (engine-driven):
+  - Set `def.assert` / `def.assert_message` for post-execution fail-fast checks
 - Convenience coercions in `WorkflowBuilder`:
   - Strings like `${inputs.x}` become `{ ref: "inputs.x" }`
   - Other strings become `{ lit: "..." }`

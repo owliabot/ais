@@ -64,7 +64,7 @@ export {
   PackSchema,
   type Pack,
   type PackMeta,
-  type SkillInclude,
+  type ProtocolInclude,
   type Policy,
   type HardConstraintsDefaults,
   type TokenPolicy,
@@ -127,7 +127,7 @@ export {
 
   // References
   registerProtocol,
-  parseSkillRef,
+  parseProtocolRef,
   resolveProtocolRef,
   resolveAction,
   resolveQuery,
@@ -193,11 +193,14 @@ export {
   loadProtocol,
   loadPack,
   loadWorkflow,
+  loadWorkflowBundle,
   loadDirectory,
   loadDirectoryAsContext,
   type LoadResult,
   type LoadError,
   type DirectoryLoadResult,
+  type LoadWorkflowBundleOptions,
+  type WorkflowBundleLoadResult,
 } from './loader.js';
 
 // Execution

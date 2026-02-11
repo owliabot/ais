@@ -168,7 +168,7 @@
         }
       ]
     },
-    "retry_38": {
+    "retry_39": {
       "type": "object",
       "properties": {
         "interval_ms": {
@@ -194,17 +194,17 @@
       ],
       "additionalProperties": false
     },
-    "params_44": {
+    "params_45": {
       "type": "object",
       "additionalProperties": {
         "$ref": "#/$defs/condition_17"
       }
     },
-    "bindings_43": {
+    "bindings_44": {
       "type": "object",
       "properties": {
         "params": {
-          "$ref": "#/$defs/params_44"
+          "$ref": "#/$defs/params_45"
         },
         "extensions": {
           "$ref": "#/$defs/extensions_7"
@@ -212,7 +212,7 @@
       },
       "additionalProperties": false
     },
-    "Lazy_52": {
+    "Lazy_53": {
       "type": "object",
       "properties": {
         "name": {
@@ -224,7 +224,7 @@
         "components": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/Lazy_52"
+            "$ref": "#/$defs/Lazy_53"
           }
         }
       },
@@ -234,7 +234,7 @@
       ],
       "additionalProperties": false
     },
-    "abi_48": {
+    "abi_49": {
       "type": "object",
       "properties": {
         "type": {
@@ -246,13 +246,13 @@
         "inputs": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/Lazy_52"
+            "$ref": "#/$defs/Lazy_53"
           }
         },
         "outputs": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/Lazy_52"
+            "$ref": "#/$defs/Lazy_53"
           }
         }
       },
@@ -263,13 +263,13 @@
       ],
       "additionalProperties": false
     },
-    "args_57": {
+    "args_58": {
       "type": "object",
       "additionalProperties": {
         "$ref": "#/$defs/condition_17"
       }
     },
-    "Union46_0_46": {
+    "Union47_0_47": {
       "type": "object",
       "properties": {
         "type": {
@@ -279,10 +279,10 @@
           "$ref": "#/$defs/condition_17"
         },
         "abi": {
-          "$ref": "#/$defs/abi_48"
+          "$ref": "#/$defs/abi_49"
         },
         "args": {
-          "$ref": "#/$defs/args_57"
+          "$ref": "#/$defs/args_58"
         },
         "extensions": {
           "$ref": "#/$defs/extensions_7"
@@ -296,13 +296,13 @@
       ],
       "additionalProperties": false
     },
-    "args_64": {
+    "args_65": {
       "type": "object",
       "additionalProperties": {
         "$ref": "#/$defs/condition_17"
       }
     },
-    "Def_62": {
+    "Def_63": {
       "type": "object",
       "properties": {
         "id": {
@@ -312,10 +312,10 @@
           "$ref": "#/$defs/condition_17"
         },
         "abi": {
-          "$ref": "#/$defs/abi_48"
+          "$ref": "#/$defs/abi_49"
         },
         "args": {
-          "$ref": "#/$defs/args_64"
+          "$ref": "#/$defs/args_65"
         },
         "extensions": {
           "$ref": "#/$defs/extensions_7"
@@ -329,7 +329,7 @@
       ],
       "additionalProperties": false
     },
-    "Union58_1_58": {
+    "Union59_1_59": {
       "type": "object",
       "properties": {
         "type": {
@@ -345,7 +345,7 @@
         "calls": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/Def_62"
+            "$ref": "#/$defs/Def_63"
           }
         },
         "extensions": {
@@ -359,13 +359,13 @@
       ],
       "additionalProperties": false
     },
-    "args_67": {
+    "args_68": {
       "type": "object",
       "additionalProperties": {
         "$ref": "#/$defs/condition_17"
       }
     },
-    "Union65_2_65": {
+    "Union66_2_66": {
       "type": "object",
       "properties": {
         "type": {
@@ -375,10 +375,10 @@
           "$ref": "#/$defs/condition_17"
         },
         "abi": {
-          "$ref": "#/$defs/abi_48"
+          "$ref": "#/$defs/abi_49"
         },
         "args": {
-          "$ref": "#/$defs/args_67"
+          "$ref": "#/$defs/args_68"
         },
         "value": {
           "$ref": "#/$defs/condition_17"
@@ -395,20 +395,20 @@
       ],
       "additionalProperties": false
     },
-    "args_72": {
+    "args_73": {
       "type": "object",
       "additionalProperties": {
         "$ref": "#/$defs/condition_17"
       }
     },
-    "Def_71": {
+    "Def_72": {
       "type": "object",
       "properties": {
         "abi": {
-          "$ref": "#/$defs/abi_48"
+          "$ref": "#/$defs/abi_49"
         },
         "args": {
-          "$ref": "#/$defs/args_72"
+          "$ref": "#/$defs/args_73"
         },
         "condition": {
           "$ref": "#/$defs/condition_17"
@@ -423,7 +423,7 @@
       ],
       "additionalProperties": false
     },
-    "Union68_3_68": {
+    "Union69_3_69": {
       "type": "object",
       "properties": {
         "type": {
@@ -435,7 +435,7 @@
         "calls": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/Def_71"
+            "$ref": "#/$defs/Def_72"
           }
         },
         "deadline": {
@@ -452,7 +452,7 @@
       ],
       "additionalProperties": false
     },
-    "Lazy_76": {
+    "Lazy_77": {
       "type": "object",
       "properties": {
         "id": {
@@ -470,7 +470,7 @@
           "pattern": "^(eip155|solana|cosmos|bip122|aptos|sui):[a-zA-Z0-9._-]+$"
         },
         "execution": {
-          "$ref": "#/$defs/execution_45"
+          "$ref": "#/$defs/execution_46"
         },
         "extensions": {
           "$ref": "#/$defs/extensions_7"
@@ -482,7 +482,7 @@
       ],
       "additionalProperties": false
     },
-    "Union73_4_73": {
+    "Union74_4_74": {
       "type": "object",
       "properties": {
         "type": {
@@ -491,7 +491,7 @@
         "steps": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/Lazy_76"
+            "$ref": "#/$defs/Lazy_77"
           },
           "minItems": 1
         },
@@ -505,7 +505,7 @@
       ],
       "additionalProperties": false
     },
-    "Def_84": {
+    "Def_85": {
       "type": "object",
       "properties": {
         "name": {
@@ -532,7 +532,7 @@
       ],
       "additionalProperties": false
     },
-    "Union80_5_80": {
+    "Union81_5_81": {
       "type": "object",
       "properties": {
         "type": {
@@ -550,7 +550,7 @@
         "accounts": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/Def_84"
+            "$ref": "#/$defs/Def_85"
           }
         },
         "data": {
@@ -575,7 +575,7 @@
       ],
       "additionalProperties": false
     },
-    "Union86_6_86": {
+    "Union87_6_87": {
       "type": "object",
       "properties": {
         "type": {
@@ -598,13 +598,13 @@
       ],
       "additionalProperties": false
     },
-    "mapping_92": {
+    "mapping_93": {
       "type": "object",
       "additionalProperties": {
         "$ref": "#/$defs/condition_17"
       }
     },
-    "Union89_7_89": {
+    "Union90_7_90": {
       "type": "object",
       "properties": {
         "type": {
@@ -620,7 +620,7 @@
           ]
         },
         "mapping": {
-          "$ref": "#/$defs/mapping_92"
+          "$ref": "#/$defs/mapping_93"
         },
         "extensions": {
           "$ref": "#/$defs/extensions_7"
@@ -633,7 +633,7 @@
       ],
       "additionalProperties": false
     },
-    "Union93_8_93": {
+    "Union94_8_94": {
       "type": "object",
       "properties": {
         "type": {
@@ -646,38 +646,38 @@
       ],
       "additionalProperties": true
     },
-    "execution_45": {
+    "execution_46": {
       "anyOf": [
         {
-          "$ref": "#/$defs/Union46_0_46"
+          "$ref": "#/$defs/Union47_0_47"
         },
         {
-          "$ref": "#/$defs/Union58_1_58"
+          "$ref": "#/$defs/Union59_1_59"
         },
         {
-          "$ref": "#/$defs/Union65_2_65"
+          "$ref": "#/$defs/Union66_2_66"
         },
         {
-          "$ref": "#/$defs/Union68_3_68"
+          "$ref": "#/$defs/Union69_3_69"
         },
         {
-          "$ref": "#/$defs/Union73_4_73"
+          "$ref": "#/$defs/Union74_4_74"
         },
         {
-          "$ref": "#/$defs/Union80_5_80"
+          "$ref": "#/$defs/Union81_5_81"
         },
         {
-          "$ref": "#/$defs/Union86_6_86"
+          "$ref": "#/$defs/Union87_6_87"
         },
         {
-          "$ref": "#/$defs/Union89_7_89"
+          "$ref": "#/$defs/Union90_7_90"
         },
         {
-          "$ref": "#/$defs/Union93_8_93"
+          "$ref": "#/$defs/Union94_8_94"
         }
       ]
     },
-    "Def_96": {
+    "Def_97": {
       "type": "object",
       "properties": {
         "path": {
@@ -699,7 +699,7 @@
       ],
       "additionalProperties": false
     },
-    "workflow_100": {
+    "workflow_101": {
       "type": "object",
       "properties": {
         "name": {
@@ -715,16 +715,16 @@
       ],
       "additionalProperties": false
     },
-    "source_99": {
+    "source_100": {
       "type": "object",
       "properties": {
         "workflow": {
-          "$ref": "#/$defs/workflow_100"
+          "$ref": "#/$defs/workflow_101"
         },
         "node_id": {
           "type": "string"
         },
-        "skill": {
+        "protocol": {
           "type": "string"
         },
         "action": {
@@ -772,30 +772,36 @@
         "condition": {
           "$ref": "#/$defs/condition_17"
         },
+        "assert": {
+          "$ref": "#/$defs/condition_17"
+        },
+        "assert_message": {
+          "type": "string"
+        },
         "until": {
           "$ref": "#/$defs/condition_17"
         },
         "retry": {
-          "$ref": "#/$defs/retry_38"
+          "$ref": "#/$defs/retry_39"
         },
         "timeout_ms": {
           "type": "integer",
           "exclusiveMinimum": 0
         },
         "bindings": {
-          "$ref": "#/$defs/bindings_43"
+          "$ref": "#/$defs/bindings_44"
         },
         "execution": {
-          "$ref": "#/$defs/execution_45"
+          "$ref": "#/$defs/execution_46"
         },
         "writes": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/Def_96"
+            "$ref": "#/$defs/Def_97"
           }
         },
         "source": {
-          "$ref": "#/$defs/source_99"
+          "$ref": "#/$defs/source_100"
         },
         "extensions": {
           "$ref": "#/$defs/extensions_7"
@@ -813,7 +819,7 @@
       "type": "object",
       "properties": {
         "schema": {
-          "const": "ais-plan/0.0.2"
+          "const": "ais-plan/0.0.3"
         },
         "meta": {
           "$ref": "#/$defs/meta_3"

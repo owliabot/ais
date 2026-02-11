@@ -3,7 +3,7 @@ import type { ResolverContext } from '../../resolver/index.js';
 import { evaluateValueRef } from '../../resolver/index.js';
 import type { DetectResolver } from '../../resolver/value-ref.js';
 import type { ExecutionPlanNode } from '../../execution/index.js';
-import { compileEvmExecution, compileEvmExecutionAsync, type CompiledEvmRequest, type CompiledEvmGetBalanceRequest } from '../../execution/index.js';
+import { compileEvmExecution, compileEvmExecutionAsync, type CompiledEvmRequest, type CompiledEvmRpcRequest } from '../../execution/index.js';
 import { decodeJsonAbiFunctionResult } from '../../execution/index.js';
 import type { RuntimePatch } from '../patch.js';
 
@@ -50,7 +50,11 @@ export class EvmJsonRpcExecutor implements Executor {
 
   supports(node: ExecutionPlanNode): boolean {
     if (!node.chain.startsWith('eip155:')) return false;
-    return node.execution.type === 'evm_read' || node.execution.type === 'evm_call' || node.execution.type === 'evm_get_balance';
+    return (
+      node.execution.type === 'evm_read' ||
+      node.execution.type === 'evm_call' ||
+      node.execution.type === 'evm_rpc'
+    );
   }
 
   async execute(
@@ -67,8 +71,8 @@ export class EvmJsonRpcExecutor implements Executor {
       ? await compileEvmExecutionAsync(node.execution, ctx, { chain: node.chain, params: resolvedParams, detect: options.detect })
       : compileEvmExecution(node.execution, ctx, { chain: node.chain, params: resolvedParams });
 
-    if (compiled.kind === 'evm_get_balance') {
-      return await this.executeGetBalance(node, compiled);
+    if (compiled.kind === 'evm_rpc') {
+      return await this.executeRpc(node, compiled);
     }
 
     if (compiled.kind === 'evm_read') {
@@ -91,15 +95,30 @@ export class EvmJsonRpcExecutor implements Executor {
     return { outputs, patches, telemetry: { method: 'eth_call', to: compiled.to } };
   }
 
-  private async executeGetBalance(
+  private async executeRpc(
     node: ExecutionPlanNode,
-    compiled: CompiledEvmGetBalanceRequest
+    compiled: CompiledEvmRpcRequest
   ): Promise<ExecutorResult> {
-    const hex = await this.transport.request<string>('eth_getBalance', [compiled.address, compiled.blockTag]);
-    const balance = hexQuantityToBigInt(hex);
-    const outputs = { balance };
-    const patches = applyWritesToPatches(node, outputs);
-    return { outputs, patches, telemetry: { method: 'eth_getBalance', address: compiled.address } };
+    const method = compiled.method;
+    if (!isAllowedEvmRpcMethod(method)) {
+      throw new Error(`evm_rpc method not allowed: ${method}`);
+    }
+
+    if (method === 'eth_getBalance') {
+      const address = String(compiled.params?.[0] ?? '');
+      if (!/^0x[a-fA-F0-9]{40}$/.test(address)) throw new Error('eth_getBalance param[0] must be an address');
+      const blockTag = compiled.params?.[1] === undefined || compiled.params?.[1] === null ? 'latest' : String(compiled.params[1]);
+      const hex = await this.transport.request<string>('eth_getBalance', [address, blockTag]);
+      const balance = hexQuantityToBigInt(hex);
+      const outputs = { balance };
+      const patches = applyWritesToPatches(node, outputs);
+      return { outputs, patches, telemetry: { method: 'eth_getBalance', address } };
+    }
+
+    const result = await this.transport.request<unknown>(method, compiled.params);
+    const outputs = { result };
+    const patches = applyWritesToPatches(node, outputs as any);
+    return { outputs, patches, telemetry: { method } };
   }
 
   private async executeCall(
@@ -173,4 +192,16 @@ function hexQuantityToBigInt(hex: string): bigint {
   if (!hex.startsWith('0x')) throw new Error('Invalid hex quantity: missing 0x prefix');
   // JSON-RPC quantities are hex without leading zeros (except 0x0).
   return BigInt(hex);
+}
+
+function isAllowedEvmRpcMethod(method: string): boolean {
+  // Read-only allowlist. (Write methods like eth_sendRawTransaction are intentionally blocked.)
+  return (
+    method === 'eth_getBalance' ||
+    method === 'eth_blockNumber' ||
+    method === 'eth_getTransactionReceipt' ||
+    method === 'eth_getLogs' ||
+    method === 'eth_call' ||
+    method === 'eth_simulateV1'
+  );
 }

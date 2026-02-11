@@ -1,10 +1,20 @@
+import type { ResolverContext } from '../resolver/index.js';
+import {
+  parseProtocolRef,
+  resolveAction,
+  resolveQuery,
+} from '../resolver/index.js';
 /**
  * Workflow validation - validate node references and dependencies
  */
-import type { Workflow, WorkflowNode } from '../schema/index.js';
-import type { ResolverContext } from '../resolver/index.js';
-import { resolveAction, resolveQuery, parseSkillRef } from '../resolver/index.js';
-import { buildWorkflowDag, WorkflowDagError } from '../workflow/dag.js';
+import type {
+  Workflow,
+  WorkflowNode,
+} from '../schema/index.js';
+import {
+  buildWorkflowDag,
+  WorkflowDagError,
+} from '../workflow/dag.js';
 import type { ValidatorRegistry } from './plugins.js';
 import { defaultValidatorRegistry } from './plugins.js';
 
@@ -23,7 +33,7 @@ export interface WorkflowValidationResult {
 /**
  * Validate a workflow against a resolver context
  * Checks:
- * - All skill references resolve to known protocols
+ * - All protocol references resolve to known protocol specs
  * - All action/query references exist in the protocol
  * - All node references in expressions point to previous nodes
  * - Input references match declared inputs
@@ -31,10 +41,12 @@ export interface WorkflowValidationResult {
 export function validateWorkflow(
   workflow: Workflow,
   ctx: ResolverContext,
-  options: { registry?: ValidatorRegistry } = {}
+  options: { registry?: ValidatorRegistry; enforce_imports?: boolean } = {}
 ): WorkflowValidationResult {
   const issues: WorkflowIssue[] = [];
   const registry = options.registry ?? defaultValidatorRegistry;
+  const enforceImports = options.enforce_imports ?? true;
+  const importedProtocols = enforceImports ? collectImportedProtocols(workflow) : new Set<string>();
   const declaredInputs = new Set(
     workflow.inputs ? Object.keys(workflow.inputs) : []
   );
@@ -50,47 +62,65 @@ export function validateWorkflow(
       });
     }
 
-    // Check skill reference exists (+ version matches the loaded workspace)
-    const { protocol, version } = parseSkillRef(node.skill);
+    // Check protocol reference exists (+ version matches the loaded workspace)
+    const { protocol, version } = parseProtocolRef(node.protocol);
     const protocolSpec = ctx.protocols.get(protocol);
     const hasVersionMismatch = Boolean(version && protocolSpec && protocolSpec.meta.version !== version);
     if (!protocolSpec) {
       issues.push({
         nodeId: node.id,
-        field: 'skill',
+        field: 'protocol',
         message: `Protocol "${protocol}" not found`,
-        reference: node.skill,
+        reference: (node as any).protocol,
       });
     } else if (hasVersionMismatch) {
       issues.push({
         nodeId: node.id,
-        field: 'skill',
+        field: 'protocol',
         message: `Protocol version mismatch: requested ${protocol}@${version}, loaded ${protocol}@${protocolSpec.meta.version}`,
-        reference: node.skill,
+        reference: (node as any).protocol,
       });
-    } else {
-      // Check action/query reference
+    } else if (enforceImports) {
+      // Import enforcement:
+      // - builtin/manual protocols can be used without explicit import
+      // - workspace-loaded protocols must be explicitly imported by workflow
+      const src = ctx.protocol_sources.get(protocol) ?? 'manual';
+      const protoRef = String((node as any).protocol ?? '');
+      const isExplicitlyImported = importedProtocols.has(protoRef);
+      const isAllowedWithoutImport = src === 'builtin' || src === 'manual' || src === 'import';
+      if (!isExplicitlyImported && !isAllowedWithoutImport) {
+        issues.push({
+          nodeId: node.id,
+          field: 'protocol',
+          message: `Protocol "${protoRef}" must be explicitly imported by workflow (imports.protocols) or registered as builtin/manual`,
+          reference: protoRef,
+        });
+      }
+    }
+
+    // Check action/query reference whenever protocol lookup succeeded.
+    if (protocolSpec && !hasVersionMismatch) {
       if (node.type === 'action_ref' && node.action) {
-        const actionRef = `${node.skill}/${node.action}`;
+        const actionRef = `${(node as any).protocol}/${node.action}`;
         const actionResult = resolveAction(ctx, actionRef);
         if (!actionResult) {
           issues.push({
             nodeId: node.id,
             field: 'action',
-            message: `Action "${node.action}" not found in ${node.skill}`,
+            message: `Action "${node.action}" not found in ${(node as any).protocol}`,
             reference: actionRef,
           });
         }
       }
 
       if (node.type === 'query_ref' && node.query) {
-        const queryRef = `${node.skill}/${node.query}`;
+        const queryRef = `${(node as any).protocol}/${node.query}`;
         const queryResult = resolveQuery(ctx, queryRef);
         if (!queryResult) {
           issues.push({
             nodeId: node.id,
             field: 'query',
-            message: `Query "${node.query}" not found in ${node.skill}`,
+            message: `Query "${node.query}" not found in ${(node as any).protocol}`,
             reference: queryRef,
           });
         }
@@ -107,6 +137,11 @@ export function validateWorkflow(
     // Check condition expression
     if (node.condition) {
       validateValueRefLike(node.condition, node.id, 'condition', declaredInputs, nodeIdSet, issues);
+    }
+
+    // Check assert expression
+    if ((node as any).assert) {
+      validateValueRefLike((node as any).assert, node.id, 'assert', declaredInputs, nodeIdSet, issues, { allow_self_node_ref: true });
     }
 
     // Check until expression
@@ -212,6 +247,19 @@ export function validateWorkflow(
     valid: issues.length === 0,
     issues,
   };
+}
+
+function collectImportedProtocols(workflow: Workflow): Set<string> {
+  const out = new Set<string>();
+  const imports: any = (workflow as any).imports;
+  const protocols = imports?.protocols;
+  if (Array.isArray(protocols)) {
+    for (const p of protocols) {
+      const proto = p?.protocol;
+      if (typeof proto === 'string' && proto.length > 0) out.add(proto);
+    }
+  }
+  return out;
 }
 
 function validateValueRefLike(
@@ -328,17 +376,18 @@ function extractIdsFromCel(cel: string, namespace: 'nodes' | 'inputs'): string[]
 }
 
 /**
- * Get all skill references used in a workflow
+ * Get all protocol references used in a workflow
  */
 export function getWorkflowDependencies(workflow: Workflow): string[] {
   return workflow.nodes.map((node) => {
+    const proto = (node as any).protocol;
     if (node.type === 'action_ref' && node.action) {
-      return `${node.skill}/${node.action}`;
+      return `${proto}/${node.action}`;
     }
     if (node.type === 'query_ref' && node.query) {
-      return `${node.skill}/${node.query}`;
+      return `${proto}/${node.query}`;
     }
-    return node.skill;
+    return String(proto ?? '');
   });
 }
 
@@ -348,7 +397,7 @@ export function getWorkflowDependencies(workflow: Workflow): string[] {
 export function getWorkflowProtocols(workflow: Workflow): string[] {
   const protocols = new Set<string>();
   for (const node of workflow.nodes) {
-    const { protocol } = parseSkillRef(node.skill);
+    const { protocol } = parseProtocolRef(String((node as any).protocol ?? ''));
     protocols.add(protocol);
   }
   return Array.from(protocols);

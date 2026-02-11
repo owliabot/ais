@@ -220,12 +220,12 @@ describe('WorkflowBuilder', () => {
     const w = workflow('test-flow', '0.0.2')
       .node('step1', {
         type: 'action_ref',
-        skill: 'erc20@0.0.2',
+        protocol: 'erc20@0.0.2',
         action: 'transfer',
       })
       .build();
 
-    expect(w.schema).toBe('ais-flow/0.0.2');
+    expect(w.schema).toBe('ais-flow/0.0.3');
     expect(w.meta.name).toBe('test-flow');
     expect(w.nodes).toHaveLength(1);
   });

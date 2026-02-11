@@ -39,17 +39,17 @@ includes:
 `;
 
 const MIN_WORKFLOW = `
-schema: "ais-flow/0.0.2"
+schema: "ais-flow/0.0.3"
 meta:
   name: test-workflow
-  version: "0.0.2"
+  version: "0.0.3"
 inputs:
   token:
     type: address
 nodes:
   - id: step1
     type: action_ref
-    skill: "uniswap-v3@0.0.2"
+    protocol: "uniswap-v3@0.0.2"
     action: swap-exact-in
     args:
       token_in: { ref: "inputs.token" }
@@ -76,8 +76,8 @@ describe('parseAIS', () => {
 
   it('parses a valid workflow', () => {
     const result = parseAIS(MIN_WORKFLOW);
-    expect(result.schema).toBe('ais-flow/0.0.2');
-    if (result.schema === 'ais-flow/0.0.2') {
+    expect(result.schema).toBe('ais-flow/0.0.3');
+    if (result.schema === 'ais-flow/0.0.3') {
       expect(result.meta.name).toBe('test-workflow');
       expect(result.nodes).toHaveLength(1);
     }
@@ -113,7 +113,7 @@ describe('detectType', () => {
   });
 
   it('detects workflow type', () => {
-    expect(detectType('schema: "ais-flow/0.0.2"')).toBe('ais-flow/0.0.2');
+    expect(detectType('schema: "ais-flow/0.0.3"')).toBe('ais-flow/0.0.3');
   });
 
   it('returns null for invalid type', () => {
@@ -149,4 +149,3 @@ describe('parseWorkflow', () => {
     expect(result.nodes).toHaveLength(1);
   });
 });
-

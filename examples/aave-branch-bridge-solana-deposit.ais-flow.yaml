@@ -1,8 +1,8 @@
-schema: "ais-flow/0.0.2"
+schema: "ais-flow/0.0.3"
 
 meta:
   name: "aave-branch-bridge-solana-deposit"
-  version: "0.0.2"
+  version: "0.0.3"
   description: "Reference: Aave borrow → branch transfer + bridge → poll Solana arrival → Solana deposit"
 
 # Required runtime context (see examples/README.md):
@@ -11,6 +11,14 @@ meta:
 # - contracts.* (auto-filled by solver from protocol deployments when missing)
 
 default_chain: "eip155:8453"
+
+imports:
+  protocols:
+    - { protocol: "erc20@0.0.2", path: "examples/erc20.ais.yaml" }
+    - { protocol: "aave-v3@0.0.2", path: "examples/aave-v3.ais.yaml" }
+    - { protocol: "bridge-demo@0.0.2", path: "examples/bridge-demo.ais.yaml" }
+    - { protocol: "solana-rpc@0.0.2", path: "examples/solana-rpc.ais.yaml" }
+    - { protocol: "solana-vault-demo@0.0.2", path: "examples/solana-vault-demo.ais.yaml" }
 
 inputs:
   # Asset objects are used to avoid hardcoding token contract addresses inside the workflow.
@@ -66,7 +74,7 @@ nodes:
 
   - id: q_weth_allowance_aave
     type: query_ref
-    skill: "erc20@0.0.2"
+    protocol: "erc20@0.0.2"
     query: "allowance"
     args:
       token: { ref: "inputs.collateral_weth" }
@@ -76,7 +84,7 @@ nodes:
 
   - id: approve_weth_to_aave
     type: action_ref
-    skill: "erc20@0.0.2"
+    protocol: "erc20@0.0.2"
     action: "approve"
     deps: ["q_weth_allowance_aave"]
     # Pre-check: only approve if allowance is insufficient
@@ -88,7 +96,7 @@ nodes:
 
   - id: aave_supply
     type: action_ref
-    skill: "aave-v3@0.0.2"
+    protocol: "aave-v3@0.0.2"
     action: "supply-raw"
     deps: ["approve_weth_to_aave"]
     args:
@@ -97,7 +105,7 @@ nodes:
 
   - id: aave_borrow
     type: action_ref
-    skill: "aave-v3@0.0.2"
+    protocol: "aave-v3@0.0.2"
     action: "borrow-raw"
     deps: ["aave_supply"]
     args:
@@ -109,7 +117,7 @@ nodes:
 
   - id: transfer_to_cex
     type: action_ref
-    skill: "erc20@0.0.2"
+    protocol: "erc20@0.0.2"
     action: "transfer"
     deps: ["aave_borrow"]
     args:
@@ -122,7 +130,7 @@ nodes:
 
   - id: bridge_send
     type: action_ref
-    skill: "bridge-demo@0.0.2"
+    protocol: "bridge-demo@0.0.2"
     action: "send"
     deps: ["aave_borrow"]
     args:
@@ -133,7 +141,7 @@ nodes:
   - id: wait_solana_arrival
     chain: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
     type: query_ref
-    skill: "solana-rpc@0.0.2"
+    protocol: "solana-rpc@0.0.2"
     query: "balance"
     deps: ["bridge_send"]
     args:
@@ -149,7 +157,7 @@ nodes:
   - id: solana_deposit
     chain: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
     type: action_ref
-    skill: "solana-vault-demo@0.0.2"
+    protocol: "solana-vault-demo@0.0.2"
     action: "deposit"
     deps: ["wait_solana_arrival"]
     args:
@@ -160,4 +168,3 @@ outputs:
   transfer_tx: { ref: "nodes.transfer_to_cex.outputs.tx_hash" }
   bridge_tx: { ref: "nodes.bridge_send.outputs.tx_hash" }
   solana_signature: { ref: "nodes.solana_deposit.outputs.signature" }
-

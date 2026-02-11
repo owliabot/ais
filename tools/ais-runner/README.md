@@ -249,6 +249,26 @@ node tools/ais-runner/dist/main.js run workflow \
   --broadcast --yes
 ```
 
+## Type Boundaries & Extension Rules
+
+This runner is now type-first. Keep new changes inside these boundaries:
+
+- SDK boundary:
+  - Import SDK types through `src/types.ts` and keep `loadSdk()` typed.
+  - Do not reintroduce `Promise<any>` or ad-hoc `any` SDK facades.
+- External input boundary:
+  - Treat CLI/config/JSON/detect input as `unknown`, then narrow with guards.
+  - Keep validation errors path-addressable (for example `chains."eip155:1".rpc_url`).
+- Executor boundary:
+  - New executors/wrappers should implement `RunnerDestroyableExecutor`.
+  - Chain/provider SDKs (ethers/solana) must be wrapped behind minimal local interfaces.
+- Engine/runtime boundary:
+  - Solver/executor outputs should use SDK patch/result types (`RunnerPatch`, `RunnerSolverResult`, `RunnerExecutorResult`).
+  - Runtime side effects should stay in typed helpers (for example `applyRunnerSideEffects`).
+- Escape hatches:
+  - Keep unavoidable dynamic module points in thin adapters (`deps.ts`, `shims.d.ts`) only.
+  - Avoid leaking untyped values from those adapters into core run/solver/wrapper logic.
+
 ## Troubleshooting
 
 - `workspace_errors` / `workflow_errors`

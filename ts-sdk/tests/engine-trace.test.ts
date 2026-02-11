@@ -27,7 +27,7 @@ describe('engine trace sink', () => {
     const ctx = createContext();
 
     const plan: ExecutionPlan = {
-      schema: 'ais-plan/0.0.2',
+      schema: 'ais-plan/0.0.3',
       nodes: [
         {
           id: 'q1',

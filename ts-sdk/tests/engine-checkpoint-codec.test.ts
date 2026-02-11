@@ -11,7 +11,7 @@ describe('checkpoint codec', () => {
       schema: 'ais-engine-checkpoint/0.0.2',
       created_at: new Date(0).toISOString(),
       plan: {
-        schema: 'ais-plan/0.0.2',
+        schema: 'ais-plan/0.0.3',
         nodes: [
           {
             id: 'q1',
@@ -56,7 +56,7 @@ describe('checkpoint codec', () => {
     const checkpoint: EngineCheckpoint = {
       schema: 'ais-engine-checkpoint/0.0.2',
       created_at: new Date(0).toISOString(),
-      plan: { schema: 'ais-plan/0.0.2', nodes: [] } as any,
+      plan: { schema: 'ais-plan/0.0.3', nodes: [] } as any,
       runtime: {
         suspicious: { __ais_json_type: 'bigint', value: '7', extra: true },
       },

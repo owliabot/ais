@@ -7,6 +7,8 @@ type CommonFlags = {
   dryRun?: boolean;
   broadcast?: boolean;
   yes?: boolean;
+  strictImports?: boolean;
+  importsOnly?: boolean;
 };
 
 export type RunWorkflowRequest = CommonFlags & {
@@ -55,6 +57,8 @@ Common options:
   --dry-run               Do not broadcast transactions
   --broadcast             Allow broadcasting write transactions (default: false)
   --yes                   Auto-approve policy gates (default: false)
+  --strict-imports        Enforce workflow imports allowlist (default: true)
+  --imports-only          For workflow mode: load protocols from workflow.imports only
   -h, --help              Show help
 `;
 }
@@ -127,6 +131,8 @@ function commonFromFlags(flags: ParsedFlags): CommonFlags {
     dryRun: flags.bool.has('dry-run'),
     broadcast: flags.bool.has('broadcast'),
     yes: flags.bool.has('yes'),
+    strictImports: !flags.bool.has('no-strict-imports'),
+    importsOnly: flags.bool.has('imports-only'),
   };
 }
 
@@ -146,7 +152,14 @@ function parseFlags(argv: string[]): ParsedFlags {
     const a = args[i]!;
     if (!a.startsWith('--')) continue;
     const key = a.slice(2);
-    if (key === 'resume' || key === 'dry-run' || key === 'broadcast' || key === 'yes') {
+    if (
+      key === 'resume' ||
+      key === 'dry-run' ||
+      key === 'broadcast' ||
+      key === 'yes' ||
+      key === 'imports-only' ||
+      key === 'no-strict-imports'
+    ) {
       bool.add(key);
       continue;
     }

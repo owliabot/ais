@@ -1,4 +1,4 @@
-# Engine Module (AIS 0.0.2)
+# Engine Module
 
 Interfaces and utilities for running AIS execution plans with a decoupled loop:
 
@@ -48,7 +48,8 @@ Notes:
 - Network IO is performed by pluggable executors (e.g. `EvmJsonRpcExecutor`, `SolanaRpcExecutor`).
 - The authoritative roadmap lives in `docs/TODO.md`.
   - `EvmJsonRpcExecutor` is a reference implementation for wiring plan nodes to a JSON-RPC transport (mockable in tests).
-  - `solver` is a minimal built-in solver (use `createSolver()` to customize).
+    - Supports `evm_read` / `evm_call` and the built-in plugin `evm_rpc` (read-only allowlist).
+  - `solver` is a minimal built-in solver (use `createSolver()` to customize); it resolves `node.source.protocol` references when auto-filling `runtime.contracts`.
 
 ### runPlan()
 
@@ -69,6 +70,10 @@ for await (const ev of runPlan(plan, ctx, { solver, executors: [executor] })) {
   }
 }
 ```
+
+Post-check behavior:
+- `until` supports polling/retry semantics.
+- `assert` is a single-shot post-execution check; falsy assertion produces an `error` event (uses `assert_message` when present).
 
 ### Async `{ detect: ... }` support
 

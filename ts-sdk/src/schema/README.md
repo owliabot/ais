@@ -7,8 +7,8 @@ Zod-based schema definitions with automatic TypeScript type inference for all AI
 - `index.ts` — Module entry point; exports all schemas and the discriminated union `AISDocumentSchema`
 - `common.ts` — Shared primitives: chain IDs (CAIP-2), addresses, assets, token amounts, AIS type system
 - `protocol.ts` — Protocol Spec schema (`ais/0.0.2`): meta, deployments, actions, queries, risks
-- `pack.ts` — Pack schema (`ais-pack/0.0.2`): skill bundles with policy and token settings
-- `workflow.ts` — Workflow schema (`ais-flow/0.0.2`): multi-step execution graphs (ValueRef everywhere)
+- `pack.ts` — Pack schema (`ais-pack/0.0.2`): protocol bundles with policy and token settings
+- `workflow.ts` — Workflow schema (`ais-flow/0.0.3`): multi-step execution graphs (ValueRef everywhere)
 - `execution.ts` — Chain-specific execution specs (AIS 0.0.2): EVM JSON ABI, Solana instructions, composite steps
 - `conformance.ts` — Conformance vector file schema (`ais-conformance/0.0.2`)
 
@@ -25,16 +25,21 @@ If you need to attach implementation-specific metadata, use the reserved `extens
 | Schema | Discriminator | Description |
 |--------|---------------|-------------|
 | `ProtocolSpecSchema` | `ais/0.0.2` | Single protocol definition with actions and queries |
-| `PackSchema` | `ais-pack/0.0.2` | Bundle of protocol skills with unified policy |
-| `WorkflowSchema` | `ais-flow/0.0.2` | Multi-step execution flow referencing pack skills |
+| `PackSchema` | `ais-pack/0.0.2` | Bundle of protocol references with unified policy |
+| `WorkflowSchema` | `ais-flow/0.0.3` | Multi-step execution flow referencing protocols |
 | `AISDocumentSchema` | — | Discriminated union of all three |
 
-Workflow chain fields:
+Workflow core fields:
 - `workflow.default_chain` (CAIP-2) sets the default chain for nodes.
 - `nodes[].chain` (CAIP-2) overrides per node to support multi-chain workflows (e.g. EVM + Solana).
+- `nodes[].protocol` uses `<protocol>@<version>` references (for example `erc20@0.0.2`).
+- `workflow.imports.protocols[]` declares explicit protocol imports (`protocol` + `path`, optional `integrity`).
 Workflow polling fields (engine-driven):
 - `nodes[].until` (ValueRef) keeps re-running the node until the expression becomes truthy.
 - `nodes[].retry` / `nodes[].timeout_ms` control polling cadence and limits.
+Workflow assertion fields:
+- `nodes[].assert` (ValueRef) is a post-execution single-shot check.
+- `nodes[].assert_message` customizes the assertion failure message.
 
 ### Execution Types (in `execution.ts`)
 
@@ -119,7 +124,7 @@ Document types are distinguished by the `schema` field using Zod's `discriminate
 const AISDocumentSchema = z.discriminatedUnion('schema', [
   ProtocolSpecSchema,  // schema: 'ais/0.0.2'
   PackSchema,          // schema: 'ais-pack/0.0.2'
-  WorkflowSchema,      // schema: 'ais-flow/0.0.2'
+  WorkflowSchema,      // schema: 'ais-flow/0.0.3'
 ]);
 ```
 

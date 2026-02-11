@@ -76,7 +76,7 @@ async function writeWorkflow(dir: string, name: string, version: string, pack?: 
   await writeFile(
     join(dir, `${name}.ais-flow.yaml`),
     `
-schema: "ais-flow/0.0.2"
+schema: "ais-flow/0.0.3"
 meta:
   name: ${name}
   version: "${version}"
@@ -106,12 +106,12 @@ describe('validateWorkspaceReferences', () => {
     await writeWorkflow(
       dir,
       'wf',
-      '0.0.2',
+      '0.0.3',
       { name: 'safe-defi', version: '0.0.2' },
       `
   - id: swap
     type: action_ref
-    skill: "uniswap-v3@0.0.2"
+    protocol: "uniswap-v3@0.0.2"
     action: swap
     args:
       choice:
@@ -154,12 +154,12 @@ describe('validateWorkspaceReferences', () => {
     await writeWorkflow(
       dir,
       'wf',
-      '0.0.2',
+      '0.0.3',
       { name: 'safe-defi', version: '0.0.2' },
       `
   - id: swap
     type: action_ref
-    skill: "uniswap-v3@0.0.2"
+    protocol: "uniswap-v3@0.0.2"
     action: swap
 `
     );
@@ -183,12 +183,12 @@ describe('validateWorkspaceReferences', () => {
     await writeWorkflow(
       dir,
       'wf',
-      '0.0.2',
+      '0.0.3',
       { name: 'safe-defi', version: '0.0.2' },
       `
   - id: swap
     type: action_ref
-    skill: "uniswap-v3@0.0.2"
+    protocol: "uniswap-v3@0.0.2"
     action: swap
     args:
       choice:
@@ -214,12 +214,12 @@ describe('validateWorkspaceReferences', () => {
     await writeWorkflow(
       dir,
       'wf',
-      '0.0.2',
+      '0.0.3',
       { name: 'safe-defi', version: '0.0.2' },
       `
   - id: x
     type: action_ref
-    skill: "uniswap-v3@0.0.2"
+    protocol: "uniswap-v3@0.0.2"
     action: missing
 `
     );
@@ -234,4 +234,3 @@ describe('validateWorkspaceReferences', () => {
     expect(issues.some((i) => i.field_path === 'nodes[0].action' && i.message.includes('Action not found'))).toBe(true);
   });
 });
-

@@ -46,13 +46,13 @@ actions: {}
     ctx.runtime.contracts.target = '0x1111111111111111111111111111111111111111';
 
     const wf = parseWorkflow(`
-schema: "ais-flow/0.0.2"
-meta: { name: wf, version: "0.0.2" }
+schema: "ais-flow/0.0.3"
+meta: { name: wf, version: "0.0.3" }
 default_chain: "eip155:1"
 nodes:
   - id: n1
     type: query_ref
-    skill: "demo@0.0.2"
+    protocol: "demo@0.0.2"
     query: q
     args:
       x:

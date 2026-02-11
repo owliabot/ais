@@ -1,4 +1,4 @@
-# Execution Module (AIS 0.0.2)
+# Execution Module (AIS 0.0.3 plan/workflow)
 
 Transaction building and ABI encoding for executing AIS actions on-chain.
 
@@ -18,7 +18,7 @@ The execution layer compiles AIS `execution` specs into chain-SDK requests (EVM 
 
 ### Execution Plan IR (JSON) — Recommended entry point
 
-`ExecutionPlan` is a JSON-serializable DAG IR for coordinating reads/writes and their dependencies. Plan nodes are emitted in a stable topological order based on `deps` plus dependencies inferred from `ValueRef` references to `nodes.*`.
+`ExecutionPlan` (`ais-plan/0.0.3`) is a JSON-serializable DAG IR for coordinating reads/writes and their dependencies. Plan nodes are emitted in a stable topological order based on `deps` plus dependencies inferred from `ValueRef` references to `nodes.*`.
 
 Composite:
 - If an `action_ref` resolves to `execution.type: composite`, the planner expands it into multiple plan nodes (`kind: "execution"`), one per step, with sequential deps.
@@ -31,6 +31,9 @@ Chain selection:
 Polling:
 - Plan nodes may carry `until` / `retry` / `timeout_ms` (copied from workflow nodes).
 - The engine can use these fields to implement “post-check until satisfied” loops (e.g. wait for bridge arrival).
+Assertions:
+- Plan nodes may carry `assert` / `assert_message` (copied from workflow nodes).
+- `assert` is a post-execution single-shot check, distinct from polling `until`.
 
 ```ts
 import {
@@ -131,6 +134,9 @@ The schema layer defines the AIS 0.0.2 execution types (see `src/schema/executio
 | `solana_read` | Solana RPC read (balance/account/status queries) |
 | `bitcoin_psbt` | Bitcoin PSBT construction (core) |
 | *(plugin)* | All non-core execution types (registry-driven) |
+
+Built-in plugin types:
+- `evm_rpc` (read-only JSON-RPC calls; executor-enforced allowlist)
 
 ## Chain Pattern Matching
 

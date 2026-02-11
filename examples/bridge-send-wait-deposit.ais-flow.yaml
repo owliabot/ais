@@ -1,11 +1,17 @@
-schema: "ais-flow/0.0.2"
+schema: "ais-flow/0.0.3"
 
 meta:
   name: "bridge-send-wait-deposit"
-  version: "0.0.2"
+  version: "0.0.3"
   description: "Reference: EVM bridge send → poll Solana arrival → Solana deposit"
 
 default_chain: "eip155:1"
+
+imports:
+  protocols:
+    - { protocol: "bridge-demo@0.0.2", path: "examples/bridge-demo.ais.yaml" }
+    - { protocol: "solana-rpc@0.0.2", path: "examples/solana-rpc.ais.yaml" }
+    - { protocol: "solana-vault-demo@0.0.2", path: "examples/solana-vault-demo.ais.yaml" }
 
 inputs:
   evm_amount:
@@ -20,7 +26,7 @@ inputs:
 nodes:
   - id: bridge_send
     type: action_ref
-    skill: "bridge-demo@0.0.2"
+    protocol: "bridge-demo@0.0.2"
     action: "send"
     args:
       amount: { ref: "inputs.evm_amount" }
@@ -29,7 +35,7 @@ nodes:
   - id: wait_arrival
     chain: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
     type: query_ref
-    skill: "solana-rpc@0.0.2"
+    protocol: "solana-rpc@0.0.2"
     query: "balance"
     deps: ["bridge_send"]
     args:
@@ -44,7 +50,7 @@ nodes:
   - id: solana_deposit
     chain: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
     type: action_ref
-    skill: "solana-vault-demo@0.0.2"
+    protocol: "solana-vault-demo@0.0.2"
     action: "deposit"
     deps: ["wait_arrival"]
     args:
@@ -53,4 +59,3 @@ nodes:
 outputs:
   evm_tx: { ref: "nodes.bridge_send.outputs.tx_hash" }
   solana_signature: { ref: "nodes.solana_deposit.outputs.signature" }
-

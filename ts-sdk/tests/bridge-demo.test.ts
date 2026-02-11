@@ -1,20 +1,30 @@
-import { describe, it, expect } from 'vitest';
 import {
+  describe,
+  expect,
+  it,
+} from 'vitest';
+
+import {
+  Keypair,
+  Transaction,
+  VersionedTransaction,
+} from '@solana/web3.js';
+
+import {
+  buildWorkflowExecutionPlan,
   createContext,
+  EvmJsonRpcExecutor,
+  type EvmSigner,
+  type JsonRpcTransport,
   parseProtocolSpec,
   parseWorkflow,
   registerProtocol,
-  buildWorkflowExecutionPlan,
   runPlan,
-  solver,
-  EvmJsonRpcExecutor,
-  SolanaRpcExecutor,
-  type JsonRpcTransport,
-  type EvmSigner,
   type SolanaRpcConnectionLike,
+  SolanaRpcExecutor,
   type SolanaSigner,
+  solver,
 } from '../src/index.js';
-import { Keypair, PublicKey, Transaction, VersionedTransaction } from '@solana/web3.js';
 
 function u256WordHex(n: bigint): string {
   return `0x${n.toString(16).padStart(64, '0')}`;
@@ -99,7 +109,7 @@ actions:
     ctx.runtime.ctx.wallet_address = solKeypair.publicKey.toBase58();
 
     const wf = parseWorkflow(`
-schema: "ais-flow/0.0.2"
+schema: "ais-flow/0.0.3"
 meta: { name: demo, version: "0.0.2" }
 default_chain: "eip155:1"
 inputs:
@@ -108,7 +118,7 @@ inputs:
 nodes:
   - id: bridge_send
     type: action_ref
-    skill: "bridge-demo@0.0.2"
+    protocol: "bridge-demo@0.0.2"
     action: "send"
     args:
       amount: { ref: "inputs.evm_amount" }
@@ -116,7 +126,7 @@ nodes:
   - id: wait_arrival
     chain: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
     type: query_ref
-    skill: "solana-rpc@0.0.2"
+    protocol: "solana-rpc@0.0.2"
     query: "balance"
     deps: ["bridge_send"]
     args:
@@ -126,7 +136,7 @@ nodes:
   - id: solana_deposit
     chain: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
     type: action_ref
-    skill: "solana-vault-demo@0.0.2"
+    protocol: "solana-vault-demo@0.0.2"
     action: "deposit"
     deps: ["wait_arrival"]
     args:

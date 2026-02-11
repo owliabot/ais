@@ -8,7 +8,6 @@ import type { ChainId, ValueRef } from './common.js';
 export const CORE_EXECUTION_TYPES = [
   'evm_call',
   'evm_read',
-  'evm_get_balance',
   'evm_multiread',
   'evm_multicall',
   'solana_instruction',
@@ -75,13 +74,6 @@ const EvmReadSchema = z.object({
   to: ValueRefSchema,
   abi: JsonAbiFunctionSchema,
   args: z.record(ValueRefSchema),
-  extensions: ExtensionsSchema,
-}).strict();
-
-const EvmGetBalanceSchema = z.object({
-  type: z.literal('evm_get_balance'),
-  address: ValueRefSchema,
-  block_tag: ValueRefSchema.optional(),
   extensions: ExtensionsSchema,
 }).strict();
 
@@ -226,7 +218,6 @@ const PluginExecutionSpecSchema = z
 // ═══════════════════════════════════════════════════════════════════════════════
 
 export type EvmRead = z.infer<typeof EvmReadSchema>;
-export type EvmGetBalance = z.infer<typeof EvmGetBalanceSchema>;
 export type EvmMultiread = z.infer<typeof EvmMultireadSchema>;
 export type EvmCall = z.infer<typeof EvmCallSchema>;
 export type EvmMulticall = z.infer<typeof EvmMulticallSchema>;
@@ -238,7 +229,6 @@ export type PluginExecutionSpec = z.infer<typeof PluginExecutionSpecSchema>;
 
 export type CoreExecutionSpec =
   | EvmRead
-  | EvmGetBalance
   | EvmMultiread
   | EvmCall
   | EvmMulticall
@@ -256,7 +246,6 @@ export function isCoreExecutionSpec(execution: ExecutionSpec): execution is Core
 export const ExecutionSpecSchema: z.ZodType<ExecutionSpec> = z.lazy(() =>
   z.union([
     EvmReadSchema,
-    EvmGetBalanceSchema,
     EvmMultireadSchema,
     EvmCallSchema,
     EvmMulticallSchema,

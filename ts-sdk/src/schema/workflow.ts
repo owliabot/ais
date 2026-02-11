@@ -31,6 +31,30 @@ const PackRefSchema = z
   .strict();
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Imports
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const ProtocolRefSchema = z
+  .string()
+  .regex(/^[a-z0-9-]+@\d+\.\d+\.\d+$/, 'Protocol reference must be protocol@version (e.g., uniswap-v3@1.0.0)');
+
+const WorkflowImportProtocolSchema = z
+  .object({
+  protocol: ProtocolRefSchema,
+  path: z.string().min(1),
+  integrity: z.string().optional(),
+  extensions: ExtensionsSchema,
+})
+  .strict();
+
+const WorkflowImportsSchema = z
+  .object({
+  protocols: z.array(WorkflowImportProtocolSchema).optional(),
+  extensions: ExtensionsSchema,
+})
+  .strict();
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Inputs
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -78,16 +102,15 @@ const WorkflowNodeSchema = z
   id: z.string(),
   type: z.enum(['query_ref', 'action_ref']),
   chain: ChainIdSchema.optional(),
-  skill: z.string().regex(
-    /^[a-z0-9-]+@\d+\.\d+\.\d+$/,
-    'Skill reference must be protocol@version (e.g., uniswap-v3@1.0.0)'
-  ),
+  protocol: ProtocolRefSchema,
   query: z.string().optional(),
   action: z.string().optional(),
   args: z.record(ValueRefSchema).optional(),
   calculated_overrides: z.record(CalculatedOverrideSchema).optional(),
   deps: z.array(z.string()).optional(),
   condition: ValueRefSchema.optional(),
+  assert: ValueRefSchema.optional(),
+  assert_message: z.string().optional(),
   until: ValueRefSchema.optional(),
   retry: RetryPolicySchema.optional(),
   timeout_ms: z.number().int().positive().optional(),
@@ -124,9 +147,10 @@ const PreflightSchema = z
 
 export const WorkflowSchema = z
   .object({
-  schema: z.literal('ais-flow/0.0.2'),
+  schema: z.literal('ais-flow/0.0.3'),
   meta: WorkflowMetaSchema,
   default_chain: ChainIdSchema.optional(),
+  imports: WorkflowImportsSchema.optional(),
   requires_pack: PackRefSchema.optional(),
   inputs: z.record(WorkflowInputSchema).optional(),
   nodes: z.array(WorkflowNodeSchema),
@@ -149,3 +173,5 @@ export type WorkflowPolicy = z.infer<typeof WorkflowPolicySchema>;
 export type PackRef = z.infer<typeof PackRefSchema>;
 export type CalculatedOverride = z.infer<typeof CalculatedOverrideSchema>;
 export type RetryPolicy = z.infer<typeof RetryPolicySchema>;
+export type WorkflowImports = z.infer<typeof WorkflowImportsSchema>;
+export type WorkflowImportProtocol = z.infer<typeof WorkflowImportProtocolSchema>;

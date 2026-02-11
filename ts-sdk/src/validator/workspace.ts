@@ -7,7 +7,7 @@
 import type { Pack, ProtocolSpec, Workflow } from '../schema/index.js';
 import type { ValueRef } from '../schema/common.js';
 import { isCoreExecutionType } from '../schema/index.js';
-import { parseSkillRef } from '../resolver/reference.js';
+import { parseProtocolRef } from '../resolver/reference.js';
 
 export type WorkspaceIssueSeverity = 'error' | 'warning' | 'info';
 
@@ -167,17 +167,17 @@ export function validateWorkspaceReferences(docs: WorkspaceDocuments): Workspace
 
     for (let i = 0; i < wf.document.nodes.length; i++) {
       const node = wf.document.nodes[i]!;
-      const skill = node.skill;
-      const { protocol, version } = parseSkillRef(skill);
+      const protoRef = (node as any).protocol;
+      const { protocol, version } = parseProtocolRef(String(protoRef ?? ''));
       const key = `${protocol}@${version ?? ''}`;
 
       if (!version) {
         issues.push({
           path: wf.path,
           severity: 'error',
-          message: `Node skill must include version: ${protocol}@<version>`,
-          field_path: `nodes[${i}].skill`,
-          reference: skill,
+          message: `Node protocol must include version: ${protocol}@<version>`,
+          field_path: `nodes[${i}].protocol`,
+          reference: String(protoRef ?? ''),
         });
         continue;
       }
@@ -193,7 +193,7 @@ export function validateWorkspaceReferences(docs: WorkspaceDocuments): Workspace
             candidateVersions.length > 0
               ? `Node references ${protocol}@${version}, but workspace has versions: ${candidateVersions.join(', ')}`
               : `Node references missing protocol: ${protocol}@${version}`,
-          field_path: `nodes[${i}].skill`,
+          field_path: `nodes[${i}].protocol`,
           reference: `${protocol}@${version}`,
         });
         continue;
@@ -205,7 +205,7 @@ export function validateWorkspaceReferences(docs: WorkspaceDocuments): Workspace
             path: wf.path,
             severity: 'error',
             message: `Workflow requires pack ${requiredPack}, but node uses protocol not included: ${protocol}@${version}`,
-            field_path: `nodes[${i}].skill`,
+            field_path: `nodes[${i}].protocol`,
             reference: `${protocol}@${version}`,
             related_path: pack.path,
           });

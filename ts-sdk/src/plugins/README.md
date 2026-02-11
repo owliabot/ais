@@ -17,6 +17,11 @@ The parser enforces:
 - Core execution types are always validated by the core schemas.
 - Non-core execution types MUST be registered before parsing; otherwise parsing fails with a clear error.
 
+## Built-in plugin types
+
+This SDK registers a small set of plugin execution types by default (still gated by packs):
+- `evm_rpc`: read-only JSON-RPC escape hatch for a limited set of EVM methods (executor-enforced allowlist)
+
 ## API
 
 ```ts

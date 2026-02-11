@@ -1,5 +1,5 @@
 /**
- * Execution Plan IR (AIS 0.0.2)
+ * Execution Plan IR (AIS 0.0.3)
  *
  * JSON-serializable intermediate representation used to coordinate:
  * - dependency ordering (DAG)
@@ -54,7 +54,7 @@ const PlanSourceSchema = z
   .object({
     workflow: z.object({ name: z.string(), version: z.string() }).strict().optional(),
     node_id: z.string().optional(),
-    skill: z.string().optional(),
+    protocol: z.string().optional(),
     action: z.string().optional(),
     query: z.string().optional(),
     step_id: z.string().optional(),
@@ -86,6 +86,8 @@ export const ExecutionPlanNodeSchema = z.object({
   description: z.string().optional(),
   deps: z.array(z.string()).optional(),
   condition: ValueRefSchema.optional(),
+  assert: ValueRefSchema.optional(),
+  assert_message: z.string().optional(),
   until: ValueRefSchema.optional(),
   retry: PlanRetrySchema.optional(),
   timeout_ms: z.number().int().positive().optional(),
@@ -98,7 +100,7 @@ export const ExecutionPlanNodeSchema = z.object({
 
 export const ExecutionPlanSchema = z
   .object({
-  schema: z.literal('ais-plan/0.0.2'),
+  schema: z.literal('ais-plan/0.0.3'),
   meta: z
     .object({
       created_at: z.string().optional(),
@@ -171,7 +173,7 @@ export function buildWorkflowExecutionPlan(
   }
 
   return {
-    schema: 'ais-plan/0.0.2',
+    schema: 'ais-plan/0.0.3',
     meta: {
       created_at: new Date().toISOString(),
       name: parsedWorkflow.meta.name,
@@ -192,6 +194,8 @@ function buildWorkflowNodePlanNodes(
   const depsRaw = depsOverride ? depsOverride.slice() : node.deps?.slice();
   const deps = depsRaw && depsRaw.length > 0 ? depsRaw : undefined;
   const condition = node.condition;
+  const assert = (node as any).assert as ValueRef | undefined;
+  const assert_message = (node as any).assert_message as string | undefined;
   const bindings = node.args ? { params: node.args } : undefined;
   const until = node.until;
   const retry = node.retry;
@@ -199,8 +203,9 @@ function buildWorkflowNodePlanNodes(
 
   if (node.type === 'action_ref') {
     if (!node.action) throw new PlanBuildError(`Workflow node "${node.id}" missing action`);
-    const resolved = resolveAction(ctx, `${node.skill}/${node.action}`);
-    if (!resolved) throw new PlanBuildError(`Action not found: ${node.skill}/${node.action}`);
+    const protoRef = String((node as any).protocol ?? '');
+    const resolved = resolveAction(ctx, `${protoRef}/${node.action}`);
+    if (!resolved) throw new PlanBuildError(`Action not found: ${protoRef}/${node.action}`);
     const exec = selectExecutionSpec(resolved.action.execution, chain);
     if (!(isCoreExecutionSpec(exec) && exec.type === 'composite')) {
       return [
@@ -211,6 +216,8 @@ function buildWorkflowNodePlanNodes(
           description: resolved.action.description,
           deps,
           condition,
+          assert,
+          assert_message,
           until,
           retry,
           timeout_ms,
@@ -219,7 +226,7 @@ function buildWorkflowNodePlanNodes(
           source: {
             workflow: { name: workflow.meta.name, version: workflow.meta.version },
             node_id: node.id,
-            skill: node.skill,
+            protocol: protoRef,
             action: node.action,
           },
         },
@@ -236,11 +243,13 @@ function buildWorkflowNodePlanNodes(
       parent_chain: chain,
       parent_deps: deps,
       parent_condition: condition,
+      parent_assert: assert,
+      parent_assert_message: assert_message,
       bindings,
       source: {
         workflow: { name: workflow.meta.name, version: workflow.meta.version },
         node_id: node.id,
-        skill: node.skill,
+        protocol: protoRef,
         action: node.action,
       },
       composite: exec,
@@ -248,8 +257,9 @@ function buildWorkflowNodePlanNodes(
   }
 
   if (!node.query) throw new PlanBuildError(`Workflow node "${node.id}" missing query`);
-  const resolved = resolveQuery(ctx, `${node.skill}/${node.query}`);
-  if (!resolved) throw new PlanBuildError(`Query not found: ${node.skill}/${node.query}`);
+  const protoRef = String((node as any).protocol ?? '');
+  const resolved = resolveQuery(ctx, `${protoRef}/${node.query}`);
+  if (!resolved) throw new PlanBuildError(`Query not found: ${protoRef}/${node.query}`);
   const exec = selectExecutionSpec(resolved.query.execution, chain);
   if (isCoreExecutionSpec(exec) && exec.type === 'composite') {
     throw new PlanBuildError(`Query node "${node.id}" cannot use composite execution`);
@@ -262,6 +272,8 @@ function buildWorkflowNodePlanNodes(
       description: resolved.query.description,
       deps,
       condition,
+      assert,
+      assert_message,
       until,
       retry,
       timeout_ms,
@@ -271,7 +283,7 @@ function buildWorkflowNodePlanNodes(
       source: {
         workflow: { name: workflow.meta.name, version: workflow.meta.version },
         node_id: node.id,
-        skill: node.skill,
+        protocol: protoRef,
         query: node.query,
       },
     },
@@ -294,6 +306,8 @@ function expandCompositeToPlanNodes(args: {
   parent_chain: ChainId;
   parent_deps?: string[];
   parent_condition?: ValueRef;
+  parent_assert?: ValueRef;
+  parent_assert_message?: string;
   bindings?: { params?: Record<string, ValueRef> };
   source: z.infer<typeof PlanSourceSchema>;
   composite: Composite;
@@ -341,6 +355,8 @@ function expandCompositeToPlanNodes(args: {
       description: step.description,
       deps,
       condition,
+      assert: isLast ? args.parent_assert : undefined,
+      assert_message: isLast ? args.parent_assert_message : undefined,
       bindings: args.bindings,
       execution: step.execution as ExecutionSpec,
       writes,

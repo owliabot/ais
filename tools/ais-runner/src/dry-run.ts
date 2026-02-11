@@ -1,9 +1,17 @@
 import { formatPlanSummary } from './plan-print.js';
+import type {
+  DryRunSdk,
+  RunnerContext,
+  RunnerPlan,
+  RunnerPlanNode,
+  RunnerReadiness,
+  RunnerSolanaInstruction,
+} from './types.js';
 
 export async function dryRunCompilePlan(args: {
-  sdk: any;
-  plan: any;
-  ctx: any;
+  sdk: DryRunSdk;
+  plan: RunnerPlan;
+  ctx: RunnerContext;
 }): Promise<string> {
   const { sdk, plan, ctx } = args;
   const solver = sdk.createSolver ? sdk.createSolver() : sdk.solver;
@@ -42,15 +50,15 @@ export async function dryRunCompilePlan(args: {
 }
 
 async function maybeSolveAndRecheck(
-  sdk: any,
-  solver: any,
-  node: any,
-  readiness: any,
-  ctx: any
-): Promise<any> {
+  sdk: DryRunSdk,
+  solver: DryRunSdk['solver'],
+  node: RunnerPlanNode,
+  readiness: RunnerReadiness,
+  ctx: RunnerContext
+): Promise<RunnerReadiness> {
   if (readiness.state !== 'blocked') return readiness;
   const solved = await solver.solve(node, readiness, ctx);
-  const patches = solved?.patches ?? [];
+  const patches = Array.isArray(solved?.patches) ? solved.patches : [];
   if (patches.length > 0) {
     sdk.applyRuntimePatches(ctx, patches);
   }
@@ -58,22 +66,22 @@ async function maybeSolveAndRecheck(
 }
 
 function compileNode(
-  sdk: any,
-  node: any,
-  ctx: any,
+  sdk: DryRunSdk,
+  node: RunnerPlanNode,
+  ctx: RunnerContext,
   resolvedParams: Record<string, unknown>
 ): string[] {
   const exec = node.execution;
   if (!exec || typeof exec !== 'object') return ['exec_type=unknown'];
   const t = String(exec.type ?? '');
-  if (t === 'evm_call' || t === 'evm_read' || t === 'evm_get_balance') {
+  if (t === 'evm_call' || t === 'evm_read' || t === 'evm_rpc') {
     const compiled = sdk.compileEvmExecution(exec, ctx, { chain: node.chain, params: resolvedParams });
-    if (compiled.kind === 'evm_get_balance') {
+    if (compiled.kind === 'evm_rpc') {
       return [
         `exec_type=${t}`,
         `chain=${compiled.chain} chainId=${compiled.chainId}`,
-        `address=${compiled.address}`,
-        `block_tag=${compiled.blockTag}`,
+        `method=${compiled.method}`,
+        `params=${JSON.stringify(compiled.params)}`,
       ];
     }
     return [
@@ -86,8 +94,13 @@ function compileNode(
     ];
   }
   if (t === 'solana_instruction') {
+    if (!sdk.solana?.compileSolanaInstruction) return ['exec_type=solana_instruction', 'compile_error=missing solana compiler'];
+    if (!isSolanaInstructionExecution(exec)) return ['exec_type=solana_instruction', 'compile_error=invalid execution spec'];
     const compiled = sdk.solana.compileSolanaInstruction(exec, ctx, { chain: node.chain, params: resolvedParams });
-    const program = compiled.programId?.toBase58 ? compiled.programId.toBase58() : String(compiled.programId ?? '');
+    const program =
+      typeof compiled.programId === 'object' && compiled.programId !== null && typeof compiled.programId.toBase58 === 'function'
+        ? compiled.programId.toBase58()
+        : String(compiled.programId ?? '');
     return [
       `exec_type=${t}`,
       `chain=${node.chain}`,
@@ -97,8 +110,12 @@ function compileNode(
     ];
   }
   if (t === 'solana_read') {
-    const method = String(exec.method ?? '');
+    const method = String((exec as { method?: unknown }).method ?? '');
     return [`exec_type=${t}`, `chain=${node.chain}`, `method=${method}`];
   }
   return [`exec_type=${t}`];
+}
+
+function isSolanaInstructionExecution(exec: RunnerPlanNode['execution']): exec is RunnerSolanaInstruction {
+  return String(exec?.type ?? '') === 'solana_instruction';
 }

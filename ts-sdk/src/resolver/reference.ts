@@ -2,19 +2,24 @@
  * Reference resolution - resolve protocol, action, and query references
  */
 import type { ProtocolSpec, Action, Query, Pack } from '../schema/index.js';
-import type { ResolverContext } from './context.js';
+import type { ProtocolSource, ResolverContext } from './context.js';
 
 /**
  * Register a protocol spec in the context
  */
-export function registerProtocol(ctx: ResolverContext, spec: ProtocolSpec): void {
+export function registerProtocol(
+  ctx: ResolverContext,
+  spec: ProtocolSpec,
+  options?: { source?: ProtocolSource }
+): void {
   ctx.protocols.set(spec.meta.protocol, spec);
+  ctx.protocol_sources.set(spec.meta.protocol, options?.source ?? 'manual');
 }
 
 /**
- * Parse a skill reference (e.g., "uniswap-v3@1.0.0" → { protocol: "uniswap-v3", version: "1.0.0" })
+ * Parse a protocol reference (e.g., "uniswap-v3@1.0.0" → { protocol: "uniswap-v3", version: "1.0.0" })
  */
-export function parseSkillRef(ref: string): { protocol: string; version?: string } {
+export function parseProtocolRef(ref: string): { protocol: string; version?: string } {
   const [protocol, version] = ref.split('@');
   return { protocol, version };
 }
@@ -26,7 +31,7 @@ export function resolveProtocolRef(
   ctx: ResolverContext,
   ref: string
 ): ProtocolSpec | null {
-  const { protocol, version } = parseSkillRef(ref);
+  const { protocol, version } = parseProtocolRef(ref);
   const spec = ctx.protocols.get(protocol);
   if (!spec) return null;
   if (version && spec.meta.version !== version) return null;
@@ -40,10 +45,10 @@ export function resolveAction(
   ctx: ResolverContext,
   ref: string
 ): { protocol: ProtocolSpec; actionId: string; action: Action } | null {
-  const [skillPart, actionId] = ref.split('/');
+  const [protocolPart, actionId] = ref.split('/');
   if (!actionId) return null;
 
-  const spec = resolveProtocolRef(ctx, skillPart);
+  const spec = resolveProtocolRef(ctx, protocolPart);
   if (!spec) return null;
 
   const action = spec.actions[actionId];
@@ -59,10 +64,10 @@ export function resolveQuery(
   ctx: ResolverContext,
   ref: string
 ): { protocol: ProtocolSpec; queryId: string; query: Query } | null {
-  const [skillPart, queryId] = ref.split('/');
+  const [protocolPart, queryId] = ref.split('/');
   if (!queryId) return null;
 
-  const spec = resolveProtocolRef(ctx, skillPart);
+  const spec = resolveProtocolRef(ctx, protocolPart);
   if (!spec || !spec.queries) return null;
 
   const query = spec.queries[queryId];
@@ -72,7 +77,7 @@ export function resolveQuery(
 }
 
 /**
- * Expand all skill references in a Pack
+ * Expand all protocol references in a Pack
  */
 export function expandPack(
   ctx: ResolverContext,
@@ -81,8 +86,8 @@ export function expandPack(
   const protocols: ProtocolSpec[] = [];
   const missing: string[] = [];
 
-  for (const skillInclude of pack.includes) {
-    const ref = `${skillInclude.protocol}@${skillInclude.version}`;
+  for (const protocolInclude of pack.includes) {
+    const ref = `${protocolInclude.protocol}@${protocolInclude.version}`;
     const spec = resolveProtocolRef(ctx, ref);
     if (spec) {
       protocols.push(spec);

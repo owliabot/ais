@@ -1,27 +1,39 @@
+import {
+  mkdir,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
+import { join } from 'node:path';
+
 /**
  * Integration tests - test full SDK flows with mock data
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { mkdir, writeFile, rm } from 'node:fs/promises';
-import { join } from 'node:path';
 import {
-  loadDirectoryAsContext,
-  loadWorkflow,
-  loadPack,
-  validateWorkflow,
-  validateConstraints,
-  resolveAction,
-  resolveQuery,
-  resolveExpressionString,
-  setRef,
-  getWorkflowProtocols,
-  getWorkflowDependencies,
+  afterAll,
+  beforeAll,
+  describe,
+  expect,
+  it,
+} from 'vitest';
+
+import {
   expandPack,
   getContractAddress,
   getSupportedChains,
-  type ResolverContext,
-  type Workflow,
+  getWorkflowDependencies,
+  getWorkflowProtocols,
+  loadDirectoryAsContext,
+  loadPack,
+  loadWorkflow,
   type Pack,
+  resolveAction,
+  resolveExpressionString,
+  resolveQuery,
+  type ResolverContext,
+  setRef,
+  validateConstraints,
+  validateWorkflow,
+  type Workflow,
 } from '../src/index.js';
 
 const TEST_DIR = '/tmp/ais-sdk-integration-test';
@@ -307,12 +319,18 @@ token_policy:
 `;
 
 const TEST_WORKFLOW = `
-schema: "ais-flow/0.0.2"
+schema: "ais-flow/0.0.3"
 meta:
   name: swap-to-token
-  version: "0.0.2"
+  version: "0.0.3"
   description: Swap ETH to target token
 default_chain: "eip155:1"
+imports:
+  protocols:
+    - protocol: "erc20@0.0.2"
+      path: "/tmp/ais-sdk-integration-test/erc20.ais.yaml"
+    - protocol: "uniswap-v3@0.0.2"
+      path: "/tmp/ais-sdk-integration-test/uniswap-v3.ais.yaml"
 inputs:
   target_token:
     type: address
@@ -326,7 +344,7 @@ inputs:
 nodes:
   - id: check_allowance
     type: query_ref
-    skill: "erc20@0.0.2"
+    protocol: "erc20@0.0.2"
     query: allowance
     args:
       token: { ref: "inputs.target_token" }
@@ -334,7 +352,7 @@ nodes:
       spender: { ref: "ctx.router" }
   - id: approve_if_needed
     type: action_ref
-    skill: "erc20@0.0.2"
+    protocol: "erc20@0.0.2"
     action: approve
     args:
       token: { ref: "inputs.target_token" }
@@ -343,7 +361,7 @@ nodes:
     condition: { cel: "nodes.check_allowance.outputs.amount < inputs.amount_in" }
   - id: get_quote
     type: query_ref
-    skill: "uniswap-v3@0.0.2"
+    protocol: "uniswap-v3@0.0.2"
     query: quote-exact-in
     args:
       tokenIn: { lit: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2" }
@@ -353,7 +371,7 @@ nodes:
       - approve_if_needed
   - id: swap
     type: action_ref
-    skill: "uniswap-v3@0.0.2"
+    protocol: "uniswap-v3@0.0.2"
     action: swap-exact-in
     args:
       tokenIn: { lit: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2" }
@@ -448,7 +466,7 @@ describe('Integration: Pack Operations', () => {
     expect(pack.version).toBe('0.0.2');
   });
 
-  it('expands pack skill references', () => {
+  it('expands pack protocol references', () => {
     const { protocols, missing } = expandPack(ctx, pack);
     expect(protocols).toHaveLength(2);
     expect(missing).toHaveLength(0);
@@ -576,7 +594,7 @@ describe('Integration: End-to-End Agent Simulation', () => {
 
     // 8. Build execution plan
     const executionPlan = workflow.nodes.map(node => {
-      const [protocolName] = node.skill.split('@');
+      const [protocolName] = node.protocol.split('@');
       const protocol = ctx.protocols.get(protocolName)!;
 
       if (node.type === 'action_ref' && node.action) {

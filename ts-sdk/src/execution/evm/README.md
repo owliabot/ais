@@ -5,6 +5,7 @@ EVM-specific execution helpers:
 - Keccak256 selector hashing
 - ABI encoding/decoding via `ethers` (JSON ABI, tuple-safe)
 - Compilation of `evm_read` / `evm_call` specs into `{to,data,value,chainId}`
+- Compilation support for the built-in plugin execution type `evm_rpc` (method + params)
 
 This submodule performs **no network IO**.
 
@@ -19,7 +20,7 @@ This submodule performs **no network IO**.
 
 ## Core API
 
-### Compile `evm_read` / `evm_call`
+### Compile `evm_read` / `evm_call` / `evm_rpc`
 
 Use the async compiler if your execution spec contains async `{ detect: ... }` ValueRefs.
 

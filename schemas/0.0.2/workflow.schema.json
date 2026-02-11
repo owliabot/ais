@@ -31,7 +31,46 @@
       ],
       "additionalProperties": false
     },
-    "requires_pack_10": {
+    "Def_12": {
+      "type": "object",
+      "properties": {
+        "protocol": {
+          "type": "string",
+          "pattern": "^[a-z0-9-]+@\\d+\\.\\d+\\.\\d+$"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "integrity": {
+          "type": "string"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_7"
+        }
+      },
+      "required": [
+        "protocol",
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "imports_10": {
+      "type": "object",
+      "properties": {
+        "protocols": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Def_12"
+          }
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_7"
+        }
+      },
+      "additionalProperties": false
+    },
+    "requires_pack_16": {
       "type": "object",
       "properties": {
         "name": {
@@ -50,7 +89,7 @@
       ],
       "additionalProperties": false
     },
-    "Def_14": {
+    "Def_20": {
       "type": "object",
       "properties": {
         "type": {
@@ -73,13 +112,13 @@
       ],
       "additionalProperties": false
     },
-    "inputs_13": {
+    "inputs_19": {
       "type": "object",
       "additionalProperties": {
-        "$ref": "#/$defs/Def_14"
+        "$ref": "#/$defs/Def_20"
       }
     },
-    "Union30_0_30": {
+    "Union36_0_36": {
       "type": "object",
       "properties": {
         "lit": {}
@@ -89,7 +128,7 @@
       ],
       "additionalProperties": false
     },
-    "Union32_1_32": {
+    "Union38_1_38": {
       "type": "object",
       "properties": {
         "ref": {
@@ -101,7 +140,7 @@
       ],
       "additionalProperties": false
     },
-    "Union34_2_34": {
+    "Union40_2_40": {
       "type": "object",
       "properties": {
         "cel": {
@@ -113,11 +152,11 @@
       ],
       "additionalProperties": false
     },
-    "constraints_42": {
+    "constraints_48": {
       "type": "object",
       "additionalProperties": {}
     },
-    "detect_37": {
+    "detect_43": {
       "type": "object",
       "properties": {
         "kind": {
@@ -137,7 +176,7 @@
           "items": {}
         },
         "constraints": {
-          "$ref": "#/$defs/constraints_42"
+          "$ref": "#/$defs/constraints_48"
         },
         "requires_capabilities": {
           "type": "array",
@@ -154,11 +193,11 @@
       ],
       "additionalProperties": false
     },
-    "Union36_3_36": {
+    "Union42_3_42": {
       "type": "object",
       "properties": {
         "detect": {
-          "$ref": "#/$defs/detect_37"
+          "$ref": "#/$defs/detect_43"
         }
       },
       "required": [
@@ -166,17 +205,17 @@
       ],
       "additionalProperties": false
     },
-    "object_47": {
+    "object_53": {
       "type": "object",
       "additionalProperties": {
-        "$ref": "#/$defs/Lazy_29"
+        "$ref": "#/$defs/Lazy_35"
       }
     },
-    "Union46_4_46": {
+    "Union52_4_52": {
       "type": "object",
       "properties": {
         "object": {
-          "$ref": "#/$defs/object_47"
+          "$ref": "#/$defs/object_53"
         }
       },
       "required": [
@@ -184,13 +223,13 @@
       ],
       "additionalProperties": false
     },
-    "Union48_5_48": {
+    "Union54_5_54": {
       "type": "object",
       "properties": {
         "array": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/Lazy_29"
+            "$ref": "#/$defs/Lazy_35"
           }
         }
       },
@@ -199,39 +238,39 @@
       ],
       "additionalProperties": false
     },
-    "Lazy_29": {
+    "Lazy_35": {
       "anyOf": [
         {
-          "$ref": "#/$defs/Union30_0_30"
+          "$ref": "#/$defs/Union36_0_36"
         },
         {
-          "$ref": "#/$defs/Union32_1_32"
+          "$ref": "#/$defs/Union38_1_38"
         },
         {
-          "$ref": "#/$defs/Union34_2_34"
+          "$ref": "#/$defs/Union40_2_40"
         },
         {
-          "$ref": "#/$defs/Union36_3_36"
+          "$ref": "#/$defs/Union42_3_42"
         },
         {
-          "$ref": "#/$defs/Union46_4_46"
+          "$ref": "#/$defs/Union52_4_52"
         },
         {
-          "$ref": "#/$defs/Union48_5_48"
+          "$ref": "#/$defs/Union54_5_54"
         }
       ]
     },
-    "args_28": {
+    "args_34": {
       "type": "object",
       "additionalProperties": {
-        "$ref": "#/$defs/Lazy_29"
+        "$ref": "#/$defs/Lazy_35"
       }
     },
-    "Def_51": {
+    "Def_57": {
       "type": "object",
       "properties": {
         "expr": {
-          "$ref": "#/$defs/Lazy_29"
+          "$ref": "#/$defs/Lazy_35"
         },
         "extensions": {
           "$ref": "#/$defs/extensions_7"
@@ -242,13 +281,13 @@
       ],
       "additionalProperties": false
     },
-    "calculated_overrides_50": {
+    "calculated_overrides_56": {
       "type": "object",
       "additionalProperties": {
-        "$ref": "#/$defs/Def_51"
+        "$ref": "#/$defs/Def_57"
       }
     },
-    "retry_54": {
+    "retry_61": {
       "type": "object",
       "properties": {
         "interval_ms": {
@@ -274,7 +313,7 @@
       ],
       "additionalProperties": false
     },
-    "Def_21": {
+    "Def_27": {
       "type": "object",
       "properties": {
         "id": {
@@ -291,7 +330,7 @@
           "type": "string",
           "pattern": "^(eip155|solana|cosmos|bip122|aptos|sui):[a-zA-Z0-9._-]+$"
         },
-        "skill": {
+        "protocol": {
           "type": "string",
           "pattern": "^[a-z0-9-]+@\\d+\\.\\d+\\.\\d+$"
         },
@@ -302,10 +341,10 @@
           "type": "string"
         },
         "args": {
-          "$ref": "#/$defs/args_28"
+          "$ref": "#/$defs/args_34"
         },
         "calculated_overrides": {
-          "$ref": "#/$defs/calculated_overrides_50"
+          "$ref": "#/$defs/calculated_overrides_56"
         },
         "deps": {
           "type": "array",
@@ -314,13 +353,19 @@
           }
         },
         "condition": {
-          "$ref": "#/$defs/Lazy_29"
+          "$ref": "#/$defs/Lazy_35"
+        },
+        "assert": {
+          "$ref": "#/$defs/Lazy_35"
+        },
+        "assert_message": {
+          "type": "string"
         },
         "until": {
-          "$ref": "#/$defs/Lazy_29"
+          "$ref": "#/$defs/Lazy_35"
         },
         "retry": {
-          "$ref": "#/$defs/retry_54"
+          "$ref": "#/$defs/retry_61"
         },
         "timeout_ms": {
           "type": "integer",
@@ -333,26 +378,26 @@
       "required": [
         "id",
         "type",
-        "skill"
+        "protocol"
       ],
       "additionalProperties": false
     },
-    "approvals_60": {
+    "approvals_67": {
       "type": "object",
       "additionalProperties": {}
     },
-    "hard_constraints_62": {
+    "hard_constraints_69": {
       "type": "object",
       "additionalProperties": {}
     },
-    "policy_59": {
+    "policy_66": {
       "type": "object",
       "properties": {
         "approvals": {
-          "$ref": "#/$defs/approvals_60"
+          "$ref": "#/$defs/approvals_67"
         },
         "hard_constraints": {
-          "$ref": "#/$defs/hard_constraints_62"
+          "$ref": "#/$defs/hard_constraints_69"
         },
         "extensions": {
           "$ref": "#/$defs/extensions_7"
@@ -360,17 +405,17 @@
       },
       "additionalProperties": false
     },
-    "simulate_65": {
+    "simulate_72": {
       "type": "object",
       "additionalProperties": {
         "type": "boolean"
       }
     },
-    "preflight_64": {
+    "preflight_71": {
       "type": "object",
       "properties": {
         "simulate": {
-          "$ref": "#/$defs/simulate_65"
+          "$ref": "#/$defs/simulate_72"
         },
         "extensions": {
           "$ref": "#/$defs/extensions_7"
@@ -378,17 +423,17 @@
       },
       "additionalProperties": false
     },
-    "outputs_67": {
+    "outputs_74": {
       "type": "object",
       "additionalProperties": {
-        "$ref": "#/$defs/Lazy_29"
+        "$ref": "#/$defs/Lazy_35"
       }
     },
     "Root_1": {
       "type": "object",
       "properties": {
         "schema": {
-          "const": "ais-flow/0.0.2"
+          "const": "ais-flow/0.0.3"
         },
         "meta": {
           "$ref": "#/$defs/meta_3"
@@ -397,26 +442,29 @@
           "type": "string",
           "pattern": "^(eip155|solana|cosmos|bip122|aptos|sui):[a-zA-Z0-9._-]+$"
         },
+        "imports": {
+          "$ref": "#/$defs/imports_10"
+        },
         "requires_pack": {
-          "$ref": "#/$defs/requires_pack_10"
+          "$ref": "#/$defs/requires_pack_16"
         },
         "inputs": {
-          "$ref": "#/$defs/inputs_13"
+          "$ref": "#/$defs/inputs_19"
         },
         "nodes": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/Def_21"
+            "$ref": "#/$defs/Def_27"
           }
         },
         "policy": {
-          "$ref": "#/$defs/policy_59"
+          "$ref": "#/$defs/policy_66"
         },
         "preflight": {
-          "$ref": "#/$defs/preflight_64"
+          "$ref": "#/$defs/preflight_71"
         },
         "outputs": {
-          "$ref": "#/$defs/outputs_67"
+          "$ref": "#/$defs/outputs_74"
         },
         "extensions": {
           "$ref": "#/$defs/extensions_7"

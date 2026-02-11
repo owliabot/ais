@@ -17,11 +17,9 @@ export {
   compileEvmCallAsync,
   compileEvmRead,
   compileEvmReadAsync,
-  compileEvmGetBalance,
-  compileEvmGetBalanceAsync,
   type CompileEvmOptions,
   type CompiledEvmRequest,
   type CompiledEvmAbiRequest,
-  type CompiledEvmGetBalanceRequest,
+  type CompiledEvmRpcRequest,
   EvmCompileError,
 } from './compiler.js';

@@ -2,12 +2,14 @@
  * File loader - load AIS documents from filesystem
  */
 import { readFile, readdir, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { AISParseError, parseAIS, parseProtocolSpec, parsePack, parseWorkflow } from './parser.js';
-import { createContext, registerProtocol } from './resolver/index.js';
+import { createContext, parseProtocolRef, registerProtocol } from './resolver/index.js';
 import type { ResolverContext } from './resolver/index.js';
 import type { AnyAISDocument, ProtocolSpec, Pack, Workflow } from './schema/index.js';
 import type { ExecutionTypeRegistry } from './plugins/index.js';
+import { validateWorkflow } from './validator/workflow.js';
+import type { WorkflowValidationResult } from './validator/workflow.js';
 
 export interface LoadResult<T> {
   path: string;
@@ -29,6 +31,22 @@ export interface DirectoryLoadResult {
   packs: LoadResult<Pack>[];
   workflows: LoadResult<Workflow>[];
   errors: LoadError[];
+}
+
+export interface LoadWorkflowBundleOptions {
+  execution_registry?: ExecutionTypeRegistry;
+  strict_imports?: boolean;
+  validate?: boolean;
+  builtin_protocols?: ProtocolSpec[];
+  pre_registered_protocols?: ProtocolSpec[];
+  search_paths?: string[];
+}
+
+export interface WorkflowBundleLoadResult {
+  workflow: Workflow;
+  context: ResolverContext;
+  imports: LoadResult<ProtocolSpec>[];
+  validation?: WorkflowValidationResult;
 }
 
 /**
@@ -64,16 +82,72 @@ export async function loadWorkflow(filePath: string): Promise<Workflow> {
 }
 
 /**
+ * Load a workflow with explicit protocol imports into a fresh resolver context.
+ *
+ * Resolution order:
+ * 1) builtin_protocols (source: builtin)
+ * 2) pre_registered_protocols (source: manual)
+ * 3) workflow.imports.protocols (source: import)
+ */
+export async function loadWorkflowBundle(
+  workflowPath: string,
+  options: LoadWorkflowBundleOptions = {}
+): Promise<WorkflowBundleLoadResult> {
+  const workflow = await loadWorkflow(workflowPath);
+  const context = createContext();
+  const imported: LoadResult<ProtocolSpec>[] = [];
+
+  for (const spec of options.builtin_protocols ?? []) {
+    registerProtocol(context, spec, { source: 'builtin' });
+  }
+  for (const spec of options.pre_registered_protocols ?? []) {
+    registerProtocol(context, spec, { source: 'manual' });
+  }
+
+  const protocolImports = (workflow as any).imports?.protocols;
+  if (Array.isArray(protocolImports)) {
+    for (const entry of protocolImports) {
+      const protoRef = String(entry?.protocol ?? '');
+      const importPath = String(entry?.path ?? '');
+      const resolvedPath = await resolveImportedProtocolPath(workflowPath, importPath, options.search_paths ?? []);
+      if (!resolvedPath) {
+        throw new Error(`Workflow import path not found for ${protoRef}: ${importPath}`);
+      }
+      const spec = await loadProtocol(resolvedPath);
+      const parsed = parseProtocolRef(protoRef);
+      if (spec.meta.protocol !== parsed.protocol || (parsed.version && spec.meta.version !== parsed.version)) {
+        throw new Error(
+          `Workflow import mismatch for ${protoRef}: loaded ${spec.meta.protocol}@${spec.meta.version} from ${resolvedPath}`
+        );
+      }
+      registerProtocol(context, spec, { source: 'import' });
+      imported.push({ path: resolvedPath, document: spec });
+    }
+  }
+
+  const shouldValidate = options.validate ?? true;
+  if (!shouldValidate) {
+    return { workflow, context, imports: imported };
+  }
+  const validation = validateWorkflow(workflow, context, { enforce_imports: options.strict_imports ?? true });
+  if (!validation.valid) {
+    throw new Error(`Workflow bundle validation failed: ${JSON.stringify(validation.issues)}`);
+  }
+
+  return { workflow, context, imports: imported, validation };
+}
+
+/**
  * Determine expected AIS document type from filename
  */
 function getExpectedTypeFromFilename(
   filename: string
-): 'ais/0.0.2' | 'ais-pack/0.0.2' | 'ais-flow/0.0.2' | null {
+): 'ais/0.0.2' | 'ais-pack/0.0.2' | 'ais-flow/0.0.3' | null {
   if (filename.endsWith('.ais-pack.yaml') || filename.endsWith('.ais-pack.yml')) {
     return 'ais-pack/0.0.2';
   }
   if (filename.endsWith('.ais-flow.yaml') || filename.endsWith('.ais-flow.yml')) {
-    return 'ais-flow/0.0.2';
+    return 'ais-flow/0.0.3';
   }
   if (filename.endsWith('.ais.yaml') || filename.endsWith('.ais.yml')) {
     return 'ais/0.0.2';
@@ -141,7 +215,7 @@ export async function loadDirectory(
           case 'ais-pack/0.0.2':
             result.packs.push({ path: fullPath, document: doc });
             break;
-          case 'ais-flow/0.0.2':
+          case 'ais-flow/0.0.3':
             result.workflows.push({ path: fullPath, document: doc });
             break;
         }
@@ -170,7 +244,7 @@ export async function loadDirectoryAsContext(
   const context = createContext();
 
   for (const { document } of result.protocols) {
-    registerProtocol(context, document);
+    registerProtocol(context, document, { source: 'workspace' });
   }
 
   return { context, result };
@@ -203,4 +277,35 @@ function toLoadError(path: string, err: unknown): LoadError {
   }
 
   return { path, error: err instanceof Error ? err.message : String(err), kind: 'unknown' };
+}
+
+async function resolveImportedProtocolPath(
+  workflowPath: string,
+  importPath: string,
+  searchPaths: string[]
+): Promise<string | null> {
+  const candidates = new Set<string>();
+  if (isAbsolute(importPath)) {
+    candidates.add(importPath);
+  } else {
+    candidates.add(resolve(dirname(workflowPath), importPath));
+    for (const base of searchPaths) {
+      candidates.add(resolve(base, importPath));
+    }
+    candidates.add(resolve(process.cwd(), importPath));
+  }
+
+  for (const p of candidates) {
+    if (await fileExists(p)) return p;
+  }
+  return null;
+}
+
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    const s = await stat(path);
+    return s.isFile();
+  } catch {
+    return false;
+  }
 }

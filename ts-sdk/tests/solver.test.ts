@@ -38,15 +38,15 @@ actions: {}
     );
 
     const wf = parseWorkflow(`
-schema: "ais-flow/0.0.2"
-meta: { name: demo, version: "0.0.2" }
+schema: "ais-flow/0.0.3"
+meta: { name: demo, version: "0.0.3" }
 default_chain: "eip155:1"
 inputs:
   amount: { type: uint256 }
 nodes:
   - id: q1
     type: query_ref
-    skill: "demo@0.0.2"
+    protocol: "demo@0.0.2"
     query: q
     args:
       x: { ref: "inputs.amount" }
@@ -83,7 +83,7 @@ nodes:
       },
       bindings: { params: { x: { ref: 'inputs.amount' } } },
       writes: [{ path: 'nodes.n1.outputs', mode: 'set' }],
-      source: { skill: 'demo@0.0.2', query: 'f' },
+      source: { protocol: 'demo@0.0.2', query: 'f' },
     };
 
     const readiness = getNodeReadiness(node, ctx);
@@ -110,7 +110,7 @@ nodes:
       },
       bindings: {},
       writes: [{ path: 'nodes.n1.outputs', mode: 'set' }],
-      source: { skill: 'demo@0.0.2', query: 'f' },
+      source: { protocol: 'demo@0.0.2', query: 'f' },
     };
     const readiness = getNodeReadiness(node, ctx);
     const s = custom.solve(node, readiness, ctx);

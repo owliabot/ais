@@ -31,9 +31,13 @@ export interface RuntimeContext {
 export interface ResolverContext {
   /** Loaded protocol specs by protocol name */
   protocols: Map<string, ProtocolSpec>;
+  /** Protocol registration metadata (builtin/import/manual/workspace) */
+  protocol_sources: Map<string, ProtocolSource>;
   /** Structured runtime context for refs/CEL */
   runtime: RuntimeContext;
 }
+
+export type ProtocolSource = 'builtin' | 'import' | 'manual' | 'workspace';
 
 /**
  * Create a fresh resolver context
@@ -41,6 +45,7 @@ export interface ResolverContext {
 export function createContext(): ResolverContext {
   return {
     protocols: new Map(),
+    protocol_sources: new Map(),
     runtime: {
       inputs: {},
       params: {},

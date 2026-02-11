@@ -13,30 +13,24 @@ capabilities_required:
   - "evm_call"
 
 deployments:
-  - chain: "eip155:1"
+  - chain: "eip155:31338"
     contracts: {}
 
 queries:
   native-balance:
-    description: "Read native balance via a helper contract: getBalance(address) -> uint256."
+    description: "Read native balance via JSON-RPC eth_getBalance."
     params:
-      - { name: balance_reader, type: address, description: "Contract implementing getBalance(address)", required: true }
       - { name: addr, type: address, description: "Address to read balance for", required: true }
     returns:
       - { name: balance, type: uint256, description: "Native balance (wei)" }
     execution:
       "eip155:*":
-        type: evm_read
-        to: { ref: "params.balance_reader" }
-        abi:
-          type: "function"
-          name: "getBalance"
-          inputs:
-            - { name: "addr", type: "address" }
-          outputs:
-            - { name: "balance", type: "uint256" }
-        args:
-          addr: { ref: "params.addr" }
+        type: evm_rpc
+        method: "eth_getBalance"
+        params:
+          array:
+            - { ref: "params.addr" }
+            - { lit: "latest" }
 
 actions:
   native-transfer:
@@ -59,4 +53,3 @@ actions:
         value: { cel: "to_atomic(params.amount, 18)" }
 
 extensions: {}
-
