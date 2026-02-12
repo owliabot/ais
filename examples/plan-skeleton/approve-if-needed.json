@@ -1,0 +1,33 @@
+{
+  "schema": "ais-plan-skeleton/0.0.1",
+  "meta": { "name": "approve-if-needed" },
+  "default_chain": "eip155:1",
+  "nodes": [
+    {
+      "id": "allowance",
+      "type": "query_ref",
+      "protocol": "demo@0.0.2",
+      "query": "allowance",
+      "args": {
+        "owner": { "ref": "ctx.wallet_address" },
+        "spender": { "ref": "ctx.spender_address" }
+      }
+    },
+    {
+      "id": "approve",
+      "type": "action_ref",
+      "protocol": "demo@0.0.2",
+      "action": "approve",
+      "deps": ["allowance"],
+      "condition": { "cel": "nodes.allowance.outputs.allowance < inputs.amount_in" },
+      "args": {
+        "spender": { "ref": "ctx.spender_address" },
+        "amount": { "ref": "inputs.amount_in" }
+      }
+    }
+  ],
+  "policy_hints": {
+    "require_confirmation": true
+  }
+}
+

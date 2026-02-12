@@ -16,6 +16,7 @@ import type {
 import type { DetectResolver } from '../resolver/value-ref.js';
 import type { ExecutionTraceSink } from './trace.js';
 import { redactEngineEventForTrace, redactNodeForTrace, redactPlanForTrace } from './trace.js';
+import { summarizeNeedUserConfirm } from './confirm-summary.js';
 
 export interface RunPlanOptions {
   solver: Solver;
@@ -99,6 +100,7 @@ export async function* runPlan(
   };
 
   const checkpointStore = options.checkpoint_store;
+  let checkpointExtensions: Record<string, unknown> | undefined;
   if (checkpointStore && resume) {
     const loaded = await checkpointStore.load();
     if (loaded && isCompatibleCheckpoint(plan, loaded)) {
@@ -107,6 +109,7 @@ export async function* runPlan(
       for (const [id, st] of Object.entries(loaded.poll_state_by_node_id ?? {})) {
         pollStateByNodeId.set(id, st);
       }
+      checkpointExtensions = isRecord(loaded.extensions) ? { ...loaded.extensions } : undefined;
     }
   }
 
@@ -133,6 +136,7 @@ export async function* runPlan(
       poll_state_by_node_id: Object.fromEntries(pollStateByNodeId.entries()),
       paused_by_node_id: Object.fromEntries(pausedByNodeId.entries()),
       events: options.include_events_in_checkpoint ? eventsForCheckpoint.slice() : undefined,
+      extensions: checkpointExtensions,
     };
     await checkpointStore.save(checkpoint);
     const ev: EngineEvent = { type: 'checkpoint_saved', checkpoint };
@@ -249,11 +253,16 @@ export async function* runPlan(
         }
 
         if (solved.need_user_confirm) {
+          const enrichedDetails = enrichNeedUserConfirmDetails({
+            node,
+            reason: solved.need_user_confirm.reason,
+            details: solved.need_user_confirm.details,
+          });
           const need: EngineEvent = {
             type: 'need_user_confirm',
             node,
             reason: solved.need_user_confirm.reason,
-            details: solved.need_user_confirm.details,
+            details: enrichedDetails,
           };
           maybeRecord(need);
           if (traceSink) {
@@ -263,7 +272,7 @@ export async function* runPlan(
           yield need;
           pausedByNodeId.set(node.id, {
             reason: solved.need_user_confirm.reason,
-            details: solved.need_user_confirm.details,
+            details: enrichedDetails,
             paused_at_ms: Date.now(),
           });
           const ck = await saveCheckpoint();
@@ -451,11 +460,16 @@ export async function* runPlan(
     const execResult = settled.result as any;
 
     if (execResult?.need_user_confirm) {
+      const enrichedDetails = enrichNeedUserConfirmDetails({
+        node: settled.node,
+        reason: execResult.need_user_confirm.reason,
+        details: execResult.need_user_confirm.details,
+      });
       const need: EngineEvent = {
         type: 'need_user_confirm',
         node: settled.node,
         reason: execResult.need_user_confirm.reason,
-        details: execResult.need_user_confirm.details,
+        details: enrichedDetails,
       };
       maybeRecord(need);
       if (traceSink) {
@@ -465,7 +479,7 @@ export async function* runPlan(
       yield need;
       pausedByNodeId.set(settled.node.id, {
         reason: execResult.need_user_confirm.reason,
-        details: execResult.need_user_confirm.details,
+        details: enrichedDetails,
         paused_at_ms: Date.now(),
       });
       const ck = await saveCheckpoint();
@@ -733,6 +747,27 @@ export async function* runPlan(
     const ck = await saveCheckpoint();
     if (ck) yield ck;
   }
+}
+
+function enrichNeedUserConfirmDetails(args: {
+  node: ExecutionPlanNode;
+  reason: string;
+  details?: unknown;
+}): unknown {
+  const { node, reason } = args;
+  const base = isRecord(args.details) ? { ...(args.details as Record<string, unknown>) } : { details: args.details };
+
+  // Avoid re-hashing if already present.
+  if (!base.confirmation_summary) {
+    const summary = summarizeNeedUserConfirm({ node, reason, details: args.details });
+    base.confirmation_summary = summary;
+    base.confirmation_hash = summary.hash;
+  }
+  return base;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
 function classifyIo(node: ExecutionPlanNode): NodeIoKind {

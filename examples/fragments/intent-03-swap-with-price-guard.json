@@ -1,0 +1,29 @@
+{
+  "schema": "ais-plan-skeleton/0.0.1",
+  "meta": { "name": "swap-with-price-guard" },
+  "default_chain": "eip155:1",
+  "nodes": [
+    {
+      "id": "quote__quote",
+      "type": "query_ref",
+      "protocol": "uniswap-v3@0.0.2",
+      "query": "quote",
+      "args": { "amount_in": { "ref": "inputs.amount_in" } }
+    },
+    {
+      "id": "swap__swap",
+      "type": "action_ref",
+      "protocol": "uniswap-v3@0.0.2",
+      "action": "swap",
+      "deps": ["quote__quote"],
+      "condition": { "cel": "nodes.quote__quote.outputs.price_impact_bps <= inputs.max_price_impact_bps" },
+      "args": {
+        "amount_in": { "ref": "inputs.amount_in" },
+        "min_out": { "ref": "nodes.quote__quote.outputs.amount_out" },
+        "slippage_bps": { "ref": "inputs.slippage_bps" }
+      }
+    }
+  ],
+  "policy_hints": { "tags": ["slippage"], "guard": "price_impact" }
+}
+

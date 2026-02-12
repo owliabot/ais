@@ -1,0 +1,17 @@
+{
+  "schema": "ais-plan-skeleton/0.0.1",
+  "meta": { "name": "wait-until" },
+  "default_chain": "eip155:1",
+  "nodes": [
+    {
+      "id": "poll",
+      "type": "query_ref",
+      "protocol": "demo@0.0.2",
+      "query": "status",
+      "args": { "id": { "ref": "inputs.job_id" } },
+      "until": { "cel": "nodes.poll.outputs.done == true" },
+      "retry": { "interval_ms": 2000, "max_attempts": 30 }
+    }
+  ]
+}
+

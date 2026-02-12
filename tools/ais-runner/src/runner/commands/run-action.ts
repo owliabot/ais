@@ -28,7 +28,7 @@ export async function runActionCommand(args: {
     process.exitCode = 1;
     return;
   }
-  const rawArgs = parseJsonObject(parsed.argsJson, '--args');
+  const rawArgs = parseJsonObject(parsed.argsJson, '--args', sdk.parseAisJson);
   const resolved = sdk.resolveAction(context, `${protocolRef}/${action}`);
   if (!resolved) {
     process.stdout.write('Action not found in workspace\n');
@@ -60,6 +60,10 @@ export async function runActionCommand(args: {
       yes: parsed.yes,
       checkpointPath: parsed.checkpointPath,
       resume: parsed.resume,
+      tracePath: parsed.tracePath,
+      traceRedactMode: parsed.traceRedactMode,
+      eventsJsonlPath: parsed.eventsJsonlPath,
+      commandsStdinJsonl: parsed.commandsStdinJsonl,
     },
   });
 }

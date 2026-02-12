@@ -7,11 +7,14 @@ export type WrapperSdk = Pick<
   | 'resolveAction'
   | 'parseProtocolRef'
   | 'validateConstraints'
+  | 'extractPolicyGateInput'
+  | 'compileWritePreview'
+  | 'enforcePolicyGate'
+  | 'explainPolicyGateResult'
+  | 'checkExecutionPluginAllowed'
   | 'evaluateValueRef'
   | 'evaluateValueRefAsync'
   | 'applyRuntimePatches'
-  | 'compileEvmExecution'
-  | 'solana'
 >;
 
 export type PolicyGateOptions = {

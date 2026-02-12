@@ -1,4 +1,4 @@
-import type { RunnerPack, RunnerPlanNode } from '../../../types.js';
+import type { RunnerContext, RunnerPack, RunnerPlanNode } from '../../../types.js';
 
 export function classifyIo(node: RunnerPlanNode): 'read' | 'write' {
   if (node.kind === 'query_ref') return 'read';
@@ -49,6 +49,17 @@ export function policyApprovalsSummary(policy: RunnerPack['policy'] | undefined)
 export function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   return value as Record<string, unknown>;
+}
+
+export function isRunnerNodeApproved(ctx: RunnerContext, node: RunnerPlanNode): boolean {
+  const runtime = asRecord((ctx as { runtime?: unknown }).runtime);
+  const policy = runtime ? asRecord(runtime.policy) : null;
+  if (!policy) return false;
+  const approvals = asRecord(policy.runner_approvals);
+  if (!approvals) return false;
+  const raw = asRecord(approvals[node.id]);
+  if (!raw) return false;
+  return raw.approved === true;
 }
 
 export function isEvmFailureStatus(status: unknown): boolean {

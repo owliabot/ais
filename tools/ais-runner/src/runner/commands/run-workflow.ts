@@ -47,10 +47,10 @@ export async function runWorkflowCommand(args: {
   applyRunnerRuntimeCtx(context, config);
 
   if (parsed.inputsJson) {
-    context.runtime.inputs = parseJsonObject(parsed.inputsJson, '--inputs');
+    context.runtime.inputs = parseJsonObject(parsed.inputsJson, '--inputs', sdk.parseAisJson);
   }
   if (parsed.ctxJson) {
-    const ctx = parseJsonObject(parsed.ctxJson, '--ctx');
+    const ctx = parseJsonObject(parsed.ctxJson, '--ctx', sdk.parseAisJson);
     context.runtime.ctx = { ...context.runtime.ctx, ...ctx };
   }
 
@@ -87,6 +87,9 @@ export async function runWorkflowCommand(args: {
       checkpointPath: parsed.checkpointPath,
       resume: parsed.resume,
       tracePath: parsed.tracePath,
+      traceRedactMode: parsed.traceRedactMode,
+      eventsJsonlPath: parsed.eventsJsonlPath,
+      commandsStdinJsonl: parsed.commandsStdinJsonl,
     },
     beforeDryRunOrExecute: () => {
       process.stdout.write(`${JSON.stringify({ request: parsed, config, load_errors: result.errors }, null, 2)}\n\n`);

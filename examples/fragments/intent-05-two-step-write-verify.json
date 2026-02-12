@@ -1,0 +1,26 @@
+{
+  "schema": "ais-plan-skeleton/0.0.1",
+  "meta": { "name": "two-step-write-verify" },
+  "default_chain": "eip155:1",
+  "nodes": [
+    {
+      "id": "step1__write",
+      "type": "action_ref",
+      "protocol": "demo@0.0.2",
+      "action": "set_state",
+      "args": { "value": { "ref": "inputs.value" } }
+    },
+    {
+      "id": "step2__verify",
+      "type": "query_ref",
+      "protocol": "demo@0.0.2",
+      "query": "get_state",
+      "deps": ["step1__write"],
+      "args": {},
+      "until": { "cel": "nodes.step2__verify.outputs.value == inputs.value" },
+      "retry": { "interval_ms": 1000, "max_attempts": 20 }
+    }
+  ],
+  "policy_hints": { "tags": ["verification"] }
+}
+

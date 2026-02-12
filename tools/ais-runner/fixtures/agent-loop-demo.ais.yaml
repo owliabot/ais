@@ -1,0 +1,18 @@
+schema: "ais/0.0.2"
+meta: { protocol: demo, version: "0.0.2", name: "Demo" }
+deployments:
+  - chain: "eip155:1"
+    contracts: { router: "0x1111111111111111111111111111111111111111" }
+queries:
+  quote:
+    description: "read quote"
+    params: [{ name: x, type: uint256, description: "x" }]
+    returns: [{ name: y, type: uint256 }]
+    execution:
+      "eip155:*":
+        type: evm_read
+        to: { ref: "contracts.router" }
+        abi: { type: "function", name: "quote", inputs: [{ name: "x", type: "uint256" }], outputs: [{ name: "y", type: "uint256" }] }
+        args: { x: { ref: "params.x" } }
+actions: {}
+

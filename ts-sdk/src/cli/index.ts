@@ -7,6 +7,7 @@ import { resolve } from 'node:path';
 import { validateCommand } from './commands/validate.js';
 import { lintCommand } from './commands/lint.js';
 import { checkCommand } from './commands/check.js';
+import { catalogCommand } from './commands/catalog.js';
 
 const VERSION = '0.1.0';
 
@@ -19,6 +20,7 @@ Commands:
   validate <path...>   Validate AIS files against schema
   lint <path...>       Lint AIS files for best practices
   check <path...>      Run all checks (validate + lint)
+  catalog <dir>        Export workspace catalog cards as JSON
   help                 Show this help message
   version              Show version
 
@@ -27,6 +29,8 @@ Options:
   -q, --quiet          Only show errors
   -v, --verbose        Show detailed output
   --json               Output results as JSON
+  --out <path>         Write catalog JSON to a file (catalog only)
+  --pretty             Pretty-print JSON output (catalog only)
   --no-color           Disable colored output
 
 Examples:
@@ -44,6 +48,8 @@ interface CLIOptions {
   verbose: boolean;
   json: boolean;
   noColor: boolean;
+  outPath?: string;
+  pretty?: boolean;
   paths: string[];
 }
 
@@ -92,6 +98,13 @@ function parseArgs(args: string[]): { command: string; options: CLIOptions } {
       case '--no-color':
         options.noColor = true;
         break;
+      case '--out':
+        i++;
+        options.outPath = args[i];
+        break;
+      case '--pretty':
+        options.pretty = true;
+        break;
       default:
         if (arg.startsWith('-')) {
           console.error(`Unknown option: ${arg}`);
@@ -129,6 +142,10 @@ async function main(): Promise<void> {
 
       case 'check':
         await checkCommand(options, useColor);
+        break;
+
+      case 'catalog':
+        await catalogCommand(options, useColor);
         break;
 
       case 'help':

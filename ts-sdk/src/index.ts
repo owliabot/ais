@@ -88,6 +88,56 @@ export {
   type AISSchemaType,
 } from './schema/index.js';
 
+// Catalog (cards for search)
+export {
+  CatalogSchemaVersion,
+  CatalogSchema,
+  ActionCardSchema,
+  QueryCardSchema,
+  PackCardSchema,
+  CatalogIndexSchemaVersion,
+  buildCatalog,
+  buildCatalogIndex,
+  filterByPack,
+  filterByEngineCapabilities,
+  type Catalog,
+  type CatalogDocumentEntry,
+  type ActionCard,
+  type QueryCard,
+  type PackCard,
+  type CatalogIndex,
+  type EngineCapabilities,
+  type DetectProviderCandidate,
+  type ExecutionPluginCandidate,
+  ExecutableCandidatesSchemaVersion,
+  getExecutableCandidates,
+  type ExecutableCandidates,
+  type ExecutableActionCandidate,
+  type ExecutableQueryCandidate,
+  type ExecutableDetectProviderCandidate,
+  type ExecutableExecutionPluginCandidate,
+} from './catalog/index.js';
+
+// Deterministic agent loop reference (AGT107)
+export {
+  runDeterministicAgentLoop,
+  type DeterministicAgentConfig,
+  type DeterministicAgentResult,
+  type DeterministicAgentCommand,
+} from './agent/index.js';
+
+// Plan skeleton (agent-facing minimal plan contract)
+export {
+  PlanSkeletonSchemaVersion,
+  PlanSkeletonSchema,
+  PlanSkeletonNodeSchema,
+  compilePlanSkeleton,
+  type PlanSkeleton,
+  type PlanSkeletonNode,
+  type PlanSkeletonCompileIssue,
+  type CompilePlanSkeletonResult,
+} from './skeleton/index.js';
+
 // Plugins
 export {
   createExecutionTypeRegistry,
@@ -187,6 +237,54 @@ export {
   type ValidatorRegistry,
 } from './validator/index.js';
 
+// Structured issues (AGT104)
+export {
+  StructuredIssueSchema,
+  StructuredIssueSeveritySchema,
+  StructuredIssueRelatedSchema,
+  zodPathToFieldPath,
+  issueLocator,
+  fromWorkspaceIssues,
+  fromWorkflowIssues,
+  fromZodError,
+  fromPlanBuildError,
+  type StructuredIssue,
+  type StructuredIssueSeverity,
+  type StructuredIssueRelated,
+} from './issues/index.js';
+
+// Policy enforcement (agent/runner integration)
+export {
+  checkDetectAllowed,
+  pickDetectProvider,
+  checkExecutionPluginAllowed,
+  compileWritePreview,
+  extractPolicyGateInput,
+  enforcePolicyGate,
+  explainPolicyGateResult,
+  type EnforcementKind,
+  type EnforcementResult,
+  type DetectAllowInput,
+  type DetectProviderPickInput,
+  type DetectProviderPickResult,
+  type ExecutionPluginAllowInput,
+  type WritePreview,
+  type CompileWritePreviewOptions,
+  type PolicyGateInput,
+  type ExtractPolicyGateInputOptions,
+  type EnforcePolicyGateOptions,
+  PolicyGateInputSchema,
+  PolicyGateOutputSchema,
+  POLICY_GATE_INPUT_FIELD_DICTIONARY,
+  POLICY_GATE_OUTPUT_FIELD_DICTIONARY,
+  validatePolicyGateInput,
+  validatePolicyGateOutput,
+  type PolicyGateInputShape,
+  type PolicyGateOutputShape,
+  type PolicyFieldNullSemantics,
+  type PolicyGateFieldDictionaryEntry,
+} from './policy/index.js';
+
 // Loader
 export {
   loadFile,
@@ -268,6 +366,18 @@ export {
 export {
   type RuntimePatchOp,
   type RuntimePatch,
+  RuntimePatchSchema,
+  RuntimePatchOpSchema,
+  validateRuntimePatch,
+  checkRuntimePatchPathAllowed,
+  DEFAULT_RUNTIME_PATCH_GUARD_POLICY,
+  buildRuntimePatchGuardPolicy,
+  type RuntimePatchValidationError,
+  type RuntimePatchGuardPolicy,
+  type RuntimePatchGuardOptions,
+  type RuntimePatchGuardRejection,
+  type RuntimePatchAuditEntry,
+  type RuntimePatchAuditSummary,
   RuntimePatchError,
   applyRuntimePatch,
   applyRuntimePatches,
@@ -300,22 +410,48 @@ export {
   checkpointJsonReviver,
   type SerializeCheckpointOptions,
   AIS_JSON_TYPE_KEY,
+  AIS_JSON_CODEC_PROFILE_VERSION,
+  AIS_JSON_CODEC_PROFILE,
+  aisJsonCodec,
+  createAisJsonReplacer,
+  type AisJsonCodecProfile,
+  type AisJsonCodec,
   stringifyAisJson,
   parseAisJson,
   aisJsonReplacer,
   aisJsonReviver,
   type ExecutionTraceSink,
   type ExecutionTraceRecord,
+  type TraceRedactMode,
   createJsonlTraceSink,
   createJsonlTraceSinkFromWritable,
+  redactEngineEventForTrace,
+  redactEngineEventByMode,
   createEngineEventJsonlWriter,
+  engineEventToEnvelope,
   engineEventsToJsonl,
   encodeEngineEventJsonlRecord,
   decodeEngineEventJsonlRecord,
   type EngineEventJsonlRecord,
+  type EngineEventEnvelope,
+  RunnerCommandSchema,
+  RunnerCommandKindSchema,
+  validateRunnerCommand,
+  summarizeCommand,
+  commandPatches,
+  type RunnerCommandKind,
+  type RunnerCommand,
+  type ParsedRunnerCommand,
+  type CommandValidationError,
   createJsonlRpcPeer,
   type JsonlRpcPeer,
   type JsonlRpcPeerOptions,
+
+  // Confirmation summary (AGT106)
+  ConfirmationSummarySchemaVersion,
+  ConfirmationSummarySchema,
+  summarizeNeedUserConfirm,
+  type ConfirmationSummary,
 } from './engine/index.js';
 
 // CEL Expression Evaluator

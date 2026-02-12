@@ -12,6 +12,8 @@ export interface CLIOptions {
   verbose: boolean;
   json: boolean;
   noColor: boolean;
+  outPath?: string;
+  pretty?: boolean;
   paths: string[];
 }
 

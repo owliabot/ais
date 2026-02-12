@@ -1,0 +1,18 @@
+schema: "ais/0.0.2"
+meta: { protocol: demo3, version: "0.0.2", name: "Demo3" }
+deployments:
+  - chain: "eip155:1"
+    contracts: { router: "0x1111111111111111111111111111111111111111" }
+actions:
+  swap:
+    description: "write tx"
+    risk_level: 4
+    params: [{ name: amount_in, type: uint256, description: "amount in" }]
+    execution:
+      "eip155:*":
+        type: evm_call
+        to: { ref: "contracts.router" }
+        abi: { type: "function", name: "swap", inputs: [{ name: "amount_in", type: "uint256" }], outputs: [] }
+        args: { amount_in: { ref: "params.amount_in" } }
+queries: {}
+

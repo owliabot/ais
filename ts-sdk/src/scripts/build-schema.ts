@@ -222,7 +222,7 @@ async function main(): Promise<void> {
   const protocol = buildRootSchema('AIS Protocol Spec (ais/0.0.2)', 'urn:ais:0.0.2:protocol', ProtocolSpecSchema);
   const pack = buildRootSchema('AIS Pack (ais-pack/0.0.2)', 'urn:ais:0.0.2:pack', PackSchema);
   const workflow = buildRootSchema('AIS Workflow (ais-flow/0.0.2)', 'urn:ais:0.0.2:workflow', WorkflowSchema);
-  const plan = buildRootSchema('AIS Execution Plan (ais-plan/0.0.2)', 'urn:ais:0.0.2:plan', ExecutionPlanSchema);
+  const plan = buildRootSchema('AIS Execution Plan (ais-plan/0.0.3)', 'urn:ais:0.0.2:plan', ExecutionPlanSchema);
   const conformance = buildRootSchema(
     'AIS Conformance Vectors (ais-conformance/0.0.2)',
     'urn:ais:0.0.2:conformance',

@@ -1,0 +1,12 @@
+schema: "ais-flow/0.0.3"
+meta: { name: agent-loop-missing-contracts, version: "0.0.3" }
+default_chain: "eip155:1"
+inputs:
+  amount: { type: uint256 }
+nodes:
+  - id: q1
+    type: query_ref
+    protocol: "demo2@0.0.2"
+    query: quote
+    args:
+      x: { ref: "inputs.amount" }

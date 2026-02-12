@@ -7,7 +7,8 @@ type CheckpointCodecSdk = Pick<RunnerSdkModule, 'deserializeCheckpoint' | 'seria
 export class FileCheckpointStore {
   constructor(
     private readonly sdk: CheckpointCodecSdk,
-    private readonly filePath: string
+    private readonly filePath: string,
+    private readonly options: { redact_mode?: string; redact_allow_path_patterns?: string[] } = {}
   ) {}
 
   async load(): Promise<RunnerEngineCheckpoint | null> {
@@ -21,7 +22,11 @@ export class FileCheckpointStore {
 
   async save(checkpoint: RunnerEngineCheckpoint): Promise<void> {
     await mkdir(dirname(this.filePath), { recursive: true });
-    const raw = this.sdk.serializeCheckpoint(checkpoint, { pretty: true });
+    const raw = this.sdk.serializeCheckpoint(checkpoint, {
+      pretty: true,
+      redact_mode: this.options.redact_mode as any,
+      redact_allow_path_patterns: this.options.redact_allow_path_patterns as any,
+    } as any);
     await writeFile(this.filePath, raw, 'utf-8');
   }
 }

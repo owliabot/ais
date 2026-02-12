@@ -1,0 +1,31 @@
+{
+  "schema": "ais-plan-skeleton/0.0.1",
+  "meta": { "name": "withdraw-then-verify" },
+  "default_chain": "eip155:1",
+  "nodes": [
+    {
+      "id": "withdraw__withdraw",
+      "type": "action_ref",
+      "protocol": "aave-v3@0.0.2",
+      "action": "withdraw",
+      "args": {
+        "asset": { "ref": "inputs.asset" },
+        "amount": { "ref": "inputs.amount" }
+      }
+    },
+    {
+      "id": "verify__balance",
+      "type": "query_ref",
+      "protocol": "erc20@0.0.2",
+      "query": "balance_of",
+      "deps": ["withdraw__withdraw"],
+      "args": {
+        "owner": { "ref": "ctx.wallet_address" }
+      },
+      "until": { "cel": "nodes.verify__balance.outputs.balance >= inputs.min_expected_balance" },
+      "retry": { "interval_ms": 2000, "max_attempts": 30 }
+    }
+  ],
+  "policy_hints": { "tags": ["verification", "wait"] }
+}
+

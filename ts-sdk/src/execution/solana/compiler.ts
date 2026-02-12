@@ -43,6 +43,14 @@ export interface CompiledSolanaInstructionRequest {
   tx: TransactionInstruction;
   computeUnits?: number;
   lookupTables?: string[];
+  accounts?: Array<{
+    name: string;
+    pubkey: string;
+    isSigner: boolean;
+    isWritable: boolean;
+  }>;
+  discriminatorSummary?: unknown;
+  dataSummary?: unknown;
 }
 
 export class SolanaCompileError extends Error {
@@ -118,6 +126,14 @@ export function compileSolanaInstruction(
     tx,
     computeUnits,
     lookupTables,
+    accounts: accounts.map((account) => ({
+      name: account.name,
+      pubkey: account.pubkey.toBase58(),
+      isSigner: account.isSigner,
+      isWritable: account.isWritable,
+    })),
+    discriminatorSummary: discriminator,
+    dataSummary: data,
   };
 }
 
@@ -197,6 +213,14 @@ export async function compileSolanaInstructionAsync(
     tx,
     computeUnits,
     lookupTables,
+    accounts: accounts.map((account) => ({
+      name: account.name,
+      pubkey: account.pubkey.toBase58(),
+      isSigner: account.isSigner,
+      isWritable: account.isWritable,
+    })),
+    discriminatorSummary: discriminator,
+    dataSummary: data,
   };
 }
 

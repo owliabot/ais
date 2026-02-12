@@ -1,0 +1,14 @@
+schema: "ais-flow/0.0.3"
+meta: { name: agent-loop-policy-gate, version: "0.0.3" }
+default_chain: "eip155:1"
+requires_pack: { name: policy-gate-pack, version: "0.0.2" }
+inputs:
+  amount: { type: uint256 }
+nodes:
+  - id: a1
+    type: action_ref
+    protocol: "demo3@0.0.2"
+    action: swap
+    args:
+      amount_in: { ref: "inputs.amount" }
+

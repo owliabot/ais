@@ -1,7 +1,11 @@
-export function parseJsonObject(raw: string, flagName: string): Record<string, unknown> {
+export function parseJsonObject(
+  raw: string,
+  flagName: string,
+  parse: (json: string) => unknown = JSON.parse
+): Record<string, unknown> {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(raw);
+    parsed = parse(raw);
   } catch (error) {
     throw new Error(`${flagName} must be valid JSON: ${(error as Error).message}`);
   }

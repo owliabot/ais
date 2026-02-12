@@ -54,7 +54,18 @@ export type RunnerSdkModule = typeof import('../../../ts-sdk/dist/index.js');
 
 export type DryRunSdk = Pick<
   RunnerSdkModule,
-  'createSolver' | 'solver' | 'getNodeReadiness' | 'applyRuntimePatches' | 'compileEvmExecution' | 'solana'
+  | 'createSolver'
+  | 'solver'
+  | 'getNodeReadiness'
+  | 'applyRuntimePatches'
+  | 'compileEvmExecution'
+  | 'solana'
+  | 'compileWritePreview'
+  | 'extractPolicyGateInput'
+  | 'enforcePolicyGate'
+  | 'explainPolicyGateResult'
+  | 'resolveAction'
+  | 'ExecutionPlanSchema'
 >;
 
 export type WorkflowOutputSdk = Pick<RunnerSdkModule, 'evaluateValueRef'>;

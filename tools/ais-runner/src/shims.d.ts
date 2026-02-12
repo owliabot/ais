@@ -1,6 +1,7 @@
 declare const process: {
   argv: string[];
   stdout: { write(chunk: string): void };
+  stdin: { isTTY?: boolean } & AsyncIterable<string>;
   env?: Record<string, string | undefined>;
   exitCode?: number;
 };
@@ -17,6 +18,13 @@ declare module 'node:module' {
 
 declare module 'node:path' {
   export function dirname(p: string): string;
+}
+
+declare module 'node:readline' {
+  export function createInterface(options: {
+    input: AsyncIterable<string> | unknown;
+    crlfDelay?: number;
+  }): AsyncIterable<string> & { close(): void };
 }
 
 declare module 'yaml' {

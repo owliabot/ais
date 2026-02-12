@@ -1,0 +1,32 @@
+{
+  "schema": "ais-plan-skeleton/0.0.1",
+  "meta": { "name": "bridge-send-wait" },
+  "nodes": [
+    {
+      "id": "bridge__send",
+      "type": "action_ref",
+      "chain": "eip155:1",
+      "protocol": "bridge@0.0.2",
+      "action": "send",
+      "args": {
+        "to_chain": { "lit": "solana:mainnet" },
+        "amount": { "ref": "inputs.amount" }
+      }
+    },
+    {
+      "id": "bridge__wait",
+      "type": "query_ref",
+      "chain": "solana:mainnet",
+      "protocol": "bridge@0.0.2",
+      "query": "status",
+      "deps": ["bridge__send"],
+      "args": {
+        "transfer_id": { "ref": "nodes.bridge__send.outputs.transfer_id" }
+      },
+      "until": { "cel": "nodes.bridge__wait.outputs.done == true" },
+      "retry": { "interval_ms": 5000, "max_attempts": 60 }
+    }
+  ],
+  "policy_hints": { "tags": ["bridge", "wait"] }
+}
+

@@ -4,6 +4,8 @@ export * from './runner.js';
 export * from './checkpoint.js';
 export * from './json.js';
 export * from './trace.js';
+export * from './commands.js';
+export * from './confirm-summary.js';
 export * from './adapters/index.js';
 export * from './executors/evm-jsonrpc.js';
 export * from './executors/solana-rpc.js';

@@ -27,6 +27,14 @@ export function formatEvent(ev: RunnerEngineEvent): string {
       return `event: skipped node=${ev.node.id}`;
     case 'engine_paused':
       return `event: engine_paused paused=${ev.paused.length}`;
+    case 'command_accepted':
+      return `event: command_accepted id=${ev.command.id} kind=${ev.command.kind}`;
+    case 'command_rejected':
+      return `event: command_rejected id=${ev.command?.id ?? 'unknown'} reason=${ev.reason}`;
+    case 'patch_applied':
+      return `event: patch_applied id=${ev.command?.id ?? 'unknown'} patches=${ev.summary.patch_count} hash=${ev.summary.hash.slice(0, 12)}`;
+    case 'patch_rejected':
+      return `event: patch_rejected id=${ev.command?.id ?? 'unknown'} reason=${ev.reason}`;
     case 'error':
       return `event: error node=${ev.node?.id ?? 'global'} msg=${ev.error?.message ?? String(ev.error)}`;
     case 'checkpoint_saved':

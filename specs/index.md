@@ -12,10 +12,13 @@ This folder defines the current AIS draft spec (**0.0.2**).
   - Protocol Spec — `specs/ais-1-protocol.md`
   - Pack — `specs/ais-1-pack.md`
   - Workflow — `specs/ais-1-workflow.md`
+  - Catalog Cards — `specs/ais-1-catalog.md`
   - Types & Numeric Model — `specs/ais-1-types.md`
   - Expressions & References (ValueRef) — `specs/ais-1-expressions.md`
   - Capabilities — `specs/ais-1-capabilities.md`
 - AIS-2: Execution
+  - Execution Plan Contract — `specs/ais-2-plan.md`
+  - Engine Event Protocol — `specs/ais-2-engine-events.md`
   - Composite (cross-chain step container) — `specs/ais-2-composite.md`
   - EVM Execution — `specs/ais-2-evm.md`
   - Solana Execution — `specs/ais-2-solana.md`

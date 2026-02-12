@@ -180,6 +180,7 @@ const PluginsSchema = z
 
 const ActionOverrideSchema = z
   .object({
+  risk_level: z.number().int().min(1).max(5).optional(),
   risk_tags: z.array(z.string()).optional(),
   hard_constraints: HardConstraintsDefaultsSchema.optional(),
   extensions: ExtensionsSchema,

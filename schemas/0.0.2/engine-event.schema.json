@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ais:0.0.2:engine-event",
+  "title": "AIS Engine Event JSONL Record (ais-engine-event/0.0.3)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "run_id", "seq", "ts", "event"],
+  "properties": {
+    "schema": { "const": "ais-engine-event/0.0.3" },
+    "run_id": { "type": "string", "minLength": 1 },
+    "seq": { "type": "integer", "minimum": 0 },
+    "ts": { "type": "string", "minLength": 1 },
+    "event": { "$ref": "#/$defs/eventEnvelope" }
+  },
+  "$defs": {
+    "eventType": {
+      "type": "string",
+      "enum": [
+        "plan_ready",
+        "node_ready",
+        "node_blocked",
+        "need_user_confirm",
+        "query_result",
+        "tx_prepared",
+        "tx_sent",
+        "tx_confirmed",
+        "node_waiting",
+        "checkpoint_saved",
+        "engine_paused",
+        "error",
+        "solver_applied",
+        "node_paused",
+        "skipped",
+        "command_accepted",
+        "command_rejected",
+        "patch_applied",
+        "patch_rejected"
+      ]
+    },
+    "eventEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "data"],
+      "properties": {
+        "type": { "$ref": "#/$defs/eventType" },
+        "node_id": { "type": "string" },
+        "data": { "type": "object" },
+        "extensions": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "type": { "const": "need_user_confirm" } },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "required": ["reason", "details"],
+                "properties": {
+                  "reason": { "type": "string" },
+                  "details": {
+                    "type": "object",
+                    "required": ["node_id", "action_ref", "hit_reasons"],
+                    "properties": {
+                      "node_id": { "type": "string" },
+                      "action_ref": { "type": "string" },
+                      "hit_reasons": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                      },
+                      "workflow_node_id": { "type": "string" },
+                      "chain": { "type": "string" },
+                      "execution_type": { "type": "string" },
+                      "pack_summary": {
+                        "type": "object",
+                        "additionalProperties": true
+                      },
+                      "policy_summary": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    },
+                    "additionalProperties": true
+                  }
+                },
+                "additionalProperties": true
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:ais:0.0.2:plan",
-  "title": "AIS Execution Plan (ais-plan/0.0.2)",
+  "title": "AIS Execution Plan (ais-plan/0.0.3)",
   "$ref": "#/$defs/Root_1",
   "$defs": {
     "extensions_7": {

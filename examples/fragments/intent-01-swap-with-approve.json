@@ -1,0 +1,56 @@
+{
+  "schema": "ais-plan-skeleton/0.0.1",
+  "meta": { "name": "swap-with-approve" },
+  "default_chain": "eip155:1",
+  "nodes": [
+    {
+      "id": "approve__allowance",
+      "type": "query_ref",
+      "protocol": "erc20@0.0.2",
+      "query": "allowance",
+      "args": {
+        "owner": { "ref": "ctx.wallet_address" },
+        "spender": { "ref": "ctx.spender_address" }
+      }
+    },
+    {
+      "id": "approve__approve",
+      "type": "action_ref",
+      "protocol": "erc20@0.0.2",
+      "action": "approve",
+      "deps": ["approve__allowance"],
+      "condition": { "cel": "nodes.approve__allowance.outputs.allowance < inputs.amount_in" },
+      "args": {
+        "spender": { "ref": "ctx.spender_address" },
+        "amount": { "ref": "inputs.amount_in" }
+      }
+    },
+    {
+      "id": "swap__quote",
+      "type": "query_ref",
+      "protocol": "uniswap-v3@0.0.2",
+      "query": "quote",
+      "deps": ["approve__approve"],
+      "args": {
+        "amount_in": { "ref": "inputs.amount_in" }
+      }
+    },
+    {
+      "id": "swap__swap",
+      "type": "action_ref",
+      "protocol": "uniswap-v3@0.0.2",
+      "action": "swap",
+      "deps": ["swap__quote"],
+      "args": {
+        "amount_in": { "ref": "inputs.amount_in" },
+        "min_out": { "ref": "nodes.swap__quote.outputs.amount_out" },
+        "slippage_bps": { "ref": "inputs.slippage_bps" }
+      }
+    }
+  ],
+  "policy_hints": {
+    "tags": ["approval", "slippage"],
+    "require_confirmation": false
+  }
+}
+

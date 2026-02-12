@@ -19,6 +19,8 @@ type ProviderEntry = {
 
 type DetectSdk = {
   ValueRefEvalError: ValueRefEvalErrorCtor;
+  pickDetectProvider?: RunnerSdkModule['pickDetectProvider'];
+  checkDetectAllowed?: RunnerSdkModule['checkDetectAllowed'];
 };
 
 export function createRunnerDetectResolver(args: {
@@ -93,15 +95,42 @@ export function createRunnerDetectResolver(args: {
   return {
     resolve(detect: DetectInput, ctx: DetectContext): unknown | Promise<unknown> {
       const kind = detect.kind ? String(detect.kind) : '';
-      const provider = detect.provider ? String(detect.provider) : null;
+      const requestedProvider = detect.provider ? String(detect.provider) : null;
       if (!kind) throw new sdk.ValueRefEvalError('Detect.kind is required');
+      const chain = detectChain(ctx);
+      const overrideProvider = pickRuntimeProviderOverride(ctx, kind, chain);
+
+      let provider = requestedProvider;
+      if (!provider && overrideProvider) provider = overrideProvider;
+      if (pack?.document && sdk.pickDetectProvider) {
+        const picked = sdk.pickDetectProvider(pack.document, {
+          kind,
+          provider: provider ?? undefined,
+          chain,
+        });
+        if (!picked.ok) {
+          throw new sdk.ValueRefEvalError(picked.reason ?? 'detect provider blocked by pack', {
+            cause: picked.details,
+          });
+        }
+        provider = picked.provider ?? requestedProvider ?? null;
+      } else if (pack?.document && sdk.checkDetectAllowed && requestedProvider) {
+        const check = sdk.checkDetectAllowed(pack.document, {
+          kind,
+          provider: requestedProvider,
+          chain,
+        });
+        if (!check.ok) {
+          throw new sdk.ValueRefEvalError(check.reason ?? 'detect provider blocked by pack', {
+            cause: check.details,
+          });
+        }
+      }
 
       if (provider) {
         const picked = byKey.get(`${kind}:${provider}`);
         if (!picked) {
-          throw new sdk.ValueRefEvalError(
-            `Detect provider not found: kind=${kind} provider=${provider}`
-          );
+          throw new sdk.ValueRefEvalError(`Detect provider not found: kind=${kind} provider=${provider}`);
         }
         return picked.resolve(detect, ctx);
       }
@@ -129,6 +158,34 @@ export function createRunnerDetectResolver(args: {
   };
 }
 
+function pickRuntimeProviderOverride(
+  ctx: DetectContext,
+  kind: string,
+  chain: string | undefined
+): string | null {
+  const runtimeCtx = (ctx.runtime?.ctx ?? {}) as Record<string, unknown>;
+  const list = runtimeCtx.runner_detect_overrides;
+  if (!Array.isArray(list) || list.length === 0) return null;
+
+  let best: { provider: string; score: number } | null = null;
+  for (const entry of list) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    const rec = entry as Record<string, unknown>;
+    const entryKind = typeof rec.kind === 'string' ? rec.kind : '';
+    const provider = typeof rec.provider === 'string' ? rec.provider : '';
+    if (!entryKind || !provider) continue;
+    if (entryKind !== kind) continue;
+
+    const entryChain = typeof rec.chain === 'string' ? rec.chain : undefined;
+    if (entryChain && chain && entryChain !== chain) continue;
+    if (entryChain && !chain) continue;
+
+    const score = entryChain ? 2 : 1;
+    if (!best || score >= best.score) best = { provider, score };
+  }
+  return best?.provider ?? null;
+}
+
 function firstCandidateOrThrow(
   ValueRefEvalError: ValueRefEvalErrorCtor,
   detect: DetectInput
@@ -138,4 +195,13 @@ function firstCandidateOrThrow(
     throw new ValueRefEvalError('Detect requires non-empty candidates');
   }
   return candidates[0];
+}
+
+function detectChain(ctx: DetectContext): string | undefined {
+  const runtimeCtx = (ctx.runtime?.ctx ?? {}) as Record<string, unknown>;
+  const chainId = runtimeCtx.chain_id;
+  if (typeof chainId === 'string' && chainId.length > 0) return chainId;
+  const chain = runtimeCtx.chain;
+  if (typeof chain === 'string' && chain.length > 0) return chain;
+  return undefined;
 }

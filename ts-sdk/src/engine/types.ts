@@ -1,6 +1,6 @@
 import type { ExecutionPlan, ExecutionPlanNode, NodeReadinessResult } from '../execution/index.js';
 import type { ResolverContext } from '../resolver/index.js';
-import type { RuntimePatch } from './patch.js';
+import type { RuntimePatch, RuntimePatchAuditSummary } from './patch.js';
 import type { DetectResolver } from '../resolver/value-ref.js';
 
 export type EngineEvent =
@@ -16,6 +16,32 @@ export type EngineEvent =
   | { type: 'tx_confirmed'; node: ExecutionPlanNode; receipt: unknown }
   | { type: 'node_waiting'; node: ExecutionPlanNode; attempts: number; next_attempt_at_ms: number }
   | { type: 'engine_paused'; paused: Array<{ node: ExecutionPlanNode; reason: string; details?: unknown }> }
+  | {
+      type: 'command_accepted';
+      command: { id: string; ts: string; kind: string };
+      details?: unknown;
+    }
+  | {
+      type: 'command_rejected';
+      command?: { id?: string; ts?: string; kind?: string };
+      reason: string;
+      field_path?: string;
+      details?: unknown;
+    }
+  | {
+      type: 'patch_applied';
+      command?: { id?: string; ts?: string; kind?: string };
+      summary: RuntimePatchAuditSummary;
+      details?: unknown;
+    }
+  | {
+      type: 'patch_rejected';
+      command?: { id?: string; ts?: string; kind?: string };
+      reason: string;
+      field_path?: string;
+      summary?: RuntimePatchAuditSummary;
+      details?: unknown;
+    }
   | { type: 'skipped'; node: ExecutionPlanNode; reason: string }
   | { type: 'error'; node?: ExecutionPlanNode; error: Error; retryable?: boolean }
   | { type: 'checkpoint_saved'; checkpoint: EngineCheckpoint };
@@ -41,6 +67,7 @@ export interface EngineCheckpoint {
   poll_state_by_node_id?: Record<string, NodePollState>;
   paused_by_node_id?: Record<string, NodePauseState>;
   events?: EngineEvent[];
+  extensions?: Record<string, unknown>;
 }
 
 export interface CheckpointStore {

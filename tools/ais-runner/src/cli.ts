@@ -3,8 +3,12 @@ type CommonFlags = {
   checkpointPath?: string;
   resume?: boolean;
   tracePath?: string;
+  traceRedactMode?: string;
+  eventsJsonlPath?: string;
+  commandsStdinJsonl?: boolean;
   outPath?: string;
   dryRun?: boolean;
+  dryRunFormat?: string;
   broadcast?: boolean;
   yes?: boolean;
   strictImports?: boolean;
@@ -38,23 +42,62 @@ export type RunQueryRequest = CommonFlags & {
   timeoutMs?: number;
 };
 
-export type CliRequest = RunWorkflowRequest | RunActionRequest | RunQueryRequest | { kind: 'help' };
+export type RunPlanRequest = CommonFlags & {
+  kind: 'run_plan';
+  workspaceDir: string;
+  filePath: string;
+  workflowPath?: string;
+  inputsJson?: string;
+  ctxJson?: string;
+};
+
+export type PlanDiffRequest = {
+  kind: 'plan_diff';
+  aPath: string;
+  bPath: string;
+  format?: string; // text|json
+};
+
+export type ReplayRequest = {
+  kind: 'replay';
+  checkpointPath?: string;
+  tracePath?: string;
+  untilNodeId?: string;
+  format?: string; // text|json
+};
+
+export type CliRequest =
+  | RunWorkflowRequest
+  | RunActionRequest
+  | RunQueryRequest
+  | RunPlanRequest
+  | PlanDiffRequest
+  | ReplayRequest
+  | { kind: 'help' };
 
 export function renderHelp(): string {
   return `AIS internal runner (ts-sdk verifier)
 
 Usage:
   ais-runner run workflow --file <.ais-flow.yaml> --workspace <dir> [--inputs <json>] [--ctx <json>]
+  ais-runner run plan --file <.ais-plan.json|.yaml> --workspace <dir> [--workflow <.ais-flow.yaml>] [--inputs <json>] [--ctx <json>]
   ais-runner run action --ref <protocol@ver>/<actionId> --workspace <dir> --args <json> [--chain <caip2>]
   ais-runner run query --ref <protocol@ver>/<queryId> --workspace <dir> --args <json> [--chain <caip2>]
+  ais-runner plan diff --a <planA.json|yaml> --b <planB.json|yaml> [--format text|json]
+  ais-runner replay --checkpoint <checkpoint.json> [--until-node <id>] [--format text|json]
+  ais-runner replay --trace <trace.jsonl|events.jsonl> [--until-node <id>] [--format text|json]
 
 Common options:
   --config <path>         Runner config (yaml)
   --checkpoint <path>     Checkpoint file path (json)
   --resume                Resume from checkpoint if compatible
   --trace <path>          Trace JSONL output path
+  --trace-redact <mode>   Trace/Event redaction mode: default|audit|off (default: default)
+  --events-jsonl <path|stdout>  Write raw engine events JSONL (use "stdout" or "-" for stdout)
+  --commands-stdin-jsonl  Read command JSONL from stdin when engine pauses
   --out <path>            Write evaluated workflow outputs JSON
   --dry-run               Do not broadcast transactions
+  --dry-run-format <fmt>  Dry-run output format: text|json (default: text)
   --broadcast             Allow broadcasting write transactions (default: false)
   --yes                   Auto-approve policy gates (default: false)
   --strict-imports        Enforce workflow imports allowlist (default: true)
@@ -70,7 +113,30 @@ export function parseCliArgs(argv: string[]): CliRequest {
 
   const cmd = args[0];
   const mode = args[1];
-  if (cmd !== 'run' || (mode !== 'workflow' && mode !== 'action' && mode !== 'query')) {
+
+  if (cmd === 'plan' && mode === 'diff') {
+    const flags = parseFlags(args.slice(2));
+    const aPath = flags.str['a'];
+    const bPath = flags.str['b'];
+    if (!aPath || !bPath) return { kind: 'help' };
+    return { kind: 'plan_diff', aPath, bPath, format: flags.str['format'] };
+  }
+
+  if (cmd === 'replay') {
+    const flags = parseFlags(args.slice(1));
+    const checkpointPath = flags.str['checkpoint'];
+    const tracePath = flags.str['trace'];
+    if (!checkpointPath && !tracePath) return { kind: 'help' };
+    return {
+      kind: 'replay',
+      checkpointPath,
+      tracePath,
+      untilNodeId: flags.str['until-node'],
+      format: flags.str['format'],
+    };
+  }
+
+  if (cmd !== 'run' || (mode !== 'workflow' && mode !== 'action' && mode !== 'query' && mode !== 'plan')) {
     return { kind: 'help' };
   }
 
@@ -82,6 +148,21 @@ export function parseCliArgs(argv: string[]): CliRequest {
     return {
       kind: 'run_workflow',
       filePath,
+      workspaceDir,
+      inputsJson: flags.str['inputs'],
+      ctxJson: flags.str['ctx'],
+      ...commonFromFlags(flags),
+    };
+  }
+
+  if (mode === 'plan') {
+    const filePath = flags.str['file'];
+    const workspaceDir = flags.str['workspace'];
+    if (!filePath || !workspaceDir) return { kind: 'help' };
+    return {
+      kind: 'run_plan',
+      filePath,
+      workflowPath: flags.str['workflow'],
       workspaceDir,
       inputsJson: flags.str['inputs'],
       ctxJson: flags.str['ctx'],
@@ -127,8 +208,12 @@ function commonFromFlags(flags: ParsedFlags): CommonFlags {
     checkpointPath: flags.str['checkpoint'],
     resume: flags.bool.has('resume'),
     tracePath: flags.str['trace'],
+    traceRedactMode: flags.str['trace-redact'],
+    eventsJsonlPath: flags.str['events-jsonl'],
+    commandsStdinJsonl: flags.bool.has('commands-stdin-jsonl'),
     outPath: flags.str['out'],
     dryRun: flags.bool.has('dry-run'),
+    dryRunFormat: flags.str['dry-run-format'],
     broadcast: flags.bool.has('broadcast'),
     yes: flags.bool.has('yes'),
     strictImports: !flags.bool.has('no-strict-imports'),
@@ -158,6 +243,7 @@ function parseFlags(argv: string[]): ParsedFlags {
       key === 'broadcast' ||
       key === 'yes' ||
       key === 'imports-only' ||
+      key === 'commands-stdin-jsonl' ||
       key === 'no-strict-imports'
     ) {
       bool.add(key);

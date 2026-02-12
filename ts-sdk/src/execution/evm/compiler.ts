@@ -30,6 +30,7 @@ export interface CompiledEvmAbiRequest {
   data: string;
   value: bigint;
   abi: JsonAbiFunction;
+  args?: Record<string, unknown>;
 }
 
 export interface CompiledEvmRpcRequest {
@@ -100,6 +101,7 @@ export function compileEvmCall(
     data,
     value,
     abi: execution.abi,
+    args,
   };
 }
 
@@ -118,6 +120,7 @@ export async function compileEvmCallAsync(
     data,
     value,
     abi: execution.abi,
+    args,
   };
 }
 
@@ -136,6 +139,7 @@ export function compileEvmRead(
     data,
     value: 0n,
     abi: execution.abi,
+    args,
   };
 }
 
@@ -154,6 +158,7 @@ export async function compileEvmReadAsync(
     data,
     value: 0n,
     abi: execution.abi,
+    args,
   };
 }
 
