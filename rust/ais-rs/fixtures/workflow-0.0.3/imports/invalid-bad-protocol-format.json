@@ -1,0 +1,17 @@
+{
+  "schema": "ais-flow/0.0.3",
+  "meta": {"name": "wf-imports-bad-protocol-format", "version": "0.0.3"},
+  "imports": {
+    "protocols": [
+      {"protocol": "erc20", "path": "./protocols/erc20.yaml"}
+    ]
+  },
+  "nodes": [
+    {
+      "id": "balance",
+      "type": "query_ref",
+      "protocol": "erc20@0.0.2",
+      "query": "balance-of"
+    }
+  ]
+}

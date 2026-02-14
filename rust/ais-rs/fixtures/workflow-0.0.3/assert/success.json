@@ -1,0 +1,15 @@
+{
+  "schema": "ais-flow/0.0.3",
+  "meta": {"name": "wf-assert-success", "version": "0.0.3"},
+  "default_chain": "eip155:1",
+  "nodes": [
+    {
+      "id": "quote",
+      "type": "query_ref",
+      "protocol": "demo@0.0.2",
+      "query": "quote",
+      "assert": {"cel": "size(nodes.quote.outputs) > 0"},
+      "assert_message": "quote output must be present"
+    }
+  ]
+}

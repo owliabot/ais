@@ -1,0 +1,26 @@
+[workspace]
+members = [
+  "crates/ais-cel",
+  "crates/ais-core",
+  "crates/ais-evm-executor",
+  "crates/ais-engine",
+  "crates/ais-runner",
+  "crates/ais-schema",
+  "crates/ais-solana-executor",
+  "crates/ais-sdk",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+regex = "1"
+serde_yaml = "0.9"
+jsonschema = "0.18"
+futures = "0.3"

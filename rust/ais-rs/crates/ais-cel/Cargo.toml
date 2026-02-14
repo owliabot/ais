@@ -1,0 +1,12 @@
+[package]
+name = "ais-cel"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+regex.workspace = true
+num-bigint = "0.4"
+num-traits = "0.2"
+bigdecimal = "0.4"

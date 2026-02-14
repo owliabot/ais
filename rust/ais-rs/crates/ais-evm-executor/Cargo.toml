@@ -1,0 +1,21 @@
+[package]
+name = "ais-evm-executor"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ais-engine = { path = "../ais-engine" }
+alloy = { version = "0.8", features = ["full"] }
+alloy-primitives = { version = "0.8", features = ["k256"] }
+alloy-consensus = { version = "0.8", features = ["k256"] }
+alloy-eips = "0.8"
+alloy-json-abi = "0.8"
+alloy-dyn-abi = "0.8"
+alloy-rpc-types-eth = "0.8"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+k256 = "0.13"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }

@@ -1,0 +1,28 @@
+{
+  "schema": "ais-flow/0.0.3",
+  "meta": {"name": "wf-preflight-simulate", "version": "0.0.3"},
+  "default_chain": "eip155:1",
+  "preflight": {
+    "simulate": {
+      "quote": true,
+      "*": false
+    }
+  },
+  "nodes": [
+    {
+      "id": "quote",
+      "type": "query_ref",
+      "protocol": "demo@0.0.2",
+      "query": "quote",
+      "assert": {"cel": "nodes.quote.outputs.simulated == true"},
+      "assert_message": "quote should run in preflight simulate mode"
+    },
+    {
+      "id": "swap",
+      "type": "action_ref",
+      "protocol": "demo@0.0.2",
+      "action": "swap",
+      "deps": ["quote"]
+    }
+  ]
+}

@@ -1,0 +1,1 @@
+{"schema":"ais-engine-command/0.0.1","command":{"id":"cmd-valid-input","type":"apply_patches","data":{"patches":[{"op":"set","path":"inputs.amount","value":"100"}]}}}

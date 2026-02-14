@@ -1,0 +1,1 @@
+{"schema":"ais-engine-command/0.0.1","command":{"id":"cmd-invalid-node-write","type":"apply_patches","data":{"patches":[{"op":"set","path":"nodes.approve.outputs","value":{"forced":true}}]}}}

@@ -1,0 +1,22 @@
+schema: "ais-pack/0.0.2"
+name: "safe-defi"
+version: "0.0.2"
+description: "Fixture pack with chain_scope + policy + allowlist"
+
+includes:
+  - protocol: "erc20"
+    version: "0.0.2"
+    source: "local"
+    chain_scope: ["eip155:1"]
+
+policy:
+  approvals:
+    auto_execute_max_risk_level: 2
+    require_approval_min_risk_level: 3
+
+token_policy:
+  allowlist:
+    - chain: "eip155:1"
+      symbol: "WETH"
+      address: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+      decimals: 18

@@ -1,0 +1,21 @@
+{
+  "schema": "ais-flow/0.0.3",
+  "meta": {"name": "wf-overrides-chain", "version": "0.0.3"},
+  "default_chain": "eip155:1",
+  "nodes": [
+    {
+      "id": "swap",
+      "type": "action_ref",
+      "protocol": "demo@0.0.2",
+      "action": "swap",
+      "args": {
+        "min_out": {"lit": "1000"}
+      },
+      "calculated_overrides": {
+        "slippage_bps": {"expr": {"lit": 50}},
+        "amount_out_limit": {"expr": {"cel": "int(calculated.slippage_bps) + int(params.min_out)"}},
+        "final_min_out": {"expr": {"cel": "int(calculated.amount_out_limit) - 5"}}
+      }
+    }
+  ]
+}

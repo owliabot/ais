@@ -1,0 +1,22 @@
+{
+  "schema": "ais-plan/0.0.3",
+  "meta": {},
+  "nodes": [
+    {
+      "id": "a",
+      "kind": "execution",
+      "chain": "eip155:1",
+      "execution": { "type": "evm_read" },
+      "writes": [{ "path": "nodes.a.outputs", "mode": "set" }]
+    },
+    {
+      "id": "b",
+      "kind": "execution",
+      "chain": "eip155:1",
+      "deps": ["a"],
+      "execution": { "type": "evm_call" },
+      "writes": [{ "path": "nodes.b.outputs", "mode": "set" }]
+    }
+  ],
+  "extensions": {}
+}

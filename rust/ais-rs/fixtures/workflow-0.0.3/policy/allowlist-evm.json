@@ -1,0 +1,32 @@
+{
+  "schema": "ais-flow/0.0.3",
+  "meta": {"name": "wf-policy-allowlist-evm", "version": "0.0.3"},
+  "default_chain": "eip155:1",
+  "requires_pack": {"name": "safe-defi", "version": "0.0.2"},
+  "policy": {
+    "allowlist": {
+      "chains": ["eip155:1"],
+      "execution_types": ["evm_call"],
+      "action_refs": ["demo@0.0.2/swap"]
+    },
+    "thresholds": {
+      "max_risk_level": 3,
+      "max_spend_amount": "1000000000000000000",
+      "max_slippage_bps": 200
+    }
+  },
+  "nodes": [
+    {
+      "id": "swap",
+      "type": "action_ref",
+      "protocol": "demo@0.0.2",
+      "action": "swap",
+      "chain": "eip155:1",
+      "args": {
+        "token_in": {"lit": "USDC"},
+        "token_out": {"lit": "WETH"},
+        "amount_in": {"lit": "1000000"}
+      }
+    }
+  ]
+}

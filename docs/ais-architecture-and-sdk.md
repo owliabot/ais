@@ -48,7 +48,7 @@ AIS 0.0.2 的规范索引：`specs/index.md`
 2. **AIS-1 核心三文档**
    - Protocol Spec：`specs/ais-1-protocol.md`（`schema: ais/0.0.2`）
    - Pack：`specs/ais-1-pack.md`（`schema: ais-pack/0.0.2`）
-   - Workflow：`specs/ais-1-workflow.md`（文档写 `ais-flow/0.0.2`）
+   - Workflow：`specs/ais-1-workflow.md`（文档写 `ais-flow/0.0.3`）
 3. **AIS-1 关键底座**
    - Types & Numeric Model：`specs/ais-1-types.md`
    - ValueRef：`specs/ais-1-expressions.md`
@@ -120,9 +120,9 @@ Workflow 描述跨协议编排（DAG）：
 - ExecutionPlan 构建：`ts-sdk/src/execution/plan.ts`（`buildWorkflowExecutionPlan`）
 
 一致性提醒（review 必看）：
-- spec 文档中 workflow schema 写作 `ais-flow/0.0.2`（`specs/ais-0-overview.md`、`specs/ais-1-workflow.md`）
+- spec 文档中 workflow schema 写作 `ais-flow/0.0.3`（`specs/ais-0-overview.md`、`specs/ais-1-workflow.md`）
 - TS SDK 的 `WorkflowSchema`/parser/loader 使用的是 `ais-flow/0.0.3`（`ts-sdk/src/schema/workflow.ts`、`ts-sdk/src/parser.ts`）
-- `ts-sdk/src/workflow/README.md` 与 `ts-sdk/src/scripts/build-schema.ts` 仍提到 `ais-flow/0.0.2`
+- `ts-sdk/src/workflow/README.md` 与 `ts-sdk/src/scripts/build-schema.ts` 已统一为 `ais-flow/0.0.3`
 
 这类“版本漂移”会直接影响：
 - 文件识别（loader/CLI）
@@ -399,7 +399,7 @@ for await (const ev of runPlan(plan, ctx, { solver, executors: [executor] })) {
 
 如果你希望同事 review 完能给出可执行的改动建议，建议把讨论聚焦到以下输出：
 
-1. **版本对齐决策**：workflow schema 到底是 `ais-flow/0.0.2` 还是 `0.0.3`，spec/examples/SDK/CLI 全部统一
+1. **版本对齐决策**：workflow schema 统一使用 `ais-flow/0.0.3`，spec/examples/SDK/CLI 全部统一
 2. **pack overrides 的落地路径**：是进入 plan（静态重写），还是进入 engine（执行前 gate），还是进入 executor（广播前 gate）
 3. **max_spend/max_approval 的数值语义**：字符串格式、单位、与 token_amount/atomic 的关系，以及 conformance 向量
 4. **quote providers 的 enforce 点**：属于 detect 层的 provider 选择，还是属于 solver/executor 的能力边界
@@ -413,4 +413,3 @@ for await (const ev of runPlan(plan, ctx, { solver, executors: [executor] })) {
 - Pack 使用与约束：`docs/ais-pack.md`
 - 现有评审记录（偏问题清单与建议）：`AIS_SPEC_TS_SDK_REVIEW.md`
 - 引擎路线图与设计草稿：`docs/TODO.md`、`docs/design-ts-sdk-internal-runner-main.md`
-

@@ -1,0 +1,17 @@
+schema: "ais-fixtures/0.0.1"
+name: "plan-events"
+cases:
+  - id: "plan-diff-basic"
+    files:
+      - plan-diff/before.plan.json
+      - plan-diff/after.plan.json
+  - id: "trace-replay-until-node"
+    files:
+      - trace/replay-trace.jsonl
+  - id: "checkpoint-replay-basic"
+    files:
+      - checkpoint/plan.json
+      - checkpoint/checkpoint.json
+  - id: "trace-redaction-default"
+    files:
+      - redaction/trace-private.jsonl

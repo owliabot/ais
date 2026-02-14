@@ -1,0 +1,9 @@
+schema: "ais-pack/0.0.2"
+name: "safe-defi"
+version: "0.0.2"
+
+includes:
+  - protocol: "erc20"
+    version: "0.0.2"
+    source: "local"
+    chain_scope: ["eip155:8453"]

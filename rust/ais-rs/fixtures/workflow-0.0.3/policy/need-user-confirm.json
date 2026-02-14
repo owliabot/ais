@@ -1,0 +1,25 @@
+{
+  "schema": "ais-flow/0.0.3",
+  "meta": {"name": "wf-policy-need-user-confirm", "version": "0.0.3"},
+  "default_chain": "eip155:1",
+  "policy": {
+    "mode": "interactive",
+    "allowlist": {
+      "chains": ["eip155:1"],
+      "execution_types": ["evm_call"]
+    }
+  },
+  "nodes": [
+    {
+      "id": "approve",
+      "type": "action_ref",
+      "protocol": "demo@0.0.2",
+      "action": "approve",
+      "chain": "eip155:1",
+      "args": {
+        "spender": {"lit": "0x1111111111111111111111111111111111111111"},
+        "amount": {"lit": "1000000000000000000"}
+      }
+    }
+  ]
+}

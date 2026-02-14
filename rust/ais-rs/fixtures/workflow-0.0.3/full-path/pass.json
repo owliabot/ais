@@ -1,0 +1,50 @@
+{
+  "schema": "ais-flow/0.0.3",
+  "meta": {"name": "wf-full-path-pass", "version": "0.0.3"},
+  "default_chain": "eip155:1",
+  "imports": {
+    "protocols": [
+      {"protocol": "demo@0.0.2", "path": "./protocols/demo.yaml", "integrity": "sha256-demo"}
+    ]
+  },
+  "requires_pack": {"name": "safe-defi", "version": "0.0.2"},
+  "policy": {
+    "allowlist": {
+      "chains": ["eip155:1"],
+      "execution_types": ["evm_read", "evm_call"],
+      "action_refs": ["demo@0.0.2/swap"]
+    }
+  },
+  "preflight": {
+    "simulate": {
+      "quote": true
+    }
+  },
+  "inputs": {
+    "amount_in": {"type": "string", "required": true}
+  },
+  "nodes": [
+    {
+      "id": "quote",
+      "type": "query_ref",
+      "protocol": "demo@0.0.2",
+      "query": "quote",
+      "args": {
+        "amount_in": {"ref": "inputs.amount_in"}
+      },
+      "assert": {"cel": "nodes.quote.outputs.simulated == true"},
+      "assert_message": "quote preflight must be simulated"
+    },
+    {
+      "id": "swap",
+      "type": "action_ref",
+      "protocol": "demo@0.0.2",
+      "action": "swap",
+      "deps": ["quote"],
+      "calculated_overrides": {
+        "slippage_bps": {"expr": {"lit": 100}},
+        "amount_out_min": {"expr": {"cel": "mul_div(1000, 9950, 10000)"}, "depends_on": ["slippage_bps"]}
+      }
+    }
+  ]
+}

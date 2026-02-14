@@ -80,7 +80,7 @@ actions:
 `;
 
   const workflowYaml = `
-schema: "ais-flow/0.0.2"
+schema: "ais-flow/0.0.3"
 meta: { name: demo-flow, version: "0.0.2" }
 default_chain: "eip155:1"
 inputs:

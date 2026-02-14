@@ -1,0 +1,14 @@
+{
+  "schema": "ais-checkpoint/0.0.1",
+  "run_id": "run-fixture-checkpoint",
+  "plan_hash": "fixture-plan-hash",
+  "engine_state": {
+    "completed_node_ids": ["n1"],
+    "paused_reason": "paused",
+    "seen_command_ids": ["cmd-a"],
+    "pending_retries": {}
+  },
+  "runtime_snapshot": {
+    "inputs": { "amount": "1" }
+  }
+}

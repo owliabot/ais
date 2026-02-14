@@ -1,0 +1,22 @@
+{
+  "schema": "ais-plan/0.0.3",
+  "meta": {},
+  "nodes": [
+    {
+      "id": "n1",
+      "kind": "execution",
+      "chain": "eip155:1",
+      "execution": { "type": "evm_read", "method": "balanceOf" },
+      "writes": []
+    },
+    {
+      "id": "n2",
+      "kind": "execution",
+      "chain": "eip155:1",
+      "deps": ["n1"],
+      "execution": { "type": "evm_read", "method": "balanceOf" },
+      "writes": []
+    }
+  ],
+  "extensions": {}
+}

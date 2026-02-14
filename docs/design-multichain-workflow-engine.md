@@ -41,7 +41,7 @@ TS SDK 已经形成了正确的闭环骨架（可复现、可 checkpoint）：
 
 ### 1.2 目前无法表达你要的“Bridge 多链闭环”的根因
 
-**Workflow nodes 没有 per-node chain**：`ais-flow/0.0.2` 的 node 结构缺 `chain` 字段；planner 只能对全 workflow 用一个 chain。  
+**Workflow nodes 没有 per-node chain**：`ais-flow/0.0.3` 的 node 结构缺 `chain` 字段；planner 只能对全 workflow 用一个 chain。  
 结果：同一个 workflow 里无法把某些节点放在 `eip155:1`，另一些放在 `solana:*`。
 
 ### 1.3 目前执行闭环还缺的关键语义
@@ -67,7 +67,7 @@ TS SDK 已经形成了正确的闭环骨架（可复现、可 checkpoint）：
 
 ### 3.1 WorkflowNode 增加 `chain`（多链表达的最小闭环）
 
-在 `ais-flow/0.0.2` 的 node 上新增可选字段：
+在 `ais-flow/0.0.3` 的 node 上新增可选字段：
 
 ```yaml
 chain: "eip155:1"     # 可选；缺省时继承 workflow 的 default_chain（或 runner 传入的默认 chain）
@@ -131,7 +131,7 @@ until: { cel: "nodes.wait.outputs.arrived == true" }  # 可选：仅对 query_re
 ### 4.1 示例（结构示意，非最终字段名）
 
 ```yaml
-schema: "ais-flow/0.0.2"
+schema: "ais-flow/0.0.3"
 meta: { name: "demo", version: "0.0.2" }
 default_chain: "eip155:1"         # 新增：可选（也可以继续由 runner 传入默认 chain）
 
@@ -326,4 +326,3 @@ P2（减少 agent 手工模板，提高 “workflow 构建正确性”）：
 2) 多链/并行/轮询都是 workflow+engine 的一等语义，而不是外部脚本胶水。  
 3) 每一步的失败都能产出结构化诊断，AI/用户可做可控决策（重试/改参/批复/终止）。  
 4) Spec 增量极小（主要是 `node.chain` + `retry/until/timeout`），表达力却足以覆盖“桥接 + 到账等待 + 目的链操作”的主路径。
-

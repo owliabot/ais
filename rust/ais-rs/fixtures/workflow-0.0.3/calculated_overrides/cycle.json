@@ -1,0 +1,17 @@
+{
+  "schema": "ais-flow/0.0.3",
+  "meta": {"name": "wf-overrides-cycle", "version": "0.0.3"},
+  "default_chain": "eip155:1",
+  "nodes": [
+    {
+      "id": "swap",
+      "type": "action_ref",
+      "protocol": "demo@0.0.2",
+      "action": "swap",
+      "calculated_overrides": {
+        "a": {"expr": {"ref": "calculated.b"}},
+        "b": {"expr": {"ref": "calculated.a"}}
+      }
+    }
+  ]
+}

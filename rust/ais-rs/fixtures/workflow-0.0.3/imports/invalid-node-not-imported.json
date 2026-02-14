@@ -1,0 +1,17 @@
+{
+  "schema": "ais-flow/0.0.3",
+  "meta": {"name": "wf-imports-node-not-imported", "version": "0.0.3"},
+  "imports": {
+    "protocols": [
+      {"protocol": "erc20@0.0.2", "path": "./protocols/erc20.yaml"}
+    ]
+  },
+  "nodes": [
+    {
+      "id": "quote",
+      "type": "query_ref",
+      "protocol": "uniswap-v3@0.0.2",
+      "query": "quote"
+    }
+  ]
+}

@@ -47,7 +47,7 @@ Because AIS schemas are strict, new fields should be introduced via a version bu
 Introduce a new workflow schema version:
 - `schema: "ais-flow/0.0.3"` (proposed)
 
-Engines/sdks should keep supporting `ais-flow/0.0.2` workflows unchanged.
+Engines/sdks should keep supporting `ais-flow/0.0.3` workflows unchanged.
 
 ### 3.2 `imports` at workflow root
 
@@ -221,7 +221,7 @@ Runner (`tools/ais-runner`) improvements:
 
 ### 5.1 Existing workflows (0.0.2)
 
-- Continue to support `ais-flow/0.0.2`.
+- Continue to support `ais-flow/0.0.3`.
 - No new fields allowed.
 - Behavior remains “load workspace, resolve protocols from loaded protocols”.
 

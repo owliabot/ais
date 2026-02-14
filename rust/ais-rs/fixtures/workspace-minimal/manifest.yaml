@@ -1,0 +1,29 @@
+schema: "ais-fixtures/0.0.1"
+name: "workspace-minimal"
+cases:
+  - id: "valid-evm-policy"
+    expected: "pass"
+    files:
+      - protocol-erc20.yaml
+      - pack-safe-defi.yaml
+      - workflow-approve.yaml
+  - id: "valid-solana-read"
+    expected: "pass"
+    files:
+      - protocol-solana-rpc.yaml
+      - pack-solana-read.yaml
+      - workflow-balance.yaml
+  - id: "invalid-chain-scope"
+    expected: "workspace.workflow.chain_scope_violation"
+    files:
+      - protocol-erc20.yaml
+      - pack-safe-defi.yaml
+      - workflow-approve.yaml
+  - id: "patch-guard"
+    expected: "command fixture"
+    files:
+      - protocol-erc20.yaml
+      - pack-safe-defi.yaml
+      - workflow-approve.yaml
+      - commands-invalid-patch.jsonl
+      - commands-valid-patch.jsonl

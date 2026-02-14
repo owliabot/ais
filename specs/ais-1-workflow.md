@@ -1,50 +1,148 @@
-# AIS-1C: Workflow — v0.0.2
+# AIS-1C: Workflow — v0.0.3
 
 Status: Draft  
-Spec Version: 0.0.2  
+Spec Version: 0.0.3  
+Schema: `ais-flow/0.0.3`
 
-Workflows orchestrate cross-protocol composition. All dynamic values MUST use `ValueRef`.
+Workflows orchestrate protocol/query/action nodes as a DAG. Dynamic node values use `ValueRef` (`lit/ref/cel/detect/object/array`).
 
-## 0. Strict fields and `extensions`
+## 1. Strictness and extensions
 
-AIS 0.0.2 workflow objects are **strict**:
+Workflow documents are strict:
 - Unknown fields MUST be rejected.
-- Extensions MUST live under `extensions` (free-form, implementation-defined).
+- Implementation-specific data MUST be placed under `extensions`.
 
-Extensions MAY appear at:
-- the workflow root (`workflow.extensions`)
-- individual nodes (`nodes[].extensions`)
+`extensions` MAY appear at:
+- workflow root
+- node object
+- nested typed objects that define an `extensions` field in schema
 
-## 0. Chain selection (multi-chain)
+## 2. Root object
 
-Each workflow node MUST resolve to exactly one CAIP-2 chain id.
+Required fields:
+- `schema: "ais-flow/0.0.3"`
+- `meta: { name, version, ... }`
+- `nodes: WorkflowNode[]`
 
-Chain inheritance:
-- `nodes[].chain` (highest precedence)
-- `workflow.default_chain`
+Optional fields:
+- `default_chain: "<caip2>"`
+- `imports.protocols[]`
+- `requires_pack`
+- `inputs`
+- `policy`
+- `preflight`
+- `outputs`
+- `extensions`
 
-Rationale:
-- The same workflow MAY include nodes for multiple chains (e.g. EVM + Solana).
-- Protocol `execution` blocks MAY use wildcards (e.g. `eip155:*`), but workflow nodes MUST resolve to a concrete chain id so the engine can route RPCs/signing correctly.
+### 2.1 `imports.protocols[]`
 
-## 1. Node dependencies (DAG)
+Each entry:
+- `protocol: "<protocol>@<semver>"` (required)
+- `path: "<relative-or-absolute-path>"` (required)
+- `integrity: "<hash>"` (optional)
+- `extensions` (optional)
 
-Workflow `nodes[]` form a directed acyclic graph (DAG).
+Semantics:
+- Declares protocol dependencies for deterministic loading.
+- Tooling SHOULD validate that referenced protocol docs exist and match `protocol`.
 
-- A node MAY declare explicit dependencies via `deps: ["<node_id>", ...]`.
-- A node also has implicit dependencies if its `args` / `condition` reference `nodes.<id>.*`.
-- Engines MUST reject cycles.
+### 2.2 `requires_pack`
 
-Scheduling semantics (recommended):
-- Nodes whose dependencies are satisfied MAY be executed in parallel.
-- For EVM writes from the same account on the same chain, engines SHOULD serialize broadcast (nonce order),
-  while allowing reads to run in parallel.
+`requires_pack` pins workflow to a pack identity:
+- `name` (required)
+- `version` (required)
+
+Runner/SDK SHOULD ensure the selected pack includes all protocols used by workflow nodes and respects chain scope rules.
+
+## 3. Node model
+
+Node required fields:
+- `id`
+- `type` (`query_ref` | `action_ref`)
+- `protocol` (`<protocol>@<version>`)
+
+Node optional fields:
+- `chain`
+- `query` / `action` (by node `type`)
+- `args`
+- `calculated_overrides`
+- `deps`
+- `condition`
+- `assert`
+- `assert_message`
+- `until`
+- `retry`
+- `timeout_ms`
+- `extensions`
+
+## 4. Chain resolution
+
+Each executable node MUST resolve to exactly one concrete CAIP-2 chain id.
+
+Resolution order:
+1. `nodes[].chain`
+2. `workflow.default_chain`
+
+If neither yields a chain, validation/compile MUST fail.
+
+## 5. DAG and scheduling
+
+Workflow nodes form a DAG:
+- explicit edges: `deps: ["<node_id>", ...]`
+- implicit edges: `ref`/`cel` references to `nodes.<id>...`
+
+Engines MUST reject cycles.
+
+Scheduling recommendations:
+- ready nodes MAY run in parallel
+- same-account same-chain EVM write broadcasts SHOULD be serialized (nonce safety)
+
+## 6. Node lifecycle semantics
+
+Recommended per-attempt evaluation order:
+1. Evaluate `condition` (pre-check); falsy => node skipped
+2. Execute node (`query_ref` / `action_ref`)
+3. Apply outputs/writes to runtime
+4. Evaluate `assert`; falsy => fail-fast
+5. Evaluate `until`; falsy => retry loop (subject to retry/timeout)
+
+### 6.1 `condition`
+
+- Evaluated before execution.
+- Falsy means skip, not failure.
+
+### 6.2 `assert` / `assert_message`
+
+- Evaluated once after successful execution and runtime writeback.
+- Falsy is a hard failure for the node attempt.
+- `assert_message` SHOULD be used as user-facing error text when provided.
+
+### 6.3 `until` / `retry` / `timeout_ms`
+
+- `until`: post-check ValueRef.
+- `retry.interval_ms`: required positive integer.
+- `retry.max_attempts`: optional positive integer.
+- `retry.backoff`: currently `fixed`.
+- `timeout_ms`: optional positive integer, caps overall polling lifecycle.
+
+## 7. Minimal example
 
 ```yaml
-schema: "ais-flow/0.0.2"
-meta: { name: "...", version: "...", description: "..." }
+schema: "ais-flow/0.0.3"
+meta:
+  name: "swap-with-guard"
+  version: "0.0.1"
 default_chain: "eip155:1"
-inputs: { ... }
+imports:
+  protocols:
+    - protocol: "uniswap-v3@0.0.2"
+      path: "./protocols/uniswap-v3.ais.yaml"
+requires_pack:
+  name: "safe-defi"
+  version: "0.0.2"
+inputs:
+  token_in: { type: "asset", required: true }
+  token_out: { type: "asset", required: true }
 nodes:
   - id: "q_quote"
     type: "query_ref"
@@ -52,27 +150,12 @@ nodes:
     query: "quote"
     args:
       token_in: { ref: "inputs.token_in" }
+      token_out: { ref: "inputs.token_out" }
   - id: "a_swap"
     type: "action_ref"
     protocol: "uniswap-v3@0.0.2"
-    action: "swap"
+    action: "swap_exact_in"
     deps: ["q_quote"]
-  - id: "q_solana_balance"
-    type: "query_ref"
-    chain: "solana:mainnet"
-    protocol: "spl-token@0.0.2"
-    query: "token-balance"
-outputs:
-  min_out: { ref: "nodes.a_swap.calculated.min_out" }
+    assert: { cel: "nodes.a_swap.outputs.tx_hash != ''" }
+    assert_message: "swap must emit tx hash"
 ```
-
-## 2. Polling / until (engine-driven)
-
-Nodes MAY declare post-check polling fields:
-- `until`: `ValueRef` evaluated **after** the node executes successfully. If the result is falsy, the node is not considered completed and MAY be retried.
-- `retry`: `{ interval_ms, max_attempts?, backoff? }` (default backoff is fixed).
-- `timeout_ms`: overall timeout for the node's polling lifecycle.
-
-Recommended usage:
-- Use `until` + `retry` for “wait until arrived/confirmed” queries (bridge arrival, balance increased, receipt exists, etc).
-- Avoid inventing new execution types for waiting; keep waiting semantics in workflow fields.

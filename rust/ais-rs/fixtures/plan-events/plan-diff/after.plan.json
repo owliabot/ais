@@ -1,0 +1,22 @@
+{
+  "schema": "ais-plan/0.0.3",
+  "meta": {},
+  "nodes": [
+    {
+      "id": "b",
+      "kind": "execution",
+      "chain": "eip155:137",
+      "deps": [],
+      "execution": { "type": "evm_multicall" },
+      "writes": [{ "path": "nodes.b.result", "mode": "set" }]
+    },
+    {
+      "id": "c",
+      "kind": "execution",
+      "chain": "solana:mainnet",
+      "execution": { "type": "solana_instruction" },
+      "writes": [{ "path": "nodes.c.outputs", "mode": "set" }]
+    }
+  ],
+  "extensions": {}
+}

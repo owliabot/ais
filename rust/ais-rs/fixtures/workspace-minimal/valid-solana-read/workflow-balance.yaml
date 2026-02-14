@@ -1,0 +1,20 @@
+schema: "ais-flow/0.0.3"
+
+meta:
+  name: "fixture-solana-balance"
+  version: "0.0.3"
+
+default_chain: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
+
+requires_pack:
+  name: "safe-sol"
+  version: "0.0.1"
+
+nodes:
+  - id: get-balance
+    type: query_ref
+    protocol: "solana-rpc@0.0.2"
+    query: "balance"
+    args:
+      address:
+        lit: "11111111111111111111111111111111"

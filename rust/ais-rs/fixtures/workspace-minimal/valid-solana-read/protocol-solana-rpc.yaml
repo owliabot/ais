@@ -1,0 +1,31 @@
+schema: "ais/0.0.2"
+
+meta:
+  protocol: "solana-rpc"
+  version: "0.0.2"
+  name: "Solana RPC"
+  description: "Minimal Solana RPC read helpers"
+
+deployments:
+  - chain: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
+    contracts: {}
+
+queries:
+  balance:
+    description: "Get SOL balance"
+    params:
+      - name: address
+        type: address
+        description: "Base58 public key"
+        required: true
+    returns:
+      - { name: lamports, type: uint64, description: "Lamports" }
+    execution:
+      "solana:*":
+        type: solana_read
+        method: "getBalance"
+        params:
+          object:
+            address: { ref: "params.address" }
+
+actions: {}

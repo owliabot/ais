@@ -179,7 +179,7 @@ describe('published JSON Schemas', () => {
           ? protocolSchema
           : doc.schema === 'ais-pack/0.0.2'
             ? packSchema
-            : doc.schema === 'ais-flow/0.0.2'
+            : doc.schema === 'ais-flow/0.0.3'
               ? workflowSchema
               : null;
 

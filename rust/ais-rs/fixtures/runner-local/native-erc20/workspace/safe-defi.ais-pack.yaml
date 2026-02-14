@@ -1,0 +1,23 @@
+schema: "ais-pack/0.0.2"
+
+meta:
+  name: "safe-defi"
+  version: "0.0.2"
+  description: "Local runner fixture pack for native + ERC20 transfer flow"
+
+includes:
+  - protocol: "evm-native-utils"
+    version: "0.0.1"
+    source: "local"
+    chain_scope: ["eip155:31338"]
+  - protocol: "erc20"
+    version: "0.0.2"
+    source: "local"
+    chain_scope: ["eip155:31338"]
+
+policy:
+  approvals:
+    auto_execute_max_risk_level: 2
+    require_approval_min_risk_level: 3
+
+extensions: {}

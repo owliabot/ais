@@ -1,6 +1,6 @@
 # Workflow Module (AIS 0.0.2)
 
-This module contains helpers for working with `ais-flow/0.0.2` workflows as a DAG.
+This module contains helpers for working with `ais-flow/0.0.3` workflows as a DAG.
 
 ## DAG utilities
 

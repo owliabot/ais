@@ -1,0 +1,20 @@
+{
+    "schema": "ais-engine-event/0.0.3",
+    "run_id": "run-fixture-redaction",
+    "seq": 0,
+    "ts": "2026-02-14T00:00:00Z",
+    "event": {
+        "type": "tx_prepared",
+        "node_id": "swap-1",
+        "data": {
+            "private_key": "0xabc",
+            "rpc_payload": {
+                "method": "eth_sendRawTransaction",
+                "params": [
+                    "0xf86c..."
+                ]
+            }
+        },
+        "extensions": {}
+    }
+}

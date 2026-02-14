@@ -21,7 +21,7 @@ AIS (Agent Interaction Spec) is a set of YAML documents that allow agents/engine
 
 - Protocol Spec: `schema: "ais/0.0.2"`
 - Pack: `schema: "ais-pack/0.0.2"`
-- Workflow: `schema: "ais-flow/0.0.2"`
+- Workflow: `schema: "ais-flow/0.0.3"`
 
 ## Key concepts
 

@@ -1,0 +1,58 @@
+schema: "ais/0.0.2"
+
+meta:
+  protocol: "erc20"
+  version: "0.0.2"
+  name: "ERC-20"
+  description: "Minimal ERC-20 primitives for workspace fixtures"
+  tags: ["evm", "token", "erc20"]
+
+deployments:
+  - chain: "eip155:1"
+    contracts: {}
+
+actions:
+  approve:
+    description: "Approve ERC-20 allowance."
+    risk_level: 3
+    risk_tags: ["approval"]
+    params:
+      - { name: token, type: asset, description: "ERC-20 token asset", required: true }
+      - { name: spender, type: address, description: "Spender address", required: true }
+      - { name: amount, type: uint256, description: "Allowance amount (atomic)", required: true }
+    execution:
+      "eip155:*":
+        type: evm_call
+        to: { ref: "params.token.address" }
+        abi:
+          type: "function"
+          name: "approve"
+          inputs:
+            - { name: "spender", type: "address" }
+            - { name: "amount", type: "uint256" }
+          outputs: []
+        args:
+          spender: { ref: "params.spender" }
+          amount: { ref: "params.amount" }
+
+queries:
+  balance-of:
+    description: "Read ERC-20 balanceOf(owner)."
+    params:
+      - { name: token, type: asset, description: "ERC-20 token asset", required: true }
+      - { name: owner, type: address, description: "Owner address", required: true }
+    returns:
+      - { name: balance, type: uint256, description: "Balance (atomic)" }
+    execution:
+      "eip155:*":
+        type: evm_read
+        to: { ref: "params.token.address" }
+        abi:
+          type: "function"
+          name: "balanceOf"
+          inputs:
+            - { name: "owner", type: "address" }
+          outputs:
+            - { name: "balance", type: "uint256" }
+        args:
+          owner: { ref: "params.owner" }

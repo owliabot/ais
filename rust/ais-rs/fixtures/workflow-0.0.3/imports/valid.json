@@ -1,0 +1,56 @@
+{
+  "schema": "ais-flow/0.0.3",
+  "meta": {"name": "wf-imports-valid", "version": "0.0.3"},
+  "default_chain": "eip155:1",
+  "imports": {
+    "protocols": [
+      {"protocol": "erc20@0.0.2", "path": "./protocols/erc20.yaml", "integrity": "sha256-abc123"},
+      {"protocol": "uniswap-v3@0.0.2", "path": "./protocols/uniswap-v3.yaml"}
+    ]
+  },
+  "nodes": [
+    {
+      "id": "balance",
+      "type": "query_ref",
+      "protocol": "erc20@0.0.2",
+      "query": "balance-of",
+      "args": {
+        "token": {
+          "lit": {
+            "chain_id": "eip155:1",
+            "symbol": "USDC",
+            "address": "0xA0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+            "decimals": 6
+          }
+        },
+        "owner": {"lit": "0x1111111111111111111111111111111111111111"}
+      }
+    },
+    {
+      "id": "quote",
+      "type": "query_ref",
+      "protocol": "uniswap-v3@0.0.2",
+      "query": "quote",
+      "deps": ["balance"],
+      "args": {
+        "token_in": {
+          "lit": {
+            "chain_id": "eip155:1",
+            "symbol": "USDC",
+            "address": "0xA0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+            "decimals": 6
+          }
+        },
+        "token_out": {
+          "lit": {
+            "chain_id": "eip155:1",
+            "symbol": "WETH",
+            "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+            "decimals": 18
+          }
+        },
+        "amount_in": {"lit": "1000000"}
+      }
+    }
+  ]
+}

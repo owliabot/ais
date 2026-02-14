@@ -1,0 +1,9 @@
+schema: "ais-pack/0.0.2"
+name: "safe-sol"
+version: "0.0.1"
+
+includes:
+  - protocol: "solana-rpc"
+    version: "0.0.2"
+    source: "local"
+    chain_scope: ["solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"]

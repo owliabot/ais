@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ais:0.0.2:workflow",
-  "title": "AIS Workflow (ais-flow/0.0.2)",
+  "$id": "urn:ais:0.0.3:workflow",
+  "title": "AIS Workflow (ais-flow/0.0.3)",
   "$ref": "#/$defs/Root_1",
   "$defs": {
     "extensions_7": {

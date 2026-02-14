@@ -1,0 +1,12 @@
+[package]
+name = "ais-engine"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ais-core = { path = "../ais-core" }
+ais-sdk = { path = "../ais-sdk" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

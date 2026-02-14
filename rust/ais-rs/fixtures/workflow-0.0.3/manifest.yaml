@@ -1,0 +1,59 @@
+schema: "ais-fixtures/0.0.1"
+name: "workflow-0.0.3"
+cases:
+  - id: "imports-valid"
+    expected: "pass"
+    files:
+      - imports/valid.json
+  - id: "imports-invalid-missing-path"
+    expected: "workflow.imports.path_required"
+    files:
+      - imports/invalid-missing-path.json
+  - id: "imports-invalid-bad-protocol-format"
+    expected: "workflow.imports.protocol_format"
+    files:
+      - imports/invalid-bad-protocol-format.json
+  - id: "imports-invalid-node-not-imported"
+    expected: "workflow.imports.node_protocol_not_imported"
+    files:
+      - imports/invalid-node-not-imported.json
+  - id: "assert-success"
+    expected: "pass"
+    files:
+      - assert/success.json
+  - id: "assert-fail-invalid-cel"
+    expected: "workflow.node.assert_cel_invalid"
+    files:
+      - assert/fail-invalid-cel.json
+  - id: "assert-type-error"
+    expected: "workflow.node.assert_not_boolean"
+    files:
+      - assert/type-error.json
+  - id: "calculated-overrides-chain"
+    expected: "pass"
+    files:
+      - calculated_overrides/chain.json
+  - id: "calculated-overrides-missing-ref"
+    expected: "workflow.node.calculated_overrides.missing_dependency"
+    files:
+      - calculated_overrides/missing-ref.json
+  - id: "calculated-overrides-cycle"
+    expected: "workflow.node.calculated_overrides.cycle"
+    files:
+      - calculated_overrides/cycle.json
+  - id: "preflight-simulate"
+    expected: "pass"
+    files:
+      - preflight/simulate.json
+  - id: "policy-allowlist-evm"
+    expected: "pass"
+    files:
+      - policy/allowlist-evm.json
+  - id: "policy-need-user-confirm"
+    expected: "pass"
+    files:
+      - policy/need-user-confirm.json
+  - id: "full-path-pass"
+    expected: "pass"
+    files:
+      - full-path/pass.json
