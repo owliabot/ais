@@ -6,6 +6,7 @@ use serde_json::{Map, Value};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConfirmationSummary {
     pub kind: String,
+    pub reason_code: String,
     pub reason: String,
     #[serde(default)]
     pub node_id: Option<String>,
@@ -39,8 +40,13 @@ pub fn build_confirmation_summary(
     gate_output: &PolicyGateOutput,
 ) -> Option<ConfirmationSummary> {
     match gate_output {
-        PolicyGateOutput::NeedUserConfirm { reason, details } => Some(ConfirmationSummary {
+        PolicyGateOutput::NeedUserConfirm {
+            reason_code,
+            reason,
+            details,
+        } => Some(ConfirmationSummary {
             kind: "need_user_confirm".to_string(),
+            reason_code: reason_code.as_str().to_string(),
             reason: reason.clone(),
             node_id: gate_input.node_id.clone(),
             chain: gate_input.chain.clone(),
@@ -83,7 +89,12 @@ pub fn enrich_need_user_confirm_output(
     details_object.insert("confirmation_hash".to_string(), Value::String(hash));
 
     match gate_output {
-        PolicyGateOutput::NeedUserConfirm { reason, .. } => Ok(PolicyGateOutput::NeedUserConfirm {
+        PolicyGateOutput::NeedUserConfirm {
+            reason_code,
+            reason,
+            ..
+        } => Ok(PolicyGateOutput::NeedUserConfirm {
+            reason_code: reason_code.clone(),
             reason: reason.clone(),
             details: details_object.clone(),
         }),

@@ -41,7 +41,10 @@ pub fn check_runtime_patch_path_allowed(
     }
 
     let parts = split_path(&patch.path).ok_or_else(|| "invalid_path".to_string())?;
-    let root = parts.first().copied().ok_or_else(|| "invalid_path".to_string())?;
+    let root = parts
+        .first()
+        .copied()
+        .ok_or_else(|| "invalid_path".to_string())?;
     if root == "nodes" {
         if path_matches_any_pattern(&patch.path, &policy.allow_nodes_paths)? {
             return Ok(());

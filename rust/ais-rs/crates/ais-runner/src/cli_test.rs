@@ -1,4 +1,4 @@
-use super::{Cli, Commands, PlanTopLevelCommand, RunCommand};
+use super::{AgentProfile, Cli, Commands, PlanTopLevelCommand, RunCommand};
 use clap::{CommandFactory, Parser};
 
 #[test]
@@ -121,4 +121,167 @@ fn cli_parses_replay_with_checkpoint_plan_and_config() {
         }
         _ => panic!("expected replay"),
     }
+}
+
+#[test]
+fn cli_parses_agent_command() {
+    let cli = Cli::try_parse_from([
+        "ais-runner",
+        "agent",
+        "--plan",
+        "run.plan.json",
+        "--workspace",
+        "./workspace",
+        "--config",
+        "runner.config.yaml",
+        "--pack",
+        "safe.pack.yaml",
+        "--profile",
+        "demo-scripted",
+        "--llm-script-jsonl",
+        "assist.jsonl",
+        "--verbose-llm",
+        "--max-tool-rounds",
+        "24",
+        "--max-index-candidates",
+        "16",
+        "--planner-context-token-budget",
+        "9000",
+        "--approvals-mode",
+        "yolo",
+    ])
+    .expect("agent command must parse");
+
+    match cli.command {
+        Commands::Agent(command) => {
+            assert_eq!(
+                command.plan.as_deref(),
+                Some(std::path::Path::new("run.plan.json"))
+            );
+            assert_eq!(
+                command.workspace.as_deref(),
+                Some(std::path::Path::new("./workspace"))
+            );
+            assert_eq!(
+                command.config.as_path(),
+                std::path::Path::new("runner.config.yaml")
+            );
+            assert_eq!(
+                command.pack.as_deref(),
+                Some(std::path::Path::new("safe.pack.yaml"))
+            );
+            assert_eq!(
+                command.llm_script_jsonl.as_deref(),
+                Some(std::path::Path::new("assist.jsonl"))
+            );
+            assert_eq!(command.profile, AgentProfile::DemoScripted);
+            assert_eq!(command.approvals_mode, Some(super::ApprovalsMode::Yolo));
+            assert_eq!(command.max_tool_rounds, Some(24));
+            assert_eq!(command.max_index_candidates, Some(16));
+            assert_eq!(command.planner_context_token_budget, Some(9000));
+            assert!(command.verbose_llm);
+        }
+        _ => panic!("expected agent command"),
+    }
+}
+
+#[test]
+fn cli_rejects_demo_scripted_profile_without_script() {
+    let result = Cli::try_parse_from([
+        "ais-runner",
+        "agent",
+        "--plan",
+        "run.plan.json",
+        "--config",
+        "runner.config.yaml",
+        "--profile",
+        "demo-scripted",
+    ]);
+    assert!(result.is_err());
+}
+
+#[test]
+fn cli_parses_agent_intent_command() {
+    let cli = Cli::try_parse_from([
+        "ais-runner",
+        "agent",
+        "--intent",
+        "check balances and transfer",
+        "--config",
+        "runner.config.yaml",
+    ])
+    .expect("agent intent command must parse");
+
+    match cli.command {
+        Commands::Agent(command) => {
+            assert_eq!(
+                command.intent.as_deref(),
+                Some("check balances and transfer")
+            );
+            assert!(command.plan.is_none());
+            assert!(command.intent_file.is_none());
+        }
+        _ => panic!("expected agent command"),
+    }
+}
+
+#[test]
+fn cli_parses_agent_intent_file_command() {
+    let cli = Cli::try_parse_from([
+        "ais-runner",
+        "agent",
+        "--intent-file",
+        "intent.txt",
+        "--config",
+        "runner.config.yaml",
+    ])
+    .expect("agent intent-file command must parse");
+
+    match cli.command {
+        Commands::Agent(command) => {
+            assert_eq!(
+                command.intent_file.as_deref(),
+                Some(std::path::Path::new("intent.txt"))
+            );
+            assert!(command.plan.is_none());
+            assert!(command.intent.is_none());
+        }
+        _ => panic!("expected agent command"),
+    }
+}
+
+#[test]
+fn cli_rejects_agent_with_both_plan_and_intent() {
+    let result = Cli::try_parse_from([
+        "ais-runner",
+        "agent",
+        "--plan",
+        "run.plan.json",
+        "--intent",
+        "do something",
+        "--config",
+        "runner.config.yaml",
+    ]);
+    assert!(result.is_err());
+}
+
+#[test]
+fn cli_rejects_agent_with_both_intent_and_intent_file() {
+    let result = Cli::try_parse_from([
+        "ais-runner",
+        "agent",
+        "--intent",
+        "do something",
+        "--intent-file",
+        "intent.txt",
+        "--config",
+        "runner.config.yaml",
+    ]);
+    assert!(result.is_err());
+}
+
+#[test]
+fn cli_rejects_agent_without_plan_or_intent() {
+    let result = Cli::try_parse_from(["ais-runner", "agent", "--config", "runner.config.yaml"]);
+    assert!(result.is_err());
 }

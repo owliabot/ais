@@ -1,0 +1,124 @@
+{
+  "schema": "ais-conformance/0.0.2",
+  "profile": "extended",
+  "cases": [
+    {
+      "id": "catalog-minimal-valid",
+      "kind": "json_schema_validate",
+      "input": {
+        "schema_id": "ais-catalog/0.0.1",
+        "value": {
+          "schema": "ais-catalog/0.0.1",
+          "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "actions": [
+            {
+              "ref": "demo@0.0.2/do",
+              "protocol": "demo",
+              "version": "0.0.2",
+              "id": "do",
+              "risk_level": 1,
+              "execution_types": ["evm_call"],
+              "execution_chains": ["eip155:1"]
+            }
+          ],
+          "queries": [
+            {
+              "ref": "demo@0.0.2/status",
+              "protocol": "demo",
+              "version": "0.0.2",
+              "id": "status",
+              "execution_types": ["evm_read"],
+              "execution_chains": ["eip155:1"]
+            }
+          ],
+          "packs": [
+            {
+              "name": "p",
+              "version": "0.0.2",
+              "includes": []
+            }
+          ]
+        }
+      },
+      "expect": { "valid": true }
+    },
+    {
+      "id": "catalog-action-missing-risk-level-invalid",
+      "kind": "json_schema_validate",
+      "input": {
+        "schema_id": "ais-catalog/0.0.1",
+        "value": {
+          "schema": "ais-catalog/0.0.1",
+          "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "actions": [
+            {
+              "ref": "demo@0.0.2/do",
+              "protocol": "demo",
+              "version": "0.0.2",
+              "id": "do",
+              "execution_types": ["evm_call"],
+              "execution_chains": ["eip155:1"]
+            }
+          ],
+          "queries": [],
+          "packs": []
+        }
+      },
+      "expect": { "valid": false }
+    },
+    {
+      "id": "catalog-detail-fields-invalid-in-index-only-contract",
+      "kind": "json_schema_validate",
+      "input": {
+        "schema_id": "ais-catalog/0.0.1",
+        "value": {
+          "schema": "ais-catalog/0.0.1",
+          "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "actions": [
+            {
+              "ref": "demo@0.0.2/do",
+              "protocol": "demo",
+              "version": "0.0.2",
+              "id": "do",
+              "level": "detail",
+              "risk_level": 1,
+              "params": [{ "name": "amount", "type": "string" }],
+              "execution_types": ["evm_call"],
+              "execution_chains": ["eip155:1"]
+            }
+          ],
+          "queries": [],
+          "packs": []
+        }
+      },
+      "expect": { "valid": false }
+    },
+    {
+      "id": "executable-candidates-minimal-valid",
+      "kind": "json_schema_validate",
+      "input": {
+        "schema_id": "ais-executable-candidates/0.0.1",
+        "value": {
+          "schema": "ais-executable-candidates/0.0.1",
+          "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "catalog_schema": "ais-catalog/0.0.1",
+          "catalog_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "actions": [
+            {
+              "ref": "demo@0.0.2/do",
+              "protocol": "demo",
+              "version": "0.0.2",
+              "id": "do",
+              "risk_level": 1,
+              "execution_types": ["evm_call"],
+              "execution_chains": ["eip155:1"]
+            }
+          ],
+          "queries": [],
+          "execution_plugins": []
+        }
+      },
+      "expect": { "valid": true }
+    }
+  ]
+}

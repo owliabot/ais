@@ -1,4 +1,4 @@
-use super::{evaluate_expression, CelContext, CelValue, CELEvaluator};
+use super::{evaluate_expression, CELEvaluator, CelContext, CelValue};
 use crate::numeric::Decimal;
 use num_bigint::BigInt;
 use std::collections::BTreeMap;
@@ -86,12 +86,30 @@ fn builtin_string_functions_work() {
 #[test]
 fn builtin_math_functions_work() {
     let context = CelContext::new();
-    assert_eq!(evaluate_expression("abs(-5)", &context).expect("eval"), CelValue::Integer(bi(5)));
-    assert_eq!(evaluate_expression("min(3,1,2)", &context).expect("eval"), CelValue::Integer(bi(1)));
-    assert_eq!(evaluate_expression("max(3,1,2)", &context).expect("eval"), CelValue::Integer(bi(3)));
-    assert_eq!(evaluate_expression("ceil(1.2)", &context).expect("eval"), CelValue::Integer(bi(2)));
-    assert_eq!(evaluate_expression("floor(1.8)", &context).expect("eval"), CelValue::Integer(bi(1)));
-    assert_eq!(evaluate_expression("round(1.5)", &context).expect("eval"), CelValue::Integer(bi(2)));
+    assert_eq!(
+        evaluate_expression("abs(-5)", &context).expect("eval"),
+        CelValue::Integer(bi(5))
+    );
+    assert_eq!(
+        evaluate_expression("min(3,1,2)", &context).expect("eval"),
+        CelValue::Integer(bi(1))
+    );
+    assert_eq!(
+        evaluate_expression("max(3,1,2)", &context).expect("eval"),
+        CelValue::Integer(bi(3))
+    );
+    assert_eq!(
+        evaluate_expression("ceil(1.2)", &context).expect("eval"),
+        CelValue::Integer(bi(2))
+    );
+    assert_eq!(
+        evaluate_expression("floor(1.8)", &context).expect("eval"),
+        CelValue::Integer(bi(1))
+    );
+    assert_eq!(
+        evaluate_expression("round(1.5)", &context).expect("eval"),
+        CelValue::Integer(bi(2))
+    );
     assert_eq!(
         evaluate_expression("mul_div(1000, 9950, 10000)", &context).expect("eval"),
         CelValue::Integer(bi(995))
@@ -101,8 +119,14 @@ fn builtin_math_functions_work() {
 #[test]
 fn builtin_type_functions_work() {
     let context = CelContext::new();
-    assert_eq!(evaluate_expression("int('42')", &context).expect("eval"), CelValue::Integer(bi(42)));
-    assert_eq!(evaluate_expression("uint(-5)", &context).expect("eval"), CelValue::Integer(bi(5)));
+    assert_eq!(
+        evaluate_expression("int('42')", &context).expect("eval"),
+        CelValue::Integer(bi(42))
+    );
+    assert_eq!(
+        evaluate_expression("uint(-5)", &context).expect("eval"),
+        CelValue::Integer(bi(5))
+    );
     assert_eq!(
         evaluate_expression("double('3.14')", &context).expect("eval"),
         CelValue::Decimal(Decimal::parse("3.14").expect("decimal"))
@@ -111,7 +135,10 @@ fn builtin_type_functions_work() {
         evaluate_expression("string(42)", &context).expect("eval"),
         CelValue::String("42".to_string())
     );
-    assert_eq!(evaluate_expression("bool(1)", &context).expect("eval"), CelValue::Bool(true));
+    assert_eq!(
+        evaluate_expression("bool(1)", &context).expect("eval"),
+        CelValue::Bool(true)
+    );
     assert_eq!(
         evaluate_expression("type([1,2])", &context).expect("eval"),
         CelValue::String("list".to_string())
@@ -121,8 +148,14 @@ fn builtin_type_functions_work() {
 #[test]
 fn builtin_collection_functions_work() {
     let context = CelContext::new();
-    assert_eq!(evaluate_expression("exists([0, 1])", &context).expect("eval"), CelValue::Bool(true));
-    assert_eq!(evaluate_expression("all([1, 1])", &context).expect("eval"), CelValue::Bool(true));
+    assert_eq!(
+        evaluate_expression("exists([0, 1])", &context).expect("eval"),
+        CelValue::Bool(true)
+    );
+    assert_eq!(
+        evaluate_expression("all([1, 1])", &context).expect("eval"),
+        CelValue::Bool(true)
+    );
 }
 
 #[test]
@@ -141,7 +174,10 @@ fn builtin_ais_functions_work() {
 #[test]
 fn numeric_string_can_compare_with_numeric_value() {
     let mut context = CelContext::new();
-    context.insert("balance".to_string(), CelValue::String("20000000000000000000".to_string()));
+    context.insert(
+        "balance".to_string(),
+        CelValue::String("20000000000000000000".to_string()),
+    );
     assert_eq!(
         evaluate_expression("balance > to_atomic('15', 18)", &context).expect("eval"),
         CelValue::Bool(true)
@@ -151,7 +187,10 @@ fn numeric_string_can_compare_with_numeric_value() {
 #[test]
 fn numeric_string_can_do_arithmetic_with_numeric_value() {
     let mut context = CelContext::new();
-    context.insert("balance".to_string(), CelValue::String("20000000000000000000".to_string()));
+    context.insert(
+        "balance".to_string(),
+        CelValue::String("20000000000000000000".to_string()),
+    );
     assert_eq!(
         evaluate_expression("balance - to_atomic('15', 18)", &context).expect("eval"),
         CelValue::Integer(BigInt::from(5_000_000_000_000_000_000u64))

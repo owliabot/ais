@@ -1,10 +1,14 @@
 mod compile_plan_skeleton;
+mod compile_plan_sketch;
 mod compile_workflow;
 mod preview;
 mod readiness;
 
 pub use compile_plan_skeleton::{
     compile_plan_skeleton, CompilePlanSkeletonOptions, CompilePlanSkeletonResult,
+};
+pub use compile_plan_sketch::{
+    compile_plan_sketch, CompilePlanSketchOptions, CompilePlanSketchResult,
 };
 pub use compile_workflow::{compile_workflow, CompileWorkflowOptions, CompileWorkflowResult};
 pub use preview::{

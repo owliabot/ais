@@ -6,7 +6,9 @@ fn sample_record() -> EngineEventRecord {
     let mut event = EngineEvent::new(EngineEventType::TxPrepared);
     event.node_id = Some("swap-1".to_string());
     event.data.insert("private_key".to_string(), json!("0xabc"));
-    event.data.insert("seed_phrase".to_string(), json!("alpha beta gamma"));
+    event
+        .data
+        .insert("seed_phrase".to_string(), json!("alpha beta gamma"));
     event.data.insert(
         "rpc_payload".to_string(),
         json!({
@@ -39,8 +41,7 @@ fn redact_default_mode_is_strong() {
     assert_eq!(data.get("seed_phrase"), Some(&json!("[REDACTED]")));
     assert_eq!(data.get("rpc_payload"), Some(&json!("[REDACTED]")));
     assert_eq!(
-        data.get("tx")
-            .and_then(|value| value.get("signature")),
+        data.get("tx").and_then(|value| value.get("signature")),
         Some(&json!("[REDACTED]"))
     );
 }
@@ -59,7 +60,10 @@ fn redact_audit_mode_keeps_rpc_structure_but_masks_secrets() {
         .and_then(|value| value.as_object())
         .expect("rpc payload object must exist");
 
-    assert_eq!(rpc_payload.get("method"), Some(&json!("eth_sendRawTransaction")));
+    assert_eq!(
+        rpc_payload.get("method"),
+        Some(&json!("eth_sendRawTransaction"))
+    );
     assert_eq!(
         record.event.data.get("private_key"),
         Some(&json!("[REDACTED]"))
@@ -93,5 +97,8 @@ fn allow_path_patterns_can_unredact_specific_field() {
     };
     let record = redact_engine_event_record(&sample_record(), &options);
     assert_eq!(record.event.data.get("private_key"), Some(&json!("0xabc")));
-    assert_eq!(record.event.data.get("seed_phrase"), Some(&json!("[REDACTED]")));
+    assert_eq!(
+        record.event.data.get("seed_phrase"),
+        Some(&json!("[REDACTED]"))
+    );
 }

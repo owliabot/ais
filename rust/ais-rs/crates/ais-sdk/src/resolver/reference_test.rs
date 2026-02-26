@@ -1,4 +1,6 @@
-use super::{parse_action_ref, parse_query_ref, resolve_action_ref, resolve_query_ref, ReferenceError};
+use super::{
+    parse_action_ref, parse_query_ref, resolve_action_ref, resolve_query_ref, ReferenceError,
+};
 use crate::documents::ProtocolDocument;
 use crate::resolver::ResolverContext;
 use serde_json::{json, Map, Value};

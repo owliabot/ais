@@ -96,7 +96,9 @@ pub fn load_workspace_documents_excluding(
                     AisDocument::Pack(pack) => loaded.packs.push(pack),
                     AisDocument::Workflow(workflow) => loaded.workflows.push(workflow),
                     AisDocument::Plan(plan) => loaded.plans.push(plan),
-                    AisDocument::Catalog(_) | AisDocument::PlanSkeleton(_) => {}
+                    AisDocument::Catalog(_)
+                    | AisDocument::PlanSkeleton(_)
+                    | AisDocument::PlanSketch(_) => {}
                 },
                 Err(parse_issues) => issues.extend(
                     parse_issues

@@ -34,7 +34,11 @@ fn protocol_semantic_checks_report_paths() {
     let issues = validate_document_semantics(&document);
     assert!(has_issue(&issues, "document.schema_mismatch", "$.schema"));
     assert!(has_issue(&issues, "protocol.meta.object", "$.meta"));
-    assert!(has_issue(&issues, "protocol.deployments.non_empty", "$.deployments"));
+    assert!(has_issue(
+        &issues,
+        "protocol.deployments.non_empty",
+        "$.deployments"
+    ));
     assert!(has_issue(
         &issues,
         "capabilities.non_empty",
@@ -78,7 +82,11 @@ fn workflow_semantic_checks_refs_and_deps() {
         "workflow.nodes.action_ref",
         "$.nodes[0].action_ref"
     ));
-    assert!(has_issue(&issues, "workflow.nodes.deps", "$.nodes[0].deps[1]"));
+    assert!(has_issue(
+        &issues,
+        "workflow.nodes.deps",
+        "$.nodes[0].deps[1]"
+    ));
 }
 
 #[test]

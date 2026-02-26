@@ -1,7 +1,9 @@
 mod apply;
 mod guard;
 
-pub use apply::{apply_runtime_patches, RuntimePatchApplyResult, RuntimePatchAudit, RuntimePatchRejection};
+pub use apply::{
+    apply_runtime_patches, RuntimePatchApplyResult, RuntimePatchAudit, RuntimePatchRejection,
+};
 pub use guard::{
     build_runtime_patch_guard_policy, check_runtime_patch_path_allowed, RuntimePatchGuardPolicy,
     DEFAULT_RUNTIME_PATCH_ALLOW_ROOTS,
@@ -66,7 +68,10 @@ pub(crate) fn split_path(path: &str) -> Option<Vec<&str>> {
     if parts.is_empty() {
         return None;
     }
-    if parts.iter().any(|segment| segment.chars().any(char::is_whitespace)) {
+    if parts
+        .iter()
+        .any(|segment| segment.chars().any(char::is_whitespace))
+    {
         return None;
     }
     Some(parts)

@@ -46,9 +46,65 @@ chains:
 
     let config = load_runner_config(path.as_path()).expect("config must load");
     let router = build_router_executor(&config).expect("router must build");
-    assert_eq!(router.registrations().len(), 2);
-    assert!(router.registrations().iter().any(|reg| reg.chain == "eip155:1"));
-    assert!(router.registrations().iter().any(|reg| reg.chain == "solana:mainnet"));
+    assert_eq!(router.registrations().len(), 3);
+    assert!(router
+        .registrations()
+        .iter()
+        .any(|reg| reg.chain == "eip155:1"));
+    assert!(router
+        .registrations()
+        .iter()
+        .any(|reg| reg.chain == "solana:mainnet"));
+    assert!(router.can_route("eip155:1", "evm_call"));
+    assert!(router.can_route("eip155:1", "evm_rpc"));
+    assert!(!router.can_route("eip155:1", "sui_tx"));
+}
+
+#[test]
+fn load_runner_config_with_offchain_plugin_registers_handler() {
+    let path = write_temp_file(
+        "runner-config-offchain-plugin",
+        r#"
+schema: ais-runner/0.0.1
+chains:
+  eip155:1:
+    rpc_url: https://rpc.evm.example
+plugins:
+  execution:
+    offchain_apy_query:
+      enabled: true
+      chains: ["eip155:1"]
+      allowed_domains: ["api.example.com"]
+      timeout_ms: 3000
+      max_retries: 2
+      retry_backoff_ms: 100
+"#,
+    );
+    let config = load_runner_config(path.as_path()).expect("config must load");
+    let router = build_router_executor(&config).expect("router must build");
+    assert!(router.can_route("eip155:1", "offchain_apy_query"));
+}
+
+#[test]
+fn load_runner_config_allows_external_chain_for_plugin_routes() {
+    let path = write_temp_file(
+        "runner-config-external-chain-plugin",
+        r#"
+schema: ais-runner/0.0.1
+chains:
+  sui:mainnet:
+    rpc_url: https://rpc.sui.example
+plugins:
+  execution:
+    offchain_apy_query:
+      enabled: true
+      chains: ["sui:mainnet"]
+      allowed_domains: ["api.example.com"]
+"#,
+    );
+    let config = load_runner_config(path.as_path()).expect("config must load");
+    let router = build_router_executor(&config).expect("router must build");
+    assert!(router.can_route("sui:mainnet", "offchain_apy_query"));
 }
 
 #[test]
@@ -81,8 +137,51 @@ chains:
         Err(issues) => issues,
     };
     assert_eq!(issues.len(), 1);
-    assert_eq!(issues[0].reference.as_deref(), Some("runner.config.chain_missing"));
+    assert_eq!(
+        issues[0].reference.as_deref(),
+        Some("runner.config.chain_missing")
+    );
     assert_eq!(issues[0].field_path.to_string(), "$.nodes[1].chain");
+}
+
+#[test]
+fn build_router_executor_for_plan_reports_unregistered_execution_type() {
+    let config = load_runner_config(
+        write_temp_file(
+            "runner-config-unregistered-type",
+            r#"
+schema: ais-runner/0.0.1
+chains:
+  eip155:1:
+    rpc_url: https://rpc.evm.example
+"#,
+        )
+        .as_path(),
+    )
+    .expect("config must load");
+    let plan = PlanDocument {
+        schema: "ais-plan/0.0.3".to_string(),
+        meta: Some(json!({})),
+        nodes: vec![json!({
+            "id":"n1",
+            "chain":"eip155:1",
+            "execution":{"type":"sui_tx"}
+        })],
+        extensions: Map::<String, Value>::new(),
+    };
+    let issues = match build_router_executor_for_plan(&plan, &config) {
+        Ok(_) => panic!("must fail"),
+        Err(issues) => issues,
+    };
+    assert_eq!(issues.len(), 1);
+    assert_eq!(
+        issues[0].reference.as_deref(),
+        Some("runner.config.execution_type_unregistered")
+    );
+    assert_eq!(
+        issues[0].field_path.to_string(),
+        "$.nodes[0].execution.type"
+    );
 }
 
 #[test]
@@ -114,11 +213,43 @@ chains:
 }
 
 #[test]
-fn load_runner_config_expands_env_placeholders() {
-    let env_key = format!(
-        "AIS_RUNNER_TEST_RPC_{}",
-        std::process::id()
+fn load_runner_config_rejects_invalid_offchain_plugin_settings() {
+    let path = write_temp_file(
+        "runner-config-offchain-invalid",
+        r#"
+schema: ais-runner/0.0.1
+chains:
+  eip155:1:
+    rpc_url: https://rpc.evm.example
+plugins:
+  execution:
+    offchain_apy_query:
+      enabled: true
+      chains: []
+      allowed_domains: []
+      timeout_ms: 0
+      retry_backoff_ms: 0
+"#,
     );
+    let error = load_runner_config(path.as_path()).expect_err("must reject");
+    match error {
+        RunnerConfigError::Validation(issues) => {
+            let refs = issues
+                .iter()
+                .filter_map(|issue| issue.reference.as_deref())
+                .collect::<Vec<_>>();
+            assert!(refs.contains(&"runner.config.offchain_apy_query.chains.non_empty"));
+            assert!(refs.contains(&"runner.config.offchain_apy_query.allowed_domains.non_empty"));
+            assert!(refs.contains(&"runner.config.offchain_apy_query.timeout"));
+            assert!(refs.contains(&"runner.config.offchain_apy_query.retry_backoff"));
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn load_runner_config_expands_env_placeholders() {
+    let env_key = format!("AIS_RUNNER_TEST_RPC_{}", std::process::id());
     let env_value = "https://rpc.env.example";
     unsafe {
         std::env::set_var(env_key.as_str(), env_value);
@@ -147,6 +278,213 @@ chains:
             .as_str(),
         env_value
     );
+}
+
+#[test]
+fn load_runner_config_parses_llm_config() {
+    let path = write_temp_file(
+        "runner-config-llm",
+        r#"
+schema: ais-runner/0.0.1
+llm:
+  provider: openrouter
+  model: openai/gpt-4.1-mini
+  api_key: test-key
+  prompts_dir: ./prompts
+  max_retries_per_provider: 2
+  rotation: round_robin
+  planner_context_token_budget: 9000
+  max_tool_rounds: 30
+  context_limit_tokens: 128k
+  fallback:
+    - provider: groq
+      model: llama-3.3-70b-versatile
+      api_key: groq-key
+chains:
+  eip155:1:
+    rpc_url: https://rpc.evm.example
+"#,
+    );
+    let config = load_runner_config(path.as_path()).expect("config must load");
+    let llm = config.llm.as_ref().expect("llm config");
+    assert_eq!(llm.provider, "openrouter");
+    assert_eq!(llm.model, "openai/gpt-4.1-mini");
+    assert_eq!(llm.api_key, "test-key");
+    assert_eq!(llm.api_base, None);
+    assert_eq!(llm.prompts_dir.as_deref(), Some("./prompts"));
+    assert_eq!(llm.max_retries_per_provider, Some(2));
+    assert_eq!(llm.rotation, super::RunnerLlmRotationMode::RoundRobin);
+    assert_eq!(llm.planner_context_token_budget, Some(9000));
+    assert_eq!(llm.max_tool_rounds, Some(30));
+    assert_eq!(llm.context_limit_tokens, Some(128000));
+    assert_eq!(llm.fallback.len(), 1);
+    assert_eq!(llm.fallback[0].provider, "groq");
+}
+
+#[test]
+fn load_runner_config_rejects_invalid_llm_config() {
+    let path = write_temp_file(
+        "runner-config-llm-invalid",
+        r#"
+schema: ais-runner/0.0.1
+llm:
+  provider: ""
+  model: ""
+  api_key: ""
+  fallback:
+    - provider: ""
+      model: ""
+      api_key: ""
+chains:
+  eip155:1:
+    rpc_url: https://rpc.evm.example
+"#,
+    );
+    let error = load_runner_config(path.as_path()).expect_err("must reject");
+    match error {
+        RunnerConfigError::Validation(issues) => {
+            let refs = issues
+                .iter()
+                .filter_map(|issue| issue.reference.as_deref())
+                .collect::<Vec<_>>();
+            assert!(refs.contains(&"runner.config.llm.provider"));
+            assert!(refs.contains(&"runner.config.llm.model"));
+            assert!(refs.contains(&"runner.config.llm.api_key"));
+            assert_eq!(
+                refs.iter()
+                    .filter(|reference| **reference == "runner.config.llm.provider")
+                    .count(),
+                2
+            );
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn load_runner_config_rejects_empty_prompts_dir() {
+    let path = write_temp_file(
+        "runner-config-llm-empty-prompts-dir",
+        r#"
+schema: ais-runner/0.0.1
+llm:
+  provider: openrouter
+  model: openai/gpt-4.1-mini
+  api_key: test-key
+  prompts_dir: "   "
+chains:
+  eip155:1:
+    rpc_url: https://rpc.evm.example
+"#,
+    );
+    let error = load_runner_config(path.as_path()).expect_err("must reject");
+    match error {
+        RunnerConfigError::Validation(issues) => {
+            let refs = issues
+                .iter()
+                .filter_map(|issue| issue.reference.as_deref())
+                .collect::<Vec<_>>();
+            assert!(refs.contains(&"runner.config.llm.prompts_dir"));
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn load_runner_config_rejects_zero_planner_context_token_budget() {
+    let path = write_temp_file(
+        "runner-config-llm-zero-context-budget",
+        r#"
+schema: ais-runner/0.0.1
+llm:
+  provider: openrouter
+  model: openai/gpt-4.1-mini
+  api_key: test-key
+  planner_context_token_budget: 0
+chains:
+  eip155:1:
+    rpc_url: https://rpc.evm.example
+"#,
+    );
+    let error = load_runner_config(path.as_path()).expect_err("must reject");
+    match error {
+        RunnerConfigError::Validation(issues) => {
+            let refs = issues
+                .iter()
+                .filter_map(|issue| issue.reference.as_deref())
+                .collect::<Vec<_>>();
+            assert!(refs.contains(&"runner.config.llm.planner_context_token_budget"));
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn load_runner_config_rejects_zero_context_limit_tokens() {
+    let path = write_temp_file(
+        "runner-config-llm-zero-context-limit",
+        r#"
+schema: ais-runner/0.0.1
+llm:
+  provider: openrouter
+  model: openai/gpt-4.1-mini
+  api_key: test-key
+  context_limit_tokens: 0
+chains:
+  eip155:1:
+    rpc_url: https://rpc.evm.example
+"#,
+    );
+    let error = load_runner_config(path.as_path()).expect_err("must reject");
+    match error {
+        RunnerConfigError::Validation(issues) => {
+            let refs = issues
+                .iter()
+                .filter_map(|issue| issue.reference.as_deref())
+                .collect::<Vec<_>>();
+            assert!(refs.contains(&"runner.config.llm.context_limit_tokens"));
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn load_runner_config_rejects_zero_max_tool_rounds() {
+    let path = write_temp_file(
+        "runner-config-llm-zero-max-tool-rounds",
+        r#"
+schema: ais-runner/0.0.1
+llm:
+  provider: openrouter
+  model: openai/gpt-4.1-mini
+  api_key: test-key
+  max_tool_rounds: 0
+chains:
+  eip155:1:
+    rpc_url: https://rpc.evm.example
+"#,
+    );
+    let error = load_runner_config(path.as_path()).expect_err("must reject");
+    match error {
+        RunnerConfigError::Validation(issues) => {
+            let refs = issues
+                .iter()
+                .filter_map(|issue| issue.reference.as_deref())
+                .collect::<Vec<_>>();
+            assert!(refs.contains(&"runner.config.llm.max_tool_rounds"));
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn parse_token_count_supports_suffix_and_separators() {
+    assert_eq!(super::parse_token_count("262k"), Some(262000));
+    assert_eq!(super::parse_token_count("1M"), Some(1000000));
+    assert_eq!(super::parse_token_count("262,144"), Some(262144));
+    assert_eq!(super::parse_token_count(" 131_072 "), Some(131072));
+    assert_eq!(super::parse_token_count(""), None);
+    assert_eq!(super::parse_token_count("abc"), None);
 }
 
 fn write_temp_file(prefix: &str, content: &str) -> PathBuf {

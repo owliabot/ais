@@ -1,6 +1,6 @@
 use crate::resolver::{
-    evaluate_value_ref_async, evaluate_value_ref_with_options, DetectResolver, ResolverContext,
-    ValueRef, ValueRefEvalError, ValueRefEvalOptions,
+    evaluate_value_ref_async, evaluate_value_ref_with_options, ResolverContext, ValueRef,
+    ValueRefEvalError, ValueRefEvalOptions,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -20,8 +20,6 @@ pub struct NodeReadinessResult {
     #[serde(default)]
     pub missing_refs: Vec<String>,
     #[serde(default)]
-    pub needs_detect: bool,
-    #[serde(default)]
     pub errors: Vec<String>,
     #[serde(default)]
     pub resolved_params: Option<Map<String, Value>>,
@@ -39,7 +37,6 @@ pub fn get_node_readiness(
                 return NodeReadinessResult {
                     state: NodeRunState::Blocked,
                     missing_refs: Vec::new(),
-                    needs_detect: false,
                     errors: vec![error],
                     resolved_params: None,
                 };
@@ -48,13 +45,11 @@ pub fn get_node_readiness(
         match safe_eval_sync(&condition_ref, context, options) {
             SafeEvalResult::Err {
                 missing_refs,
-                needs_detect,
                 errors,
             } => {
                 return NodeReadinessResult {
                     state: NodeRunState::Blocked,
                     missing_refs,
-                    needs_detect,
                     errors,
                     resolved_params: None,
                 };
@@ -64,7 +59,6 @@ pub fn get_node_readiness(
                     return NodeReadinessResult {
                         state: NodeRunState::Skipped,
                         missing_refs: Vec::new(),
-                        needs_detect: false,
                         errors: Vec::new(),
                         resolved_params: None,
                     };
@@ -74,7 +68,6 @@ pub fn get_node_readiness(
                     return NodeReadinessResult {
                         state: NodeRunState::Blocked,
                         missing_refs: Vec::new(),
-                        needs_detect: false,
                         errors: vec![format!(
                             "condition must evaluate to boolean, got: {}",
                             json_type_name(&value)
@@ -88,7 +81,6 @@ pub fn get_node_readiness(
 
     let mut resolved_params = Map::new();
     let mut missing_refs = Vec::<String>::new();
-    let mut needs_detect = false;
     let mut errors = Vec::<String>::new();
 
     if let Some(params) = node
@@ -106,11 +98,9 @@ pub fn get_node_readiness(
                     }
                     SafeEvalResult::Err {
                         missing_refs: eval_missing_refs,
-                        needs_detect: eval_needs_detect,
                         errors: eval_errors,
                     } => {
                         missing_refs.extend(eval_missing_refs);
-                        needs_detect = needs_detect || eval_needs_detect;
                         errors.extend(eval_errors);
                     }
                 },
@@ -126,11 +116,9 @@ pub fn get_node_readiness(
                 SafeEvalResult::Ok { .. } => {}
                 SafeEvalResult::Err {
                     missing_refs: eval_missing_refs,
-                    needs_detect: eval_needs_detect,
                     errors: eval_errors,
                 } => {
                     missing_refs.extend(eval_missing_refs);
-                    needs_detect = needs_detect || eval_needs_detect;
                     errors.extend(eval_errors);
                 }
             }
@@ -139,11 +127,10 @@ pub fn get_node_readiness(
 
     missing_refs = dedup_sort_strings(missing_refs);
 
-    if !missing_refs.is_empty() || needs_detect || !errors.is_empty() {
+    if !missing_refs.is_empty() || !errors.is_empty() {
         return NodeReadinessResult {
             state: NodeRunState::Blocked,
             missing_refs,
-            needs_detect,
             errors,
             resolved_params: Some(resolved_params),
         };
@@ -152,7 +139,6 @@ pub fn get_node_readiness(
     NodeReadinessResult {
         state: NodeRunState::Ready,
         missing_refs: Vec::new(),
-        needs_detect: false,
         errors: Vec::new(),
         resolved_params: Some(resolved_params),
     }
@@ -162,7 +148,6 @@ pub async fn get_node_readiness_async(
     node: &Value,
     context: &ResolverContext,
     options: &ValueRefEvalOptions,
-    detect_resolver: Option<&dyn DetectResolver>,
 ) -> NodeReadinessResult {
     if let Some(condition) = node.as_object().and_then(|object| object.get("condition")) {
         let condition_ref = match parse_value_ref(condition, "condition") {
@@ -171,22 +156,19 @@ pub async fn get_node_readiness_async(
                 return NodeReadinessResult {
                     state: NodeRunState::Blocked,
                     missing_refs: Vec::new(),
-                    needs_detect: false,
                     errors: vec![error],
                     resolved_params: None,
                 };
             }
         };
-        match safe_eval_async(&condition_ref, context, options, detect_resolver).await {
+        match safe_eval_async(&condition_ref, context, options).await {
             SafeEvalResult::Err {
                 missing_refs,
-                needs_detect,
                 errors,
             } => {
                 return NodeReadinessResult {
                     state: NodeRunState::Blocked,
                     missing_refs,
-                    needs_detect,
                     errors,
                     resolved_params: None,
                 };
@@ -196,7 +178,6 @@ pub async fn get_node_readiness_async(
                     return NodeReadinessResult {
                         state: NodeRunState::Skipped,
                         missing_refs: Vec::new(),
-                        needs_detect: false,
                         errors: Vec::new(),
                         resolved_params: None,
                     };
@@ -206,7 +187,6 @@ pub async fn get_node_readiness_async(
                     return NodeReadinessResult {
                         state: NodeRunState::Blocked,
                         missing_refs: Vec::new(),
-                        needs_detect: false,
                         errors: vec![format!(
                             "condition must evaluate to boolean, got: {}",
                             json_type_name(&value)
@@ -220,7 +200,6 @@ pub async fn get_node_readiness_async(
 
     let mut resolved_params = Map::new();
     let mut missing_refs = Vec::<String>::new();
-    let mut needs_detect = false;
     let mut errors = Vec::<String>::new();
 
     if let Some(params) = node
@@ -232,22 +211,18 @@ pub async fn get_node_readiness_async(
     {
         for (key, value) in params {
             match parse_value_ref(value, &format!("bindings.params.{key}")) {
-                Ok(value_ref) => {
-                    match safe_eval_async(&value_ref, context, options, detect_resolver).await {
-                        SafeEvalResult::Ok { value } => {
-                            resolved_params.insert(key.clone(), value);
-                        }
-                        SafeEvalResult::Err {
-                            missing_refs: eval_missing_refs,
-                            needs_detect: eval_needs_detect,
-                            errors: eval_errors,
-                        } => {
-                            missing_refs.extend(eval_missing_refs);
-                            needs_detect = needs_detect || eval_needs_detect;
-                            errors.extend(eval_errors);
-                        }
+                Ok(value_ref) => match safe_eval_async(&value_ref, context, options).await {
+                    SafeEvalResult::Ok { value } => {
+                        resolved_params.insert(key.clone(), value);
                     }
-                }
+                    SafeEvalResult::Err {
+                        missing_refs: eval_missing_refs,
+                        errors: eval_errors,
+                    } => {
+                        missing_refs.extend(eval_missing_refs);
+                        errors.extend(eval_errors);
+                    }
+                },
                 Err(error) => errors.push(error),
             }
         }
@@ -256,15 +231,13 @@ pub async fn get_node_readiness_async(
     if let Some(execution) = node.as_object().and_then(|object| object.get("execution")) {
         let execution_options = options_with_resolved_params(options, &resolved_params);
         for value_ref in collect_value_refs_deep(execution) {
-            match safe_eval_async(&value_ref, context, &execution_options, detect_resolver).await {
+            match safe_eval_async(&value_ref, context, &execution_options).await {
                 SafeEvalResult::Ok { .. } => {}
                 SafeEvalResult::Err {
                     missing_refs: eval_missing_refs,
-                    needs_detect: eval_needs_detect,
                     errors: eval_errors,
                 } => {
                     missing_refs.extend(eval_missing_refs);
-                    needs_detect = needs_detect || eval_needs_detect;
                     errors.extend(eval_errors);
                 }
             }
@@ -273,11 +246,10 @@ pub async fn get_node_readiness_async(
 
     missing_refs = dedup_sort_strings(missing_refs);
 
-    if !missing_refs.is_empty() || needs_detect || !errors.is_empty() {
+    if !missing_refs.is_empty() || !errors.is_empty() {
         return NodeReadinessResult {
             state: NodeRunState::Blocked,
             missing_refs,
-            needs_detect,
             errors,
             resolved_params: Some(resolved_params),
         };
@@ -286,7 +258,6 @@ pub async fn get_node_readiness_async(
     NodeReadinessResult {
         state: NodeRunState::Ready,
         missing_refs: Vec::new(),
-        needs_detect: false,
         errors: Vec::new(),
         resolved_params: Some(resolved_params),
     }
@@ -297,10 +268,7 @@ fn options_with_resolved_params(
     resolved_params: &Map<String, Value>,
 ) -> ValueRefEvalOptions {
     let mut root_overrides = options.root_overrides.clone();
-    root_overrides.insert(
-        "params".to_string(),
-        Value::Object(resolved_params.clone()),
-    );
+    root_overrides.insert("params".to_string(), Value::Object(resolved_params.clone()));
     ValueRefEvalOptions { root_overrides }
 }
 
@@ -311,7 +279,6 @@ enum SafeEvalResult {
     },
     Err {
         missing_refs: Vec<String>,
-        needs_detect: bool,
         errors: Vec<String>,
     },
 }
@@ -331,9 +298,8 @@ async fn safe_eval_async(
     value_ref: &ValueRef,
     context: &ResolverContext,
     options: &ValueRefEvalOptions,
-    detect_resolver: Option<&dyn DetectResolver>,
 ) -> SafeEvalResult {
-    match evaluate_value_ref_async(value_ref, context, options, detect_resolver).await {
+    match evaluate_value_ref_async(value_ref, context, options).await {
         Ok(value) => SafeEvalResult::Ok { value },
         Err(error) => map_eval_error(error),
     }
@@ -343,17 +309,10 @@ fn map_eval_error(error: ValueRefEvalError) -> SafeEvalResult {
     match error {
         ValueRefEvalError::MissingRef { path, .. } => SafeEvalResult::Err {
             missing_refs: vec![path],
-            needs_detect: false,
             errors: Vec::new(),
-        },
-        ValueRefEvalError::NeedDetect { kind } => SafeEvalResult::Err {
-            missing_refs: Vec::new(),
-            needs_detect: true,
-            errors: vec![format!("detect requires async provider resolution: {kind}")],
         },
         ValueRefEvalError::CelEvaluationFailed { expression, reason } => SafeEvalResult::Err {
             missing_refs: Vec::new(),
-            needs_detect: false,
             errors: vec![format!(
                 "CEL evaluation failed for `{expression}`: {reason}"
             )],
@@ -399,14 +358,18 @@ fn parse_value_ref_like(value: &Value) -> Option<ValueRef> {
         return None;
     }
     let key = object.keys().next()?;
-    if !matches!(key.as_str(), "lit" | "ref" | "cel" | "detect" | "object" | "array") {
+    if !matches!(key.as_str(), "lit" | "ref" | "cel" | "object" | "array") {
         return None;
     }
     serde_json::from_value::<ValueRef>(value.clone()).ok()
 }
 
 fn dedup_sort_strings(values: Vec<String>) -> Vec<String> {
-    values.into_iter().collect::<BTreeSet<_>>().into_iter().collect()
+    values
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 fn json_type_name(value: &Value) -> &'static str {

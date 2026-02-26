@@ -1,6 +1,6 @@
 use ais_runner::{
-    execute_plan_diff, execute_replay, execute_run_plan, execute_run_workflow, Cli, Commands,
-    PlanTopLevelCommand, RunCommand,
+    execute_agent, execute_plan_diff, execute_replay, execute_run_plan, execute_run_workflow, Cli,
+    Commands, PlanTopLevelCommand, RunCommand,
 };
 use clap::Parser;
 
@@ -15,6 +15,7 @@ fn main() {
             PlanTopLevelCommand::Diff(command) => execute_plan_diff(&command),
         },
         Commands::Replay(command) => execute_replay(&command),
+        Commands::Agent(command) => execute_agent(&command),
     };
 
     match result {

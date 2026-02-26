@@ -1,11 +1,9 @@
 use super::{dry_run_json, dry_run_json_async, dry_run_text, render_dry_run_text};
-use crate::planner::NodeRunState;
 use crate::documents::PlanDocument;
-use crate::resolver::{DetectResolver, DetectSpec, ResolverContext, ValueRefEvalError, ValueRefEvalOptions};
+use crate::planner::NodeRunState;
+use crate::resolver::{ResolverContext, ValueRefEvalOptions};
 use futures::executor::block_on;
-use futures::FutureExt;
-use serde_json::{json, Map, Value};
-use std::collections::BTreeMap;
+use serde_json::{json, Map};
 
 fn sample_plan() -> PlanDocument {
     PlanDocument {
@@ -64,7 +62,10 @@ fn dry_run_json_contains_per_node_report_and_issues() {
     assert_eq!(report.nodes.len(), 2);
     assert_eq!(report.nodes[0].readiness.state, NodeRunState::Ready);
     assert_eq!(report.nodes[1].readiness.state, NodeRunState::Blocked);
-    assert_eq!(report.nodes[1].readiness.missing_refs, vec!["contracts.router".to_string()]);
+    assert_eq!(
+        report.nodes[1].readiness.missing_refs,
+        vec!["contracts.router".to_string()]
+    );
     assert!(!report.issues.is_empty());
     assert!(!report.plan_hash.is_empty());
     assert!(!report.report_hash.is_empty());
@@ -86,31 +87,13 @@ fn dry_run_text_is_stable() {
     assert!(text_first.contains("id=node-blocked"));
 }
 
-struct StaticDetectResolver;
-
-impl DetectResolver for StaticDetectResolver {
-    fn resolve<'a>(
-        &'a self,
-        detect: &'a DetectSpec,
-        _context: &'a ResolverContext,
-        _options: &'a ValueRefEvalOptions,
-    ) -> futures::future::LocalBoxFuture<'a, Result<Value, ValueRefEvalError>> {
-        async move {
-            Ok(json!({
-                "selected": detect.kind
-            }))
-        }
-        .boxed_local()
-    }
-}
-
 #[test]
-fn dry_run_json_async_resolves_detect_and_becomes_ready() {
+fn dry_run_json_async_reports_ready_node() {
     let plan = PlanDocument {
         schema: "ais-plan/0.0.3".to_string(),
         meta: None,
         nodes: vec![json!({
-            "id": "node-detect",
+            "id": "node-async",
             "kind": "execution",
             "chain": "eip155:1",
             "execution": {
@@ -119,22 +102,18 @@ fn dry_run_json_async_resolves_detect_and_becomes_ready() {
                 "abi": {"type": "function", "name": "swap", "inputs": [], "outputs": []},
                 "method": "swap",
                 "args": {
-                    "route": {"detect": {"kind": "choose_one"}}
+                    "route": {"lit": "fixed"}
                 }
             }
         })],
         extensions: Map::new(),
     };
     let context = ResolverContext::new();
-    let resolver = StaticDetectResolver;
 
     let report = block_on(dry_run_json_async(
         &plan,
         &context,
-        &ValueRefEvalOptions {
-            root_overrides: BTreeMap::new(),
-        },
-        Some(&resolver),
+        &ValueRefEvalOptions::default(),
     ));
 
     assert_eq!(report.nodes.len(), 1);

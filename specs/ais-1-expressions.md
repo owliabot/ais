@@ -23,7 +23,6 @@ This made validation and execution fragile. AIS 0.0.2 removes ambiguity by requi
 { lit: <literal> }          # literal scalar/object/array
 { ref: "<path>" }           # reference lookup by path
 { cel: "<expression>" }     # CEL expression evaluated against a context
-{ detect: <Detect> }        # dynamic resolution via providers/engine plugins
 { object: { <k>: <ValueRef> } }  # structured object of ValueRef (for tuples/structs)
 { array: [ <ValueRef> ] }         # array of ValueRef
 ```
@@ -82,17 +81,28 @@ Recommended pattern:
 - Convert `token_amount` → atomic `uint` via `to_atomic()`
 - Perform slippage math using integer helpers (see Types doc)
 
-## 4. Detect (`{detect:{...}}`)
+### 3.3 Allowed usage classes (normative)
 
-`detect` is a declaration for engine/provider-driven dynamic resolution.
+CEL in AIS has two allowed usage classes:
 
-```yaml
-detect:
-  kind: "choose_one" | "best_quote" | "best_path" | "protocol_specific"
-  provider: "..."                      # provider id (optional for choose_one)
-  candidates: [ {lit:...}, ... ]       # candidate values
-  constraints: { ... }                 # provider-specific constraints
-  requires_capabilities: ["..."]       # required engine capabilities
-```
+- conditional gating:
+  - `when.cel`
+  - boolean guards inside policy/constraint evaluation
+- deterministic computed values:
+  - `ValueRef = { cel: "..." }` for parameter/value derivation
 
-Engines MUST fail with a clear error if the requested detect kind/provider is unsupported.
+For deterministic computed values:
+
+- expression MUST be pure, deterministic, and side-effect free.
+- expression MUST NOT read time/random/network/environment.
+- expression MUST NOT perform IO or host callbacks.
+- same input context MUST produce the same output value.
+
+### 3.4 Prohibited behavior
+
+The following are explicitly prohibited:
+
+- external service calls in CEL
+- hidden mutable state
+- dynamic code evaluation/reflection
+- string-built executable references (for example constructing function/protocol names at runtime)

@@ -1,3 +1,7 @@
+use crate::checkpoint::{
+    canonical_side_effect_status, CheckpointSideEffectRecord, SIDE_EFFECT_RECORD_SCHEMA_0_1_0,
+    SIDE_EFFECT_STATUS_UNKNOWN,
+};
 use crate::commands::{
     apply_command_with_dedupe, CommandDeduper, DuplicateCommandMode, EngineCommandEnvelope,
     EngineCommandType,
@@ -7,7 +11,7 @@ use crate::events::{EngineEvent, EngineEventRecord, EngineEventStream, EngineEve
 use crate::executor::{RouterExecuteError, RouterExecutor};
 use crate::policy::{
     enforce_policy_gate, enrich_need_user_confirm_output, extract_policy_gate_input,
-    PolicyEnforcementOptions, PolicyGateOutput,
+    PolicyEnforcementOptions, PolicyGateInput, PolicyGateOutput, PolicyGateReasonCode,
 };
 use crate::solver::{build_solver_event, Solver, SolverDecision};
 use ais_sdk::{
@@ -40,6 +44,10 @@ pub struct EngineRunnerState {
     #[serde(default)]
     pub pending_retries: Map<String, Value>,
     #[serde(default)]
+    pub plan_epoch: u64,
+    #[serde(default)]
+    pub plan_hash_history: Vec<String>,
+    #[serde(default)]
     pub next_seq: u64,
 }
 
@@ -52,6 +60,8 @@ impl Default for EngineRunnerState {
             seen_command_ids: Vec::new(),
             paused_reason: None,
             pending_retries: Map::new(),
+            plan_epoch: 0,
+            plan_hash_history: Vec::new(),
             next_seq: 0,
         }
     }
@@ -62,6 +72,8 @@ pub struct EngineRunnerOptions {
     pub duplicate_command_mode: DuplicateCommandMode,
     pub policy: PolicyEnforcementOptions,
     pub solver_context: crate::solver::SolverContext,
+    #[serde(default)]
+    pub safety: EngineSafetyOptions,
 }
 
 impl Default for EngineRunnerOptions {
@@ -70,8 +82,40 @@ impl Default for EngineRunnerOptions {
             duplicate_command_mode: DuplicateCommandMode::Reject,
             policy: PolicyEnforcementOptions::default(),
             solver_context: crate::solver::SolverContext::default(),
+            safety: EngineSafetyOptions::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EngineSafetyOptions {
+    #[serde(default)]
+    pub blocked_execution_types: Vec<String>,
+    #[serde(default = "default_true")]
+    pub sanitize_executor_output: bool,
+    #[serde(default = "default_max_output_string_chars")]
+    pub max_output_string_chars: usize,
+    #[serde(default = "default_true")]
+    pub hard_block_prompt_injection: bool,
+}
+
+impl Default for EngineSafetyOptions {
+    fn default() -> Self {
+        Self {
+            blocked_execution_types: vec![],
+            sanitize_executor_output: true,
+            max_output_string_chars: default_max_output_string_chars(),
+            hard_block_prompt_injection: true,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_max_output_string_chars() -> usize {
+    512
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -99,12 +143,8 @@ pub fn run_plan_once(
     );
 
     for command in commands {
-        let command_event = apply_command_with_dedupe(
-            &mut deduper,
-            &mut stream,
-            "1970-01-01T00:00:00Z",
-            command,
-        );
+        let command_event =
+            apply_command_with_dedupe(&mut deduper, &mut stream, "1970-01-01T00:00:00Z", command);
         events.push(command_event.event_record.clone());
         if !command_event.accepted || command_event.duplicate {
             continue;
@@ -142,19 +182,71 @@ pub fn run_plan_once(
                     }
                 }
             }
+            EngineCommandType::UserInput => {
+                if let Err(reason) =
+                    apply_user_input_command(&mut state.runtime, &command.command.data)
+                {
+                    events.push(stream.next_record(
+                        "1970-01-01T00:00:00Z",
+                        need_user_input_event(
+                            "invalid_user_input",
+                            reason.as_str(),
+                            &command.command.id,
+                        ),
+                    ));
+                    state.paused_reason = Some("need_user_input:command".to_string());
+                    events.push(
+                        stream.next_record("1970-01-01T00:00:00Z", paused_event("need_user_input")),
+                    );
+                    persist_state_from_runtime(state, &mut deduper, &stream);
+                    return EngineRunResult {
+                        status: EngineRunStatus::Paused,
+                        events,
+                    };
+                }
+                if is_user_input_pause_reason(state.paused_reason.as_deref()) {
+                    state.paused_reason = None;
+                }
+            }
+            EngineCommandType::UserSelect => {
+                if let Err(reason) =
+                    apply_user_select_command(&mut state.runtime, &command.command.data)
+                {
+                    events.push(stream.next_record(
+                        "1970-01-01T00:00:00Z",
+                        need_user_input_event(
+                            "invalid_user_select",
+                            reason.as_str(),
+                            &command.command.id,
+                        ),
+                    ));
+                    state.paused_reason = Some("need_user_input:command".to_string());
+                    events.push(
+                        stream.next_record("1970-01-01T00:00:00Z", paused_event("need_user_input")),
+                    );
+                    persist_state_from_runtime(state, &mut deduper, &stream);
+                    return EngineRunResult {
+                        status: EngineRunStatus::Paused,
+                        events,
+                    };
+                }
+                if is_user_input_pause_reason(state.paused_reason.as_deref()) {
+                    state.paused_reason = None;
+                }
+            }
             EngineCommandType::Cancel => {
                 state.paused_reason = Some("cancelled_by_command".to_string());
-                events.push(stream.next_record(
-                    "1970-01-01T00:00:00Z",
-                    paused_event("cancelled_by_command"),
-                ));
+                events.push(
+                    stream
+                        .next_record("1970-01-01T00:00:00Z", paused_event("cancelled_by_command")),
+                );
                 persist_state_from_runtime(state, &mut deduper, &stream);
                 return EngineRunResult {
                     status: EngineRunStatus::Paused,
                     events,
                 };
             }
-            EngineCommandType::SelectProvider => {}
+            EngineCommandType::ReplacePlan => {}
         }
     }
 
@@ -164,13 +256,21 @@ pub fn run_plan_once(
         .iter()
         .cloned()
         .collect::<BTreeSet<_>>();
-    let mut approved_set = state.approved_node_ids.iter().cloned().collect::<BTreeSet<_>>();
+    let mut approved_set = state
+        .approved_node_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
 
     for node in &plan.nodes {
         let Some(node_obj) = node.as_object() else {
             continue;
         };
-        let Some(node_id) = node_obj.get("id").and_then(Value::as_str).map(str::to_string) else {
+        let Some(node_id) = node_obj
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        else {
             continue;
         };
         if completed_set.contains(&node_id) {
@@ -183,10 +283,9 @@ pub fn run_plan_once(
         match evaluate_node_condition(node_obj, &state.runtime) {
             NodeConditionOutcome::Pass => {}
             NodeConditionOutcome::Skip => {
-                events.push(stream.next_record(
-                    "1970-01-01T00:00:00Z",
-                    condition_skipped_event(&node_id),
-                ));
+                events.push(
+                    stream.next_record("1970-01-01T00:00:00Z", condition_skipped_event(&node_id)),
+                );
                 clear_retry_state(state, &node_id);
                 completed_set.insert(node_id.clone());
                 approved_set.remove(&node_id);
@@ -199,10 +298,9 @@ pub fn run_plan_once(
                     condition_failed_event(&node_id, &message),
                 ));
                 state.paused_reason = Some(format!("condition_failed:{node_id}"));
-                events.push(stream.next_record(
-                    "1970-01-01T00:00:00Z",
-                    paused_event("condition_failed"),
-                ));
+                events.push(
+                    stream.next_record("1970-01-01T00:00:00Z", paused_event("condition_failed")),
+                );
                 persist_state_from_runtime(state, &mut deduper, &stream);
                 return EngineRunResult {
                     status: EngineRunStatus::Paused,
@@ -219,8 +317,13 @@ pub fn run_plan_once(
                 node_blocked_event(&node_id, &readiness),
             ));
             let decision = solver.solve(node, &readiness, &options.solver_context);
-            if let Some(event) = build_solver_event(Some(&node_id), &decision) {
-                events.push(stream.next_record("1970-01-01T00:00:00Z", event));
+            if !matches!(
+                decision,
+                SolverDecision::NeedUserConfirm { .. } | SolverDecision::NeedUserInput { .. }
+            ) {
+                if let Some(event) = build_solver_event(Some(&node_id), &decision) {
+                    events.push(stream.next_record("1970-01-01T00:00:00Z", event));
+                }
             }
             match decision {
                 SolverDecision::ApplyPatches { patches, .. } => {
@@ -234,27 +337,104 @@ pub fn run_plan_once(
                         continue;
                     }
                 }
-                SolverDecision::NeedUserConfirm { .. } => {
-                    state.paused_reason = Some(format!("need_user_confirm:{node_id}"));
+                SolverDecision::NeedUserInput { reason, details } => {
+                    let action_ref = extract_action_ref_from_node(node_obj);
+                    let (reason_code, event_details) =
+                        need_user_input_fields(&node_id, action_ref.as_deref(), &reason, &details);
                     events.push(stream.next_record(
                         "1970-01-01T00:00:00Z",
-                        paused_event("need_user_confirm"),
+                        need_user_input_event_with_details(
+                            Some(&node_id),
+                            &reason_code,
+                            &reason,
+                            &event_details,
+                        ),
                     ));
+                    state.paused_reason = Some(format!("need_user_input:{node_id}"));
+                    events.push(
+                        stream.next_record("1970-01-01T00:00:00Z", paused_event("need_user_input")),
+                    );
                     persist_state_from_runtime(state, &mut deduper, &stream);
                     return EngineRunResult {
                         status: EngineRunStatus::Paused,
                         events,
                     };
                 }
-                SolverDecision::SelectProvider { .. } | SolverDecision::Noop => {}
+                SolverDecision::NeedUserConfirm { reason, details } => {
+                    let action_ref = extract_action_ref_from_node(node_obj);
+                    let risk_level = extract_risk_level_from_node(node_obj);
+                    let risk_tags = extract_risk_tags_from_node(node_obj);
+                    let gate_input = extract_policy_gate_input(
+                        node,
+                        readiness.resolved_params.as_ref(),
+                        action_ref.clone(),
+                        risk_level,
+                        risk_tags,
+                    );
+                    let gate_output = PolicyGateOutput::NeedUserConfirm {
+                        reason_code: PolicyGateReasonCode::UnknownFields,
+                        reason: reason.clone(),
+                        details: details.clone(),
+                    };
+                    let gate_output = enrich_need_user_confirm_output(&gate_input, &gate_output)
+                        .unwrap_or(gate_output);
+                    let (event_reason_code, event_reason, event_details) =
+                        need_user_confirm_fields(&gate_input, &gate_output, action_ref.as_deref());
+                    if should_route_confirm_to_missing_required_input(
+                        event_reason_code.as_str(),
+                        &event_details,
+                    ) {
+                        let normalized_details =
+                            normalize_missing_required_input_details(&event_details);
+                        events.push(stream.next_record(
+                            "1970-01-01T00:00:00Z",
+                            need_user_input_event_with_details(
+                                Some(&node_id),
+                                "missing_required_input",
+                                "missing_inputs_or_runtime_refs",
+                                &normalized_details,
+                            ),
+                        ));
+                        state.paused_reason = Some(format!("need_user_input:{node_id}"));
+                        events.push(
+                            stream.next_record(
+                                "1970-01-01T00:00:00Z",
+                                paused_event("need_user_input"),
+                            ),
+                        );
+                        persist_state_from_runtime(state, &mut deduper, &stream);
+                        return EngineRunResult {
+                            status: EngineRunStatus::Paused,
+                            events,
+                        };
+                    }
+
+                    events.push(stream.next_record(
+                        "1970-01-01T00:00:00Z",
+                        need_user_confirm_event(
+                            &node_id,
+                            &event_reason_code,
+                            &event_reason,
+                            &event_details,
+                        ),
+                    ));
+                    state.paused_reason = Some(format!("need_user_confirm:{node_id}"));
+                    events.push(
+                        stream
+                            .next_record("1970-01-01T00:00:00Z", paused_event("need_user_confirm")),
+                    );
+                    persist_state_from_runtime(state, &mut deduper, &stream);
+                    return EngineRunResult {
+                        status: EngineRunStatus::Paused,
+                        events,
+                    };
+                }
+                SolverDecision::Noop => {}
             }
             continue;
         }
 
-        events.push(stream.next_record(
-            "1970-01-01T00:00:00Z",
-            node_ready_event(&node_id),
-        ));
+        events.push(stream.next_record("1970-01-01T00:00:00Z", node_ready_event(&node_id)));
 
         let simulate_mode = should_simulate_node(plan, node_obj, &node_id);
         if simulate_mode {
@@ -263,10 +443,9 @@ pub fn run_plan_once(
                 "node_id": node_id,
             });
             apply_node_writes(node_obj, &simulated_result, &mut state.runtime);
-            events.push(stream.next_record(
-                "1970-01-01T00:00:00Z",
-                preflight_simulated_event(&node_id),
-            ));
+            events.push(
+                stream.next_record("1970-01-01T00:00:00Z", preflight_simulated_event(&node_id)),
+            );
             match evaluate_node_assert(plan, node_obj, &node_id, &state.runtime) {
                 NodeAssertOutcome::Pass => {
                     match handle_node_until(
@@ -293,15 +472,15 @@ pub fn run_plan_once(
                     continue;
                 }
                 NodeAssertOutcome::Fail { message, strategy } => {
-                        events.push(stream.next_record(
-                            "1970-01-01T00:00:00Z",
-                            assert_failed_event(
-                                &node_id,
-                                &message,
-                                "preflight_simulate",
-                                node_obj.get("assert"),
-                            ),
-                        ));
+                    events.push(stream.next_record(
+                        "1970-01-01T00:00:00Z",
+                        assert_failed_event(
+                            &node_id,
+                            &message,
+                            "preflight_simulate",
+                            node_obj.get("assert"),
+                        ),
+                    ));
                     state.paused_reason = Some(format!("assert_failed:{node_id}"));
                     if strategy == AssertFailStrategy::Stop {
                         events.push(stream.next_record(
@@ -314,10 +493,9 @@ pub fn run_plan_once(
                             events,
                         };
                     }
-                    events.push(stream.next_record(
-                        "1970-01-01T00:00:00Z",
-                        paused_event("assert_failed"),
-                    ));
+                    events.push(
+                        stream.next_record("1970-01-01T00:00:00Z", paused_event("assert_failed")),
+                    );
                     persist_state_from_runtime(state, &mut deduper, &stream);
                     return EngineRunResult {
                         status: EngineRunStatus::Paused,
@@ -327,29 +505,77 @@ pub fn run_plan_once(
             }
         }
 
+        let action_ref = extract_action_ref_from_node(node_obj);
+        let risk_level = extract_risk_level_from_node(node_obj);
+        let risk_tags = extract_risk_tags_from_node(node_obj);
         let gate_input = extract_policy_gate_input(
             node,
             readiness.resolved_params.as_ref(),
-            None,
-            None,
-            Vec::new(),
+            action_ref.clone(),
+            risk_level,
+            risk_tags,
         );
         let gate_output = enforce_policy_gate(&gate_input, &options.policy);
-        let gate_output = enrich_need_user_confirm_output(&gate_input, &gate_output).unwrap_or(gate_output);
+        let gate_output =
+            enrich_need_user_confirm_output(&gate_input, &gate_output).unwrap_or(gate_output);
 
         match gate_output {
             PolicyGateOutput::Ok { .. } => {}
-            PolicyGateOutput::NeedUserConfirm { reason, details } => {
+            PolicyGateOutput::NeedUserConfirm {
+                reason_code,
+                reason,
+                details,
+            } => {
+                let gate_output = PolicyGateOutput::NeedUserConfirm {
+                    reason_code,
+                    reason,
+                    details,
+                };
                 if !approved_set.contains(&node_id) {
+                    let (event_reason_code, event_reason, event_details) =
+                        need_user_confirm_fields(&gate_input, &gate_output, action_ref.as_deref());
+                    if should_route_confirm_to_missing_required_input(
+                        event_reason_code.as_str(),
+                        &event_details,
+                    ) {
+                        let normalized_details =
+                            normalize_missing_required_input_details(&event_details);
+                        events.push(stream.next_record(
+                            "1970-01-01T00:00:00Z",
+                            need_user_input_event_with_details(
+                                Some(&node_id),
+                                "missing_required_input",
+                                "missing_inputs_or_runtime_refs",
+                                &normalized_details,
+                            ),
+                        ));
+                        state.paused_reason = Some(format!("need_user_input:{node_id}"));
+                        events.push(
+                            stream.next_record(
+                                "1970-01-01T00:00:00Z",
+                                paused_event("need_user_input"),
+                            ),
+                        );
+                        persist_state_from_runtime(state, &mut deduper, &stream);
+                        return EngineRunResult {
+                            status: EngineRunStatus::Paused,
+                            events,
+                        };
+                    }
                     events.push(stream.next_record(
                         "1970-01-01T00:00:00Z",
-                        need_user_confirm_event(&node_id, &reason, &details),
+                        need_user_confirm_event(
+                            &node_id,
+                            &event_reason_code,
+                            &event_reason,
+                            &event_details,
+                        ),
                     ));
                     state.paused_reason = Some(format!("need_user_confirm:{node_id}"));
-                    events.push(stream.next_record(
-                        "1970-01-01T00:00:00Z",
-                        paused_event("need_user_confirm"),
-                    ));
+                    events.push(
+                        stream
+                            .next_record("1970-01-01T00:00:00Z", paused_event("need_user_confirm")),
+                    );
                     persist_state_from_runtime(state, &mut deduper, &stream);
                     return EngineRunResult {
                         status: EngineRunStatus::Paused,
@@ -357,16 +583,17 @@ pub fn run_plan_once(
                     };
                 }
             }
-            PolicyGateOutput::HardBlock { reason, details } => {
+            PolicyGateOutput::HardBlock {
+                reason_code,
+                reason,
+                details,
+            } => {
                 events.push(stream.next_record(
                     "1970-01-01T00:00:00Z",
-                    hard_block_event(&node_id, &reason, &details),
+                    hard_block_event(&node_id, reason_code.as_str(), &reason, &details),
                 ));
                 state.paused_reason = Some(format!("hard_block:{node_id}"));
-                events.push(stream.next_record(
-                    "1970-01-01T00:00:00Z",
-                    paused_event("hard_block"),
-                ));
+                events.push(stream.next_record("1970-01-01T00:00:00Z", paused_event("hard_block")));
                 persist_state_from_runtime(state, &mut deduper, &stream);
                 return EngineRunResult {
                     status: EngineRunStatus::Paused,
@@ -392,10 +619,9 @@ pub fn run_plan_once(
                     executor_error_event(&node_id, &error),
                 ));
                 state.paused_reason = Some(format!("executor_error:{node_id}"));
-                events.push(stream.next_record(
-                    "1970-01-01T00:00:00Z",
-                    paused_event("executor_error"),
-                ));
+                events.push(
+                    stream.next_record("1970-01-01T00:00:00Z", paused_event("executor_error")),
+                );
                 persist_state_from_runtime(state, &mut deduper, &stream);
                 return EngineRunResult {
                     status: EngineRunStatus::Paused,
@@ -403,16 +629,92 @@ pub fn run_plan_once(
                 };
             }
         };
+        if let Some((reason_code, reason, details)) =
+            safety_hook_before_execute(node_obj, &options.safety)
+        {
+            events.push(stream.next_record(
+                "1970-01-01T00:00:00Z",
+                hard_block_event(&node_id, reason_code.as_str(), reason.as_str(), &details),
+            ));
+            state.paused_reason = Some(format!("hard_block:{node_id}"));
+            events.push(stream.next_record("1970-01-01T00:00:00Z", paused_event("hard_block")));
+            persist_state_from_runtime(state, &mut deduper, &stream);
+            return EngineRunResult {
+                status: EngineRunStatus::Paused,
+                events,
+            };
+        }
 
         match router.execute(&executable_node, &mut state.runtime) {
-            Ok(result) => {
+            Ok(mut result) => {
+                if options.safety.sanitize_executor_output {
+                    sanitize_executor_output_value(&mut result.output.result, &options.safety);
+                }
+                if options.safety.hard_block_prompt_injection
+                    && contains_prompt_injection_pattern(&result.output.result)
+                {
+                    let mut details = Map::new();
+                    details.insert(
+                        "reason".to_string(),
+                        Value::String(
+                            "potential prompt-injection content detected in executor output"
+                                .to_string(),
+                        ),
+                    );
+                    events.push(stream.next_record(
+                        "1970-01-01T00:00:00Z",
+                        hard_block_event(
+                            &node_id,
+                            "safety_output_prompt_injection",
+                            "safety layer blocked suspicious executor output",
+                            &details,
+                        ),
+                    ));
+                    state.paused_reason = Some(format!("hard_block:{node_id}"));
+                    events.push(
+                        stream.next_record("1970-01-01T00:00:00Z", paused_event("hard_block")),
+                    );
+                    persist_state_from_runtime(state, &mut deduper, &stream);
+                    return EngineRunResult {
+                        status: EngineRunStatus::Paused,
+                        events,
+                    };
+                }
+
+                let chain = node_obj.get("chain").and_then(Value::as_str);
+                let execution_type = node_obj
+                    .get("execution")
+                    .and_then(Value::as_object)
+                    .and_then(|execution| execution.get("type"))
+                    .and_then(Value::as_str);
+                let side_effects = std::mem::take(&mut result.output.side_effects);
+                for mut side_effect in side_effects {
+                    if !normalize_side_effect_record(
+                        &mut side_effect,
+                        node_id.as_str(),
+                        chain,
+                        execution_type,
+                    ) {
+                        continue;
+                    }
+                    events.push(stream.next_record(
+                        "1970-01-01T00:00:00Z",
+                        side_effect_observed_event(&node_id, &side_effect),
+                    ));
+                }
+
                 apply_node_writes(node_obj, &result.output.result, &mut state.runtime);
                 match evaluate_node_assert(plan, node_obj, &node_id, &state.runtime) {
                     NodeAssertOutcome::Pass => {}
                     NodeAssertOutcome::Fail { message, strategy } => {
                         events.push(stream.next_record(
                             "1970-01-01T00:00:00Z",
-                            assert_failed_event(&node_id, &message, "execute", node_obj.get("assert")),
+                            assert_failed_event(
+                                &node_id,
+                                &message,
+                                "execute",
+                                node_obj.get("assert"),
+                            ),
                         ));
                         state.paused_reason = Some(format!("assert_failed:{node_id}"));
                         if strategy == AssertFailStrategy::Stop {
@@ -426,10 +728,10 @@ pub fn run_plan_once(
                                 events,
                             };
                         }
-                        events.push(stream.next_record(
-                            "1970-01-01T00:00:00Z",
-                            paused_event("assert_failed"),
-                        ));
+                        events.push(
+                            stream
+                                .next_record("1970-01-01T00:00:00Z", paused_event("assert_failed")),
+                        );
                         persist_state_from_runtime(state, &mut deduper, &stream);
                         return EngineRunResult {
                             status: EngineRunStatus::Paused,
@@ -465,10 +767,9 @@ pub fn run_plan_once(
                     executor_error_event(&node_id, &error),
                 ));
                 state.paused_reason = Some(format!("executor_error:{node_id}"));
-                events.push(stream.next_record(
-                    "1970-01-01T00:00:00Z",
-                    paused_event("executor_error"),
-                ));
+                events.push(
+                    stream.next_record("1970-01-01T00:00:00Z", paused_event("executor_error")),
+                );
                 persist_state_from_runtime(state, &mut deduper, &stream);
                 return EngineRunResult {
                     status: EngineRunStatus::Paused,
@@ -492,10 +793,7 @@ pub fn run_plan_once(
 
     if !progress {
         state.paused_reason = Some("no_progress".to_string());
-        events.push(stream.next_record(
-            "1970-01-01T00:00:00Z",
-            paused_event("no_progress"),
-        ));
+        events.push(stream.next_record("1970-01-01T00:00:00Z", paused_event("no_progress")));
         persist_state_from_runtime(state, &mut deduper, &stream);
         return EngineRunResult {
             status: EngineRunStatus::Paused,
@@ -559,7 +857,10 @@ fn materialize_value_refs(
         Value::Object(object) => {
             let mut out = Map::<String, Value>::new();
             for (key, child) in object {
-                out.insert(key.clone(), materialize_value_refs(child, context, options)?);
+                out.insert(
+                    key.clone(),
+                    materialize_value_refs(child, context, options)?,
+                );
             }
             Ok(Value::Object(out))
         }
@@ -729,7 +1030,10 @@ fn evaluate_node_until(node_obj: &Map<String, Value>, runtime: &Value) -> NodeUn
         Value::Bool(true) => NodeUntilOutcome::Pass,
         Value::Bool(false) => NodeUntilOutcome::Retry,
         other => NodeUntilOutcome::Fail {
-            message: format!("until must evaluate to boolean, got {}", json_type_name(&other)),
+            message: format!(
+                "until must evaluate to boolean, got {}",
+                json_type_name(&other)
+            ),
         },
     }
 }
@@ -761,7 +1065,9 @@ fn parse_retry_config(node_obj: &Map<String, Value>) -> Result<Option<RetryConfi
         .unwrap_or("fixed")
         .to_string();
     if backoff != "fixed" {
-        return Err(format!("retry.backoff `{backoff}` is not supported (expected `fixed`)"));
+        return Err(format!(
+            "retry.backoff `{backoff}` is not supported (expected `fixed`)"
+        ));
     }
     Ok(Some(RetryConfig {
         interval_ms,
@@ -803,10 +1109,9 @@ fn handle_node_until(
                         until_failed_event(node_id, &message),
                     ));
                     state.paused_reason = Some(format!("until_failed:{node_id}"));
-                    events.push(stream.next_record(
-                        "1970-01-01T00:00:00Z",
-                        paused_event("until_failed"),
-                    ));
+                    events.push(
+                        stream.next_record("1970-01-01T00:00:00Z", paused_event("until_failed")),
+                    );
                     persist_state_from_runtime(state, deduper, stream);
                     return NodeUntilHandle::Paused;
                 }
@@ -814,13 +1119,15 @@ fn handle_node_until(
             let Some(retry_config) = retry_config else {
                 events.push(stream.next_record(
                     "1970-01-01T00:00:00Z",
-                    until_failed_event(node_id, "until evaluated false and retry is not configured"),
+                    until_failed_event(
+                        node_id,
+                        "until evaluated false and retry is not configured",
+                    ),
                 ));
                 state.paused_reason = Some(format!("until_not_met:{node_id}"));
-                events.push(stream.next_record(
-                    "1970-01-01T00:00:00Z",
-                    paused_event("until_not_met"),
-                ));
+                events.push(
+                    stream.next_record("1970-01-01T00:00:00Z", paused_event("until_not_met")),
+                );
                 persist_state_from_runtime(state, deduper, stream);
                 return NodeUntilHandle::Paused;
             };
@@ -832,25 +1139,26 @@ fn handle_node_until(
                         until_failed_event(node_id, &message),
                     ));
                     state.paused_reason = Some(format!("until_failed:{node_id}"));
-                    events.push(stream.next_record(
-                        "1970-01-01T00:00:00Z",
-                        paused_event("until_failed"),
-                    ));
+                    events.push(
+                        stream.next_record("1970-01-01T00:00:00Z", paused_event("until_failed")),
+                    );
                     persist_state_from_runtime(state, deduper, stream);
                     return NodeUntilHandle::Paused;
                 }
             };
             let (attempt, waited_ms) = next_retry_attempt(state, node_id, &retry_config);
-            if retry_config.max_attempts.is_some_and(|max_attempts| attempt > max_attempts) {
+            if retry_config
+                .max_attempts
+                .is_some_and(|max_attempts| attempt > max_attempts)
+            {
                 events.push(stream.next_record(
                     "1970-01-01T00:00:00Z",
                     retry_exhausted_event(node_id, attempt, &retry_config),
                 ));
                 state.paused_reason = Some(format!("retry_exhausted:{node_id}"));
-                events.push(stream.next_record(
-                    "1970-01-01T00:00:00Z",
-                    paused_event("retry_exhausted"),
-                ));
+                events.push(
+                    stream.next_record("1970-01-01T00:00:00Z", paused_event("retry_exhausted")),
+                );
                 persist_state_from_runtime(state, deduper, stream);
                 return NodeUntilHandle::Paused;
             }
@@ -860,10 +1168,9 @@ fn handle_node_until(
                     retry_timeout_event(node_id, waited_ms, timeout_ms.unwrap_or_default()),
                 ));
                 state.paused_reason = Some(format!("retry_timeout:{node_id}"));
-                events.push(stream.next_record(
-                    "1970-01-01T00:00:00Z",
-                    paused_event("retry_timeout"),
-                ));
+                events.push(
+                    stream.next_record("1970-01-01T00:00:00Z", paused_event("retry_timeout")),
+                );
                 persist_state_from_runtime(state, deduper, stream);
                 return NodeUntilHandle::Paused;
             }
@@ -880,17 +1187,18 @@ fn handle_node_until(
                 until_failed_event(node_id, &message),
             ));
             state.paused_reason = Some(format!("until_failed:{node_id}"));
-            events.push(stream.next_record(
-                "1970-01-01T00:00:00Z",
-                paused_event("until_failed"),
-            ));
+            events.push(stream.next_record("1970-01-01T00:00:00Z", paused_event("until_failed")));
             persist_state_from_runtime(state, deduper, stream);
             NodeUntilHandle::Paused
         }
     }
 }
 
-fn next_retry_attempt(state: &mut EngineRunnerState, node_id: &str, retry: &RetryConfig) -> (u64, u64) {
+fn next_retry_attempt(
+    state: &mut EngineRunnerState,
+    node_id: &str,
+    retry: &RetryConfig,
+) -> (u64, u64) {
     let previous_attempt = state
         .pending_retries
         .get(node_id)
@@ -985,7 +1293,10 @@ fn evaluate_node_assert(
     }
 }
 
-fn resolve_assert_fail_strategy(plan: &PlanDocument, node_obj: &Map<String, Value>) -> AssertFailStrategy {
+fn resolve_assert_fail_strategy(
+    plan: &PlanDocument,
+    node_obj: &Map<String, Value>,
+) -> AssertFailStrategy {
     if let Some(strategy) = node_obj
         .get("extensions")
         .and_then(Value::as_object)
@@ -1038,10 +1349,207 @@ fn ensure_runtime_object(runtime: &mut Value) {
     }
 }
 
+fn safety_hook_before_execute(
+    node_obj: &Map<String, Value>,
+    safety: &EngineSafetyOptions,
+) -> Option<(String, String, Map<String, Value>)> {
+    if safety.blocked_execution_types.is_empty() {
+        return None;
+    }
+    let execution_type = node_obj
+        .get("execution")
+        .and_then(Value::as_object)
+        .and_then(|execution| execution.get("type"))
+        .and_then(Value::as_str)?;
+    if !safety
+        .blocked_execution_types
+        .iter()
+        .any(|value| value == execution_type)
+    {
+        return None;
+    }
+    let mut details = Map::new();
+    details.insert(
+        "execution_type".to_string(),
+        Value::String(execution_type.to_string()),
+    );
+    details.insert(
+        "blocked_execution_types".to_string(),
+        Value::Array(
+            safety
+                .blocked_execution_types
+                .iter()
+                .cloned()
+                .map(Value::String)
+                .collect(),
+        ),
+    );
+    Some((
+        "safety_hook_execution_type_blocked".to_string(),
+        "execution type is blocked by safety hook".to_string(),
+        details,
+    ))
+}
+
+fn sanitize_executor_output_value(value: &mut Value, safety: &EngineSafetyOptions) {
+    match value {
+        Value::Object(object) => {
+            for (key, child) in object.iter_mut() {
+                if is_sensitive_key(key) {
+                    *child = Value::String("[REDACTED]".to_string());
+                    continue;
+                }
+                sanitize_executor_output_value(child, safety);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                sanitize_executor_output_value(item, safety);
+            }
+        }
+        Value::String(text) => {
+            let mut normalized = text.trim().to_string();
+            if normalized.chars().count() > safety.max_output_string_chars {
+                normalized = normalized
+                    .chars()
+                    .take(safety.max_output_string_chars)
+                    .collect::<String>();
+                normalized.push_str("...");
+            }
+            *text = normalized;
+        }
+        _ => {}
+    }
+}
+
+fn is_sensitive_key(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "private_key"
+            | "mnemonic"
+            | "seed"
+            | "api_key"
+            | "authorization"
+            | "password"
+            | "secret"
+            | "access_token"
+            | "refresh_token"
+            | "signature"
+    )
+}
+
+fn contains_prompt_injection_pattern(value: &Value) -> bool {
+    match value {
+        Value::String(text) => contains_prompt_injection_text(text),
+        Value::Array(items) => items.iter().any(contains_prompt_injection_pattern),
+        Value::Object(object) => object.values().any(contains_prompt_injection_pattern),
+        _ => false,
+    }
+}
+
+fn contains_prompt_injection_text(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("ignore previous instructions")
+        || lower.contains("ignore all previous")
+        || lower.contains("system prompt")
+        || lower.contains("developer message")
+        || lower.contains("tool_call")
+        || lower.contains("<script")
+}
+
 fn insert_unique_sorted(list: &mut Vec<String>, value: String) {
     if !list.iter().any(|item| item == &value) {
         list.push(value);
         list.sort();
+    }
+}
+
+fn apply_user_input_command(runtime: &mut Value, data: &Map<String, Value>) -> Result<(), String> {
+    let input_id = data
+        .get("input_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "data.input_id is required".to_string())?;
+    let value = data
+        .get("value")
+        .cloned()
+        .ok_or_else(|| "data.value is required".to_string())?;
+    let target_path = resolve_user_input_target_path(input_id, data.get("target_path"))?;
+    set_runtime_path(runtime, target_path.as_str(), value);
+    Ok(())
+}
+
+fn apply_user_select_command(runtime: &mut Value, data: &Map<String, Value>) -> Result<(), String> {
+    let input_id = data
+        .get("input_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "data.input_id is required".to_string())?;
+    let selected = if let Some(value) = data.get("selected_value") {
+        value.clone()
+    } else {
+        let selected_index = data
+            .get("selected_index")
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .ok_or_else(|| {
+                "data.selected_value is required, or data.selected_index (>=1) with data.options"
+                    .to_string()
+            })?;
+        let options = data
+            .get("options")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                "data.options must be an array when selected_index is used".to_string()
+            })?;
+        if selected_index > options.len() {
+            return Err(format!(
+                "data.selected_index {} out of range (options={})",
+                selected_index,
+                options.len()
+            ));
+        }
+        let option = &options[selected_index - 1];
+        if let Some(value) = option.get("value") {
+            value.clone()
+        } else if let Some(label) = option.get("label").and_then(Value::as_str) {
+            Value::String(label.to_string())
+        } else if let Some(text) = option.as_str() {
+            Value::String(text.to_string())
+        } else {
+            return Err("selected option must be string or object with label/value".to_string());
+        }
+    };
+    let target_path = resolve_user_input_target_path(input_id, data.get("target_path"))?;
+    set_runtime_path(runtime, target_path.as_str(), selected);
+    Ok(())
+}
+
+fn resolve_user_input_target_path(
+    input_id: &str,
+    raw_target_path: Option<&Value>,
+) -> Result<String, String> {
+    let target_path = raw_target_path
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("inputs.{input_id}"));
+    if !target_path.starts_with("inputs.") {
+        return Err("target_path must start with `inputs.`".to_string());
+    }
+    Ok(target_path)
+}
+
+fn is_user_input_pause_reason(paused_reason: Option<&str>) -> bool {
+    match paused_reason {
+        Some("missing_required_input") => true,
+        Some(reason) => reason.starts_with("need_user_input:"),
+        None => false,
     }
 }
 
@@ -1116,7 +1624,10 @@ fn project_write_value(node_obj: &Map<String, Value>, result: &Value, path: &str
 }
 
 fn set_runtime_path(runtime: &mut Value, path: &str, value: Value) {
-    let parts = path.split('.').filter(|part| !part.is_empty()).collect::<Vec<_>>();
+    let parts = path
+        .split('.')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
     if parts.is_empty() {
         return;
     }
@@ -1135,7 +1646,10 @@ fn set_runtime_path(runtime: &mut Value, path: &str, value: Value) {
 }
 
 fn merge_runtime_path(runtime: &mut Value, path: &str, value: Value) {
-    let parts = path.split('.').filter(|part| !part.is_empty()).collect::<Vec<_>>();
+    let parts = path
+        .split('.')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
     if parts.is_empty() {
         return;
     }
@@ -1152,7 +1666,9 @@ fn merge_runtime_path(runtime: &mut Value, path: &str, value: Value) {
         return;
     };
     let key = parts[parts.len() - 1].to_string();
-    let target = object.entry(key).or_insert_with(|| Value::Object(Map::new()));
+    let target = object
+        .entry(key)
+        .or_insert_with(|| Value::Object(Map::new()));
     if let (Some(target_object), Some(value_object)) = (target.as_object_mut(), value.as_object()) {
         for (key, value) in value_object {
             target_object.insert(key.clone(), value.clone());
@@ -1177,9 +1693,6 @@ fn node_blocked_event(node_id: &str, readiness: &ais_sdk::NodeReadinessResult) -
         ),
     );
     event
-        .data
-        .insert("needs_detect".to_string(), Value::Bool(readiness.needs_detect));
-    event
 }
 
 fn node_ready_event(node_id: &str) -> EngineEvent {
@@ -1188,9 +1701,70 @@ fn node_ready_event(node_id: &str) -> EngineEvent {
     event
 }
 
-fn need_user_confirm_event(node_id: &str, reason: &str, details: &Map<String, Value>) -> EngineEvent {
+fn normalize_side_effect_record(
+    record: &mut CheckpointSideEffectRecord,
+    node_id: &str,
+    chain: Option<&str>,
+    execution_type: Option<&str>,
+) -> bool {
+    if record.schema.is_none() {
+        record.schema = Some(SIDE_EFFECT_RECORD_SCHEMA_0_1_0.to_string());
+    }
+    if record.node_id.trim().is_empty() {
+        record.node_id = node_id.to_string();
+    }
+    if record.chain.is_none() {
+        record.chain = chain.map(str::to_string);
+    }
+    if record.execution_type.is_none() {
+        record.execution_type = execution_type.map(str::to_string);
+    }
+    if record.effect_type.trim().is_empty() {
+        record.effect_type = "tx".to_string();
+    }
+    record.status = canonical_side_effect_status(record.status.as_str()).to_string();
+    if record.status.trim().is_empty() {
+        record.status = SIDE_EFFECT_STATUS_UNKNOWN.to_string();
+    }
+    if record.observed_at.trim().is_empty() {
+        record.observed_at = "1970-01-01T00:00:00Z".to_string();
+    }
+
+    record
+        .chain
+        .as_ref()
+        .is_some_and(|value| !value.trim().is_empty())
+        && record
+            .execution_type
+            .as_ref()
+            .is_some_and(|value| !value.trim().is_empty())
+        && !record.effect_type.trim().is_empty()
+        && !record.idempotency_key.trim().is_empty()
+        && !record.status.trim().is_empty()
+        && !record.observed_at.trim().is_empty()
+}
+
+fn side_effect_observed_event(node_id: &str, record: &CheckpointSideEffectRecord) -> EngineEvent {
+    let mut event = EngineEvent::new(EngineEventType::SideEffectObserved);
+    event.node_id = Some(node_id.to_string());
+    if let Ok(value) = serde_json::to_value(record) {
+        event.data.insert("record".to_string(), value);
+    }
+    event
+}
+
+fn need_user_confirm_event(
+    node_id: &str,
+    reason_code: &str,
+    reason: &str,
+    details: &Map<String, Value>,
+) -> EngineEvent {
     let mut event = EngineEvent::new(EngineEventType::NeedUserConfirm);
     event.node_id = Some(node_id.to_string());
+    event.data.insert(
+        "reason_code".to_string(),
+        Value::String(reason_code.to_string()),
+    );
     event
         .data
         .insert("reason".to_string(), Value::String(reason.to_string()));
@@ -1200,9 +1774,135 @@ fn need_user_confirm_event(node_id: &str, reason: &str, details: &Map<String, Va
     event
 }
 
-fn hard_block_event(node_id: &str, reason: &str, details: &Map<String, Value>) -> EngineEvent {
+fn extract_action_ref_from_node(node_obj: &Map<String, Value>) -> Option<String> {
+    let source = node_obj.get("source").and_then(Value::as_object)?;
+    let protocol = source
+        .get("protocol")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    if let Some(action) = source.get("action").and_then(Value::as_str) {
+        return Some(match protocol {
+            Some(protocol) => format!("action:{protocol}/{action}"),
+            None => format!("action:{action}"),
+        });
+    }
+    if let Some(query) = source.get("query").and_then(Value::as_str) {
+        return Some(match protocol {
+            Some(protocol) => format!("query:{protocol}/{query}"),
+            None => format!("query:{query}"),
+        });
+    }
+
+    None
+}
+
+fn extract_risk_level_from_node(node_obj: &Map<String, Value>) -> Option<u8> {
+    let value = node_obj
+        .get("extensions")
+        .and_then(Value::as_object)
+        .and_then(|extensions| extensions.get("risk_level"))?
+        .as_u64()?;
+    if !(1..=5).contains(&value) {
+        return None;
+    }
+    u8::try_from(value).ok()
+}
+
+fn extract_risk_tags_from_node(node_obj: &Map<String, Value>) -> Vec<String> {
+    let Some(tags) = node_obj
+        .get("extensions")
+        .and_then(Value::as_object)
+        .and_then(|extensions| extensions.get("risk_tags"))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    tags.iter()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .filter(|tag| !tag.trim().is_empty())
+        .collect()
+}
+
+fn need_user_confirm_fields(
+    gate_input: &PolicyGateInput,
+    gate_output: &PolicyGateOutput,
+    fallback_action_ref: Option<&str>,
+) -> (String, String, Map<String, Value>) {
+    let (reason_code, reason, mut details) = match gate_output {
+        PolicyGateOutput::NeedUserConfirm {
+            reason_code,
+            reason,
+            details,
+        } => (
+            reason_code.as_str().to_string(),
+            reason.clone(),
+            details.clone(),
+        ),
+        _ => (
+            "need_user_confirm".to_string(),
+            "manual review required".to_string(),
+            Map::new(),
+        ),
+    };
+
+    details.insert(
+        "node_id".to_string(),
+        Value::String(
+            gate_input
+                .node_id
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+        ),
+    );
+
+    let action_ref = gate_input
+        .action_ref
+        .as_deref()
+        .or(fallback_action_ref)
+        .unwrap_or("unknown")
+        .to_string();
+    details.insert("action_ref".to_string(), Value::String(action_ref));
+
+    if !details.contains_key("hit_reasons") {
+        details.insert(
+            "hit_reasons".to_string(),
+            Value::Array(vec![Value::String(reason_code.clone())]),
+        );
+    }
+
+    if !details.contains_key("confirmation_summary") || !details.contains_key("confirmation_hash") {
+        if let Ok(enriched) = enrich_need_user_confirm_output(gate_input, gate_output) {
+            if let PolicyGateOutput::NeedUserConfirm {
+                details: enriched, ..
+            } = enriched
+            {
+                if let Some(value) = enriched.get("confirmation_summary").cloned() {
+                    details.insert("confirmation_summary".to_string(), value);
+                }
+                if let Some(value) = enriched.get("confirmation_hash").cloned() {
+                    details.insert("confirmation_hash".to_string(), value);
+                }
+            }
+        }
+    }
+
+    (reason_code, reason, details)
+}
+
+fn hard_block_event(
+    node_id: &str,
+    reason_code: &str,
+    reason: &str,
+    details: &Map<String, Value>,
+) -> EngineEvent {
     let mut event = EngineEvent::new(EngineEventType::Error);
     event.node_id = Some(node_id.to_string());
+    event.data.insert(
+        "reason_code".to_string(),
+        Value::String(reason_code.to_string()),
+    );
     event
         .data
         .insert("reason".to_string(), Value::String(reason.to_string()));
@@ -1215,6 +1915,10 @@ fn hard_block_event(node_id: &str, reason: &str, details: &Map<String, Value>) -
 fn executor_error_event(node_id: &str, error: &RouterExecuteError) -> EngineEvent {
     let mut event = EngineEvent::new(EngineEventType::Error);
     event.node_id = Some(node_id.to_string());
+    event.data.insert(
+        "reason_code".to_string(),
+        Value::String("executor_error".to_string()),
+    );
     event
         .data
         .insert("reason".to_string(), Value::String(error.to_string()));
@@ -1225,34 +1929,278 @@ fn paused_event(reason: &str) -> EngineEvent {
     let mut event = EngineEvent::new(EngineEventType::EnginePaused);
     event
         .data
+        .insert("reason_code".to_string(), Value::String(reason.to_string()));
+    event
+        .data
         .insert("reason".to_string(), Value::String(reason.to_string()));
     event
+}
+
+fn need_user_input_event(reason_code: &str, reason: &str, command_id: &str) -> EngineEvent {
+    let mut details = Map::new();
+    details.insert(
+        "command_id".to_string(),
+        Value::String(command_id.to_string()),
+    );
+    need_user_input_event_with_details(None, reason_code, reason, &details)
+}
+
+fn need_user_input_event_with_details(
+    node_id: Option<&str>,
+    reason_code: &str,
+    reason: &str,
+    details: &Map<String, Value>,
+) -> EngineEvent {
+    let mut event = EngineEvent::new(EngineEventType::NeedUserInput);
+    event.node_id = node_id.map(str::to_string);
+    event.data.insert(
+        "reason_code".to_string(),
+        Value::String(reason_code.to_string()),
+    );
+    event
+        .data
+        .insert("reason".to_string(), Value::String(reason.to_string()));
+    event
+        .data
+        .insert("details".to_string(), Value::Object(details.clone()));
+    event
+}
+
+fn need_user_input_fields(
+    node_id: &str,
+    action_ref: Option<&str>,
+    reason: &str,
+    details: &Map<String, Value>,
+) -> (String, Map<String, Value>) {
+    let mut out = details.clone();
+    out.entry("node_id".to_string())
+        .or_insert_with(|| Value::String(node_id.to_string()));
+    if let Some(action_ref) = action_ref {
+        out.entry("action_ref".to_string())
+            .or_insert_with(|| Value::String(action_ref.to_string()));
+    }
+    let reason_code = match reason {
+        "missing_inputs_or_runtime_refs" => "missing_required_input",
+        _ => "need_user_input",
+    };
+    if reason_code == "missing_required_input" {
+        out = normalize_missing_required_input_details(&out);
+    }
+    (reason_code.to_string(), out)
+}
+
+fn should_route_confirm_to_missing_required_input(
+    reason_code: &str,
+    details: &Map<String, Value>,
+) -> bool {
+    if reason_code == PolicyGateReasonCode::MissingFields.as_str() {
+        return true;
+    }
+    if reason_code == PolicyGateReasonCode::UnknownFields.as_str() {
+        return has_non_empty_string_array(details, "missing_refs")
+            || has_non_empty_string_array(details, "missing_fields")
+            || has_non_empty_string_array(details, "unknown_fields")
+            || has_non_empty_array(details, "questions");
+    }
+    has_non_empty_string_array(details, "missing_refs")
+        || has_non_empty_string_array(details, "missing_fields")
+}
+
+fn has_non_empty_string_array(details: &Map<String, Value>, key: &str) -> bool {
+    details
+        .get(key)
+        .and_then(Value::as_array)
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                item.as_str()
+                    .map(|text| !text.trim().is_empty())
+                    .unwrap_or(false)
+            })
+        })
+}
+
+fn has_non_empty_array(details: &Map<String, Value>, key: &str) -> bool {
+    details
+        .get(key)
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty())
+}
+
+fn normalize_missing_required_input_details(details: &Map<String, Value>) -> Map<String, Value> {
+    let mut out = details.clone();
+    let mut missing_refs = BTreeSet::<String>::new();
+    append_string_array_field(&mut missing_refs, details.get("missing_refs"));
+    append_missing_field_refs(&mut missing_refs, details.get("missing_fields"));
+    append_missing_field_refs(&mut missing_refs, details.get("unknown_fields"));
+
+    let missing_refs_vec = missing_refs.into_iter().collect::<Vec<_>>();
+    out.insert(
+        "missing_refs".to_string(),
+        Value::Array(
+            missing_refs_vec
+                .iter()
+                .cloned()
+                .map(Value::String)
+                .collect::<Vec<_>>(),
+        ),
+    );
+
+    if !out.contains_key("suggested_paths") {
+        out.insert(
+            "suggested_paths".to_string(),
+            Value::Array(
+                build_missing_input_suggested_paths(missing_refs_vec.as_slice())
+                    .into_iter()
+                    .map(Value::String)
+                    .collect::<Vec<_>>(),
+            ),
+        );
+    }
+
+    let has_questions = out
+        .get("questions")
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty());
+    if !has_questions {
+        out.insert(
+            "questions".to_string(),
+            Value::Array(build_missing_input_questions(missing_refs_vec.as_slice())),
+        );
+    }
+
+    out
+}
+
+fn append_string_array_field(output: &mut BTreeSet<String>, value: Option<&Value>) {
+    let Some(items) = value.and_then(Value::as_array) else {
+        return;
+    };
+    for item in items {
+        let Some(text) = item.as_str().map(str::trim) else {
+            continue;
+        };
+        if text.is_empty() {
+            continue;
+        }
+        output.insert(text.to_string());
+    }
+}
+
+fn append_missing_field_refs(output: &mut BTreeSet<String>, value: Option<&Value>) {
+    let Some(items) = value.and_then(Value::as_array) else {
+        return;
+    };
+    for item in items {
+        let Some(field) = item.as_str().map(str::trim) else {
+            continue;
+        };
+        if field.is_empty() {
+            continue;
+        }
+        if field.contains('.') {
+            output.insert(field.to_string());
+            continue;
+        }
+        output.insert(format!("inputs.{field}"));
+        output.insert(format!("params.{field}"));
+    }
+}
+
+fn build_missing_input_suggested_paths(missing_refs: &[String]) -> Vec<String> {
+    let mut out = BTreeSet::<String>::new();
+    for reference in missing_refs {
+        let reference = reference.trim();
+        if reference.is_empty() {
+            continue;
+        }
+        out.insert(reference.to_string());
+        if let Some(slot) = missing_slot_id_from_ref(reference) {
+            out.insert(format!("inputs.{slot}"));
+            out.insert(format!("params.{slot}"));
+        }
+    }
+    out.into_iter().collect::<Vec<_>>()
+}
+
+fn build_missing_input_questions(missing_refs: &[String]) -> Vec<Value> {
+    let mut slots = BTreeSet::<String>::new();
+    for reference in missing_refs {
+        if let Some(slot) = missing_slot_id_from_ref(reference.as_str()) {
+            slots.insert(slot);
+        }
+    }
+    slots
+        .into_iter()
+        .map(|slot| {
+            json!({
+                "id": slot,
+                "question": format!("Provide value for `{slot}`."),
+                "required": true,
+                "options": []
+            })
+        })
+        .collect::<Vec<_>>()
+}
+
+fn missing_slot_id_from_ref(reference: &str) -> Option<String> {
+    let trimmed = reference.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(slot) = trimmed.strip_prefix("inputs.") {
+        return (!slot.trim().is_empty()).then_some(slot.to_string());
+    }
+    if let Some(slot) = trimmed.strip_prefix("params.") {
+        return (!slot.trim().is_empty()).then_some(slot.to_string());
+    }
+    if let Some(slot) = trimmed.rsplit('.').next() {
+        let slot = slot.trim();
+        if !slot.is_empty() {
+            return Some(slot.to_string());
+        }
+    }
+    Some(trimmed.to_string())
 }
 
 fn preflight_simulated_event(node_id: &str) -> EngineEvent {
     let mut event = EngineEvent::new(EngineEventType::Skipped);
     event.node_id = Some(node_id.to_string());
-    event
-        .data
-        .insert("reason".to_string(), Value::String("preflight_simulate".to_string()));
+    event.data.insert(
+        "reason_code".to_string(),
+        Value::String("preflight_simulate".to_string()),
+    );
+    event.data.insert(
+        "reason".to_string(),
+        Value::String("preflight_simulate".to_string()),
+    );
     event
 }
 
 fn condition_skipped_event(node_id: &str) -> EngineEvent {
     let mut event = EngineEvent::new(EngineEventType::Skipped);
     event.node_id = Some(node_id.to_string());
-    event
-        .data
-        .insert("reason".to_string(), Value::String("condition_false".to_string()));
+    event.data.insert(
+        "reason_code".to_string(),
+        Value::String("condition_false".to_string()),
+    );
+    event.data.insert(
+        "reason".to_string(),
+        Value::String("condition_false".to_string()),
+    );
     event
 }
 
 fn condition_failed_event(node_id: &str, message: &str) -> EngineEvent {
     let mut event = EngineEvent::new(EngineEventType::Error);
     event.node_id = Some(node_id.to_string());
-    event
-        .data
-        .insert("reason".to_string(), Value::String("condition_failed".to_string()));
+    event.data.insert(
+        "reason_code".to_string(),
+        Value::String("condition_failed".to_string()),
+    );
+    event.data.insert(
+        "reason".to_string(),
+        Value::String("condition_failed".to_string()),
+    );
     event
         .data
         .insert("message".to_string(), Value::String(message.to_string()));
@@ -1268,9 +2216,14 @@ fn node_waiting_retry_event(
 ) -> EngineEvent {
     let mut event = EngineEvent::new(EngineEventType::NodeWaiting);
     event.node_id = Some(node_id.to_string());
-    event
-        .data
-        .insert("reason".to_string(), Value::String("until_retry".to_string()));
+    event.data.insert(
+        "reason_code".to_string(),
+        Value::String("until_retry".to_string()),
+    );
+    event.data.insert(
+        "reason".to_string(),
+        Value::String("until_retry".to_string()),
+    );
     event
         .data
         .insert("attempt".to_string(), Value::Number(attempt.into()));
@@ -1301,9 +2254,14 @@ fn node_waiting_retry_event(
 fn until_failed_event(node_id: &str, message: &str) -> EngineEvent {
     let mut event = EngineEvent::new(EngineEventType::Error);
     event.node_id = Some(node_id.to_string());
-    event
-        .data
-        .insert("reason".to_string(), Value::String("until_failed".to_string()));
+    event.data.insert(
+        "reason_code".to_string(),
+        Value::String("until_failed".to_string()),
+    );
+    event.data.insert(
+        "reason".to_string(),
+        Value::String("until_failed".to_string()),
+    );
     event
         .data
         .insert("message".to_string(), Value::String(message.to_string()));
@@ -1313,9 +2271,14 @@ fn until_failed_event(node_id: &str, message: &str) -> EngineEvent {
 fn retry_exhausted_event(node_id: &str, attempt: u64, retry: &RetryConfig) -> EngineEvent {
     let mut event = EngineEvent::new(EngineEventType::Error);
     event.node_id = Some(node_id.to_string());
-    event
-        .data
-        .insert("reason".to_string(), Value::String("retry_exhausted".to_string()));
+    event.data.insert(
+        "reason_code".to_string(),
+        Value::String("retry_exhausted".to_string()),
+    );
+    event.data.insert(
+        "reason".to_string(),
+        Value::String("retry_exhausted".to_string()),
+    );
     event
         .data
         .insert("attempt".to_string(), Value::Number(attempt.into()));
@@ -1331,9 +2294,14 @@ fn retry_exhausted_event(node_id: &str, attempt: u64, retry: &RetryConfig) -> En
 fn retry_timeout_event(node_id: &str, waited_ms: u64, timeout_ms: u64) -> EngineEvent {
     let mut event = EngineEvent::new(EngineEventType::Error);
     event.node_id = Some(node_id.to_string());
-    event
-        .data
-        .insert("reason".to_string(), Value::String("retry_timeout".to_string()));
+    event.data.insert(
+        "reason_code".to_string(),
+        Value::String("retry_timeout".to_string()),
+    );
+    event.data.insert(
+        "reason".to_string(),
+        Value::String("retry_timeout".to_string()),
+    );
     event
         .data
         .insert("waited_ms".to_string(), Value::Number(waited_ms.into()));
@@ -1351,9 +2319,14 @@ fn assert_failed_event(
 ) -> EngineEvent {
     let mut event = EngineEvent::new(EngineEventType::Error);
     event.node_id = Some(node_id.to_string());
-    event
-        .data
-        .insert("reason".to_string(), Value::String("assert_failed".to_string()));
+    event.data.insert(
+        "reason_code".to_string(),
+        Value::String("assert_failed".to_string()),
+    );
+    event.data.insert(
+        "reason".to_string(),
+        Value::String("assert_failed".to_string()),
+    );
     event
         .data
         .insert("message".to_string(), Value::String(message.to_string()));
@@ -1361,9 +2334,7 @@ fn assert_failed_event(
         .data
         .insert("phase".to_string(), Value::String(phase.to_string()));
     if let Some(assert_expr) = assert_expr {
-        event
-            .data
-            .insert("assert".to_string(), assert_expr.clone());
+        event.data.insert("assert".to_string(), assert_expr.clone());
     }
     event
 }
@@ -1371,6 +2342,9 @@ fn assert_failed_event(
 fn node_paused_event(node_id: &str, reason: &str) -> EngineEvent {
     let mut event = EngineEvent::new(EngineEventType::NodePaused);
     event.node_id = Some(node_id.to_string());
+    event
+        .data
+        .insert("reason_code".to_string(), Value::String(reason.to_string()));
     event
         .data
         .insert("reason".to_string(), Value::String(reason.to_string()));

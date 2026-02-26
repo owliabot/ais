@@ -26,7 +26,11 @@ fn scheduler_reads_parallel_under_global_limit() {
     let batches = schedule_ready_nodes(&plan, &BTreeSet::new(), &options);
     assert_eq!(batches.len(), 2);
     assert_eq!(
-        batches[0].nodes.iter().map(|node| node.id.as_str()).collect::<Vec<_>>(),
+        batches[0]
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect::<Vec<_>>(),
         vec!["r1", "r2"]
     );
 }
@@ -41,11 +45,19 @@ fn scheduler_writes_per_chain_serial_by_default() {
     let batches = schedule_ready_nodes(&plan, &BTreeSet::new(), &SchedulerOptions::default());
     assert_eq!(batches.len(), 2);
     assert_eq!(
-        batches[0].nodes.iter().map(|node| node.id.as_str()).collect::<Vec<_>>(),
+        batches[0]
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect::<Vec<_>>(),
         vec!["w1", "w3"]
     );
     assert_eq!(
-        batches[1].nodes.iter().map(|node| node.id.as_str()).collect::<Vec<_>>(),
+        batches[1]
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect::<Vec<_>>(),
         vec!["w2"]
     );
 }
@@ -86,4 +98,16 @@ fn scheduler_skips_nodes_with_unmet_deps_and_completed_nodes() {
     assert_eq!(batches.len(), 1);
     assert_eq!(batches[0].nodes.len(), 1);
     assert_eq!(batches[0].nodes[0].id, "n2");
+}
+
+#[test]
+fn scheduler_uses_execution_type_registry_for_write_detection() {
+    let plan = plan_with_nodes(vec![
+        json!({"id":"b1","chain":"bitcoin:mainnet","execution":{"type":"bitcoin_psbt"}}),
+        json!({"id":"b2","chain":"bitcoin:mainnet","execution":{"type":"bitcoin_psbt"}}),
+    ]);
+    let batches = schedule_ready_nodes(&plan, &BTreeSet::new(), &SchedulerOptions::default());
+    assert_eq!(batches.len(), 2);
+    assert_eq!(batches[0].nodes[0].id, "b1");
+    assert_eq!(batches[1].nodes[0].id, "b2");
 }

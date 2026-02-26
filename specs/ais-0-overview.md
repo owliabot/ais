@@ -39,7 +39,7 @@ params: {}      # per-node params (derived from nodes[].args; injected by planne
 ctx: {}         # environment (wallet, time, etc.)
 contracts: {}   # deployment contracts (can be auto-filled by solver from protocol deployments)
 nodes: {}       # per-node state (engine writes outputs here)
-query: {}       # optional legacy/flat query bag (prefer nodes.<id>.outputs)
+query: {}       # optional query result bag (prefer nodes.<id>.outputs)
 calculated: {}  # optional computed values (engine-defined)
 policy: {}      # optional pack/workflow policy values
 ```

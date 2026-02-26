@@ -46,11 +46,11 @@ pub fn evaluate_ast(ast: &AstNode, context: &CelContext) -> Result<CelValue, Eva
     match ast {
         AstNode::Null => Ok(CelValue::Null),
         AstNode::Bool(value) => Ok(CelValue::Bool(*value)),
-        AstNode::Integer(value) => Ok(CelValue::Integer(
-            value
-                .parse::<BigInt>()
-                .map_err(|_| EvalError::TypeMismatch("invalid integer literal".to_string()))?,
-        )),
+        AstNode::Integer(value) => {
+            Ok(CelValue::Integer(value.parse::<BigInt>().map_err(
+                |_| EvalError::TypeMismatch("invalid integer literal".to_string()),
+            )?))
+        }
         AstNode::Decimal(raw) => Ok(CelValue::Decimal(Decimal::parse(raw)?)),
         AstNode::String(value) => Ok(CelValue::String(value.clone())),
         AstNode::Identifier(name) => context
@@ -119,7 +119,11 @@ impl CELEvaluator {
         }
     }
 
-    pub fn evaluate(&mut self, expression: &str, context: &CelContext) -> Result<CelValue, EvalError> {
+    pub fn evaluate(
+        &mut self,
+        expression: &str,
+        context: &CelContext,
+    ) -> Result<CelValue, EvalError> {
         let ast = if let Some(ast) = self.cache.get(expression) {
             ast.clone()
         } else {
@@ -142,7 +146,9 @@ fn evaluate_unary(op: UnaryOp, value: CelValue) -> Result<CelValue, EvalError> {
         UnaryOp::Neg => match value {
             CelValue::Integer(number) => Ok(CelValue::Integer(-number)),
             CelValue::Decimal(decimal) => Ok(CelValue::Decimal(decimal.neg())),
-            _ => Err(EvalError::TypeMismatch("neg requires numeric value".to_string())),
+            _ => Err(EvalError::TypeMismatch(
+                "neg requires numeric value".to_string(),
+            )),
         },
     }
 }
@@ -153,10 +159,14 @@ fn evaluate_binary(left: CelValue, op: BinaryOp, right: CelValue) -> Result<CelV
         BinaryOp::Or => Ok(CelValue::Bool(as_bool(&left)? || as_bool(&right)?)),
         BinaryOp::Eq => Ok(CelValue::Bool(left == right)),
         BinaryOp::Ne => Ok(CelValue::Bool(left != right)),
-        BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => evaluate_compare(left, op, right),
+        BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
+            evaluate_compare(left, op, right)
+        }
         BinaryOp::In => match right {
             CelValue::List(items) => Ok(CelValue::Bool(items.contains(&left))),
-            _ => Err(EvalError::TypeMismatch("`in` right side must be list".to_string())),
+            _ => Err(EvalError::TypeMismatch(
+                "`in` right side must be list".to_string(),
+            )),
         },
         BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => {
             evaluate_arithmetic(left, op, right)
@@ -232,7 +242,11 @@ fn evaluate_compare(left: CelValue, op: BinaryOp, right: CelValue) -> Result<Cel
     Ok(CelValue::Bool(result))
 }
 
-fn evaluate_arithmetic(left: CelValue, op: BinaryOp, right: CelValue) -> Result<CelValue, EvalError> {
+fn evaluate_arithmetic(
+    left: CelValue,
+    op: BinaryOp,
+    right: CelValue,
+) -> Result<CelValue, EvalError> {
     if op == BinaryOp::Add {
         if let (CelValue::String(left), CelValue::String(right)) = (&left, &right) {
             return Ok(CelValue::String(format!("{left}{right}")));
@@ -245,7 +259,11 @@ fn evaluate_arithmetic(left: CelValue, op: BinaryOp, right: CelValue) -> Result<
     match (left_num, right_num) {
         (Numeric::Integer(left), Numeric::Integer(right)) => {
             evaluate_integer_arithmetic(left.clone(), op, right.clone()).or_else(|_| {
-                evaluate_decimal_arithmetic(decimal_from_bigint(&left)?, op, decimal_from_bigint(&right)?)
+                evaluate_decimal_arithmetic(
+                    decimal_from_bigint(&left)?,
+                    op,
+                    decimal_from_bigint(&right)?,
+                )
             })
         }
         (Numeric::Integer(left), Numeric::Decimal(right)) => {
@@ -254,11 +272,17 @@ fn evaluate_arithmetic(left: CelValue, op: BinaryOp, right: CelValue) -> Result<
         (Numeric::Decimal(left), Numeric::Integer(right)) => {
             evaluate_decimal_arithmetic(left, op, decimal_from_bigint(&right)?)
         }
-        (Numeric::Decimal(left), Numeric::Decimal(right)) => evaluate_decimal_arithmetic(left, op, right),
+        (Numeric::Decimal(left), Numeric::Decimal(right)) => {
+            evaluate_decimal_arithmetic(left, op, right)
+        }
     }
 }
 
-fn evaluate_integer_arithmetic(left: BigInt, op: BinaryOp, right: BigInt) -> Result<CelValue, EvalError> {
+fn evaluate_integer_arithmetic(
+    left: BigInt,
+    op: BinaryOp,
+    right: BigInt,
+) -> Result<CelValue, EvalError> {
     match op {
         BinaryOp::Add => Ok(CelValue::Integer(left + right)),
         BinaryOp::Sub => Ok(CelValue::Integer(left - right)),
@@ -279,17 +303,27 @@ fn evaluate_integer_arithmetic(left: BigInt, op: BinaryOp, right: BigInt) -> Res
             }
             Ok(CelValue::Integer(left % right))
         }
-        _ => Err(EvalError::TypeMismatch("unsupported integer operation".to_string())),
+        _ => Err(EvalError::TypeMismatch(
+            "unsupported integer operation".to_string(),
+        )),
     }
 }
 
-fn evaluate_decimal_arithmetic(left: Decimal, op: BinaryOp, right: Decimal) -> Result<CelValue, EvalError> {
+fn evaluate_decimal_arithmetic(
+    left: Decimal,
+    op: BinaryOp,
+    right: Decimal,
+) -> Result<CelValue, EvalError> {
     let out = match op {
         BinaryOp::Add => left.add(&right)?,
         BinaryOp::Sub => left.sub(&right)?,
         BinaryOp::Mul => left.mul(&right)?,
         BinaryOp::Div => left.div_exact(&right)?,
-        BinaryOp::Mod => return Err(EvalError::Numeric(NumericError::UnsupportedDecimalOperation)),
+        BinaryOp::Mod => {
+            return Err(EvalError::Numeric(
+                NumericError::UnsupportedDecimalOperation,
+            ))
+        }
         _ => {
             return Err(EvalError::TypeMismatch(
                 "unsupported decimal operation".to_string(),
@@ -346,7 +380,9 @@ fn as_numeric(value: CelValue) -> Result<Numeric, EvalError> {
         CelValue::Integer(value) => Ok(Numeric::Integer(value)),
         CelValue::Decimal(value) => Ok(Numeric::Decimal(value)),
         CelValue::String(value) => parse_numeric_string(value.as_str()),
-        _ => Err(EvalError::TypeMismatch("expected numeric value".to_string())),
+        _ => Err(EvalError::TypeMismatch(
+            "expected numeric value".to_string(),
+        )),
     }
 }
 
@@ -362,7 +398,11 @@ fn parse_numeric_string(value: &str) -> Result<Numeric, EvalError> {
     ))
 }
 
-fn evaluate_call(callee: &AstNode, args: &[AstNode], context: &CelContext) -> Result<CelValue, EvalError> {
+fn evaluate_call(
+    callee: &AstNode,
+    args: &[AstNode],
+    context: &CelContext,
+) -> Result<CelValue, EvalError> {
     let name = resolve_callee_name(callee)?;
     let mut values = Vec::with_capacity(args.len());
     for arg in args {
@@ -416,7 +456,11 @@ fn builtin_size(args: &[CelValue]) -> Result<CelValue, EvalError> {
         CelValue::String(value) => value.chars().count(),
         CelValue::List(value) => value.len(),
         CelValue::Map(value) => value.len(),
-        _ => return Err(EvalError::TypeMismatch("size expects string/list/map".to_string())),
+        _ => {
+            return Err(EvalError::TypeMismatch(
+                "size expects string/list/map".to_string(),
+            ))
+        }
     };
     Ok(CelValue::Integer(BigInt::from(size)))
 }
@@ -426,7 +470,9 @@ fn builtin_contains(args: &[CelValue]) -> Result<CelValue, EvalError> {
     match (&args[0], &args[1]) {
         (CelValue::String(value), CelValue::String(sub)) => Ok(CelValue::Bool(value.contains(sub))),
         (CelValue::List(items), needle) => Ok(CelValue::Bool(items.contains(needle))),
-        _ => Err(EvalError::TypeMismatch("contains expects (string,string) or (list,any)".to_string())),
+        _ => Err(EvalError::TypeMismatch(
+            "contains expects (string,string) or (list,any)".to_string(),
+        )),
     }
 }
 
@@ -448,7 +494,8 @@ fn builtin_matches(args: &[CelValue]) -> Result<CelValue, EvalError> {
     ensure_arity(args, 2, "matches")?;
     let value = as_string_value(&args[0])?;
     let pattern = as_string_value(&args[1])?;
-    let regex = Regex::new(pattern.as_str()).map_err(|err| EvalError::TypeMismatch(format!("invalid regex: {err}")))?;
+    let regex = Regex::new(pattern.as_str())
+        .map_err(|err| EvalError::TypeMismatch(format!("invalid regex: {err}")))?;
     Ok(CelValue::Bool(regex.is_match(value.as_str())))
 }
 
@@ -464,7 +511,9 @@ fn builtin_upper(args: &[CelValue]) -> Result<CelValue, EvalError> {
 
 fn builtin_trim(args: &[CelValue]) -> Result<CelValue, EvalError> {
     ensure_arity(args, 1, "trim")?;
-    Ok(CelValue::String(as_string_value(&args[0])?.trim().to_string()))
+    Ok(CelValue::String(
+        as_string_value(&args[0])?.trim().to_string(),
+    ))
 }
 
 fn builtin_abs(args: &[CelValue]) -> Result<CelValue, EvalError> {
@@ -472,13 +521,17 @@ fn builtin_abs(args: &[CelValue]) -> Result<CelValue, EvalError> {
     match &args[0] {
         CelValue::Integer(value) => Ok(CelValue::Integer(value.abs())),
         CelValue::Decimal(value) => Ok(CelValue::Decimal(value.abs())),
-        _ => Err(EvalError::TypeMismatch("abs expects numeric value".to_string())),
+        _ => Err(EvalError::TypeMismatch(
+            "abs expects numeric value".to_string(),
+        )),
     }
 }
 
 fn builtin_min(args: &[CelValue]) -> Result<CelValue, EvalError> {
     if args.is_empty() {
-        return Err(EvalError::TypeMismatch("min expects at least one argument".to_string()));
+        return Err(EvalError::TypeMismatch(
+            "min expects at least one argument".to_string(),
+        ));
     }
     let mut current = as_decimal_from_any(&args[0])?;
     for arg in &args[1..] {
@@ -492,7 +545,9 @@ fn builtin_min(args: &[CelValue]) -> Result<CelValue, EvalError> {
 
 fn builtin_max(args: &[CelValue]) -> Result<CelValue, EvalError> {
     if args.is_empty() {
-        return Err(EvalError::TypeMismatch("max expects at least one argument".to_string()));
+        return Err(EvalError::TypeMismatch(
+            "max expects at least one argument".to_string(),
+        ));
     }
     let mut current = as_decimal_from_any(&args[0])?;
     for arg in &args[1..] {
@@ -616,13 +671,18 @@ fn builtin_to_human(args: &[CelValue]) -> Result<CelValue, EvalError> {
     ensure_arity(args, 2, "to_human")?;
     let atomic = as_integer_coerce(&args[0])?;
     let decimals = extract_decimals(&args[1])?;
-    let decimal = Decimal::from_atomic_int(atomic, decimals).to_bigdecimal().normalized();
+    let decimal = Decimal::from_atomic_int(atomic, decimals)
+        .to_bigdecimal()
+        .normalized();
     Ok(CelValue::String(decimal.to_string()))
 }
 
 fn ensure_arity(args: &[CelValue], expected: usize, name: &str) -> Result<(), EvalError> {
     if args.len() != expected {
-        return Err(EvalError::TypeMismatch(format!("{name} expects {expected} args, got {}", args.len())));
+        return Err(EvalError::TypeMismatch(format!(
+            "{name} expects {expected} args, got {}",
+            args.len()
+        )));
     }
     Ok(())
 }
@@ -639,7 +699,9 @@ fn as_decimal_from_any(value: &CelValue) -> Result<Decimal, EvalError> {
         CelValue::Integer(value) => decimal_from_bigint(value),
         CelValue::Decimal(value) => Ok(value.clone()),
         CelValue::String(value) => Ok(Decimal::parse(value)?),
-        _ => Err(EvalError::TypeMismatch("expected numeric/string".to_string())),
+        _ => Err(EvalError::TypeMismatch(
+            "expected numeric/string".to_string(),
+        )),
     }
 }
 
@@ -659,7 +721,11 @@ fn as_integer_coerce(value: &CelValue) -> Result<BigInt, EvalError> {
         CelValue::String(value) => value
             .parse::<BigInt>()
             .map_err(|_| EvalError::TypeMismatch("string is not integer".to_string())),
-        CelValue::Bool(value) => Ok(if *value { BigInt::from(1u8) } else { BigInt::from(0u8) }),
+        CelValue::Bool(value) => Ok(if *value {
+            BigInt::from(1u8)
+        } else {
+            BigInt::from(0u8)
+        }),
         _ => Err(EvalError::TypeMismatch("cannot coerce to int".to_string())),
     }
 }

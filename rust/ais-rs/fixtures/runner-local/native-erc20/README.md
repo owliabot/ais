@@ -28,3 +28,12 @@ cargo run -p ais-runner -- run workflow \
   --workspace fixtures/runner-local/native-erc20/workspace \
   --dry-run --format json
 ```
+
+## Troubleshooting
+
+- `connection refused`: local RPC (`127.0.0.1:8545`) 未启动。
+- `execution.type ... unregistered`: 检查 `--workspace` 是否传入本目录 `workspace/`。
+- token transfer revert: 检查 token 地址、钱包余额与 signer 私钥是否匹配本地链账户。
+
+Intent + agent 剧本请参考：
+`rust/ais-rs/fixtures/runner-local/intent-native-erc20-transfer/README.md`

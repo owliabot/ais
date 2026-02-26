@@ -20,8 +20,8 @@ pub struct LocalPrivateKeySigner {
 
 impl LocalPrivateKeySigner {
     pub fn from_hex(private_key_hex: &str) -> Result<Self, SignerError> {
-        let private_key =
-            B256::from_str(private_key_hex).map_err(|error| SignerError::InvalidKey(error.to_string()))?;
+        let private_key = B256::from_str(private_key_hex)
+            .map_err(|error| SignerError::InvalidKey(error.to_string()))?;
         let signing_key = SigningKey::from_slice(private_key.as_slice())
             .map_err(|error| SignerError::InvalidKey(error.to_string()))?;
         let address = Address::from_public_key(signing_key.verifying_key());

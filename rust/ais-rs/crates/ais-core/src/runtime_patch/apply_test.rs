@@ -69,7 +69,9 @@ fn allow_nodes_paths_can_enable_specific_target() {
         extensions: None,
     };
     let mut policy = RuntimePatchGuardPolicy::default();
-    policy.allow_nodes_paths.push(r"^nodes\.allowed\.outputs$".to_string());
+    policy
+        .allow_nodes_paths
+        .push(r"^nodes\.allowed\.outputs$".to_string());
 
     let result = apply_runtime_patches(&mut runtime, &[patch], &policy);
 

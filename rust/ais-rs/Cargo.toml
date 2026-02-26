@@ -4,6 +4,8 @@ members = [
   "crates/ais-core",
   "crates/ais-evm-executor",
   "crates/ais-engine",
+  "crates/ais-llm",
+  "crates/ais-offchain-executor",
   "crates/ais-runner",
   "crates/ais-schema",
   "crates/ais-solana-executor",

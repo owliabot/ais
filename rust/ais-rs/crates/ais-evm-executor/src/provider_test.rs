@@ -24,7 +24,8 @@ fn endpoint_rejects_invalid_chain_or_url() {
         .expect_err("must reject chain");
     assert!(matches!(chain_error, ProviderError::InvalidChain(_)));
 
-    let url_error = EvmRpcEndpoint::new("eip155:1", "ftp://eth.example").expect_err("must reject url");
+    let url_error =
+        EvmRpcEndpoint::new("eip155:1", "ftp://eth.example").expect_err("must reject url");
     assert!(matches!(url_error, ProviderError::InvalidRpcUrl(_)));
 }
 

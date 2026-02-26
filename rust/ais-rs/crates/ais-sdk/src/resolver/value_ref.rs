@@ -1,7 +1,5 @@
 use ais_cel::{evaluate_expression, CelContext, CelValue};
 use num_bigint::BigInt;
-use futures::future::LocalBoxFuture;
-use futures::FutureExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
@@ -9,29 +7,24 @@ use std::collections::BTreeMap;
 use super::{ResolverContext, ResolverError};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DetectSpec {
-    pub kind: String,
-    #[serde(default)]
-    pub provider: Option<String>,
-    #[serde(default)]
-    pub candidates: Vec<Value>,
-    #[serde(default)]
-    pub constraints: BTreeMap<String, Value>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ValueRef {
-    Lit { lit: Value },
+    Lit {
+        lit: Value,
+    },
     Ref {
         #[serde(rename = "ref")]
         ref_path: String,
     },
-    Cel { cel: String },
-    Detect { detect: DetectSpec },
-    Object { object: BTreeMap<String, ValueRef> },
-    Array { array: Vec<ValueRef> },
+    Cel {
+        cel: String,
+    },
+    Object {
+        object: BTreeMap<String, ValueRef>,
+    },
+    Array {
+        array: Vec<ValueRef>,
+    },
 }
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -44,8 +37,6 @@ pub enum ValueRefEvalError {
     },
     #[error("CEL evaluation failed for `{expression}`: {reason}")]
     CelEvaluationFailed { expression: String, reason: String },
-    #[error("detect requires async provider resolution: {kind}")]
-    NeedDetect { kind: String },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -54,16 +45,10 @@ pub struct ValueRefEvalOptions {
     pub root_overrides: BTreeMap<String, Value>,
 }
 
-pub trait DetectResolver {
-    fn resolve<'a>(
-        &'a self,
-        detect: &'a DetectSpec,
-        context: &'a ResolverContext,
-        options: &'a ValueRefEvalOptions,
-    ) -> LocalBoxFuture<'a, Result<Value, ValueRefEvalError>>;
-}
-
-pub fn evaluate_value_ref(value_ref: &ValueRef, context: &ResolverContext) -> Result<Value, ValueRefEvalError> {
+pub fn evaluate_value_ref(
+    value_ref: &ValueRef,
+    context: &ResolverContext,
+) -> Result<Value, ValueRefEvalError> {
     evaluate_value_ref_with_options(value_ref, context, &ValueRefEvalOptions::default())
 }
 
@@ -76,13 +61,13 @@ pub fn evaluate_value_ref_with_options(
         ValueRef::Lit { lit } => Ok(lit.clone()),
         ValueRef::Ref { ref_path } => resolve_ref_with_overrides(ref_path, context, options),
         ValueRef::Cel { cel } => evaluate_cel(cel, context, options),
-        ValueRef::Detect { detect } => Err(ValueRefEvalError::NeedDetect {
-            kind: detect.kind.clone(),
-        }),
         ValueRef::Object { object } => {
             let mut result = Map::new();
             for (key, child) in object {
-                result.insert(key.clone(), evaluate_value_ref_with_options(child, context, options)?);
+                result.insert(
+                    key.clone(),
+                    evaluate_value_ref_with_options(child, context, options)?,
+                );
             }
             Ok(Value::Object(result))
         }
@@ -100,49 +85,8 @@ pub async fn evaluate_value_ref_async(
     value_ref: &ValueRef,
     context: &ResolverContext,
     options: &ValueRefEvalOptions,
-    detect_resolver: Option<&dyn DetectResolver>,
 ) -> Result<Value, ValueRefEvalError> {
-    evaluate_value_ref_async_boxed(value_ref, context, options, detect_resolver).await
-}
-
-fn evaluate_value_ref_async_boxed<'a>(
-    value_ref: &'a ValueRef,
-    context: &'a ResolverContext,
-    options: &'a ValueRefEvalOptions,
-    detect_resolver: Option<&'a dyn DetectResolver>,
-) -> LocalBoxFuture<'a, Result<Value, ValueRefEvalError>> {
-    async move {
-    match value_ref {
-        ValueRef::Lit { lit } => Ok(lit.clone()),
-        ValueRef::Ref { ref_path } => resolve_ref_with_overrides(ref_path, context, options),
-        ValueRef::Cel { cel } => evaluate_cel(cel, context, options),
-        ValueRef::Detect { detect } => match detect_resolver {
-            Some(resolver) => resolver.resolve(detect, context, options).await,
-            None => Err(ValueRefEvalError::NeedDetect {
-                kind: detect.kind.clone(),
-            }),
-        },
-        ValueRef::Object { object } => {
-            let mut result = Map::new();
-            for (key, child) in object {
-                let value =
-                    evaluate_value_ref_async_boxed(child, context, options, detect_resolver).await?;
-                result.insert(key.clone(), value);
-            }
-            Ok(Value::Object(result))
-        }
-        ValueRef::Array { array } => {
-            let mut out = Vec::with_capacity(array.len());
-            for item in array {
-                out.push(
-                    evaluate_value_ref_async_boxed(item, context, options, detect_resolver).await?,
-                );
-            }
-            Ok(Value::Array(out))
-        }
-    }
-    }
-    .boxed_local()
+    evaluate_value_ref_with_options(value_ref, context, options)
 }
 
 fn evaluate_cel(
@@ -190,11 +134,12 @@ fn json_value_to_cel_value(value: &Value) -> Result<CelValue, ValueRefEvalError>
                 return Ok(CelValue::Integer(BigInt::from(value)));
             }
             let raw = number.to_string();
-            let decimal =
-                ais_cel::Decimal::parse(raw.as_str()).map_err(|error| ValueRefEvalError::CelEvaluationFailed {
+            let decimal = ais_cel::Decimal::parse(raw.as_str()).map_err(|error| {
+                ValueRefEvalError::CelEvaluationFailed {
                     expression: "<json-context-conversion>".to_string(),
                     reason: format!("invalid decimal number `{raw}`: {error}"),
-                })?;
+                }
+            })?;
             Ok(CelValue::Decimal(decimal))
         }
         Value::String(value) => Ok(CelValue::String(value.clone())),
@@ -286,7 +231,11 @@ fn split_first_segment(path: &str) -> Option<(&str, &str)> {
     }
 }
 
-fn walk_value_by_path(root: Value, path: &str, full_path: &str) -> Result<Value, ValueRefEvalError> {
+fn walk_value_by_path(
+    root: Value,
+    path: &str,
+    full_path: &str,
+) -> Result<Value, ValueRefEvalError> {
     if path.is_empty() {
         return Ok(root);
     }
@@ -304,7 +253,10 @@ fn walk_token(current: Value, token: &str, full_path: &str) -> Result<Value, Val
     let mut next = current;
 
     if bytes.first() != Some(&b'[') {
-        let key_end = bytes.iter().position(|value| *value == b'[').unwrap_or(bytes.len());
+        let key_end = bytes
+            .iter()
+            .position(|value| *value == b'[')
+            .unwrap_or(bytes.len());
         let key = &token[..key_end];
         next = next
             .as_object()
@@ -334,12 +286,13 @@ fn walk_token(current: Value, token: &str, full_path: &str) -> Result<Value, Val
                 source: ResolverError::InvalidPath(full_path.to_string()),
             });
         }
-        let index = token[start..position]
-            .parse::<usize>()
-            .map_err(|_| ValueRefEvalError::MissingRef {
-                path: full_path.to_string(),
-                source: ResolverError::InvalidPath(full_path.to_string()),
-            })?;
+        let index =
+            token[start..position]
+                .parse::<usize>()
+                .map_err(|_| ValueRefEvalError::MissingRef {
+                    path: full_path.to_string(),
+                    source: ResolverError::InvalidPath(full_path.to_string()),
+                })?;
         next = next
             .as_array()
             .and_then(|items| items.get(index).cloned())

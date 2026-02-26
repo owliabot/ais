@@ -30,5 +30,8 @@ fn set_ref_rejects_index_path() {
     let error = context
         .set_ref("nodes[0].outputs", json!(1))
         .expect_err("must reject");
-    assert_eq!(error, ResolverError::InvalidPath("nodes[0].outputs".to_string()));
+    assert_eq!(
+        error,
+        ResolverError::InvalidPath("nodes[0].outputs".to_string())
+    );
 }

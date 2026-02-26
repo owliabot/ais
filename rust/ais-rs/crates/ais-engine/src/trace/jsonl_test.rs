@@ -52,6 +52,5 @@ fn encode_trace_jsonl_line_fixture_default_mode_redacts_sensitive_fields() {
 }
 
 fn fixture_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../fixtures/plan-events")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/plan-events")
 }

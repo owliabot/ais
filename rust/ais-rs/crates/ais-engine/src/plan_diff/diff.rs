@@ -64,8 +64,12 @@ pub fn diff_plans_json(before: &PlanDocument, after: &PlanDocument) -> PlanDiffJ
         }
     }
     for id in before_ids.intersection(&after_ids) {
-        let Some(left) = before_nodes.get(id) else { continue };
-        let Some(right) = after_nodes.get(id) else { continue };
+        let Some(left) = before_nodes.get(id) else {
+            continue;
+        };
+        let Some(right) = after_nodes.get(id) else {
+            continue;
+        };
         let changes = detect_changes(left, right);
         if !changes.is_empty() {
             changed.push(PlanDiffNodeChanged {

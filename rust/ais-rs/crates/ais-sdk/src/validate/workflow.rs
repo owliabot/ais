@@ -31,7 +31,11 @@ pub fn validate_workflow_document(workflow: &WorkflowDocument) -> Vec<Structured
             continue;
         };
 
-        let Some(node_id) = node_obj.get("id").and_then(Value::as_str).map(str::to_string) else {
+        let Some(node_id) = node_obj
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        else {
             issues.push(issue(
                 "workflow_error",
                 IssueSeverity::Error,
@@ -48,13 +52,10 @@ pub fn validate_workflow_document(workflow: &WorkflowDocument) -> Vec<Structured
                 "workflow_error",
                 IssueSeverity::Error,
                 path_with_key(&base_path, "id"),
-                &format!(
-                    "duplicate node id `{node_id}` found (first at nodes[{previous_index}])"
-                ),
+                &format!("duplicate node id `{node_id}` found (first at nodes[{previous_index}])"),
                 "workflow.node.duplicate_id",
             ));
         }
-
     }
 
     let node_id_set: HashSet<String> = node_indices.keys().cloned().collect();
@@ -418,7 +419,10 @@ fn collect_refs_from_node(
         }
     }
 
-    if let Some(overrides) = node_obj.get("calculated_overrides").and_then(Value::as_object) {
+    if let Some(overrides) = node_obj
+        .get("calculated_overrides")
+        .and_then(Value::as_object)
+    {
         for (key, item) in overrides {
             if let Some(expr) = item.as_object().and_then(|obj| obj.get("expr")) {
                 validate_value_ref_like(
@@ -514,7 +518,10 @@ fn validate_assert_fields(
     }
 }
 
-fn build_node_deps_map(nodes: &[Value], deps_by_index: &[Vec<String>]) -> HashMap<String, Vec<String>> {
+fn build_node_deps_map(
+    nodes: &[Value],
+    deps_by_index: &[Vec<String>],
+) -> HashMap<String, Vec<String>> {
     let mut out = HashMap::new();
     for (index, node) in nodes.iter().enumerate() {
         let Some(node_id) = node
@@ -621,7 +628,10 @@ fn validate_ref_path(
         ));
         return;
     }
-    let parts: Vec<&str> = normalized.split('.').filter(|part| !part.is_empty()).collect();
+    let parts: Vec<&str> = normalized
+        .split('.')
+        .filter(|part| !part.is_empty())
+        .collect();
     if parts.is_empty() {
         return;
     }
@@ -631,7 +641,10 @@ fn validate_ref_path(
             "workflow_error",
             IssueSeverity::Error,
             field_path.to_vec(),
-            &format!("ref root `{}` is not resolvable under runtime roots", parts[0]),
+            &format!(
+                "ref root `{}` is not resolvable under runtime roots",
+                parts[0]
+            ),
             "workflow.ref.invalid_root",
         ));
         return;
@@ -682,7 +695,11 @@ fn validate_ref_path(
     }
 }
 
-fn collect_ref_paths_and_cel(value: &Value, ref_paths: &mut Vec<String>, cel_expressions: &mut Vec<String>) {
+fn collect_ref_paths_and_cel(
+    value: &Value,
+    ref_paths: &mut Vec<String>,
+    cel_expressions: &mut Vec<String>,
+) {
     let Some(obj) = value.as_object() else {
         return;
     };
@@ -839,7 +856,11 @@ fn path_with_key(path: &[FieldPathSegment], key: &str) -> Vec<FieldPathSegment> 
     out
 }
 
-fn path_with_key_index(path: &[FieldPathSegment], key: &str, index: usize) -> Vec<FieldPathSegment> {
+fn path_with_key_index(
+    path: &[FieldPathSegment],
+    key: &str,
+    index: usize,
+) -> Vec<FieldPathSegment> {
     let mut out = path.to_vec();
     out.push(FieldPathSegment::Key(key.to_string()));
     out.push(FieldPathSegment::Index(index));

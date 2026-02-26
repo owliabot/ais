@@ -1,0 +1,22 @@
+schema: "ais-runner/0.0.1"
+
+engine:
+  max_concurrency: 4
+  per_chain:
+    "eip155:31338":
+      max_read_concurrency: 4
+      max_write_concurrency: 1
+
+chains:
+  "eip155:31338":
+    rpc_url: "https://rpc.evm.example"
+
+plugins:
+  execution:
+    offchain_apy_query:
+      enabled: true
+      chains: ["eip155:31338"]
+      allowed_domains: ["127.0.0.1", "localhost"]
+      timeout_ms: 2000
+      max_retries: 0
+      retry_backoff_ms: 50

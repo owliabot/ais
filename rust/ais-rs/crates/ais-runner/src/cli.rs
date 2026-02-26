@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Parser)]
@@ -16,6 +16,7 @@ pub enum Commands {
     #[command(subcommand)]
     Plan(PlanTopLevelCommand),
     Replay(ReplayCommand),
+    Agent(AgentCommand),
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -33,6 +34,76 @@ pub enum PlanTopLevelCommand {
 pub enum OutputFormat {
     Text,
     Json,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum ApprovalsMode {
+    Safe,
+    Assist,
+    Yolo,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum AgentProfile {
+    Standard,
+    DemoScripted,
+}
+
+#[derive(Debug, Clone, clap::Args)]
+#[command(group(
+    ArgGroup::new("agent_input")
+        .required(true)
+        .args(["plan", "intent", "intent_file"])
+        .multiple(false)
+))]
+pub struct AgentCommand {
+    #[arg(long)]
+    pub plan: Option<PathBuf>,
+    #[arg(long)]
+    pub intent: Option<String>,
+    #[arg(long)]
+    pub intent_file: Option<PathBuf>,
+    #[arg(long)]
+    pub workspace: Option<PathBuf>,
+    #[arg(long)]
+    pub config: PathBuf,
+    #[arg(long)]
+    pub pack: Option<PathBuf>,
+    #[arg(long)]
+    pub runtime: Option<PathBuf>,
+    #[arg(long)]
+    pub events_jsonl: Option<String>,
+    #[arg(long)]
+    pub trace: Option<PathBuf>,
+    #[arg(long)]
+    pub checkpoint: Option<PathBuf>,
+    #[arg(long, value_enum, default_value_t = AgentProfile::Standard)]
+    pub profile: AgentProfile,
+    #[arg(
+        long,
+        help_heading = "Demo Options",
+        help = "Scripted LLM response JSONL path (demo-only)",
+        required_if_eq("profile", "demo-scripted")
+    )]
+    pub llm_script_jsonl: Option<PathBuf>,
+    #[arg(long, default_value_t = false)]
+    pub verbose: bool,
+    #[arg(long, default_value_t = false)]
+    pub verbose_llm: bool,
+    #[arg(long, value_enum)]
+    pub approvals_mode: Option<ApprovalsMode>,
+    #[arg(long)]
+    pub max_iterations: Option<usize>,
+    #[arg(long)]
+    pub max_planner_rounds: Option<u8>,
+    #[arg(long)]
+    pub max_tool_rounds: Option<u8>,
+    #[arg(long)]
+    pub max_index_candidates: Option<usize>,
+    #[arg(long)]
+    pub planner_context_token_budget: Option<usize>,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub format: OutputFormat,
 }
 
 #[derive(Debug, Clone, clap::Args)]

@@ -1,11 +1,16 @@
 use crate::utils::lit_or_value;
-use alloy_dyn_abi::{DynSolType, DynSolValue, FunctionExt as DynFunctionExt, JsonAbiExt, Specifier};
+use alloy_dyn_abi::{
+    DynSolType, DynSolValue, FunctionExt as DynFunctionExt, JsonAbiExt, Specifier,
+};
 use alloy_json_abi::{Function, Param};
 use alloy_primitives::hex;
 use alloy_primitives::{Bytes, U256};
 use serde_json::{Map, Value};
 
-pub(crate) fn build_calldata(function: &Function, args: &Map<String, Value>) -> Result<Bytes, String> {
+pub(crate) fn build_calldata(
+    function: &Function,
+    args: &Map<String, Value>,
+) -> Result<Bytes, String> {
     let mut values = Vec::<DynSolValue>::with_capacity(function.inputs.len());
     for input in &function.inputs {
         let input_name = input.name.as_str();
@@ -24,7 +29,10 @@ pub(crate) fn build_calldata(function: &Function, args: &Map<String, Value>) -> 
         .map_err(|error| format!("abi encode input failed: {error}"))
 }
 
-pub(crate) fn decode_outputs(raw: &Bytes, function: &Function) -> Result<Map<String, Value>, String> {
+pub(crate) fn decode_outputs(
+    raw: &Bytes,
+    function: &Function,
+) -> Result<Map<String, Value>, String> {
     if function.outputs.is_empty() {
         return Ok(Map::new());
     }
@@ -114,7 +122,10 @@ fn tuple_json_array_to_dyn_value(
     })
 }
 
-fn tuple_json_base_to_dyn_value(components: &[Param], value: &Value) -> Result<DynSolValue, String> {
+fn tuple_json_base_to_dyn_value(
+    components: &[Param],
+    value: &Value,
+) -> Result<DynSolValue, String> {
     if let Some(items) = value.as_array() {
         if items.len() != components.len() {
             return Err(format!(
@@ -135,7 +146,9 @@ fn tuple_json_base_to_dyn_value(components: &[Param], value: &Value) -> Result<D
     let mut values = Vec::<DynSolValue>::with_capacity(components.len());
     for component in components {
         if component.name.is_empty() {
-            return Err("tuple component name must be non-empty when using object args".to_string());
+            return Err(
+                "tuple component name must be non-empty when using object args".to_string(),
+            );
         }
         let item = object
             .get(component.name.as_str())
@@ -300,12 +313,18 @@ fn dyn_value_to_json(value: &DynSolValue) -> Value {
         DynSolValue::Bool(boolean) => Value::Bool(*boolean),
         DynSolValue::Int(number, _) => Value::String(number.to_string()),
         DynSolValue::Uint(number, _) => Value::String(number.to_string()),
-        DynSolValue::FixedBytes(word, size) => Value::String(format!("0x{}", hex::encode(&word[..*size]))),
+        DynSolValue::FixedBytes(word, size) => {
+            Value::String(format!("0x{}", hex::encode(&word[..*size])))
+        }
         DynSolValue::Address(address) => Value::String(format!("{address:#x}")),
-        DynSolValue::Function(function) => Value::String(format!("0x{}", hex::encode(function.as_slice()))),
+        DynSolValue::Function(function) => {
+            Value::String(format!("0x{}", hex::encode(function.as_slice())))
+        }
         DynSolValue::Bytes(bytes) => Value::String(format!("0x{}", hex::encode(bytes))),
         DynSolValue::String(text) => Value::String(text.clone()),
-        DynSolValue::Array(values) | DynSolValue::FixedArray(values) | DynSolValue::Tuple(values) => {
+        DynSolValue::Array(values)
+        | DynSolValue::FixedArray(values)
+        | DynSolValue::Tuple(values) => {
             Value::Array(values.iter().map(dyn_value_to_json).collect())
         }
         #[allow(unreachable_patterns)]

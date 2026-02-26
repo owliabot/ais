@@ -48,3 +48,24 @@ fn parse_unknown_schema_is_rejected() {
         .iter()
         .any(|issue| issue.reference.as_deref() == Some("parse.unsupported_schema")));
 }
+
+#[test]
+fn parse_json_plan_sketch_dispatches_by_schema() {
+    let input = r#"{
+      "schema":"ais-plan-sketch/0.1.0",
+      "intent":"check and transfer",
+      "pack_snapshot":{"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+      "catalog_snapshot":{"schema":"ais-catalog/0.0.1","hash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+      "segments":[{"segment_id":"s1","cursor_in":"c0","cursor_out":"c1","done":false,"steps":[{"id":"step1","kind":"query","candidate_ref":"erc20@0.0.2/balance-of","inputs":{}}]}]
+    }"#;
+    let options = ParseDocumentOptions {
+        format: DocumentFormat::Json,
+        validate_schema: true,
+    };
+
+    let parsed = parse_document_with_options(input, options).expect("must parse");
+    match parsed {
+        AisDocument::PlanSketch(_) => {}
+        _ => panic!("expected plan sketch document"),
+    }
+}

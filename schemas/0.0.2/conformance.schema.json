@@ -507,6 +507,499 @@
       ],
       "additionalProperties": false
     },
+    "input_80": {
+      "type": "object",
+      "properties": {
+        "schema_id": {
+          "type": "string"
+        },
+        "value": {},
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "schema_id",
+        "value"
+      ],
+      "additionalProperties": false
+    },
+    "expect_82": {
+      "type": "object",
+      "properties": {
+        "valid": {
+          "type": "boolean"
+        },
+        "error_includes": {
+          "type": "string"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "valid"
+      ],
+      "additionalProperties": false
+    },
+    "Union79_8_79": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "const": "json_schema_validate"
+        },
+        "input": {
+          "$ref": "#/$defs/input_80"
+        },
+        "expect": {
+          "$ref": "#/$defs/expect_82"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "input",
+        "expect"
+      ],
+      "additionalProperties": false
+    },
+    "approvals_90": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "safe",
+            "assist",
+            "yolo"
+          ]
+        },
+        "auto_execute_max_risk_level": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "require_approval_min_risk_level": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "llm_may_approve_max_risk_level": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "additionalProperties": false
+    },
+    "input_88": {
+      "type": "object",
+      "properties": {
+        "approvals": {
+          "$ref": "#/$defs/approvals_90"
+        },
+        "risk_level": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "approvals",
+        "risk_level"
+      ],
+      "additionalProperties": false
+    },
+    "expect_92": {
+      "type": "object",
+      "properties": {
+        "needs_confirmation": {
+          "type": "boolean"
+        },
+        "confirmer": {
+          "type": "string",
+          "enum": [
+            "none",
+            "human",
+            "llm",
+            "auto"
+          ]
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "needs_confirmation",
+        "confirmer"
+      ],
+      "additionalProperties": false
+    },
+    "Union87_9_87": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "const": "pack_approvals_decision"
+        },
+        "input": {
+          "$ref": "#/$defs/input_88"
+        },
+        "expect": {
+          "$ref": "#/$defs/expect_92"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "input",
+        "expect"
+      ],
+      "additionalProperties": false
+    },
+    "input_96": {
+      "type": "object",
+      "properties": {
+        "summary": {},
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "summary"
+      ],
+      "additionalProperties": false
+    },
+    "expect_98": {
+      "type": "object",
+      "properties": {
+        "hash_sha256_hex": {
+          "type": "string"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "hash_sha256_hex"
+      ],
+      "additionalProperties": false
+    },
+    "Union95_10_95": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "const": "confirmation_hash"
+        },
+        "input": {
+          "$ref": "#/$defs/input_96"
+        },
+        "expect": {
+          "$ref": "#/$defs/expect_98"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "input",
+        "expect"
+      ],
+      "additionalProperties": false
+    },
+    "options_104": {
+      "type": "object",
+      "properties": {
+        "hard_block_on_missing": {
+          "type": "boolean"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "additionalProperties": false
+    },
+    "input_102": {
+      "type": "object",
+      "properties": {
+        "hard_block_fields": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "missing_fields": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "unknown_fields": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "options": {
+          "$ref": "#/$defs/options_104"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "hard_block_fields",
+        "missing_fields",
+        "unknown_fields"
+      ],
+      "additionalProperties": false
+    },
+    "expect_106": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "ok",
+            "need_user_confirm",
+            "hard_block"
+          ]
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "additionalProperties": false
+    },
+    "Union101_11_101": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "const": "policy_gate_missingness_decision"
+        },
+        "input": {
+          "$ref": "#/$defs/input_102"
+        },
+        "expect": {
+          "$ref": "#/$defs/expect_106"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "input",
+        "expect"
+      ],
+      "additionalProperties": false
+    },
+    "pack_plugin_allowlist_110": {
+      "type": "object",
+      "properties": {
+        "active": {
+          "type": "boolean"
+        },
+        "enabled_types": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "active",
+        "enabled_types"
+      ],
+      "additionalProperties": false
+    },
+    "input_108": {
+      "type": "object",
+      "properties": {
+        "execution_type": {
+          "type": "string"
+        },
+        "core_execution_types": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "registered_execution_types": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "pack_plugin_allowlist": {
+          "$ref": "#/$defs/pack_plugin_allowlist_110"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "execution_type",
+        "core_execution_types",
+        "registered_execution_types"
+      ],
+      "additionalProperties": false
+    },
+    "expect_112": {
+      "type": "object",
+      "properties": {
+        "decision": {
+          "type": "string",
+          "enum": [
+            "allow",
+            "reject"
+          ]
+        },
+        "reason_code": {
+          "type": "string",
+          "enum": [
+            "unregistered_execution_handler",
+            "plugin_execution_type_not_allowlisted"
+          ]
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "decision"
+      ],
+      "additionalProperties": false
+    },
+    "Union107_12_107": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "const": "execution_handler_registration_decision"
+        },
+        "input": {
+          "$ref": "#/$defs/input_108"
+        },
+        "expect": {
+          "$ref": "#/$defs/expect_112"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "input",
+        "expect"
+      ],
+      "additionalProperties": false
+    },
+    "input_114": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["safe", "assist", "yolo"]
+        },
+        "source_kind": {
+          "type": "string",
+          "enum": ["local_path", "registry_ref", "remote_url", "llm_generated"]
+        },
+        "allowed_sources": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "require_signature": {
+          "type": "boolean"
+        },
+        "has_signature": {
+          "type": "boolean"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "mode",
+        "source_kind"
+      ],
+      "additionalProperties": false
+    },
+    "expect_116": {
+      "type": "object",
+      "properties": {
+        "decision": {
+          "type": "string",
+          "enum": ["allow", "need_user_confirm", "reject"]
+        },
+        "reason_code": {
+          "type": "string",
+          "enum": [
+            "source_kind_not_allowed",
+            "signature_required",
+            "assist_dynamic_source_requires_confirm"
+          ]
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "decision"
+      ],
+      "additionalProperties": false
+    },
+    "Union113_13_113": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "const": "protocol_install_decision"
+        },
+        "input": {
+          "$ref": "#/$defs/input_114"
+        },
+        "expect": {
+          "$ref": "#/$defs/expect_116"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "input",
+        "expect"
+      ],
+      "additionalProperties": false
+    },
     "Def_4": {
       "anyOf": [
         {
@@ -532,6 +1025,24 @@
         },
         {
           "$ref": "#/$defs/Union69_7_69"
+        },
+        {
+          "$ref": "#/$defs/Union79_8_79"
+        },
+        {
+          "$ref": "#/$defs/Union87_9_87"
+        },
+        {
+          "$ref": "#/$defs/Union95_10_95"
+        },
+        {
+          "$ref": "#/$defs/Union101_11_101"
+        },
+        {
+          "$ref": "#/$defs/Union107_12_107"
+        },
+        {
+          "$ref": "#/$defs/Union113_13_113"
         }
       ]
     },
@@ -540,6 +1051,14 @@
       "properties": {
         "schema": {
           "const": "ais-conformance/0.0.2"
+        },
+        "profile": {
+          "type": "string",
+          "enum": [
+            "core",
+            "extended",
+            "mixed"
+          ]
         },
         "cases": {
           "type": "array",

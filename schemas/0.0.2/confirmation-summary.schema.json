@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ais:0.0.2:confirmation-summary",
+  "title": "AIS Confirmation Summary (ais-confirmation-summary/0.0.1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "kind", "reason", "chain"],
+  "properties": {
+    "schema": { "const": "ais-confirmation-summary/0.0.1" },
+    "kind": { "type": "string" },
+    "reason": { "type": "string" },
+    "node_id": { "type": "string" },
+    "chain": { "type": "string" },
+    "action_ref": { "type": "string" },
+    "execution_type": { "type": "string" },
+    "risk_level": { "type": "integer", "minimum": 1, "maximum": 5 },
+    "risk_tags": { "type": "array", "items": { "type": "string" } },
+    "missing_fields": { "type": "array", "items": { "type": "string" } },
+    "unknown_fields": { "type": "array", "items": { "type": "string" } },
+    "hard_block_fields": { "type": "array", "items": { "type": "string" } },
+    "details": { "type": "object", "additionalProperties": true },
+    "extensions": { "type": "object", "additionalProperties": true }
+  }
+}
+

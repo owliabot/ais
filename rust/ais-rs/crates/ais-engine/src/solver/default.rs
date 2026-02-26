@@ -6,15 +6,18 @@ use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub trait Solver {
-    fn solve(&self, node: &Value, readiness: &NodeReadinessResult, context: &SolverContext) -> SolverDecision;
+    fn solve(
+        &self,
+        node: &Value,
+        readiness: &NodeReadinessResult,
+        context: &SolverContext,
+    ) -> SolverDecision;
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SolverContext {
     #[serde(default)]
     pub contract_candidates: BTreeMap<String, Vec<Value>>,
-    #[serde(default)]
-    pub detect_provider_candidates: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -25,9 +28,9 @@ pub enum SolverDecision {
         patches: Vec<RuntimePatch>,
         summary: String,
     },
-    SelectProvider {
-        provider: String,
-        summary: String,
+    NeedUserInput {
+        reason: String,
+        details: Map<String, Value>,
     },
     NeedUserConfirm {
         reason: String,
@@ -39,7 +42,12 @@ pub enum SolverDecision {
 pub struct DefaultSolver;
 
 impl Solver for DefaultSolver {
-    fn solve(&self, _node: &Value, readiness: &NodeReadinessResult, context: &SolverContext) -> SolverDecision {
+    fn solve(
+        &self,
+        _node: &Value,
+        readiness: &NodeReadinessResult,
+        context: &SolverContext,
+    ) -> SolverDecision {
         if readiness.state != NodeRunState::Blocked {
             return SolverDecision::Noop;
         }
@@ -78,28 +86,18 @@ impl Solver for DefaultSolver {
             .collect::<Vec<_>>();
 
         if !remaining_missing.is_empty() {
-            return SolverDecision::NeedUserConfirm {
+            return SolverDecision::NeedUserInput {
                 reason: "missing_inputs_or_runtime_refs".to_string(),
                 details: map_from_entries(vec![
-                    ("missing_refs", Value::Array(remaining_missing.into_iter().map(Value::String).collect())),
-                    ("proposed_patch_count", Value::Number((proposed_patches.len() as u64).into())),
+                    (
+                        "missing_refs",
+                        Value::Array(remaining_missing.into_iter().map(Value::String).collect()),
+                    ),
+                    (
+                        "proposed_patch_count",
+                        Value::Number((proposed_patches.len() as u64).into()),
+                    ),
                 ]),
-            };
-        }
-
-        if readiness.needs_detect {
-            return match context.detect_provider_candidates.as_slice() {
-                [provider] => SolverDecision::SelectProvider {
-                    provider: provider.clone(),
-                    summary: "detect provider selected by default solver".to_string(),
-                },
-                candidates => SolverDecision::NeedUserConfirm {
-                    reason: "detect_provider_selection_required".to_string(),
-                    details: map_from_entries(vec![(
-                        "provider_candidates",
-                        Value::Array(candidates.iter().cloned().map(Value::String).collect()),
-                    )]),
-                },
             };
         }
 
@@ -108,7 +106,14 @@ impl Solver for DefaultSolver {
                 reason: "readiness_errors".to_string(),
                 details: map_from_entries(vec![(
                     "errors",
-                    Value::Array(readiness.errors.iter().cloned().map(Value::String).collect()),
+                    Value::Array(
+                        readiness
+                            .errors
+                            .iter()
+                            .cloned()
+                            .map(Value::String)
+                            .collect(),
+                    ),
                 )]),
             };
         }
@@ -142,15 +147,15 @@ pub fn build_solver_event(node_id: Option<&str>, decision: &SolverDecision) -> O
                 .insert("summary".to_string(), Value::String(summary.clone()));
             Some(event)
         }
-        SolverDecision::SelectProvider { provider, summary } => {
-            let mut event = EngineEvent::new(EngineEventType::SolverApplied);
+        SolverDecision::NeedUserInput { reason, details } => {
+            let mut event = EngineEvent::new(EngineEventType::NeedUserInput);
             event.node_id = node_id.map(str::to_string);
             event
                 .data
-                .insert("provider".to_string(), Value::String(provider.clone()));
+                .insert("reason".to_string(), Value::String(reason.clone()));
             event
                 .data
-                .insert("summary".to_string(), Value::String(summary.clone()));
+                .insert("details".to_string(), Value::Object(details.clone()));
             Some(event)
         }
         SolverDecision::NeedUserConfirm { reason, details } => {

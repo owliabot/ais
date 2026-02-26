@@ -29,9 +29,15 @@ fn audit_mode_keeps_shape_and_trims_values() {
     });
     let redacted = redact_solana_value(&payload, TraceRedactMode::Audit);
     assert_eq!(redacted.get("instruction"), Some(&json!("swap")));
-    let data = redacted.get("data").and_then(|value| value.as_str()).expect("data");
+    let data = redacted
+        .get("data")
+        .and_then(|value| value.as_str())
+        .expect("data");
     assert!(data.contains("…(len="));
-    assert!(redacted.get("lookup_tables").and_then(|value| value.as_array()).is_some());
+    assert!(redacted
+        .get("lookup_tables")
+        .and_then(|value| value.as_array())
+        .is_some());
     assert_eq!(redacted.get("signature"), Some(&json!("[REDACTED]")));
 }
 

@@ -14,7 +14,9 @@ pub struct FieldPath {
 
 impl FieldPath {
     pub fn root() -> Self {
-        Self { segments: Vec::new() }
+        Self {
+            segments: Vec::new(),
+        }
     }
 
     pub fn from_segments(segments: Vec<FieldPathSegment>) -> Self {

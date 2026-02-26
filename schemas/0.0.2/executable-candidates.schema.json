@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ais:0.0.2:executable-candidates",
+  "title": "AIS Executable Candidates (ais-executable-candidates/0.0.1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "hash",
+    "catalog_schema",
+    "catalog_hash",
+    "actions",
+    "queries",
+    "execution_plugins"
+  ],
+  "properties": {
+    "schema": { "const": "ais-executable-candidates/0.0.1" },
+    "created_at": { "type": "string" },
+    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "catalog_schema": { "type": "string", "minLength": 1 },
+    "catalog_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "pack": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "type": "string" },
+        "version": { "type": "string" }
+      }
+    },
+    "chain_scope": { "type": "array", "items": { "type": "string" } },
+    "actions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["ref", "protocol", "version", "id", "risk_level", "execution_types", "execution_chains"],
+        "properties": {
+          "level": { "const": "index" },
+          "ref": { "type": "string" },
+          "protocol": { "type": "string" },
+          "version": { "type": "string" },
+          "id": { "type": "string" },
+          "signature": { "type": "string" },
+          "description": { "type": "string" },
+          "risk_level": { "type": "integer", "minimum": 1, "maximum": 5 },
+          "risk_tags": { "type": "array", "items": { "type": "string" } },
+          "capabilities_required": { "type": "array", "items": { "type": "string" } },
+          "execution_types": { "type": "array", "items": { "type": "string" } },
+          "execution_chains": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "queries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["ref", "protocol", "version", "id", "execution_types", "execution_chains"],
+        "properties": {
+          "level": { "const": "index" },
+          "ref": { "type": "string" },
+          "protocol": { "type": "string" },
+          "version": { "type": "string" },
+          "id": { "type": "string" },
+          "signature": { "type": "string" },
+          "description": { "type": "string" },
+          "capabilities_required": { "type": "array", "items": { "type": "string" } },
+          "execution_types": { "type": "array", "items": { "type": "string" } },
+          "execution_chains": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "execution_plugins": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type"],
+        "properties": {
+          "type": { "type": "string", "minLength": 1 },
+          "chain": { "type": "string" },
+          "extensions": { "type": "object", "additionalProperties": true }
+        }
+      }
+    },
+    "extensions": { "type": "object", "additionalProperties": true }
+  }
+}

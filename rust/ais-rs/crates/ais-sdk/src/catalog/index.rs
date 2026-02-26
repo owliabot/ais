@@ -17,7 +17,6 @@ pub struct CatalogIndex {
     pub packs_by_key: HashMap<String, Value>,
     pub actions_by_protocol_version: HashMap<String, Vec<Value>>,
     pub queries_by_protocol_version: HashMap<String, Vec<Value>>,
-    pub detect_providers: Option<Vec<Value>>,
     pub execution_plugins: Option<Vec<Value>>,
 }
 
@@ -48,7 +47,9 @@ pub(crate) fn build_index_from_parts(
         if let Some(reference) = value_str(action, "ref") {
             actions_by_ref.insert(reference.to_string(), action.clone());
         }
-        if let (Some(protocol), Some(version)) = (value_str(action, "protocol"), value_str(action, "version")) {
+        if let (Some(protocol), Some(version)) =
+            (value_str(action, "protocol"), value_str(action, "version"))
+        {
             let key = format!("{protocol}@{version}");
             actions_by_protocol_version
                 .entry(key)
@@ -61,7 +62,9 @@ pub(crate) fn build_index_from_parts(
         if let Some(reference) = value_str(query, "ref") {
             queries_by_ref.insert(reference.to_string(), query.clone());
         }
-        if let (Some(protocol), Some(version)) = (value_str(query, "protocol"), value_str(query, "version")) {
+        if let (Some(protocol), Some(version)) =
+            (value_str(query, "protocol"), value_str(query, "version"))
+        {
             let key = format!("{protocol}@{version}");
             queries_by_protocol_version
                 .entry(key)
@@ -88,7 +91,6 @@ pub(crate) fn build_index_from_parts(
         packs_by_key,
         actions_by_protocol_version,
         queries_by_protocol_version,
-        detect_providers: None,
         execution_plugins: None,
     }
 }

@@ -14,7 +14,6 @@ pub enum TraceRedactMode {
     Off,
 }
 
-
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TraceRedactOptions {
     pub mode: TraceRedactMode,
@@ -90,8 +89,8 @@ fn should_redact_full_object(
 ) -> bool {
     let full_path = path.join(".");
     let lower_path = full_path.to_lowercase();
-    let has_rpc_shape =
-        object.contains_key("method") && (object.contains_key("params") || object.contains_key("result"));
+    let has_rpc_shape = object.contains_key("method")
+        && (object.contains_key("params") || object.contains_key("result"));
     if has_rpc_shape {
         return mode == TraceRedactMode::Default;
     }

@@ -29,3 +29,26 @@ Registry MUST provide:
 
 - `latestByName[protocol] -> protocolId` (or record)
 - a method to fetch the latest verified version
+
+## 4. Protocol install audit record (normative)
+
+Any dynamic protocol installation MUST emit/persist a `ProtocolInstallRecord` with at least:
+
+- `source`: the full `ProtocolSource` object (see `specs/ais-3-discovery.md`)
+- `integrity`:
+  - `content_digest_sha256` (required)
+  - `schema_digest_sha256` (optional but recommended)
+- `resolved_identity`:
+  - `protocol`
+  - `version`
+- `policy_decision`:
+  - `kind`: `ok|need_user_confirm|hard_block`
+  - `reasons`: string array
+- `installed_path` (for allowed installs)
+- `timestamp` (optional, non-hash field)
+
+Rules:
+
+- record MUST be stable-hashable ignoring volatile time fields.
+- if `policy_decision.kind != ok`, install MUST NOT proceed.
+- install record is for audit/replay; execution handler allowlist/registration checks still apply separately.

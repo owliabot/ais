@@ -10,8 +10,10 @@ pub const ENGINE_COMMAND_SCHEMA_0_0_1: &str = "ais-engine-command/0.0.1";
 pub enum EngineCommandType {
     ApplyPatches,
     UserConfirm,
-    SelectProvider,
+    UserInput,
+    UserSelect,
     Cancel,
+    ReplacePlan,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,14 +143,23 @@ fn command_event(
     reason: Option<&str>,
 ) -> EngineEvent {
     let mut event = EngineEvent::new(event_type);
-    event.data.insert("command_id".to_string(), Value::String(command.id.clone()));
+    event
+        .data
+        .insert("command_id".to_string(), Value::String(command.id.clone()));
     event.data.insert(
         "command_type".to_string(),
         Value::String(command_type_name(command.command_type).to_string()),
     );
-    event.data.insert("duplicate".to_string(), Value::Bool(duplicate));
-    event.data.insert("noop".to_string(), Value::Bool(duplicate));
+    event
+        .data
+        .insert("duplicate".to_string(), Value::Bool(duplicate));
+    event
+        .data
+        .insert("noop".to_string(), Value::Bool(duplicate));
     if let Some(reason) = reason {
+        event
+            .data
+            .insert("reason_code".to_string(), Value::String(reason.to_string()));
         event
             .data
             .insert("reason".to_string(), Value::String(reason.to_string()));
@@ -160,8 +171,10 @@ fn command_type_name(command_type: EngineCommandType) -> &'static str {
     match command_type {
         EngineCommandType::ApplyPatches => "apply_patches",
         EngineCommandType::UserConfirm => "user_confirm",
-        EngineCommandType::SelectProvider => "select_provider",
+        EngineCommandType::UserInput => "user_input",
+        EngineCommandType::UserSelect => "user_select",
         EngineCommandType::Cancel => "cancel",
+        EngineCommandType::ReplacePlan => "replace_plan",
     }
 }
 

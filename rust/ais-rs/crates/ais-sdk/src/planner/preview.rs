@@ -2,8 +2,10 @@ use super::readiness::{
     get_node_readiness, get_node_readiness_async, NodeReadinessResult, NodeRunState,
 };
 use crate::documents::PlanDocument;
-use crate::resolver::{DetectResolver, ResolverContext, ValueRefEvalOptions};
-use ais_core::{stable_hash_hex, FieldPath, FieldPathSegment, IssueSeverity, StableJsonOptions, StructuredIssue};
+use crate::resolver::{ResolverContext, ValueRefEvalOptions};
+use ais_core::{
+    stable_hash_hex, FieldPath, FieldPathSegment, IssueSeverity, StableJsonOptions, StructuredIssue,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -83,13 +85,12 @@ pub async fn dry_run_json_async(
     plan: &PlanDocument,
     context: &ResolverContext,
     options: &ValueRefEvalOptions,
-    detect_resolver: Option<&dyn DetectResolver>,
 ) -> DryRunJsonReport {
     let mut issues = Vec::<StructuredIssue>::new();
     let mut nodes = Vec::<DryRunNodeReport>::new();
 
     for (index, node) in plan.nodes.iter().enumerate() {
-        match build_node_report_async(node, index, context, options, detect_resolver, &mut issues).await {
+        match build_node_report_async(node, index, context, options, &mut issues).await {
             Some(report) => nodes.push(report),
             None => continue,
         }
@@ -128,9 +129,8 @@ pub async fn dry_run_text_async(
     plan: &PlanDocument,
     context: &ResolverContext,
     options: &ValueRefEvalOptions,
-    detect_resolver: Option<&dyn DetectResolver>,
 ) -> String {
-    let report = dry_run_json_async(plan, context, options, detect_resolver).await;
+    let report = dry_run_json_async(plan, context, options).await;
     render_dry_run_text(&report)
 }
 
@@ -175,9 +175,6 @@ pub fn render_dry_run_text(report: &DryRunJsonReport) -> String {
                 "  missing_refs={}",
                 node.readiness.missing_refs.join(",")
             ));
-        }
-        if node.readiness.needs_detect {
-            lines.push("  needs_detect=true".to_string());
         }
         if !node.readiness.errors.is_empty() {
             lines.push(format!("  errors={}", node.readiness.errors.join(" | ")));
@@ -241,8 +238,14 @@ fn build_node_report_sync(
 
     Some(DryRunNodeReport {
         node_id,
-        chain: node_object.get("chain").and_then(Value::as_str).map(str::to_string),
-        kind: node_object.get("kind").and_then(Value::as_str).map(str::to_string),
+        chain: node_object
+            .get("chain")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        kind: node_object
+            .get("kind")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         execution_type: node_object
             .get("execution")
             .and_then(Value::as_object)
@@ -260,7 +263,6 @@ async fn build_node_report_async(
     node_index: usize,
     context: &ResolverContext,
     options: &ValueRefEvalOptions,
-    detect_resolver: Option<&dyn DetectResolver>,
     issues: &mut Vec<StructuredIssue>,
 ) -> Option<DryRunNodeReport> {
     let node_object = match node.as_object() {
@@ -293,13 +295,19 @@ async fn build_node_report_async(
         return None;
     }
 
-    let readiness = get_node_readiness_async(node, context, options, detect_resolver).await;
+    let readiness = get_node_readiness_async(node, context, options).await;
     push_readiness_issues(issues, node_index, &node_id, &readiness);
 
     Some(DryRunNodeReport {
         node_id,
-        chain: node_object.get("chain").and_then(Value::as_str).map(str::to_string),
-        kind: node_object.get("kind").and_then(Value::as_str).map(str::to_string),
+        chain: node_object
+            .get("chain")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        kind: node_object
+            .get("kind")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         execution_type: node_object
             .get("execution")
             .and_then(Value::as_object)
@@ -343,15 +351,6 @@ fn push_readiness_issues(
             path_with_nodes_key(node_index, "execution"),
             &format!("missing refs: {}", readiness.missing_refs.join(",")),
             "dry_run.readiness_missing_refs",
-            Some(node_id),
-        ));
-    }
-    if readiness.needs_detect {
-        issues.push(issue(
-            "readiness_blocked",
-            path_with_nodes_key(node_index, "execution"),
-            "detect decision required before execution",
-            "dry_run.readiness_needs_detect",
             Some(node_id),
         ));
     }
@@ -400,12 +399,11 @@ fn collect_risk_flags(
         .and_then(Value::as_object)
         .and_then(|execution| execution.get("type"))
         .and_then(Value::as_str)
-        .is_some_and(|kind| kind == "evm_call" || kind == "evm_multicall" || kind == "solana_instruction")
+        .is_some_and(|kind| {
+            kind == "evm_call" || kind == "evm_multicall" || kind == "solana_instruction"
+        })
     {
         flags.push("write_execution".to_string());
-    }
-    if readiness.needs_detect {
-        flags.push("needs_detect".to_string());
     }
     if !readiness.missing_refs.is_empty() {
         flags.push("missing_refs".to_string());

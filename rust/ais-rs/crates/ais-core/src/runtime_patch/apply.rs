@@ -111,7 +111,11 @@ pub fn apply_runtime_patches(
     }
 }
 
-fn apply_one_patch(runtime: &mut Value, path_parts: &[&str], patch: &RuntimePatch) -> Result<(), String> {
+fn apply_one_patch(
+    runtime: &mut Value,
+    path_parts: &[&str],
+    patch: &RuntimePatch,
+) -> Result<(), String> {
     let Some(last_key) = path_parts.last().copied() else {
         return Err("invalid_path".to_string());
     };

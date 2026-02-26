@@ -219,7 +219,12 @@ fn token_pair(kind: TokenKind, lexeme: &str, pos: usize) -> Token {
     }
 }
 
-fn two_char_op(chars: &[char], index: &mut usize, ch: char, pos: usize) -> Result<Option<Token>, LexError> {
+fn two_char_op(
+    chars: &[char],
+    index: &mut usize,
+    ch: char,
+    pos: usize,
+) -> Result<Option<Token>, LexError> {
     let token = match ch {
         '!' if matches_next(chars, pos, '=') => Some((TokenKind::NotEq, "!=")),
         '=' if matches_next(chars, pos, '=') => Some((TokenKind::EqEq, "==")),

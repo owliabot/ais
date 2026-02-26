@@ -1,0 +1,208 @@
+{
+  "schema": "ais-conformance/0.0.2",
+  "profile": "core",
+  "cases": [
+    {
+      "id": "engine-command-apply-patches-valid",
+      "kind": "json_schema_validate",
+      "input": {
+        "schema_id": "ais-engine-command/0.0.1",
+        "value": {
+          "schema": "ais-engine-command/0.0.1",
+          "command": {
+            "id": "cmd-1",
+            "type": "apply_patches",
+            "data": {
+              "patches": [
+                { "op": "set", "path": "inputs.amount_in", "value": "10" }
+              ]
+            }
+          }
+        }
+      },
+      "expect": { "valid": true }
+    },
+    {
+      "id": "engine-command-apply-patches-missing-data-invalid",
+      "kind": "json_schema_validate",
+      "input": {
+        "schema_id": "ais-engine-command/0.0.1",
+        "value": {
+          "schema": "ais-engine-command/0.0.1",
+          "command": { "id": "cmd-2", "type": "apply_patches" }
+        }
+      },
+      "expect": { "valid": false }
+    },
+    {
+      "id": "engine-command-user-confirm-valid",
+      "kind": "json_schema_validate",
+      "input": {
+        "schema_id": "ais-engine-command/0.0.1",
+        "value": {
+          "schema": "ais-engine-command/0.0.1",
+          "command": {
+            "id": "cmd-3",
+            "type": "user_confirm",
+            "data": { "node_id": "n1", "decision": "approve" }
+          }
+        }
+      },
+      "expect": { "valid": true }
+    },
+    {
+      "id": "engine-command-user-confirm-invalid-decision",
+      "kind": "json_schema_validate",
+      "input": {
+        "schema_id": "ais-engine-command/0.0.1",
+        "value": {
+          "schema": "ais-engine-command/0.0.1",
+          "command": {
+            "id": "cmd-4",
+            "type": "user_confirm",
+            "data": { "node_id": "n1", "decision": "maybe" }
+          }
+        }
+      },
+      "expect": { "valid": false }
+    },
+    {
+      "id": "engine-command-unknown-type-invalid",
+      "kind": "json_schema_validate",
+      "input": {
+        "schema_id": "ais-engine-command/0.0.1",
+        "value": {
+          "schema": "ais-engine-command/0.0.1",
+          "command": { "id": "cmd-5", "type": "unknown_command", "data": {} }
+        }
+      },
+      "expect": { "valid": false }
+    },
+    {
+      "id": "engine-command-replace-plan-missing-plan-invalid",
+      "kind": "json_schema_validate",
+      "input": {
+        "schema_id": "ais-engine-command/0.0.1",
+        "value": {
+          "schema": "ais-engine-command/0.0.1",
+          "command": { "id": "cmd-5a", "type": "replace_plan", "data": {} }
+        }
+      },
+      "expect": { "valid": false }
+    },
+    {
+      "id": "engine-command-replace-plan-valid",
+      "kind": "json_schema_validate",
+      "input": {
+        "schema_id": "ais-engine-command/0.0.1",
+        "value": {
+          "schema": "ais-engine-command/0.0.1",
+          "command": {
+            "id": "cmd-5b",
+            "type": "replace_plan",
+            "data": {
+              "plan": { "schema": "ais-plan/0.0.3", "nodes": [] },
+              "reason": "demo plan mutation"
+            }
+          }
+        }
+      },
+      "expect": { "valid": true }
+    },
+    {
+      "id": "engine-command-unknown-top-level-key-invalid",
+      "kind": "json_schema_validate",
+      "input": {
+        "schema_id": "ais-engine-command/0.0.1",
+        "value": {
+          "schema": "ais-engine-command/0.0.1",
+          "extra": true,
+          "command": { "id": "cmd-6", "type": "cancel", "data": {} }
+        }
+      },
+      "expect": { "valid": false }
+    },
+    {
+      "id": "engine-event-command-accepted-valid",
+      "kind": "json_schema_validate",
+      "input": {
+        "schema_id": "ais-engine-event/0.0.3",
+        "value": {
+          "schema": "ais-engine-event/0.0.3",
+          "run_id": "run-1",
+          "seq": 0,
+          "ts": "1970-01-01T00:00:00Z",
+          "event": {
+            "type": "command_accepted",
+            "data": {
+              "command_id": "cmd-1",
+              "command_type": "apply_patches",
+              "duplicate": false,
+              "noop": false
+            }
+          }
+        }
+      },
+      "expect": { "valid": true }
+    },
+    {
+      "id": "engine-event-command-accepted-missing-fields-invalid",
+      "kind": "json_schema_validate",
+      "input": {
+        "schema_id": "ais-engine-event/0.0.3",
+        "value": {
+          "schema": "ais-engine-event/0.0.3",
+          "run_id": "run-1",
+          "seq": 0,
+          "ts": "1970-01-01T00:00:00Z",
+          "event": {
+            "type": "command_accepted",
+            "data": { "command_id": "cmd-1" }
+          }
+        }
+      },
+      "expect": { "valid": false }
+    }
+    ,
+    {
+      "id": "engine-event-plan-replaced-valid",
+      "kind": "json_schema_validate",
+      "input": {
+        "schema_id": "ais-engine-event/0.0.3",
+        "value": {
+          "schema": "ais-engine-event/0.0.3",
+          "run_id": "run-1",
+          "seq": 1,
+          "ts": "1970-01-01T00:00:00Z",
+          "event": {
+            "type": "plan_replaced",
+            "data": {
+              "before_plan_hash": "h1",
+              "after_plan_hash": "h2",
+              "command_id": "cmd-5b"
+            }
+          }
+        }
+      },
+      "expect": { "valid": true }
+    },
+    {
+      "id": "engine-event-plan-replaced-missing-hashes-invalid",
+      "kind": "json_schema_validate",
+      "input": {
+        "schema_id": "ais-engine-event/0.0.3",
+        "value": {
+          "schema": "ais-engine-event/0.0.3",
+          "run_id": "run-1",
+          "seq": 2,
+          "ts": "1970-01-01T00:00:00Z",
+          "event": {
+            "type": "plan_replaced",
+            "data": { "reason": "missing hashes" }
+          }
+        }
+      },
+      "expect": { "valid": false }
+    }
+  ]
+}

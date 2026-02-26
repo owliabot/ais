@@ -1,3 +1,4 @@
+use crate::execution_type::is_write_execution_type;
 use ais_sdk::PlanDocument;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -48,10 +49,7 @@ fn collect_ready_candidates(
     plan: &PlanDocument,
     completed_node_ids: &BTreeSet<String>,
 ) -> Vec<ScheduledNode> {
-    let completed = completed_node_ids
-        .iter()
-        .cloned()
-        .collect::<HashSet<_>>();
+    let completed = completed_node_ids.iter().cloned().collect::<HashSet<_>>();
     let mut out = Vec::<ScheduledNode>::new();
 
     for node in &plan.nodes {
@@ -105,10 +103,7 @@ fn is_write_node(node: &serde_json::Map<String, Value>) -> bool {
         .and_then(|execution| execution.get("type"))
         .and_then(Value::as_str)
         .unwrap_or("");
-    matches!(
-        execution_type,
-        "evm_call" | "evm_multicall" | "solana_instruction" | "bitcoin_psbt"
-    )
+    is_write_execution_type(execution_type)
 }
 
 fn build_batches(candidates: Vec<ScheduledNode>, options: &SchedulerOptions) -> Vec<ScheduleBatch> {
@@ -141,7 +136,8 @@ fn build_batches(candidates: Vec<ScheduledNode>, options: &SchedulerOptions) -> 
                 continue;
             }
             if options.writes_per_chain_serial
-                && (chains_with_write.contains(&node.chain) || (node.is_write && current_chain_count > 0))
+                && (chains_with_write.contains(&node.chain)
+                    || (node.is_write && current_chain_count > 0))
             {
                 next_pending.push(node);
                 continue;

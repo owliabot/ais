@@ -33,7 +33,10 @@ pub(crate) fn parse_u256(value: &Value) -> Result<U256, String> {
     Err("uint arg must be string or integer number".to_string())
 }
 
-pub(crate) fn optional_u64_field(execution: &Map<String, Value>, key: &str) -> Result<Option<u64>, String> {
+pub(crate) fn optional_u64_field(
+    execution: &Map<String, Value>,
+    key: &str,
+) -> Result<Option<u64>, String> {
     execution
         .get(key)
         .map(lit_or_value)
@@ -51,7 +54,10 @@ pub(crate) fn parse_u64(value: &Value) -> Result<u64, String> {
     Err("value must be u64 number or numeric string".to_string())
 }
 
-pub(crate) fn optional_u128_field(execution: &Map<String, Value>, key: &str) -> Result<Option<u128>, String> {
+pub(crate) fn optional_u128_field(
+    execution: &Map<String, Value>,
+    key: &str,
+) -> Result<Option<u128>, String> {
     execution
         .get(key)
         .map(lit_or_value)
@@ -105,7 +111,9 @@ pub(crate) fn normalize_evm_rpc_params(method: &str, params: Value) -> Result<Va
         "eth_getBalance" => {
             if let Some(array) = object.get("array").and_then(Value::as_array) {
                 if array.is_empty() {
-                    return Err("evm_rpc eth_getBalance params.array must contain address".to_string());
+                    return Err(
+                        "evm_rpc eth_getBalance params.array must contain address".to_string()
+                    );
                 }
                 let address = value_to_string(&array[0]).ok_or_else(|| {
                     "evm_rpc eth_getBalance params.array[0] must be string".to_string()
@@ -121,7 +129,9 @@ pub(crate) fn normalize_evm_rpc_params(method: &str, params: Value) -> Result<Va
                 .or_else(|| object.get("account"))
                 .or_else(|| object.get("addr"))
                 .and_then(value_to_string)
-                .ok_or_else(|| "evm_rpc eth_getBalance params.address must be string".to_string())?;
+                .ok_or_else(|| {
+                    "evm_rpc eth_getBalance params.address must be string".to_string()
+                })?;
             let block = object
                 .get("block")
                 .or_else(|| object.get("block_tag"))
@@ -129,7 +139,10 @@ pub(crate) fn normalize_evm_rpc_params(method: &str, params: Value) -> Result<Va
                 .map(lit_or_value)
                 .cloned()
                 .unwrap_or_else(|| Value::String("latest".to_string()));
-            Ok(Value::Array(vec![Value::String(address.to_string()), block]))
+            Ok(Value::Array(vec![
+                Value::String(address.to_string()),
+                block,
+            ]))
         }
         "eth_getTransactionReceipt" => {
             let tx_hash = object

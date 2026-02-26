@@ -1,6 +1,8 @@
 use super::{validate_workspace_references, WorkspaceDocuments};
 use crate::documents::{PackDocument, ProtocolDocument, WorkflowDocument};
-use crate::parse::{parse_document_with_options, AisDocument, DocumentFormat, ParseDocumentOptions};
+use crate::parse::{
+    parse_document_with_options, AisDocument, DocumentFormat, ParseDocumentOptions,
+};
 use serde_json::{json, Map};
 use std::fs;
 use std::path::PathBuf;
@@ -173,6 +175,72 @@ fn valid_workspace_has_no_issues() {
 }
 
 #[test]
+fn control_node_assert_with_single_target_is_validated_against_protocol() {
+    let protocol = protocol_doc("demo", "0.0.2", &["swap"], &["quote"]);
+    let workflow = workflow_doc(
+        json!({ "name": "wf", "version": "0.0.1" }),
+        None,
+        vec![json!({
+            "id": "c1",
+            "type": "assert",
+            "protocol": "demo@0.0.2",
+            "query": "quote"
+        })],
+        Some("eip155:1"),
+    );
+
+    let issues = validate_workspace_references(WorkspaceDocuments {
+        protocols: &[protocol],
+        packs: &[],
+        workflows: &[workflow],
+    });
+
+    assert!(issues.is_empty(), "unexpected issues: {issues:?}");
+}
+
+#[test]
+fn control_node_assert_requires_exactly_one_target() {
+    let protocol = protocol_doc("demo", "0.0.2", &["swap"], &["quote"]);
+
+    let workflow = workflow_doc(
+        json!({ "name": "wf", "version": "0.0.1" }),
+        None,
+        vec![
+            json!({
+                "id": "c1",
+                "type": "assert",
+                "protocol": "demo@0.0.2"
+            }),
+            json!({
+                "id": "c2",
+                "type": "branch",
+                "protocol": "demo@0.0.2",
+                "action": "swap",
+                "query": "quote"
+            }),
+        ],
+        Some("eip155:1"),
+    );
+
+    let issues = validate_workspace_references(WorkspaceDocuments {
+        protocols: &[protocol],
+        packs: &[],
+        workflows: &[workflow],
+    });
+
+    assert!(has_issue(
+        &issues,
+        "workspace.workflow.control_target_required",
+        "$.nodes[0].type"
+    ));
+    assert!(has_issue(
+        &issues,
+        "workspace.workflow.control_target_ambiguous",
+        "$.nodes[1].type"
+    ));
+}
+
+#[test]
 fn fixture_workspace_valid_evm_policy_has_no_issues() {
     let workspace = load_fixture_workspace("valid-evm-policy");
     let issues = validate_workspace_references(WorkspaceDocuments {
@@ -233,7 +301,11 @@ fn protocol_doc(
     }
 }
 
-fn pack_doc(name: Option<&str>, version: Option<&str>, includes: Vec<serde_json::Value>) -> PackDocument {
+fn pack_doc(
+    name: Option<&str>,
+    version: Option<&str>,
+    includes: Vec<serde_json::Value>,
+) -> PackDocument {
     PackDocument {
         schema: "ais-pack/0.0.2".to_string(),
         name: name.map(str::to_string),

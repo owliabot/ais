@@ -13,7 +13,10 @@ fn local_private_key_signer_exposes_address_and_private_key_hex() {
     )
     .expect("valid key");
 
-    assert_eq!(EvmTransactionSigner::address(&signer), Some(signer.address()));
+    assert_eq!(
+        EvmTransactionSigner::address(&signer),
+        Some(signer.address())
+    );
     assert_eq!(
         EvmTransactionSigner::private_key_hex(&signer).as_deref(),
         Some("0x1111111111111111111111111111111111111111111111111111111111111111")

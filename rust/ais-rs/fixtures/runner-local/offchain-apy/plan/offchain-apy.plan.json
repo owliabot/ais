@@ -1,0 +1,28 @@
+{
+  "schema": "ais-plan/0.0.3",
+  "meta": {
+    "name": "offchain-apy-demo"
+  },
+  "nodes": [
+    {
+      "id": "aave-usdc-apy",
+      "type": "query_ref",
+      "kind": "execution",
+      "chain": "eip155:1",
+      "execution": {
+        "type": "offchain_apy_query",
+        "method": "GET",
+        "endpoint": {
+          "lit": "https://api.example.com/v1/aave/supply-apy?asset=USDC&chain=eip155:1"
+        }
+      },
+      "writes": [
+        {
+          "path": "nodes.aave-usdc-apy.outputs",
+          "mode": "set"
+        }
+      ]
+    }
+  ],
+  "extensions": {}
+}

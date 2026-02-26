@@ -38,7 +38,10 @@ Solana executor crate for AIS.
 - Implemented:
   - `AISRS-SOL-001` minimal RPC provider abstraction + chain config model.
   - `AISRS-SOL-010` supports() + `solana_read` + `solana_instruction` execution entry.
-  - `AISRS-SOL-011` instruction signing/send/confirm flow (missing-signer -> need_user_confirm; v0 + lookup table enforcement).
+  - `AISRS-SOL-011` instruction signing/send/confirm flow (missing-signer -> need_user_confirm; instruction tx_version enforces `v0`).
+  - `solana_instruction` now emits canonical side-effect records via `ExecutorOutput.side_effects` (`tx` idempotency key + sent/confirmed status), so engine consumes side-effects without result-field guessing.
+  - executor-level side-effect reconciliation for `solana_instruction` is supported: `sent` records query `getSignatureStatuses` and transition to `confirmed|reverted|sent` with stable reconcile reason codes.
+  - `solana_instruction` side-effect tests覆盖 `wait_for_confirmation=true|false` 下 `confirmed/sent` 状态映射与 `details.signed_tx_hash` 透传。
   - `AISRS-SOL-020` solana payload redaction aligned with trace modes.
 - Planned next:
   - runner/engine wiring with real solana client + signer config.

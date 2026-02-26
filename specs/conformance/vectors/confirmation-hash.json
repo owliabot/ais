@@ -1,0 +1,32 @@
+{
+  "schema": "ais-conformance/0.0.2",
+  "profile": "extended",
+  "cases": [
+    {
+      "id": "confirmation-hash-ignores-ts-in-details",
+      "kind": "confirmation_hash",
+      "input": {
+        "summary": {
+          "action_ref": "uniswap-v3@0.0.2/swap_exact_in",
+          "chain": "eip155:1",
+          "details": {
+            "hit_reasons": ["missing_fields"],
+            "ts": "2026-02-18T00:00:00Z"
+          },
+          "execution_type": "evm_call",
+          "hard_block_fields": [],
+          "kind": "need_user_confirm",
+          "missing_fields": ["slippage_bps"],
+          "node_id": "n1",
+          "reason": "policy gate input is incomplete",
+          "risk_level": 3,
+          "risk_tags": ["slippage"],
+          "unknown_fields": []
+        }
+      },
+      "expect": {
+        "hash_sha256_hex": "ce0796e38dd290d5a7619242d9cdb5c4094475366e8abbee877c7f0aaa05e7b0"
+      }
+    }
+  ]
+}

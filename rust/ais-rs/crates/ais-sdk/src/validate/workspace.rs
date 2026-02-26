@@ -202,6 +202,51 @@ pub fn validate_workspace_references(docs: WorkspaceDocuments<'_>) -> Vec<Struct
         let default_chain = workflow.default_chain.as_deref();
 
         for (node_index, node) in workflow.nodes.iter().enumerate() {
+            if let Some(node_obj) = node.as_object() {
+                let node_type = node_obj.get("type").and_then(Value::as_str);
+                if matches!(node_type, Some("assert" | "branch")) {
+                    let has_action = node_obj
+                        .get("action")
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| !value.trim().is_empty());
+                    let has_query = node_obj
+                        .get("query")
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| !value.trim().is_empty());
+
+                    if has_action && has_query {
+                        issues.push(issue(
+                            "workspace_error",
+                            IssueSeverity::Error,
+                            vec![
+                                FieldPathSegment::Key("nodes".to_string()),
+                                FieldPathSegment::Index(node_index),
+                                FieldPathSegment::Key("type".to_string()),
+                            ],
+                            "control node type assert/branch must set exactly one of `action` or `query`",
+                            "workspace.workflow.control_target_ambiguous",
+                            None,
+                        ));
+                        continue;
+                    }
+                    if !has_action && !has_query {
+                        issues.push(issue(
+                            "workspace_error",
+                            IssueSeverity::Error,
+                            vec![
+                                FieldPathSegment::Key("nodes".to_string()),
+                                FieldPathSegment::Index(node_index),
+                                FieldPathSegment::Key("type".to_string()),
+                            ],
+                            "control node type assert/branch requires `action` or `query`",
+                            "workspace.workflow.control_target_required",
+                            None,
+                        ));
+                        continue;
+                    }
+                }
+            }
+
             let Some((protocol_key, node_type, leaf, chain)) =
                 extract_node_reference(node, default_chain)
             else {
@@ -437,7 +482,27 @@ fn extract_node_reference(
     default_chain: Option<&str>,
 ) -> Option<(String, Option<String>, Option<String>, Option<String>)> {
     let node = node.as_object()?;
-    let node_type = node.get("type").and_then(Value::as_str).map(str::to_string);
+    let raw_type = node.get("type").and_then(Value::as_str);
+    let node_type = match raw_type {
+        Some("assert" | "branch") => {
+            let has_action = node
+                .get("action")
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty());
+            let has_query = node
+                .get("query")
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty());
+            if has_action && !has_query {
+                Some("action_ref".to_string())
+            } else if has_query && !has_action {
+                Some("query_ref".to_string())
+            } else {
+                raw_type.map(str::to_string)
+            }
+        }
+        _ => raw_type.map(str::to_string),
+    };
     let chain = node
         .get("chain")
         .and_then(Value::as_str)
@@ -448,8 +513,14 @@ fn extract_node_reference(
         let (protocol_id, version) = protocol.split_once('@')?;
         let key = format!("{protocol_id}@{version}");
         let leaf = match node_type.as_deref() {
-            Some("action_ref") => node.get("action").and_then(Value::as_str).map(str::to_string),
-            Some("query_ref") => node.get("query").and_then(Value::as_str).map(str::to_string),
+            Some("action_ref") => node
+                .get("action")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            Some("query_ref") => node
+                .get("query")
+                .and_then(Value::as_str)
+                .map(str::to_string),
             _ => None,
         };
         return Some((key, node_type, leaf, chain));

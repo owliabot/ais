@@ -23,7 +23,10 @@ fn dedupe_accept_noop_mode_accepts_duplicate_with_noop() {
         apply_command_with_dedupe(&mut deduper, &mut stream, "2026-02-13T00:00:00Z", &envelope);
     assert!(first.accepted);
     assert!(!first.duplicate);
-    assert_eq!(first.event_record.event.event_type, EngineEventType::CommandAccepted);
+    assert_eq!(
+        first.event_record.event.event_type,
+        EngineEventType::CommandAccepted
+    );
 
     let second =
         apply_command_with_dedupe(&mut deduper, &mut stream, "2026-02-13T00:00:01Z", &envelope);
@@ -82,6 +85,15 @@ fn with_seen_ids_includes_checkpoint_restored_ids() {
 
 #[test]
 fn envelope_schema_constant_is_applied() {
-    let envelope = command_envelope("cmd-schema", EngineCommandType::SelectProvider);
+    let envelope = command_envelope("cmd-schema", EngineCommandType::Cancel);
     assert_eq!(envelope.schema, ENGINE_COMMAND_SCHEMA_0_0_1);
+}
+
+#[test]
+fn user_input_and_user_select_command_type_names_are_stable() {
+    let user_input = serde_json::to_value(EngineCommandType::UserInput).expect("serialize");
+    assert_eq!(user_input.as_str(), Some("user_input"));
+
+    let user_select = serde_json::to_value(EngineCommandType::UserSelect).expect("serialize");
+    assert_eq!(user_select.as_str(), Some("user_select"));
 }

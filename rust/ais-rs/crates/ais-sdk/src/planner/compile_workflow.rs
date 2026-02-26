@@ -1,5 +1,7 @@
-use crate::documents::{PlanDocument, WorkflowDocument};
-use crate::resolver::{calculated_override_order_from_map, CalculatedOverrideError, ResolverContext};
+use crate::documents::{PlanDocument, ProtocolDocument, WorkflowDocument};
+use crate::resolver::{
+    calculated_override_order_from_map, CalculatedOverrideError, ResolverContext,
+};
 use crate::ValueRef;
 use ais_cel::parse_expression;
 use ais_core::{FieldPath, FieldPathSegment, IssueSeverity, StructuredIssue};
@@ -54,7 +56,11 @@ pub fn compile_workflow(
             ));
             continue;
         };
-        let Some(node_id) = node_obj.get("id").and_then(Value::as_str).map(str::to_string) else {
+        let Some(node_id) = node_obj
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        else {
             issues.push(issue(
                 "plan_build_error",
                 path_with_key(&base_path, "id"),
@@ -89,7 +95,10 @@ pub fn compile_workflow(
         });
     }
 
-    let all_node_ids = nodes.iter().map(|node| node.id.clone()).collect::<HashSet<_>>();
+    let all_node_ids = nodes
+        .iter()
+        .map(|node| node.id.clone())
+        .collect::<HashSet<_>>();
     for node in &nodes {
         for (dep_index, dep) in node.explicit_deps.iter().enumerate() {
             if dep == &node.id {
@@ -247,6 +256,15 @@ struct NodeCompileInput {
     implicit_deps: Vec<String>,
 }
 
+#[derive(Debug)]
+struct ResolvedWorkflowOperation<'a> {
+    executable_kind: &'static str,
+    source_leaf_key: &'static str,
+    source_leaf_value: String,
+    operation_spec: &'a Value,
+    control_step_kind: Option<String>,
+}
+
 fn compile_node(
     node: &NodeCompileInput,
     default_chain: Option<&str>,
@@ -310,62 +328,21 @@ fn compile_node(
         )]);
     };
 
-    let (source_leaf_key, source_leaf_value, operation_spec) = match kind {
-        "action_ref" => {
-            let Some(action) = node.node_obj.get("action").and_then(Value::as_str) else {
-                return Err(vec![issue(
-                    "reference_error",
-                    path_with_key(&base_path, "action"),
-                    "action_ref node must include `action`",
-                    "workflow.node.action_required",
-                )]);
-            };
-            let Some(spec) = protocol.actions.get(action) else {
-                return Err(vec![issue(
-                    "reference_error",
-                    path_with_key(&base_path, "action"),
-                    &format!("action not found: {protocol_key}/{action}"),
-                    "workflow.node.action_missing",
-                )]);
-            };
-            ("action", action.to_string(), spec)
-        }
-        "query_ref" => {
-            let Some(query) = node.node_obj.get("query").and_then(Value::as_str) else {
-                return Err(vec![issue(
-                    "reference_error",
-                    path_with_key(&base_path, "query"),
-                    "query_ref node must include `query`",
-                    "workflow.node.query_required",
-                )]);
-            };
-            let Some(spec) = protocol.queries.get(query) else {
-                return Err(vec![issue(
-                    "reference_error",
-                    path_with_key(&base_path, "query"),
-                    &format!("query not found: {protocol_key}/{query}"),
-                    "workflow.node.query_missing",
-                )]);
-            };
-            ("query", query.to_string(), spec)
-        }
-        _ => {
-            return Err(vec![issue(
-                "plan_build_error",
-                path_with_key(&base_path, "type"),
-                "workflow node type must be action_ref or query_ref",
-                "workflow.node.type_invalid",
-            )])
-        }
-    };
+    let resolved = resolve_workflow_operation(
+        &node.node_obj,
+        &base_path,
+        protocol,
+        protocol_key.as_str(),
+        kind,
+    )?;
 
-    let Some(execution) = select_execution_for_chain(operation_spec, &chain) else {
+    let Some(execution) = select_execution_for_chain(resolved.operation_spec, &chain) else {
         return Err(vec![issue(
             "reference_error",
             path_with_key(&base_path, "chain"),
             &format!(
                 "no execution mapping for chain `{chain}` in {protocol_key}/{}",
-                source_leaf_value
+                resolved.source_leaf_value
             ),
             "workflow.node.execution_missing_for_chain",
         )]);
@@ -378,7 +355,10 @@ fn compile_node(
 
     let mut plan_node = Map::new();
     plan_node.insert("id".to_string(), Value::String(node.id.clone()));
-    plan_node.insert("kind".to_string(), Value::String(kind.to_string()));
+    plan_node.insert(
+        "kind".to_string(),
+        Value::String(resolved.executable_kind.to_string()),
+    );
     plan_node.insert("chain".to_string(), Value::String(chain));
     plan_node.insert("execution".to_string(), execution);
     copy_if_present(&node.node_obj, &mut plan_node, "condition");
@@ -450,10 +430,17 @@ fn compile_node(
     );
     source.insert("node_id".to_string(), Value::String(node.id.clone()));
     source.insert("protocol".to_string(), Value::String(protocol_key));
-    source.insert(source_leaf_key.to_string(), Value::String(source_leaf_value));
+    source.insert(
+        resolved.source_leaf_key.to_string(),
+        Value::String(resolved.source_leaf_value.clone()),
+    );
     plan_node.insert("source".to_string(), Value::Object(source));
+    if let Some(control_step_kind) = resolved.control_step_kind.as_deref() {
+        insert_control_step_kind_extension(&mut plan_node, control_step_kind);
+    }
 
-    if let Some(description) = operation_spec
+    if let Some(description) = resolved
+        .operation_spec
         .as_object()
         .and_then(|obj| obj.get("description"))
         .cloned()
@@ -461,7 +448,273 @@ fn compile_node(
         plan_node.insert("description".to_string(), description);
     }
 
+    copy_risk_metadata_from_operation_spec(resolved.operation_spec, &mut plan_node);
+    if resolved.executable_kind == "action_ref" {
+        copy_policy_gate_metadata_from_action_spec(resolved.operation_spec, &mut plan_node);
+    }
+
     Ok(Value::Object(plan_node))
+}
+
+fn resolve_workflow_operation<'a>(
+    node_obj: &Map<String, Value>,
+    base_path: &[FieldPathSegment],
+    protocol: &'a ProtocolDocument,
+    protocol_key: &str,
+    kind: &str,
+) -> Result<ResolvedWorkflowOperation<'a>, Vec<StructuredIssue>> {
+    let action = node_obj.get("action").and_then(Value::as_str);
+    let query = node_obj.get("query").and_then(Value::as_str);
+
+    let invalid_type = || {
+        vec![issue(
+            "plan_build_error",
+            path_with_key(base_path, "type"),
+            "workflow node type must be action_ref/query_ref/assert/branch",
+            "workflow.node.type_invalid",
+        )]
+    };
+
+    match kind {
+        "action_ref" => {
+            let Some(action) = action else {
+                return Err(vec![issue(
+                    "reference_error",
+                    path_with_key(base_path, "action"),
+                    "action_ref node must include `action`",
+                    "workflow.node.action_required",
+                )]);
+            };
+            let Some(spec) = protocol.actions.get(action) else {
+                return Err(vec![issue(
+                    "reference_error",
+                    path_with_key(base_path, "action"),
+                    &format!("action not found: {protocol_key}/{action}"),
+                    "workflow.node.action_missing",
+                )]);
+            };
+            Ok(ResolvedWorkflowOperation {
+                executable_kind: "action_ref",
+                source_leaf_key: "action",
+                source_leaf_value: action.to_string(),
+                operation_spec: spec,
+                control_step_kind: None,
+            })
+        }
+        "query_ref" => {
+            let Some(query) = query else {
+                return Err(vec![issue(
+                    "reference_error",
+                    path_with_key(base_path, "query"),
+                    "query_ref node must include `query`",
+                    "workflow.node.query_required",
+                )]);
+            };
+            let Some(spec) = protocol.queries.get(query) else {
+                return Err(vec![issue(
+                    "reference_error",
+                    path_with_key(base_path, "query"),
+                    &format!("query not found: {protocol_key}/{query}"),
+                    "workflow.node.query_missing",
+                )]);
+            };
+            Ok(ResolvedWorkflowOperation {
+                executable_kind: "query_ref",
+                source_leaf_key: "query",
+                source_leaf_value: query.to_string(),
+                operation_spec: spec,
+                control_step_kind: None,
+            })
+        }
+        "assert" | "branch" => match (action, query) {
+            (Some(action), None) => {
+                let Some(spec) = protocol.actions.get(action) else {
+                    return Err(vec![issue(
+                        "reference_error",
+                        path_with_key(base_path, "action"),
+                        &format!("action not found: {protocol_key}/{action}"),
+                        "workflow.node.action_missing",
+                    )]);
+                };
+                Ok(ResolvedWorkflowOperation {
+                    executable_kind: "action_ref",
+                    source_leaf_key: "action",
+                    source_leaf_value: action.to_string(),
+                    operation_spec: spec,
+                    control_step_kind: Some(kind.to_string()),
+                })
+            }
+            (None, Some(query)) => {
+                let Some(spec) = protocol.queries.get(query) else {
+                    return Err(vec![issue(
+                        "reference_error",
+                        path_with_key(base_path, "query"),
+                        &format!("query not found: {protocol_key}/{query}"),
+                        "workflow.node.query_missing",
+                    )]);
+                };
+                Ok(ResolvedWorkflowOperation {
+                    executable_kind: "query_ref",
+                    source_leaf_key: "query",
+                    source_leaf_value: query.to_string(),
+                    operation_spec: spec,
+                    control_step_kind: Some(kind.to_string()),
+                })
+            }
+            (Some(_), Some(_)) => Err(vec![issue(
+                "plan_build_error",
+                path_with_key(base_path, "type"),
+                "control node type assert/branch must set exactly one of `action` or `query`",
+                "workflow.node.control_target_ambiguous",
+            )]),
+            (None, None) => Err(vec![issue(
+                "plan_build_error",
+                path_with_key(base_path, "type"),
+                "control node type assert/branch requires `action` or `query`",
+                "workflow.node.control_target_required",
+            )]),
+        },
+        _ => Err(invalid_type()),
+    }
+}
+
+fn insert_control_step_kind_extension(plan_node: &mut Map<String, Value>, step_kind: &str) {
+    let extensions = plan_node
+        .entry("extensions".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    let Some(extensions_obj) = extensions.as_object_mut() else {
+        return;
+    };
+    let control = extensions_obj
+        .entry("control".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    let Some(control_obj) = control.as_object_mut() else {
+        return;
+    };
+    control_obj.insert(
+        "step_kind".to_string(),
+        Value::String(step_kind.to_string()),
+    );
+}
+
+fn copy_risk_metadata_from_operation_spec(
+    operation_spec: &Value,
+    plan_node: &mut Map<String, Value>,
+) {
+    let Some(obj) = operation_spec.as_object() else {
+        return;
+    };
+
+    let risk_level = obj.get("risk_level").and_then(Value::as_u64);
+    let risk_tags = obj.get("risk_tags").and_then(Value::as_array);
+    if risk_level.is_none() && risk_tags.is_none() {
+        return;
+    }
+
+    let extensions = plan_node
+        .entry("extensions".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    let Some(extensions_obj) = extensions.as_object_mut() else {
+        return;
+    };
+
+    if let Some(risk_level) = risk_level {
+        if (1..=5).contains(&risk_level) {
+            extensions_obj.insert("risk_level".to_string(), Value::Number(risk_level.into()));
+        }
+    }
+
+    if let Some(risk_tags) = risk_tags {
+        let tags = risk_tags
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .filter(|tag| !tag.trim().is_empty())
+            .collect::<Vec<_>>();
+        if !tags.is_empty() {
+            extensions_obj.insert(
+                "risk_tags".to_string(),
+                Value::Array(tags.into_iter().map(Value::String).collect()),
+            );
+        }
+    }
+}
+
+fn copy_policy_gate_metadata_from_action_spec(
+    operation_spec: &Value,
+    plan_node: &mut Map<String, Value>,
+) {
+    let Some(obj) = operation_spec.as_object() else {
+        return;
+    };
+    let Some(params) = obj.get("params").and_then(Value::as_array) else {
+        return;
+    };
+
+    let mut role_to_param = Map::<String, Value>::new();
+
+    let slippage_param = find_param_by_name(params, "slippage_bps");
+    if let Some(name) = slippage_param {
+        role_to_param.insert("slippage_bps".to_string(), Value::String(name));
+    }
+
+    if let Some(name) = find_param_by_name(params, "spend_amount") {
+        role_to_param.insert("spend_amount".to_string(), Value::String(name));
+    }
+
+    let risk_tags = obj
+        .get("risk_tags")
+        .and_then(Value::as_array)
+        .map(|tags| {
+            tags.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let is_approval_related = risk_tags.iter().any(|tag| tag == "approval");
+    if is_approval_related {
+        if let Some(name) = find_param_by_name(params, "spender_address") {
+            role_to_param.insert("spender_address".to_string(), Value::String(name));
+        }
+        if let Some(name) = find_param_by_name(params, "approval_amount") {
+            role_to_param.insert("approval_amount".to_string(), Value::String(name));
+        }
+    }
+
+    if role_to_param.is_empty() {
+        return;
+    }
+
+    let required_fields = role_to_param.keys().cloned().collect::<Vec<_>>();
+
+    let extensions = plan_node
+        .entry("extensions".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    let Some(extensions_obj) = extensions.as_object_mut() else {
+        return;
+    };
+    let policy = extensions_obj
+        .entry("policy".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    let Some(policy_obj) = policy.as_object_mut() else {
+        return;
+    };
+
+    policy_obj.insert("param_roles".to_string(), Value::Object(role_to_param));
+    policy_obj.insert(
+        "required_fields".to_string(),
+        Value::Array(required_fields.into_iter().map(Value::String).collect()),
+    );
+}
+
+fn find_param_by_name(params: &[Value], expected: &str) -> Option<String> {
+    params
+        .iter()
+        .filter_map(Value::as_object)
+        .find(|param| param.get("name").and_then(Value::as_str) == Some(expected))
+        .and_then(|param| param.get("name").and_then(Value::as_str))
+        .map(str::to_string)
 }
 
 fn validate_assert_semantics(
@@ -552,14 +805,20 @@ fn map_calculated_override_errors(
             ),
             CalculatedOverrideError::EntryMustBeObject { key } => issue(
                 "plan_build_error",
-                path_with_key(&path_with_key(base_path, "calculated_overrides"), key.as_str()),
+                path_with_key(
+                    &path_with_key(base_path, "calculated_overrides"),
+                    key.as_str(),
+                ),
                 "calculated override entry must be an object",
                 "workflow.node.calculated_overrides.entry_object",
             ),
             CalculatedOverrideError::ExprMissing { key } => issue(
                 "plan_build_error",
                 path_with_key(
-                    &path_with_key(&path_with_key(base_path, "calculated_overrides"), key.as_str()),
+                    &path_with_key(
+                        &path_with_key(base_path, "calculated_overrides"),
+                        key.as_str(),
+                    ),
                     "expr",
                 ),
                 "calculated override must contain expr",
@@ -568,7 +827,10 @@ fn map_calculated_override_errors(
             CalculatedOverrideError::ExprInvalid { key, reason } => issue(
                 "plan_build_error",
                 path_with_key(
-                    &path_with_key(&path_with_key(base_path, "calculated_overrides"), key.as_str()),
+                    &path_with_key(
+                        &path_with_key(base_path, "calculated_overrides"),
+                        key.as_str(),
+                    ),
                     "expr",
                 ),
                 &format!("calculated override expr must be a valid ValueRef: {reason}"),
@@ -577,7 +839,10 @@ fn map_calculated_override_errors(
             CalculatedOverrideError::MissingDependency { key, dependency } => issue(
                 "plan_build_error",
                 path_with_key(
-                    &path_with_key(&path_with_key(base_path, "calculated_overrides"), key.as_str()),
+                    &path_with_key(
+                        &path_with_key(base_path, "calculated_overrides"),
+                        key.as_str(),
+                    ),
                     "expr",
                 ),
                 &format!("calculated override depends on missing `calculated.{dependency}`"),
@@ -720,7 +985,10 @@ fn collect_implicit_deps(node_obj: &Map<String, Value>) -> Vec<String> {
             collect_ref_paths_and_cel(value, &mut ref_paths, &mut cel_expressions);
         }
     }
-    if let Some(overrides) = node_obj.get("calculated_overrides").and_then(Value::as_object) {
+    if let Some(overrides) = node_obj
+        .get("calculated_overrides")
+        .and_then(Value::as_object)
+    {
         for override_value in overrides.values() {
             if let Some(expr) = override_value.as_object().and_then(|obj| obj.get("expr")) {
                 collect_ref_paths_and_cel(expr, &mut ref_paths, &mut cel_expressions);
@@ -816,7 +1084,12 @@ fn copy_if_present(from: &Map<String, Value>, to: &mut Map<String, Value>, key: 
     }
 }
 
-fn issue(kind: &str, path: Vec<FieldPathSegment>, message: &str, reference: &str) -> StructuredIssue {
+fn issue(
+    kind: &str,
+    path: Vec<FieldPathSegment>,
+    message: &str,
+    reference: &str,
+) -> StructuredIssue {
     StructuredIssue {
         kind: kind.to_string(),
         severity: IssueSeverity::Error,
@@ -834,7 +1107,11 @@ fn path_with_key(path: &[FieldPathSegment], key: &str) -> Vec<FieldPathSegment> 
     out
 }
 
-fn path_with_key_index(path: &[FieldPathSegment], key: &str, index: usize) -> Vec<FieldPathSegment> {
+fn path_with_key_index(
+    path: &[FieldPathSegment],
+    key: &str,
+    index: usize,
+) -> Vec<FieldPathSegment> {
     let mut out = path.to_vec();
     out.push(FieldPathSegment::Key(key.to_string()));
     out.push(FieldPathSegment::Index(index));

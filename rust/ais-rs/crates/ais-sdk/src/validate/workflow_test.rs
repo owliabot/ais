@@ -1,6 +1,8 @@
 use super::{validate_workflow_document, validate_workflow_imports};
 use crate::documents::WorkflowDocument;
-use crate::parse::{parse_document_with_options, AisDocument, DocumentFormat, ParseDocumentOptions};
+use crate::parse::{
+    parse_document_with_options, AisDocument, DocumentFormat, ParseDocumentOptions,
+};
 use serde_json::{json, Map};
 use std::collections::HashSet;
 use std::fs;
@@ -28,9 +30,21 @@ fn reports_duplicate_unknown_and_self_deps() {
     );
 
     let issues = validate_workflow_document(&workflow);
-    assert!(has_issue(&issues, "workflow.node.duplicate_id", "$.nodes[1].id"));
-    assert!(has_issue(&issues, "workflow.deps.self", "$.nodes[0].deps[0]"));
-    assert!(has_issue(&issues, "workflow.deps.unknown", "$.nodes[0].deps[1]"));
+    assert!(has_issue(
+        &issues,
+        "workflow.node.duplicate_id",
+        "$.nodes[1].id"
+    ));
+    assert!(has_issue(
+        &issues,
+        "workflow.deps.self",
+        "$.nodes[0].deps[0]"
+    ));
+    assert!(has_issue(
+        &issues,
+        "workflow.deps.unknown",
+        "$.nodes[0].deps[1]"
+    ));
 }
 
 #[test]
@@ -67,23 +81,21 @@ fn validates_value_refs_and_cel_bindings() {
     inputs.insert("amount".to_string(), json!({ "type": "string" }));
 
     let workflow = workflow_doc(
-        vec![
-            json!({
-                "id": "step1",
-                "type": "query_ref",
-                "protocol": "p@0.0.1",
-                "query": "q1",
-                "args": {
-                    "ok": { "ref": "inputs.amount" },
-                    "bad_root": { "ref": "unknown_root.x" },
-                    "bad_input": { "ref": "inputs.missing" },
-                    "bad_node": { "ref": "nodes.not_exists.outputs.v" },
-                    "self_ref": { "ref": "nodes.step1.outputs.v" }
-                },
-                "condition": { "cel": "inputs.missing2 != '' || nodes.not_exists.outputs.ok" },
-                "until": { "ref": "nodes.step1.outputs.done" }
-            }),
-        ],
+        vec![json!({
+            "id": "step1",
+            "type": "query_ref",
+            "protocol": "p@0.0.1",
+            "query": "q1",
+            "args": {
+                "ok": { "ref": "inputs.amount" },
+                "bad_root": { "ref": "unknown_root.x" },
+                "bad_input": { "ref": "inputs.missing" },
+                "bad_node": { "ref": "nodes.not_exists.outputs.v" },
+                "self_ref": { "ref": "nodes.step1.outputs.v" }
+            },
+            "condition": { "cel": "inputs.missing2 != '' || nodes.not_exists.outputs.ok" },
+            "until": { "ref": "nodes.step1.outputs.done" }
+        })],
         inputs,
     );
 
@@ -102,7 +114,10 @@ fn validates_value_refs_and_cel_bindings() {
 #[test]
 fn outputs_refs_must_target_declared_inputs_or_nodes() {
     let mut outputs = Map::new();
-    outputs.insert("result".to_string(), json!({ "ref": "nodes.step2.outputs.out" }));
+    outputs.insert(
+        "result".to_string(),
+        json!({ "ref": "nodes.step2.outputs.out" }),
+    );
     outputs.insert("in2".to_string(), json!({ "ref": "inputs.unknown" }));
     outputs.insert(
         "cel".to_string(),
@@ -212,7 +227,10 @@ fn assert_message_without_assert_is_invalid() {
     ));
 }
 
-fn workflow_doc(nodes: Vec<serde_json::Value>, inputs: Map<String, serde_json::Value>) -> WorkflowDocument {
+fn workflow_doc(
+    nodes: Vec<serde_json::Value>,
+    inputs: Map<String, serde_json::Value>,
+) -> WorkflowDocument {
     WorkflowDocument {
         schema: "ais-flow/0.0.3".to_string(),
         meta: json!({ "name": "wf", "version": "0.0.1" }),

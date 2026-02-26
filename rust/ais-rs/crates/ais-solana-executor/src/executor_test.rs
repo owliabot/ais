@@ -4,15 +4,17 @@ use crate::types::{
     ProviderError, SolanaInstructionRequest, SolanaProviderRegistry, SolanaRpcClient,
     SolanaRpcClientFactory, SolanaRpcEndpoint,
 };
-use ais_engine::Executor;
+use ais_engine::{CheckpointSideEffectRecord, Executor};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 
 #[test]
 fn supports_requires_exact_configured_chain_and_types() {
-    let providers = SolanaProviderRegistry::from_endpoints(vec![
-        SolanaRpcEndpoint::new("solana:mainnet", "https://rpc.example").expect("valid endpoint"),
-    ])
+    let providers = SolanaProviderRegistry::from_endpoints(vec![SolanaRpcEndpoint::new(
+        "solana:mainnet",
+        "https://rpc.example",
+    )
+    .expect("valid endpoint")])
     .expect("must build registry");
     let executor = SolanaExecutor::new(providers, Box::new(MockFactory::default()));
 
@@ -29,9 +31,11 @@ fn solana_read_get_balance_dispatches_to_client() {
         calls: calls.clone(),
         instruction_requests: Arc::new(Mutex::new(Vec::new())),
     };
-    let providers = SolanaProviderRegistry::from_endpoints(vec![
-        SolanaRpcEndpoint::new("solana:mainnet", "https://rpc.example").expect("valid endpoint"),
-    ])
+    let providers = SolanaProviderRegistry::from_endpoints(vec![SolanaRpcEndpoint::new(
+        "solana:mainnet",
+        "https://rpc.example",
+    )
+    .expect("valid endpoint")])
     .expect("must build registry");
     let executor = SolanaExecutor::new(providers, Box::new(factory));
     let mut runtime = json!({});
@@ -58,9 +62,11 @@ fn solana_read_get_balance_dispatches_to_client() {
 
 #[test]
 fn solana_read_rejects_method_outside_allowlist() {
-    let providers = SolanaProviderRegistry::from_endpoints(vec![
-        SolanaRpcEndpoint::new("solana:mainnet", "https://rpc.example").expect("valid endpoint"),
-    ])
+    let providers = SolanaProviderRegistry::from_endpoints(vec![SolanaRpcEndpoint::new(
+        "solana:mainnet",
+        "https://rpc.example",
+    )
+    .expect("valid endpoint")])
     .expect("must build registry");
     let executor = SolanaExecutor::new(providers, Box::new(MockFactory::default()));
     let mut runtime = json!({});
@@ -88,11 +94,14 @@ fn solana_instruction_dispatches_to_client() {
         calls: Arc::new(Mutex::new(Vec::new())),
         instruction_requests: requests.clone(),
     };
-    let providers = SolanaProviderRegistry::from_endpoints(vec![
-        SolanaRpcEndpoint::new("solana:mainnet", "https://rpc.example").expect("valid endpoint"),
-    ])
+    let providers = SolanaProviderRegistry::from_endpoints(vec![SolanaRpcEndpoint::new(
+        "solana:mainnet",
+        "https://rpc.example",
+    )
+    .expect("valid endpoint")])
     .expect("must build registry");
-    let executor = SolanaExecutor::new(providers, Box::new(factory)).with_signer(Box::new(MockSigner));
+    let executor =
+        SolanaExecutor::new(providers, Box::new(factory)).with_signer(Box::new(MockSigner));
     let mut runtime = json!({});
 
     let output = executor
@@ -119,14 +128,34 @@ fn solana_instruction_dispatches_to_client() {
 
     assert_eq!(output.result.get("signature"), Some(&json!("solana_sig_1")));
     assert_eq!(output.result.get("signed_tx_hash"), Some(&json!("0x1111")));
+    assert_eq!(output.side_effects.len(), 1);
+    assert_eq!(
+        output.side_effects[0].idempotency_key,
+        "tx:ix-1:solana_sig_1"
+    );
+    assert_eq!(output.side_effects[0].status, "confirmed");
+    assert_eq!(
+        output.side_effects[0].execution_type.as_deref(),
+        Some("solana_instruction")
+    );
+    assert_eq!(
+        output.side_effects[0]
+            .details
+            .as_ref()
+            .and_then(|details| details.get("signed_tx_hash"))
+            .and_then(Value::as_str),
+        Some("0x1111")
+    );
     assert_eq!(requests.lock().expect("lock").len(), 1);
 }
 
 #[test]
 fn solana_instruction_without_signer_returns_need_user_confirm() {
-    let providers = SolanaProviderRegistry::from_endpoints(vec![
-        SolanaRpcEndpoint::new("solana:mainnet", "https://rpc.example").expect("valid endpoint"),
-    ])
+    let providers = SolanaProviderRegistry::from_endpoints(vec![SolanaRpcEndpoint::new(
+        "solana:mainnet",
+        "https://rpc.example",
+    )
+    .expect("valid endpoint")])
     .expect("must build registry");
     let executor = SolanaExecutor::new(providers, Box::new(MockFactory::default()));
     let mut runtime = json!({});
@@ -152,9 +181,11 @@ fn solana_instruction_without_signer_returns_need_user_confirm() {
 
 #[test]
 fn solana_instruction_with_lookup_tables_requires_v0() {
-    let providers = SolanaProviderRegistry::from_endpoints(vec![
-        SolanaRpcEndpoint::new("solana:mainnet", "https://rpc.example").expect("valid endpoint"),
-    ])
+    let providers = SolanaProviderRegistry::from_endpoints(vec![SolanaRpcEndpoint::new(
+        "solana:mainnet",
+        "https://rpc.example",
+    )
+    .expect("valid endpoint")])
     .expect("must build registry");
     let executor = SolanaExecutor::new(providers, Box::new(MockFactory::default()))
         .with_signer(Box::new(MockSigner));
@@ -166,7 +197,7 @@ fn solana_instruction_with_lookup_tables_requires_v0() {
                 "chain":"solana:mainnet",
                 "execution":{
                     "type":"solana_instruction",
-                    "tx_version":"legacy",
+                    "tx_version":"v1",
                     "program":{"lit":"JUP6Lkb..."},
                     "instruction":"swap",
                     "accounts":[{"name":"payer","pubkey":{"lit":"abc"},"signer":{"lit":true},"writable":{"lit":true}}],
@@ -187,9 +218,11 @@ fn solana_instruction_with_signer_confirms_signature() {
         calls: Arc::new(Mutex::new(Vec::new())),
         instruction_requests: requests,
     };
-    let providers = SolanaProviderRegistry::from_endpoints(vec![
-        SolanaRpcEndpoint::new("solana:mainnet", "https://rpc.example").expect("valid endpoint"),
-    ])
+    let providers = SolanaProviderRegistry::from_endpoints(vec![SolanaRpcEndpoint::new(
+        "solana:mainnet",
+        "https://rpc.example",
+    )
+    .expect("valid endpoint")])
     .expect("must build registry");
     let executor = SolanaExecutor::new(providers, Box::new(factory))
         .with_signer(Box::new(MockSigner))
@@ -219,6 +252,95 @@ fn solana_instruction_with_signer_confirms_signature() {
         .expect("must execute");
     assert_eq!(output.result.get("tx_version"), Some(&json!("v0")));
     assert!(output.result.get("confirmation_status").is_some());
+    assert_eq!(output.side_effects.len(), 1);
+    assert_eq!(output.side_effects[0].status, "confirmed");
+}
+
+#[test]
+fn solana_instruction_without_wait_for_confirmation_marks_side_effect_sent() {
+    let factory = MockFactory::default();
+    let providers = SolanaProviderRegistry::from_endpoints(vec![SolanaRpcEndpoint::new(
+        "solana:mainnet",
+        "https://rpc.example",
+    )
+    .expect("valid endpoint")])
+    .expect("must build registry");
+    let executor = SolanaExecutor::new(providers, Box::new(factory))
+        .with_signer(Box::new(MockSigner))
+        .with_instruction_config(SolanaInstructionExecutionConfig {
+            wait_for_confirmation: false,
+            poll_interval_ms: 1,
+            max_poll_attempts: 1,
+        });
+    let mut runtime = json!({});
+
+    let output = executor
+        .execute(
+            &json!({
+                "id":"ix-5",
+                "chain":"solana:mainnet",
+                "execution":{
+                    "type":"solana_instruction",
+                    "tx_version":"v0",
+                    "program":{"lit":"JUP6Lkb..."},
+                    "instruction":"swap",
+                    "accounts":[{"name":"payer","pubkey":{"lit":"abc"},"signer":{"lit":true},"writable":{"lit":true}}],
+                    "data":{"lit":"base64:AAA="}
+                }
+            }),
+            &mut runtime,
+        )
+        .expect("must execute");
+
+    assert_eq!(
+        output
+            .result
+            .get("confirmation_status")
+            .and_then(Value::as_str),
+        None
+    );
+    assert_eq!(output.side_effects.len(), 1);
+    assert_eq!(output.side_effects[0].status, "sent");
+    assert_eq!(
+        output.side_effects[0].idempotency_key,
+        "tx:ix-5:solana_sig_1"
+    );
+}
+
+#[test]
+fn reconcile_sent_solana_side_effect_marks_confirmed_when_signature_status_present() {
+    let factory = MockFactory::default();
+    let providers = SolanaProviderRegistry::from_endpoints(vec![SolanaRpcEndpoint::new(
+        "solana:mainnet",
+        "https://rpc.example",
+    )
+    .expect("valid endpoint")])
+    .expect("must build registry");
+    let executor = SolanaExecutor::new(providers, Box::new(factory));
+
+    let reconciled = executor
+        .reconcile_side_effect(&CheckpointSideEffectRecord {
+            schema: Some("ais-side-effect-record/0.1.0".to_string()),
+            idempotency_key: "tx:ix-1:solana_sig_1".to_string(),
+            node_id: "ix-1".to_string(),
+            effect_type: "tx".to_string(),
+            chain: Some("solana:mainnet".to_string()),
+            execution_type: Some("solana_instruction".to_string()),
+            tx_hash: Some("solana_sig_1".to_string()),
+            nonce: None,
+            provider_ref: None,
+            reason_code: None,
+            details: None,
+            status: "sent".to_string(),
+            observed_at: "2026-02-25T00:00:00Z".to_string(),
+        })
+        .expect("reconcile should not fail")
+        .expect("must reconcile solana side-effect");
+    assert_eq!(reconciled.status, "confirmed");
+    assert_eq!(
+        reconciled.reason_code.as_deref(),
+        Some("side_effect_reconciled")
+    );
 }
 
 #[derive(Default)]
@@ -246,7 +368,10 @@ struct MockClient {
 
 impl SolanaRpcClient for MockClient {
     fn get_balance(&self, _pubkey: &str) -> Result<u64, ProviderError> {
-        self.calls.lock().expect("lock").push("getBalance".to_string());
+        self.calls
+            .lock()
+            .expect("lock")
+            .push("getBalance".to_string());
         Ok(1000)
     }
 

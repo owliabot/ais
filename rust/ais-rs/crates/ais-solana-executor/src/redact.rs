@@ -30,7 +30,9 @@ fn redact_default(value: &Value) -> Value {
             Value::Object(out)
         }
         Value::Array(items) => Value::Array(items.iter().map(redact_default).collect()),
-        Value::String(text) if looks_like_secret_string(text) => Value::String(REDACTED.to_string()),
+        Value::String(text) if looks_like_secret_string(text) => {
+            Value::String(REDACTED.to_string())
+        }
         _ => value.clone(),
     }
 }
@@ -46,7 +48,10 @@ fn redact_audit(value: &Value) -> Value {
                     continue;
                 }
                 if lower == "data" {
-                    out.insert(key.clone(), Value::String(trim_string(child.as_str().unwrap_or_default())));
+                    out.insert(
+                        key.clone(),
+                        Value::String(trim_string(child.as_str().unwrap_or_default())),
+                    );
                     continue;
                 }
                 if lower == "lookup_tables" {
@@ -58,7 +63,9 @@ fn redact_audit(value: &Value) -> Value {
             Value::Object(out)
         }
         Value::Array(items) => Value::Array(items.iter().map(redact_audit).collect()),
-        Value::String(text) if looks_like_secret_string(text) => Value::String(REDACTED.to_string()),
+        Value::String(text) if looks_like_secret_string(text) => {
+            Value::String(REDACTED.to_string())
+        }
         _ => value.clone(),
     }
 }

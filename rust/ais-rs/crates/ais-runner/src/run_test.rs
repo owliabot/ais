@@ -1,11 +1,19 @@
+use super::{hash_plan, maybe_save_checkpoint, process_replace_plan_commands, read_command_jsonl};
+use crate::checkpoint_ledger::RunnerCheckpointLedger;
 use crate::cli::{OutputFormat, PlanCommand};
+use crate::config::RunnerConfig;
+use crate::error::RunnerError;
 use crate::{
     execute_plan_diff, execute_replay, execute_run_plan, execute_run_workflow, PlanDiffCommand,
     ReplayCommand, WorkflowCommand,
 };
-use ais_engine::{encode_event_jsonl_line, EngineEvent, EngineEventRecord, EngineEventType};
-use super::read_command_jsonl;
-use serde_json::Value;
+use ais_engine::{
+    create_checkpoint_document, encode_event_jsonl_line, load_checkpoint_from_path,
+    save_checkpoint_to_path, CheckpointEngineState, CheckpointSideEffectRecord, EngineCommandType,
+    EngineEvent, EngineEventRecord, EngineEventType, EngineRunnerOptions, EngineRunnerState,
+};
+use ais_sdk::PlanDocument;
+use serde_json::{json, Value};
 use std::fs;
 use std::io::Cursor;
 use std::path::PathBuf;
@@ -674,7 +682,10 @@ fn replay_trace_jsonl_until_node_json_output() {
         parsed.get("status").and_then(Value::as_str),
         Some("reached_until_node")
     );
-    assert_eq!(parsed.get("events_emitted").and_then(Value::as_u64), Some(2));
+    assert_eq!(
+        parsed.get("events_emitted").and_then(Value::as_u64),
+        Some(2)
+    );
 }
 
 #[test]
@@ -748,8 +759,14 @@ chains:
         .and_then(Value::as_str)
         .unwrap_or_default()
         .starts_with("executor_error:"));
-    assert_eq!(parsed.get("command_accepted").and_then(Value::as_u64), Some(0));
-    assert_eq!(parsed.get("command_rejected").and_then(Value::as_u64), Some(0));
+    assert_eq!(
+        parsed.get("command_accepted").and_then(Value::as_u64),
+        Some(0)
+    );
+    assert_eq!(
+        parsed.get("command_rejected").and_then(Value::as_u64),
+        Some(0)
+    );
 
     let events_content = fs::read_to_string(events_path).expect("events must exist");
     assert!(events_content.contains("\"type\":\"engine_paused\""));
@@ -830,16 +847,771 @@ chains:
 }
 
 #[test]
+fn run_plan_rejects_unregistered_execution_type_in_execute_path() {
+    let plan_path = write_temp_file(
+        "plan-unregistered-exec-type",
+        r#"{
+  "schema":"ais-plan/0.0.3",
+  "meta": {},
+  "nodes":[
+    {
+      "id":"node-1",
+      "chain":"eip155:1",
+      "kind":"execution",
+      "execution":{
+        "type":"offchain_apy_query",
+        "args":{}
+      }
+    }
+  ]
+}"#,
+    );
+    let config_path = write_temp_file(
+        "runner-config-unregistered-exec-type",
+        r#"
+schema: ais-runner/0.0.1
+chains:
+  eip155:1:
+    rpc_url: https://rpc.evm.example
+"#,
+    );
+
+    let error = execute_run_plan(&PlanCommand {
+        plan: plan_path,
+        config: Some(config_path),
+        runtime: None,
+        dry_run: false,
+        events_jsonl: None,
+        trace: None,
+        checkpoint: None,
+        commands_stdin_jsonl: false,
+        verbose: false,
+        format: OutputFormat::Json,
+    })
+    .expect_err("must reject unregistered execution type");
+    match error {
+        RunnerError::ConfigInvalidForPlan(issues) => {
+            assert!(!issues.is_empty());
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn checkpoint_resume_keeps_need_user_confirm_decision_stable() {
+    let plan_path = write_temp_file(
+        "plan-need-user-confirm-stable",
+        r#"{
+  "schema":"ais-plan/0.0.3",
+  "meta": {},
+  "nodes":[
+    {
+      "id":"swap-1",
+      "chain":"eip155:1",
+      "kind":"execution",
+      "execution":{
+        "type":"evm_call",
+        "to":{"lit":"0x0000000000000000000000000000000000000001"},
+        "abi":{"name":"swapExactTokensForTokens","inputs":[],"outputs":[]},
+        "args":{}
+      },
+      "bindings":{
+        "params":{
+          "spend_amount":{"lit":"10"}
+        }
+      },
+      "extensions":{
+        "policy":{
+          "constraint_templates":[
+            {"name":"max_spend","params":{"amount_atomic":"1"}}
+          ]
+        }
+      }
+    }
+  ]
+}"#,
+    );
+    let config_path = write_temp_file(
+        "runner-config-need-user-confirm-stable",
+        r#"
+schema: ais-runner/0.0.1
+chains:
+  eip155:1:
+    rpc_url: https://rpc.evm.example
+"#,
+    );
+    let checkpoint_path = write_temp_file("checkpoint-need-user-confirm-stable", "");
+    let events_first = write_temp_file("events-first-need-user-confirm-stable", "");
+    let events_second = write_temp_file("events-second-need-user-confirm-stable", "");
+
+    let first = execute_run_plan(&PlanCommand {
+        plan: plan_path.clone(),
+        config: Some(config_path.clone()),
+        runtime: None,
+        dry_run: false,
+        events_jsonl: Some(events_first.display().to_string()),
+        trace: None,
+        checkpoint: Some(checkpoint_path.clone()),
+        commands_stdin_jsonl: false,
+        verbose: false,
+        format: OutputFormat::Json,
+    })
+    .expect("first run must pause for confirm");
+    let second = execute_run_plan(&PlanCommand {
+        plan: plan_path,
+        config: Some(config_path),
+        runtime: None,
+        dry_run: false,
+        events_jsonl: Some(events_second.display().to_string()),
+        trace: None,
+        checkpoint: Some(checkpoint_path),
+        commands_stdin_jsonl: false,
+        verbose: false,
+        format: OutputFormat::Json,
+    })
+    .expect("second run must preserve decision");
+
+    let first_value: Value = serde_json::from_str(first.as_str()).expect("json");
+    let second_value: Value = serde_json::from_str(second.as_str()).expect("json");
+    assert_eq!(
+        first_value.get("paused_reason").and_then(Value::as_str),
+        Some("need_user_confirm:swap-1")
+    );
+    assert_eq!(
+        second_value.get("paused_reason").and_then(Value::as_str),
+        Some("need_user_confirm:swap-1")
+    );
+    assert_eq!(
+        second_value
+            .get("resumed_from_checkpoint")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+
+    let first_events = fs::read_to_string(events_first).expect("events file");
+    let second_events = fs::read_to_string(events_second).expect("events file");
+    let first_confirm = first_events
+        .lines()
+        .find(|line| line.contains("\"type\":\"need_user_confirm\""))
+        .expect("first need_user_confirm event");
+    let second_confirm = second_events
+        .lines()
+        .find(|line| line.contains("\"type\":\"need_user_confirm\""))
+        .expect("second need_user_confirm event");
+    let first_record: Value = serde_json::from_str(first_confirm).expect("jsonl event");
+    let second_record: Value = serde_json::from_str(second_confirm).expect("jsonl event");
+    let first_hash = first_record
+        .pointer("/event/data/details/confirmation_hash")
+        .and_then(Value::as_str)
+        .expect("first confirmation hash");
+    let second_hash = second_record
+        .pointer("/event/data/details/confirmation_hash")
+        .and_then(Value::as_str)
+        .expect("second confirmation hash");
+    assert_eq!(first_hash, second_hash);
+}
+
+#[test]
+fn checkpoint_save_persists_approval_and_side_effect_ledgers() {
+    let checkpoint_path = write_temp_file("checkpoint-ledger", "");
+    let command = PlanCommand {
+        plan: PathBuf::from("unused.plan.json"),
+        config: None,
+        runtime: None,
+        dry_run: false,
+        events_jsonl: None,
+        trace: None,
+        checkpoint: Some(checkpoint_path.clone()),
+        commands_stdin_jsonl: false,
+        verbose: false,
+        format: OutputFormat::Text,
+    };
+    let plan = PlanDocument {
+        schema: "ais-plan/0.0.3".to_string(),
+        meta: None,
+        nodes: vec![json!({"id":"swap-1","chain":"eip155:1","execution":{"type":"evm_call"}})],
+        extensions: serde_json::Map::new(),
+    };
+    let state = EngineRunnerState {
+        runtime: json!({
+            "nodes":{
+                "swap-1":{
+                    "outputs":{
+                        "tx_hash":"0xtx1",
+                        "tx":{"nonce":7}
+                    }
+                }
+            }
+        }),
+        approved_node_ids: vec!["swap-1".to_string()],
+        ..EngineRunnerState::default()
+    };
+    let mut ledger = RunnerCheckpointLedger::default();
+    let mut event = EngineEvent::new(EngineEventType::NeedUserConfirm);
+    event.node_id = Some("swap-1".to_string());
+    event.data.insert(
+        "details".to_string(),
+        json!({"confirmation_hash":"0xconfirm1"}),
+    );
+    let records = vec![
+        EngineEventRecord {
+            schema: "ais-engine-event/0.0.3".to_string(),
+            run_id: "run-ledger".to_string(),
+            seq: 1,
+            ts: "2026-02-23T00:00:00Z".to_string(),
+            event,
+        },
+        {
+            let mut side_effect_event = EngineEvent::new(EngineEventType::SideEffectObserved);
+            side_effect_event.data.insert(
+                "record".to_string(),
+                json!({
+                    "schema":"ais-side-effect-record/0.1.0",
+                    "effect_type":"tx",
+                    "idempotency_key":"tx:swap-1:0xtx1",
+                    "node_id":"swap-1",
+                    "chain":"eip155:1",
+                    "execution_type":"evm_call",
+                    "status":"sent",
+                    "observed_at":"2026-02-23T00:00:02Z",
+                    "tx_hash":"0xtx1",
+                    "nonce":7
+                }),
+            );
+            EngineEventRecord {
+                schema: "ais-engine-event/0.0.3".to_string(),
+                run_id: "run-ledger".to_string(),
+                seq: 2,
+                ts: "2026-02-23T00:00:02Z".to_string(),
+                event: side_effect_event,
+            }
+        },
+    ];
+    ledger.absorb_events(&records);
+    ledger.mark_approved_nodes(&state.approved_node_ids, "2026-02-23T00:00:01Z");
+
+    maybe_save_checkpoint(
+        &command,
+        "run-ledger",
+        "plan-hash-ledger",
+        &plan,
+        &state,
+        &ledger,
+    )
+    .expect("checkpoint save must succeed");
+
+    let checkpoint = load_checkpoint_from_path(&checkpoint_path).expect("checkpoint load");
+    assert!(!checkpoint.approvals_ledger.is_empty());
+    assert!(checkpoint
+        .approvals_ledger
+        .iter()
+        .any(|entry| entry.decision == "approve" && entry.node_id == "swap-1"));
+    assert!(checkpoint
+        .side_effects
+        .iter()
+        .any(|entry| entry.tx_hash.as_deref() == Some("0xtx1") && entry.node_id == "swap-1"));
+}
+
+#[test]
+fn runtime_side_effect_without_checkpoint_does_not_guard_replay() {
+    let plan_path = write_temp_file(
+        "plan-runtime-side-effect-replay-guard",
+        r#"{
+  "schema":"ais-plan/0.0.3",
+  "meta": {},
+  "nodes":[
+    {
+      "id":"swap-1",
+      "chain":"eip155:1",
+      "kind":"execution",
+      "execution":{
+        "type":"evm_call",
+        "to":{"lit":"0x0000000000000000000000000000000000000001"},
+        "abi":{"name":"swapExactTokensForTokens","inputs":[],"outputs":[]},
+        "args":{}
+      }
+    }
+  ]
+}"#,
+    );
+    let runtime_path = write_temp_file(
+        "runtime-side-effect-replay-guard",
+        r#"{
+  "nodes":{
+    "swap-1":{
+      "outputs":{
+        "tx_hash":"0xsent_without_checkpoint",
+        "tx":{"nonce":11}
+      }
+    }
+  }
+}"#,
+    );
+    let config_path = write_temp_file(
+        "runner-config-runtime-side-effect-replay-guard",
+        r#"
+schema: ais-runner/0.0.1
+chains:
+  eip155:1:
+    rpc_url: https://rpc.evm.example
+"#,
+    );
+
+    let output = execute_run_plan(&PlanCommand {
+        plan: plan_path,
+        config: Some(config_path),
+        runtime: Some(runtime_path),
+        dry_run: false,
+        events_jsonl: None,
+        trace: None,
+        checkpoint: None,
+        commands_stdin_jsonl: false,
+        verbose: false,
+        format: OutputFormat::Json,
+    })
+    .expect("run should complete with executor failure pause");
+    let parsed: Value = serde_json::from_str(output.as_str()).expect("must be valid json");
+    assert_eq!(parsed.get("status").and_then(Value::as_str), Some("paused"));
+    assert_eq!(
+        parsed.get("paused_reason").and_then(Value::as_str),
+        Some("executor_error:swap-1")
+    );
+    let completed = parsed
+        .get("completed_node_ids")
+        .and_then(Value::as_array)
+        .expect("completed_node_ids array");
+    assert!(completed.is_empty());
+}
+
+#[test]
+fn checkpoint_side_effect_sent_prevents_tx_replay_after_restart() {
+    let plan: PlanDocument = serde_json::from_value(json!({
+      "schema":"ais-plan/0.0.3",
+      "meta": {},
+      "nodes":[
+        {
+          "id":"swap-1",
+          "chain":"eip155:1",
+          "kind":"execution",
+          "execution":{
+            "type":"evm_call",
+            "to":{"lit":"0x0000000000000000000000000000000000000001"},
+            "abi":{"name":"swapExactTokensForTokens","inputs":[],"outputs":[]},
+            "args":{}
+          }
+        }
+      ]
+    }))
+    .expect("plan");
+    let plan_path = write_temp_file(
+        "plan-checkpoint-side-effect-replay-guard",
+        serde_json::to_string(&plan).expect("serialize").as_str(),
+    );
+    let config_path = write_temp_file(
+        "runner-config-checkpoint-side-effect-replay-guard",
+        r#"
+schema: ais-runner/0.0.1
+chains:
+  eip155:1:
+    rpc_url: https://rpc.evm.example
+"#,
+    );
+    let checkpoint_path = write_temp_file("checkpoint-side-effect-replay-guard", "");
+    let plan_hash = hash_plan(&plan).expect("hash");
+    let mut checkpoint = create_checkpoint_document(
+        "run-side-effect-replay-guard",
+        plan_hash,
+        CheckpointEngineState::default(),
+        None,
+        None,
+        None,
+    );
+    checkpoint.side_effects.push(CheckpointSideEffectRecord {
+        schema: Some("ais-side-effect-record/0.1.0".to_string()),
+        idempotency_key: "tx:swap-1:0xsent_checkpoint".to_string(),
+        node_id: "swap-1".to_string(),
+        effect_type: "tx".to_string(),
+        chain: Some("eip155:1".to_string()),
+        execution_type: Some("evm_call".to_string()),
+        tx_hash: Some("0xsent_checkpoint".to_string()),
+        nonce: Some(12),
+        provider_ref: None,
+        reason_code: None,
+        details: None,
+        status: "sent".to_string(),
+        observed_at: "2026-02-24T00:00:00Z".to_string(),
+    });
+    save_checkpoint_to_path(&checkpoint_path, &checkpoint).expect("save checkpoint");
+
+    let output = execute_run_plan(&PlanCommand {
+        plan: plan_path,
+        config: Some(config_path),
+        runtime: None,
+        dry_run: false,
+        events_jsonl: None,
+        trace: None,
+        checkpoint: Some(checkpoint_path),
+        commands_stdin_jsonl: false,
+        verbose: false,
+        format: OutputFormat::Json,
+    })
+    .expect("checkpoint side-effect should prevent replay");
+    let parsed: Value = serde_json::from_str(output.as_str()).expect("must be valid json");
+    assert_eq!(parsed.get("status").and_then(Value::as_str), Some("paused"));
+    assert!(parsed
+        .get("paused_reason")
+        .and_then(Value::as_str)
+        .is_some_and(|reason| reason.starts_with("side_effect_reconcile_pending:")));
+    assert_eq!(
+        parsed
+            .get("resumed_from_checkpoint")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    let completed = parsed
+        .get("completed_node_ids")
+        .and_then(Value::as_array)
+        .expect("completed_node_ids array");
+    assert!(completed.is_empty());
+}
+
+#[test]
+fn checkpoint_side_effect_reverted_does_not_mark_node_completed() {
+    let plan_path = write_temp_file(
+        "plan-checkpoint-reverted-side-effect",
+        r#"{
+  "schema":"ais-plan/0.0.3",
+  "meta": {},
+  "nodes":[
+    {
+      "id":"swap-1",
+      "chain":"eip155:1",
+      "kind":"execution",
+      "execution":{
+        "type":"evm_call",
+        "to":{"lit":"0x0000000000000000000000000000000000000001"},
+        "abi":{"name":"swapExactTokensForTokens","inputs":[],"outputs":[]},
+        "args":{}
+      }
+    }
+  ]
+}"#,
+    );
+    let config_path = write_temp_file(
+        "runner-config-checkpoint-reverted-side-effect",
+        r#"
+schema: ais-runner/0.0.1
+chains:
+  eip155:1:
+    rpc_url: https://rpc.evm.example
+"#,
+    );
+    let checkpoint_path = write_temp_file("checkpoint-reverted-side-effect", "");
+    let plan: PlanDocument =
+        serde_json::from_str(fs::read_to_string(&plan_path).expect("read plan").as_str())
+            .expect("plan");
+    let plan_hash = hash_plan(&plan).expect("hash");
+    let mut checkpoint = create_checkpoint_document(
+        "run-side-effect-reverted",
+        plan_hash,
+        CheckpointEngineState::default(),
+        None,
+        None,
+        None,
+    );
+    checkpoint.side_effects.push(CheckpointSideEffectRecord {
+        schema: Some("ais-side-effect-record/0.1.0".to_string()),
+        idempotency_key: "tx:swap-1:0xfailed".to_string(),
+        node_id: "swap-1".to_string(),
+        effect_type: "tx".to_string(),
+        chain: Some("eip155:1".to_string()),
+        execution_type: Some("evm_call".to_string()),
+        tx_hash: Some("0xfailed".to_string()),
+        nonce: Some(7),
+        provider_ref: None,
+        reason_code: None,
+        details: None,
+        status: "reverted".to_string(),
+        observed_at: "2026-02-24T00:00:00Z".to_string(),
+    });
+    save_checkpoint_to_path(&checkpoint_path, &checkpoint).expect("save checkpoint");
+
+    let output = execute_run_plan(&PlanCommand {
+        plan: plan_path,
+        config: Some(config_path),
+        runtime: None,
+        dry_run: false,
+        events_jsonl: None,
+        trace: None,
+        checkpoint: Some(checkpoint_path),
+        commands_stdin_jsonl: false,
+        verbose: false,
+        format: OutputFormat::Json,
+    })
+    .expect("run must finish");
+    let parsed: Value = serde_json::from_str(output.as_str()).expect("must be valid json");
+    assert_eq!(parsed.get("status").and_then(Value::as_str), Some("paused"));
+    assert_eq!(
+        parsed.get("paused_reason").and_then(Value::as_str),
+        Some("executor_error:swap-1")
+    );
+    assert!(parsed
+        .get("completed_node_ids")
+        .and_then(Value::as_array)
+        .is_some_and(|items| items.is_empty()));
+}
+
+#[test]
+fn checkpoint_side_effect_cannot_bypass_unregistered_execution_type_guard() {
+    let plan_path = write_temp_file(
+        "plan-unregistered-with-checkpoint-side-effect",
+        r#"{
+  "schema":"ais-plan/0.0.3",
+  "meta": {},
+  "nodes":[
+    {
+      "id":"node-1",
+      "chain":"eip155:1",
+      "kind":"execution",
+      "execution":{"type":"sui_tx","args":{}}
+    }
+  ]
+}"#,
+    );
+    let config_path = write_temp_file(
+        "runner-config-unregistered-with-checkpoint-side-effect",
+        r#"
+schema: ais-runner/0.0.1
+chains:
+  eip155:1:
+    rpc_url: https://rpc.evm.example
+"#,
+    );
+    let checkpoint_path = write_temp_file("checkpoint-unregistered-with-side-effect", "");
+    let plan: PlanDocument =
+        serde_json::from_str(fs::read_to_string(&plan_path).expect("read plan").as_str())
+            .expect("plan");
+    let plan_hash = hash_plan(&plan).expect("hash");
+    let mut checkpoint = create_checkpoint_document(
+        "run-unregistered-with-side-effect",
+        plan_hash,
+        CheckpointEngineState::default(),
+        None,
+        None,
+        None,
+    );
+    checkpoint.side_effects.push(CheckpointSideEffectRecord {
+        schema: Some("ais-side-effect-record/0.1.0".to_string()),
+        idempotency_key: "tx:node-1:0xsent".to_string(),
+        node_id: "node-1".to_string(),
+        effect_type: "tx".to_string(),
+        chain: Some("eip155:1".to_string()),
+        execution_type: Some("sui_tx".to_string()),
+        tx_hash: Some("0xsent".to_string()),
+        nonce: None,
+        provider_ref: None,
+        reason_code: None,
+        details: None,
+        status: "sent".to_string(),
+        observed_at: "2026-02-24T00:00:00Z".to_string(),
+    });
+    save_checkpoint_to_path(&checkpoint_path, &checkpoint).expect("save checkpoint");
+
+    let error = execute_run_plan(&PlanCommand {
+        plan: plan_path,
+        config: Some(config_path),
+        runtime: None,
+        dry_run: false,
+        events_jsonl: None,
+        trace: None,
+        checkpoint: Some(checkpoint_path),
+        commands_stdin_jsonl: false,
+        verbose: false,
+        format: OutputFormat::Json,
+    })
+    .expect_err("must still reject unregistered execution type");
+    match error {
+        RunnerError::ConfigInvalidForPlan(issues) => {
+            assert_eq!(issues.len(), 1);
+            assert_eq!(
+                issues[0].reference.as_deref(),
+                Some("runner.config.execution_type_unregistered")
+            );
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
 fn read_command_jsonl_parses_supported_command_types() {
     let input = r#"{"schema":"ais-engine-command/0.0.1","command":{"id":"cmd-patch","type":"apply_patches","data":{"patches":[]}}}
 {"schema":"ais-engine-command/0.0.1","command":{"id":"cmd-confirm","type":"user_confirm","data":{"node_id":"n1","decision":"approve"}}}
+{"schema":"ais-engine-command/0.0.1","command":{"id":"cmd-input","type":"user_input","data":{"input_id":"owner","value":"0xabc"}}}
+{"schema":"ais-engine-command/0.0.1","command":{"id":"cmd-select","type":"user_select","data":{"input_id":"token","selected_index":1,"options":[{"label":"USDC","value":"0x1"}]}}}
 {"schema":"ais-engine-command/0.0.1","command":{"id":"cmd-cancel","type":"cancel","data":{}}}
+{"schema":"ais-engine-command/0.0.1","command":{"id":"cmd-replace","type":"replace_plan","data":{"plan":{"schema":"ais-plan/0.0.3","nodes":[]}}}}
 "#;
     let commands = read_command_jsonl(Cursor::new(input)).expect("must parse");
-    assert_eq!(commands.len(), 3);
+    assert_eq!(commands.len(), 6);
     assert_eq!(commands[0].command.id, "cmd-patch");
     assert_eq!(commands[1].command.id, "cmd-confirm");
-    assert_eq!(commands[2].command.id, "cmd-cancel");
+    assert_eq!(
+        commands[2].command.command_type,
+        EngineCommandType::UserInput
+    );
+    assert_eq!(
+        commands[3].command.command_type,
+        EngineCommandType::UserSelect
+    );
+    assert_eq!(commands[4].command.id, "cmd-cancel");
+    assert_eq!(
+        commands[5].command.command_type,
+        EngineCommandType::ReplacePlan
+    );
+}
+
+#[test]
+fn process_replace_plan_command_updates_active_plan_and_epoch() {
+    let config: RunnerConfig = serde_yaml::from_str(
+        r#"
+schema: ais-runner/0.0.1
+chains:
+  eip155:1:
+    rpc_url: https://rpc.evm.example
+"#,
+    )
+    .expect("config must parse");
+    let mut active_plan = sample_plan("balanceOf", false);
+    let before_hash = hash_plan(&active_plan).expect("hash before");
+    let command = format!(
+        r#"{{"schema":"ais-engine-command/0.0.1","command":{{"id":"cmd-replace-ok","type":"replace_plan","data":{{"plan":{}}}}}}}
+"#,
+        sample_plan_json("balanceOf", true)
+    );
+    let commands = read_command_jsonl(Cursor::new(command)).expect("commands parse");
+    let mut state = EngineRunnerState {
+        runtime: json!({}),
+        plan_hash_history: vec![before_hash.clone()],
+        ..EngineRunnerState::default()
+    };
+    let mut active_hash = before_hash.clone();
+    let processed = process_replace_plan_commands(
+        "run-test",
+        &config,
+        commands.as_slice(),
+        &EngineRunnerOptions::default(),
+        &mut state,
+        &mut active_plan,
+        &mut active_hash,
+    )
+    .expect("replace plan succeeds");
+
+    assert!(processed.plan_replaced);
+    assert!(!processed.pause_after_processing);
+    assert_eq!(processed.forward_commands.len(), 0);
+    assert_eq!(active_plan.nodes.len(), 2);
+    assert_eq!(state.plan_epoch, 1);
+    assert_eq!(state.plan_hash_history.len(), 2);
+    assert_ne!(active_hash, before_hash);
+    assert!(processed
+        .events
+        .iter()
+        .any(|record| record.event.event_type == EngineEventType::PlanReplaced));
+}
+
+#[test]
+fn process_replace_plan_rejects_mutating_completed_node() {
+    let config: RunnerConfig = serde_yaml::from_str(
+        r#"
+schema: ais-runner/0.0.1
+chains:
+  eip155:1:
+    rpc_url: https://rpc.evm.example
+"#,
+    )
+    .expect("config must parse");
+    let mut active_plan = sample_plan("balanceOf", false);
+    let original_plan = active_plan.clone();
+    let before_hash = hash_plan(&active_plan).expect("hash before");
+    let command = format!(
+        r#"{{"schema":"ais-engine-command/0.0.1","command":{{"id":"cmd-replace-bad","type":"replace_plan","data":{{"plan":{}}}}}}}
+"#,
+        sample_plan_json("allowance", false)
+    );
+    let commands = read_command_jsonl(Cursor::new(command)).expect("commands parse");
+    let mut state = EngineRunnerState {
+        runtime: json!({}),
+        completed_node_ids: vec!["node-1".to_string()],
+        plan_hash_history: vec![before_hash.clone()],
+        ..EngineRunnerState::default()
+    };
+    let mut active_hash = before_hash.clone();
+    let processed = process_replace_plan_commands(
+        "run-test",
+        &config,
+        commands.as_slice(),
+        &EngineRunnerOptions::default(),
+        &mut state,
+        &mut active_plan,
+        &mut active_hash,
+    )
+    .expect("processing must finish");
+
+    assert!(!processed.plan_replaced);
+    assert!(processed.pause_after_processing);
+    assert_eq!(
+        state.paused_reason.as_deref(),
+        Some("replace_plan_rejected:replace_plan_completed_node_mutated")
+    );
+    assert_eq!(active_plan, original_plan);
+    assert_eq!(active_hash, before_hash);
+    assert_eq!(state.plan_epoch, 0);
+    assert!(processed
+        .events
+        .iter()
+        .any(|record| record.event.event_type == EngineEventType::Error));
+    assert!(processed
+        .events
+        .iter()
+        .any(|record| record.event.event_type == EngineEventType::EnginePaused));
+}
+
+fn sample_plan(method: &str, include_second_node: bool) -> PlanDocument {
+    let mut nodes = vec![json!({
+      "id":"node-1",
+      "chain":"eip155:1",
+      "kind":"execution",
+      "execution":{
+        "type":"evm_read",
+        "to":{"lit":"0x0000000000000000000000000000000000000001"},
+        "abi":{"name":method,"inputs":[],"outputs":[]},
+        "args":{}
+      }
+    })];
+    if include_second_node {
+        nodes.push(json!({
+          "id":"node-2",
+          "chain":"eip155:1",
+          "kind":"execution",
+          "deps":["node-1"],
+          "execution":{
+            "type":"evm_read",
+            "to":{"lit":"0x0000000000000000000000000000000000000001"},
+            "abi":{"name":"totalSupply","inputs":[],"outputs":[]},
+            "args":{}
+          }
+        }));
+    }
+    PlanDocument {
+        schema: "ais-plan/0.0.3".to_string(),
+        meta: Some(json!({})),
+        nodes,
+        extensions: serde_json::Map::new(),
+    }
+}
+
+fn sample_plan_json(method: &str, include_second_node: bool) -> String {
+    serde_json::to_string(&sample_plan(method, include_second_node)).expect("plan json")
 }
 
 fn write_temp_file(prefix: &str, content: &str) -> PathBuf {

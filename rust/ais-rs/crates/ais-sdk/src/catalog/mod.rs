@@ -1,6 +1,7 @@
 mod build;
 mod filter;
 mod index;
+mod types;
 
 pub use build::{build_catalog, CatalogBuildInput, CatalogBuildOptions};
 pub use filter::{
@@ -8,3 +9,4 @@ pub use filter::{
     ExecutableCandidates, EXECUTABLE_CANDIDATES_SCHEMA_0_0_1,
 };
 pub use index::{build_catalog_index, CatalogIndex, CATALOG_INDEX_SCHEMA_0_0_1};
+pub use types::{ActionCard, CatalogCardLevel, CatalogParam, CatalogReturn, QueryCard};

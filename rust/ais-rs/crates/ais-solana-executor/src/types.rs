@@ -24,7 +24,10 @@ pub struct SolanaRpcEndpoint {
 }
 
 impl SolanaRpcEndpoint {
-    pub fn new(chain: impl Into<String>, rpc_url: impl Into<String>) -> Result<Self, ProviderError> {
+    pub fn new(
+        chain: impl Into<String>,
+        rpc_url: impl Into<String>,
+    ) -> Result<Self, ProviderError> {
         let endpoint = Self {
             chain: chain.into(),
             rpc_url: rpc_url.into(),
@@ -96,7 +99,10 @@ pub trait SolanaRpcClient: Send + Sync {
 }
 
 pub trait SolanaRpcClientFactory: Send + Sync {
-    fn build_client(&self, endpoint: &SolanaRpcEndpoint) -> Result<Box<dyn SolanaRpcClient>, ProviderError>;
+    fn build_client(
+        &self,
+        endpoint: &SolanaRpcEndpoint,
+    ) -> Result<Box<dyn SolanaRpcClient>, ProviderError>;
 }
 
 pub struct SolanaProviderRegistry {
@@ -170,7 +176,7 @@ const fn default_timeout_ms() -> u64 {
 }
 
 fn default_tx_version() -> String {
-    "legacy".to_string()
+    "v0".to_string()
 }
 
 #[cfg(test)]

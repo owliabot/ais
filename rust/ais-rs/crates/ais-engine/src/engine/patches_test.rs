@@ -30,11 +30,17 @@ fn apply_patches_emits_patch_applied_with_audit_hash() {
     )
     .expect("must apply");
 
-    assert_eq!(runtime.get("inputs").and_then(|value| value.get("amount")), Some(&json!("100")));
+    assert_eq!(
+        runtime.get("inputs").and_then(|value| value.get("amount")),
+        Some(&json!("100"))
+    );
     assert_eq!(execution.apply_result.audit.applied_count, 1);
     assert_eq!(execution.apply_result.audit.rejected_count, 0);
     assert_eq!(execution.events.len(), 1);
-    assert_eq!(execution.events[0].event.event_type, EngineEventType::PatchApplied);
+    assert_eq!(
+        execution.events[0].event.event_type,
+        EngineEventType::PatchApplied
+    );
     assert_eq!(
         execution.events[0].event.data.get("audit_hash"),
         Some(&json!(execution.apply_result.audit.hash))
@@ -62,7 +68,10 @@ fn apply_patches_rejects_nodes_paths_and_emits_patch_rejected() {
     assert_eq!(execution.apply_result.audit.applied_count, 0);
     assert_eq!(execution.apply_result.audit.rejected_count, 1);
     assert_eq!(execution.events.len(), 1);
-    assert_eq!(execution.events[0].event.event_type, EngineEventType::PatchRejected);
+    assert_eq!(
+        execution.events[0].event.event_type,
+        EngineEventType::PatchRejected
+    );
     assert!(execution.events[0].event.data.get("rejections").is_some());
 }
 
@@ -89,8 +98,14 @@ fn apply_patches_partial_success_emits_both_events() {
     assert_eq!(execution.apply_result.audit.rejected_count, 1);
     assert!(execution.apply_result.audit.partial_success);
     assert_eq!(execution.events.len(), 2);
-    assert_eq!(execution.events[0].event.event_type, EngineEventType::PatchApplied);
-    assert_eq!(execution.events[1].event.event_type, EngineEventType::PatchRejected);
+    assert_eq!(
+        execution.events[0].event.event_type,
+        EngineEventType::PatchApplied
+    );
+    assert_eq!(
+        execution.events[1].event.event_type,
+        EngineEventType::PatchRejected
+    );
 }
 
 #[test]

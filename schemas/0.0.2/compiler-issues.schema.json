@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ais-spec.dev/schemas/0.0.2/compiler-issues.schema.json",
+  "title": "AIS Compiler Issues",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "issues"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ais-compiler-issues/0.1.0"
+    },
+    "summary": {
+      "type": "string"
+    },
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "pack_snapshot_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "catalog_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "plan_epoch": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "issues": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/issue"
+      }
+    },
+    "extensions": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "$defs": {
+    "kind": {
+      "type": "string",
+      "enum": [
+        "schema_error",
+        "compile_error",
+        "policy_error",
+        "runtime_error"
+      ]
+    },
+    "severity": {
+      "type": "string",
+      "enum": [
+        "error",
+        "warning"
+      ]
+    },
+    "reason_code": {
+      "type": "string",
+      "enum": [
+        "candidate_not_found",
+        "candidate_chain_not_allowed",
+        "execution_type_not_allowed",
+        "missing_required_input",
+        "input_type_mismatch",
+        "constraint_violation",
+        "policy_requires_confirm",
+        "segment_mutation_not_allowed",
+        "planner_round_limit_reached"
+      ]
+    },
+    "field_path": {
+      "type": "string",
+      "pattern": "^/(|[^\\s]*)$"
+    },
+    "issue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "severity",
+        "reason_code",
+        "message"
+      ],
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/kind"
+        },
+        "severity": {
+          "$ref": "#/$defs/severity"
+        },
+        "reason_code": {
+          "$ref": "#/$defs/reason_code"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "field_path": {
+          "$ref": "#/$defs/field_path"
+        },
+        "node_id": {
+          "type": "string"
+        },
+        "candidate_ref": {
+          "type": "string"
+        },
+        "suggestion": {
+          "type": "string"
+        },
+        "details": {
+          "type": "object"
+        },
+        "reference": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

@@ -20,6 +20,7 @@
         "node_ready",
         "node_blocked",
         "need_user_confirm",
+        "need_user_input",
         "query_result",
         "tx_prepared",
         "tx_sent",
@@ -31,11 +32,50 @@
         "solver_applied",
         "node_paused",
         "skipped",
+        "plan_replaced",
         "command_accepted",
         "command_rejected",
         "patch_applied",
-        "patch_rejected"
+        "patch_rejected",
+        "side_effect_observed"
       ]
+    },
+    "sideEffectRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "effect_type",
+        "idempotency_key",
+        "node_id",
+        "chain",
+        "execution_type",
+        "status",
+        "observed_at"
+      ],
+      "properties": {
+        "schema": { "const": "ais-side-effect-record/0.1.0" },
+        "effect_type": { "type": "string", "minLength": 1 },
+        "idempotency_key": { "type": "string", "minLength": 1 },
+        "node_id": { "type": "string", "minLength": 1 },
+        "chain": { "type": "string", "minLength": 1 },
+        "execution_type": { "type": "string", "minLength": 1 },
+        "status": {
+          "type": "string",
+          "enum": ["prepared", "sent", "confirmed", "reverted", "unknown"]
+        },
+        "observed_at": { "type": "string", "format": "date-time", "minLength": 1 },
+        "tx_hash": { "type": "string" },
+        "nonce": {
+          "oneOf": [
+            { "type": "integer", "minimum": 0 },
+            { "type": "string", "minLength": 1 }
+          ]
+        },
+        "provider_ref": { "type": "string", "minLength": 1 },
+        "reason_code": { "type": "string" },
+        "details": { "type": "object", "additionalProperties": true }
+      }
     },
     "eventEnvelope": {
       "type": "object",
@@ -65,7 +105,13 @@
                   "reason": { "type": "string" },
                   "details": {
                     "type": "object",
-                    "required": ["node_id", "action_ref", "hit_reasons"],
+                    "required": [
+                      "node_id",
+                      "action_ref",
+                      "hit_reasons",
+                      "confirmation_summary",
+                      "confirmation_hash"
+                    ],
                     "properties": {
                       "node_id": { "type": "string" },
                       "action_ref": { "type": "string" },
@@ -73,6 +119,26 @@
                         "type": "array",
                         "items": { "type": "string" }
                       },
+                      "confirmation_summary": {
+                        "type": "object",
+                        "required": ["kind", "reason", "chain"],
+                        "properties": {
+                          "kind": { "type": "string" },
+                          "reason": { "type": "string" },
+                          "node_id": { "type": "string" },
+                          "chain": { "type": "string" },
+                          "action_ref": { "type": "string" },
+                          "execution_type": { "type": "string" },
+                          "risk_level": { "type": "integer" },
+                          "risk_tags": { "type": "array", "items": { "type": "string" } },
+                          "missing_fields": { "type": "array", "items": { "type": "string" } },
+                          "unknown_fields": { "type": "array", "items": { "type": "string" } },
+                          "hard_block_fields": { "type": "array", "items": { "type": "string" } },
+                          "details": { "type": "object", "additionalProperties": true }
+                        },
+                        "additionalProperties": true
+                      },
+                      "confirmation_hash": { "type": "string" },
                       "workflow_node_id": { "type": "string" },
                       "chain": { "type": "string" },
                       "execution_type": { "type": "string" },
@@ -87,6 +153,92 @@
                     },
                     "additionalProperties": true
                   }
+                },
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "need_user_input" } },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "required": ["reason_code", "reason", "details"],
+                "properties": {
+                  "reason_code": { "type": "string", "minLength": 1 },
+                  "reason": { "type": "string", "minLength": 1 },
+                  "details": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                },
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": { "enum": ["command_accepted", "command_rejected"] }
+            },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "required": ["command_id", "command_type", "duplicate", "noop"],
+                "properties": {
+                  "command_id": { "type": "string" },
+                  "command_type": { "type": "string" },
+                  "duplicate": { "type": "boolean" },
+                  "noop": { "type": "boolean" },
+                  "reason": { "type": "string" }
+                },
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "plan_replaced" } },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "required": ["before_plan_hash", "after_plan_hash"],
+                "properties": {
+                  "before_plan_hash": { "type": "string" },
+                  "after_plan_hash": { "type": "string" },
+                  "command_id": { "type": "string" },
+                  "reason": { "type": "string" }
+                },
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "side_effect_observed" } },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "required": ["record"],
+                "properties": {
+                  "record": { "$ref": "#/$defs/sideEffectRecord" }
                 },
                 "additionalProperties": true
               }

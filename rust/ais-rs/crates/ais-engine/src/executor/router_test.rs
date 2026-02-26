@@ -31,6 +31,7 @@ impl Executor for MockExecutor {
         Ok(ExecutorOutput {
             result: json!({"executor": self.name, "node_id": node_id}),
             writes: Map::new(),
+            side_effects: Vec::new(),
         })
     }
 }
@@ -39,14 +40,16 @@ impl Executor for MockExecutor {
 fn router_routes_by_exact_chain_with_multiple_executors() {
     let calls = Rc::new(RefCell::new(Vec::new()));
     let mut router = RouterExecutor::new();
-    router.register(
+    router.register_core(
         "evm-mainnet",
         "eip155:1",
+        ["evm_call", "evm_read"],
         Box::new(MockExecutor::new("evm-mainnet", Rc::clone(&calls))),
     );
-    router.register(
+    router.register_core(
         "solana-mainnet",
         "solana:mainnet-beta",
+        ["solana_instruction", "solana_read"],
         Box::new(MockExecutor::new("solana-mainnet", Rc::clone(&calls))),
     );
 
@@ -67,9 +70,10 @@ fn router_routes_by_exact_chain_with_multiple_executors() {
 fn router_chain_mismatch_is_rejected() {
     let calls = Rc::new(RefCell::new(Vec::new()));
     let mut router = RouterExecutor::new();
-    router.register(
+    router.register_core(
         "evm-mainnet",
         "eip155:1",
+        ["evm_call"],
         Box::new(MockExecutor::new("evm-mainnet", Rc::clone(&calls))),
     );
 
@@ -80,7 +84,9 @@ fn router_chain_mismatch_is_rejected() {
         "execution": {"type": "evm_call"}
     });
 
-    let error = router.execute(&node, &mut runtime).expect_err("must reject");
+    let error = router
+        .execute(&node, &mut runtime)
+        .expect_err("must reject");
     assert_eq!(
         error,
         RouterExecuteError::ChainMismatch {
@@ -95,14 +101,16 @@ fn router_chain_mismatch_is_rejected() {
 fn router_ambiguous_chain_is_rejected() {
     let calls = Rc::new(RefCell::new(Vec::new()));
     let mut router = RouterExecutor::new();
-    router.register(
+    router.register_core(
         "evm-a",
         "eip155:1",
+        ["evm_call"],
         Box::new(MockExecutor::new("evm-a", Rc::clone(&calls))),
     );
-    router.register(
+    router.register_core(
         "evm-b",
         "eip155:1",
+        ["evm_call"],
         Box::new(MockExecutor::new("evm-b", Rc::clone(&calls))),
     );
 
@@ -113,9 +121,15 @@ fn router_ambiguous_chain_is_rejected() {
         "execution": {"type": "evm_call"}
     });
 
-    let error = router.execute(&node, &mut runtime).expect_err("must reject");
+    let error = router
+        .execute(&node, &mut runtime)
+        .expect_err("must reject");
     match error {
-        RouterExecuteError::AmbiguousRoute { node_id, chain, executors } => {
+        RouterExecuteError::AmbiguousRoute {
+            node_id,
+            chain,
+            executors,
+        } => {
             assert_eq!(node_id, "swap-3");
             assert_eq!(chain, "eip155:1");
             assert!(executors.contains("evm-a"));
@@ -123,4 +137,35 @@ fn router_ambiguous_chain_is_rejected() {
         }
         _ => panic!("expected ambiguous route"),
     }
+}
+
+#[test]
+fn router_unregistered_execution_type_is_rejected_even_when_chain_matches() {
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let mut router = RouterExecutor::new();
+    router.register_core(
+        "evm-mainnet",
+        "eip155:1",
+        ["evm_call", "evm_read"],
+        Box::new(MockExecutor::new("evm-mainnet", Rc::clone(&calls))),
+    );
+
+    let mut runtime = json!({});
+    let node = json!({
+        "id": "swap-4",
+        "chain": "eip155:1",
+        "execution": {"type": "sui_tx"}
+    });
+    let error = router
+        .execute(&node, &mut runtime)
+        .expect_err("must reject");
+    assert_eq!(
+        error,
+        RouterExecuteError::UnregisteredExecutionType {
+            node_id: "swap-4".to_string(),
+            chain: "eip155:1".to_string(),
+            execution_type: "sui_tx".to_string(),
+        }
+    );
+    assert!(calls.borrow().is_empty());
 }

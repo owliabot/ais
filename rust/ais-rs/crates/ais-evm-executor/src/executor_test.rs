@@ -4,7 +4,7 @@ use super::{
 };
 use crate::provider::{EvmProviderRegistry, EvmRpcEndpoint};
 use crate::signer::EvmTransactionSigner;
-use ais_engine::Executor;
+use ais_engine::{CheckpointSideEffectRecord, Executor};
 use alloy_dyn_abi::{DynSolValue, FunctionExt as DynFunctionExt};
 use alloy_json_abi::Function;
 use alloy_primitives::{hex, Address, Bytes};
@@ -14,9 +14,11 @@ use std::sync::{Arc, Mutex};
 
 #[test]
 fn supports_requires_exact_configured_chain_and_supported_type() {
-    let providers = EvmProviderRegistry::from_endpoints(vec![
-        EvmRpcEndpoint::new("eip155:1", "https://eth.example").expect("valid endpoint"),
-    ])
+    let providers = EvmProviderRegistry::from_endpoints(vec![EvmRpcEndpoint::new(
+        "eip155:1",
+        "https://eth.example",
+    )
+    .expect("valid endpoint")])
     .expect("valid registry");
     let executor = EvmExecutor::new(providers);
 
@@ -28,9 +30,11 @@ fn supports_requires_exact_configured_chain_and_supported_type() {
 
 #[test]
 fn execute_rejects_mismatched_execution_type() {
-    let providers = EvmProviderRegistry::from_endpoints(vec![
-        EvmRpcEndpoint::new("eip155:1", "https://eth.example").expect("valid endpoint"),
-    ])
+    let providers = EvmProviderRegistry::from_endpoints(vec![EvmRpcEndpoint::new(
+        "eip155:1",
+        "https://eth.example",
+    )
+    .expect("valid endpoint")])
     .expect("valid registry");
     let executor = EvmExecutor::new(providers);
     let mut runtime = json!({});
@@ -51,9 +55,11 @@ fn execute_rejects_mismatched_execution_type() {
 #[test]
 fn evm_read_executes_eth_call_and_decodes_uint_output() {
     let read_requests = Arc::new(Mutex::new(Vec::<EvmReadRequest>::new()));
-    let providers = EvmProviderRegistry::from_endpoints(vec![
-        EvmRpcEndpoint::new("eip155:1", "https://eth.example").expect("valid endpoint"),
-    ])
+    let providers = EvmProviderRegistry::from_endpoints(vec![EvmRpcEndpoint::new(
+        "eip155:1",
+        "https://eth.example",
+    )
+    .expect("valid endpoint")])
     .expect("valid registry");
     let executor = EvmExecutor::new(providers).with_read_rpc_sender(Box::new(MockReadRpcSender {
         read_requests: read_requests.clone(),
@@ -120,9 +126,11 @@ fn evm_read_decodes_dynamic_string_output() {
     let encoded = function
         .abi_encode_output(&[DynSolValue::String("USDC".to_string())])
         .expect("encode output");
-    let providers = EvmProviderRegistry::from_endpoints(vec![
-        EvmRpcEndpoint::new("eip155:1", "https://eth.example").expect("valid endpoint"),
-    ])
+    let providers = EvmProviderRegistry::from_endpoints(vec![EvmRpcEndpoint::new(
+        "eip155:1",
+        "https://eth.example",
+    )
+    .expect("valid endpoint")])
     .expect("valid registry");
     let executor = EvmExecutor::new(providers).with_read_rpc_sender(Box::new(MockReadRpcSender {
         read_requests: Arc::new(Mutex::new(Vec::new())),
@@ -167,9 +175,11 @@ fn evm_read_decodes_dynamic_string_output() {
 #[test]
 fn evm_read_supports_tuple_object_args() {
     let read_requests = Arc::new(Mutex::new(Vec::<EvmReadRequest>::new()));
-    let providers = EvmProviderRegistry::from_endpoints(vec![
-        EvmRpcEndpoint::new("eip155:1", "https://eth.example").expect("valid endpoint"),
-    ])
+    let providers = EvmProviderRegistry::from_endpoints(vec![EvmRpcEndpoint::new(
+        "eip155:1",
+        "https://eth.example",
+    )
+    .expect("valid endpoint")])
     .expect("valid registry");
     let executor = EvmExecutor::new(providers).with_read_rpc_sender(Box::new(MockReadRpcSender {
         read_requests: read_requests.clone(),
@@ -223,9 +233,11 @@ fn evm_read_supports_tuple_object_args() {
 
 #[test]
 fn evm_call_without_signer_returns_need_user_confirm() {
-    let providers = EvmProviderRegistry::from_endpoints(vec![
-        EvmRpcEndpoint::new("eip155:1", "https://eth.example").expect("valid endpoint"),
-    ])
+    let providers = EvmProviderRegistry::from_endpoints(vec![EvmRpcEndpoint::new(
+        "eip155:1",
+        "https://eth.example",
+    )
+    .expect("valid endpoint")])
     .expect("valid registry");
     let executor = EvmExecutor::new(providers);
     let mut runtime = json!({});
@@ -260,9 +272,11 @@ fn evm_call_without_signer_returns_need_user_confirm() {
 
 #[test]
 fn evm_call_with_signer_sends_and_returns_receipt() {
-    let providers = EvmProviderRegistry::from_endpoints(vec![
-        EvmRpcEndpoint::new("eip155:1", "https://eth.example").expect("valid endpoint"),
-    ])
+    let providers = EvmProviderRegistry::from_endpoints(vec![EvmRpcEndpoint::new(
+        "eip155:1",
+        "https://eth.example",
+    )
+    .expect("valid endpoint")])
     .expect("valid registry");
     let call_requests = Arc::new(Mutex::new(Vec::<EvmCallSendRequest>::new()));
     let executor = EvmExecutor::new(providers)
@@ -311,18 +325,36 @@ fn evm_call_with_signer_sends_and_returns_receipt() {
         )
         .expect("evm_call must succeed");
 
-    assert_eq!(result.result.get("tx_hash"), Some(&Value::String("0x02".to_string())));
-    assert_eq!(result.result.pointer("/tx/nonce"), Some(&Value::Number(3u64.into())));
+    assert_eq!(
+        result.result.get("tx_hash"),
+        Some(&Value::String("0x02".to_string()))
+    );
+    assert_eq!(
+        result.result.pointer("/tx/nonce"),
+        Some(&Value::Number(3u64.into()))
+    );
     assert!(result.result.get("receipt").is_some());
+    assert_eq!(result.side_effects.len(), 1);
+    assert_eq!(result.side_effects[0].idempotency_key, "tx:call-2:0x02");
+    assert_eq!(result.side_effects[0].status, "confirmed");
+    assert_eq!(
+        result.side_effects[0].execution_type.as_deref(),
+        Some("evm_call")
+    );
+    assert_eq!(result.side_effects[0].chain.as_deref(), Some("eip155:1"));
+    assert_eq!(result.side_effects[0].tx_hash.as_deref(), Some("0x02"));
+    assert_eq!(result.side_effects[0].nonce, Some(3));
     assert_eq!(call_requests.lock().expect("lock").len(), 1);
 }
 
 #[test]
 fn evm_call_uses_filler_sender_for_nonce_and_fee_fields() {
     let call_requests = Arc::new(Mutex::new(Vec::<EvmCallSendRequest>::new()));
-    let providers = EvmProviderRegistry::from_endpoints(vec![
-        EvmRpcEndpoint::new("eip155:1", "https://eth.example").expect("valid endpoint"),
-    ])
+    let providers = EvmProviderRegistry::from_endpoints(vec![EvmRpcEndpoint::new(
+        "eip155:1",
+        "https://eth.example",
+    )
+    .expect("valid endpoint")])
     .expect("valid registry");
     let executor = EvmExecutor::new(providers)
         .with_signer(Box::new(MockSigner))
@@ -389,13 +421,79 @@ fn evm_call_uses_filler_sender_for_nonce_and_fee_fields() {
         result.result.pointer("/tx/max_fee_per_gas"),
         Some(&Value::String("9000000000".to_string()))
     );
+    assert_eq!(result.side_effects.len(), 1);
+    assert_eq!(
+        result.side_effects[0].idempotency_key,
+        "tx:call-estimate-1:0x03"
+    );
+    assert_eq!(result.side_effects[0].status, "sent");
+    assert_eq!(result.side_effects[0].nonce, Some(8));
+}
+
+#[test]
+fn evm_call_failed_receipt_maps_side_effect_status_to_reverted() {
+    let providers = EvmProviderRegistry::from_endpoints(vec![EvmRpcEndpoint::new(
+        "eip155:1",
+        "https://eth.example",
+    )
+    .expect("valid endpoint")])
+    .expect("valid registry");
+    let executor = EvmExecutor::new(providers)
+        .with_signer(Box::new(MockSigner))
+        .with_call_sender(Box::new(MockCallSender {
+            requests: Arc::new(Mutex::new(Vec::new())),
+            result: EvmCallSendResult {
+                tx_hash: "0xdead".to_string(),
+                nonce: Some(99),
+                gas_limit: Some(21_000),
+                max_fee_per_gas: None,
+                max_priority_fee_per_gas: None,
+                receipt: Some(json!({"status":"0x0"})),
+            },
+        }));
+    let mut runtime = json!({});
+
+    let result = executor
+        .execute(
+            &json!({
+                "id": "call-failed-1",
+                "chain": "eip155:1",
+                "execution": {
+                    "type": "evm_call",
+                    "to": {"lit": "0x0000000000000000000000000000000000000001"},
+                    "abi": {
+                        "type": "function",
+                        "name": "transfer",
+                        "inputs": [
+                            {"name":"to","type":"address"},
+                            {"name":"amount","type":"uint256"}
+                        ]
+                    },
+                    "args": {
+                        "to": {"lit": "0x0000000000000000000000000000000000000002"},
+                        "amount": {"lit": "10"}
+                    }
+                }
+            }),
+            &mut runtime,
+        )
+        .expect("evm_call must succeed");
+
+    assert_eq!(result.side_effects.len(), 1);
+    assert_eq!(
+        result.side_effects[0].idempotency_key,
+        "tx:call-failed-1:0xdead"
+    );
+    assert_eq!(result.side_effects[0].status, "reverted");
 }
 
 #[test]
 fn evm_rpc_rejects_non_allowlisted_method() {
-    let providers = EvmProviderRegistry::from_endpoints(vec![
-        EvmRpcEndpoint::new("eip155:1", "https://eth.example").expect("valid endpoint"),
-    ])
+    let providers = EvmProviderRegistry::from_endpoints(vec![EvmRpcEndpoint::new(
+        "eip155:1",
+        "https://eth.example",
+    )
+    .expect("valid endpoint")])
     .expect("valid registry");
     let executor = EvmExecutor::new(providers);
     let mut runtime = json!({});
@@ -420,9 +518,11 @@ fn evm_rpc_rejects_non_allowlisted_method() {
 #[test]
 fn evm_rpc_allowlisted_method_calls_provider() {
     let rpc_calls = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
-    let providers = EvmProviderRegistry::from_endpoints(vec![
-        EvmRpcEndpoint::new("eip155:1", "https://eth.example").expect("valid endpoint"),
-    ])
+    let providers = EvmProviderRegistry::from_endpoints(vec![EvmRpcEndpoint::new(
+        "eip155:1",
+        "https://eth.example",
+    )
+    .expect("valid endpoint")])
     .expect("valid registry");
     let executor = EvmExecutor::new(providers).with_read_rpc_sender(Box::new(MockReadRpcSender {
         read_requests: Arc::new(Mutex::new(Vec::new())),
@@ -450,16 +550,21 @@ fn evm_rpc_allowlisted_method_calls_provider() {
         )
         .expect("must pass");
 
-    assert_eq!(result.result.get("method"), Some(&Value::String("eth_blockNumber".to_string())));
+    assert_eq!(
+        result.result.get("method"),
+        Some(&Value::String("eth_blockNumber".to_string()))
+    );
     assert_eq!(rpc_calls.lock().expect("lock").len(), 1);
 }
 
 #[test]
 fn evm_rpc_get_balance_object_params_are_normalized() {
     let rpc_calls = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
-    let providers = EvmProviderRegistry::from_endpoints(vec![
-        EvmRpcEndpoint::new("eip155:31338", "https://eth.example").expect("valid endpoint"),
-    ])
+    let providers = EvmProviderRegistry::from_endpoints(vec![EvmRpcEndpoint::new(
+        "eip155:31338",
+        "https://eth.example",
+    )
+    .expect("valid endpoint")])
     .expect("valid registry");
     let executor = EvmExecutor::new(providers).with_read_rpc_sender(Box::new(MockReadRpcSender {
         read_requests: Arc::new(Mutex::new(Vec::new())),
@@ -506,9 +611,11 @@ fn evm_rpc_get_balance_object_params_are_normalized() {
 #[test]
 fn evm_rpc_get_balance_array_wrapper_params_are_normalized() {
     let rpc_calls = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
-    let providers = EvmProviderRegistry::from_endpoints(vec![
-        EvmRpcEndpoint::new("eip155:31338", "https://eth.example").expect("valid endpoint"),
-    ])
+    let providers = EvmProviderRegistry::from_endpoints(vec![EvmRpcEndpoint::new(
+        "eip155:31338",
+        "https://eth.example",
+    )
+    .expect("valid endpoint")])
     .expect("valid registry");
     let executor = EvmExecutor::new(providers).with_read_rpc_sender(Box::new(MockReadRpcSender {
         read_requests: Arc::new(Mutex::new(Vec::new())),
@@ -544,6 +651,89 @@ fn evm_rpc_get_balance_array_wrapper_params_are_normalized() {
     assert_eq!(
         calls[0].1,
         json!(["0x0000000000000000000000000000000000000001", "latest"])
+    );
+}
+
+#[test]
+fn reconcile_sent_evm_side_effect_marks_confirmed_when_receipt_succeeds() {
+    let rpc_calls = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+    let providers = EvmProviderRegistry::from_endpoints(vec![EvmRpcEndpoint::new(
+        "eip155:1",
+        "https://eth.example",
+    )
+    .expect("valid endpoint")])
+    .expect("valid registry");
+    let executor = EvmExecutor::new(providers).with_read_rpc_sender(Box::new(MockReadRpcSender {
+        read_requests: Arc::new(Mutex::new(Vec::new())),
+        read_response: Bytes::new(),
+        rpc_calls,
+        rpc_responses: BTreeMap::from([(
+            "eth_getTransactionReceipt".to_string(),
+            json!({"status":"0x1","transactionHash":"0x1111111111111111111111111111111111111111111111111111111111111111"}),
+        )]),
+    }));
+
+    let reconciled = executor
+        .reconcile_side_effect(&CheckpointSideEffectRecord {
+            schema: Some("ais-side-effect-record/0.1.0".to_string()),
+            idempotency_key:
+                "tx:swap-1:0x1111111111111111111111111111111111111111111111111111111111111111"
+                    .to_string(),
+            node_id: "swap-1".to_string(),
+            effect_type: "tx".to_string(),
+            chain: Some("eip155:1".to_string()),
+            execution_type: Some("evm_call".to_string()),
+            tx_hash: Some(
+                "0x1111111111111111111111111111111111111111111111111111111111111111".to_string(),
+            ),
+            nonce: None,
+            provider_ref: None,
+            reason_code: None,
+            details: None,
+            status: "sent".to_string(),
+            observed_at: "2026-02-25T00:00:00Z".to_string(),
+        })
+        .expect("reconcile should not fail")
+        .expect("must reconcile evm side-effect");
+    assert_eq!(reconciled.status, "confirmed");
+    assert_eq!(
+        reconciled.reason_code.as_deref(),
+        Some("side_effect_reconciled")
+    );
+}
+
+#[test]
+fn reconcile_sent_evm_side_effect_with_invalid_hash_keeps_pending() {
+    let providers = EvmProviderRegistry::from_endpoints(vec![EvmRpcEndpoint::new(
+        "eip155:1",
+        "https://eth.example",
+    )
+    .expect("valid endpoint")])
+    .expect("valid registry");
+    let executor = EvmExecutor::new(providers);
+
+    let reconciled = executor
+        .reconcile_side_effect(&CheckpointSideEffectRecord {
+            schema: Some("ais-side-effect-record/0.1.0".to_string()),
+            idempotency_key: "tx:swap-1:0xsent_checkpoint".to_string(),
+            node_id: "swap-1".to_string(),
+            effect_type: "tx".to_string(),
+            chain: Some("eip155:1".to_string()),
+            execution_type: Some("evm_call".to_string()),
+            tx_hash: Some("0xsent_checkpoint".to_string()),
+            nonce: None,
+            provider_ref: None,
+            reason_code: None,
+            details: None,
+            status: "sent".to_string(),
+            observed_at: "2026-02-25T00:00:00Z".to_string(),
+        })
+        .expect("reconcile should not fail")
+        .expect("must reconcile evm side-effect");
+    assert_eq!(reconciled.status, "sent");
+    assert_eq!(
+        reconciled.reason_code.as_deref(),
+        Some("side_effect_reconcile_invalid_tx_hash")
     );
 }
 

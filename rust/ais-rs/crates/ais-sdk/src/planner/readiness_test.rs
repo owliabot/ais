@@ -1,7 +1,6 @@
 use super::{get_node_readiness, get_node_readiness_async, NodeRunState};
-use crate::resolver::{DetectResolver, DetectSpec, ResolverContext, ValueRefEvalError, ValueRefEvalOptions};
+use crate::resolver::{ResolverContext, ValueRefEvalOptions};
 use futures::executor::block_on;
-use futures::FutureExt;
 use serde_json::{json, Value};
 
 fn make_evm_call_node(execution: Value) -> Value {
@@ -31,7 +30,6 @@ fn readiness_missing_ref_is_blocked() {
     let readiness = get_node_readiness(&node, &context, &ValueRefEvalOptions::default());
     assert_eq!(readiness.state, NodeRunState::Blocked);
     assert_eq!(readiness.missing_refs, vec!["contracts.router".to_string()]);
-    assert!(!readiness.needs_detect);
 }
 
 #[test]
@@ -54,13 +52,12 @@ fn readiness_condition_false_is_skipped() {
     let readiness = get_node_readiness(&node, &context, &ValueRefEvalOptions::default());
     assert_eq!(readiness.state, NodeRunState::Skipped);
     assert!(readiness.missing_refs.is_empty());
-    assert!(!readiness.needs_detect);
     assert!(readiness.errors.is_empty());
     assert_eq!(readiness.resolved_params, None);
 }
 
 #[test]
-fn readiness_detect_in_sync_path_is_blocked() {
+fn readiness_unknown_object_arg_is_treated_as_literal() {
     let context = ResolverContext::new();
     let node = make_evm_call_node(json!({
         "type": "evm_call",
@@ -68,31 +65,18 @@ fn readiness_detect_in_sync_path_is_blocked() {
         "abi": {"type": "function", "name": "swap", "inputs": [], "outputs": []},
         "method": "swap",
         "args": {
-            "route": {"detect": {"kind": "choose_one"}}
+            "route": {"unknown": "x"}
         }
     }));
 
     let readiness = get_node_readiness(&node, &context, &ValueRefEvalOptions::default());
-    assert_eq!(readiness.state, NodeRunState::Blocked);
+    assert_eq!(readiness.state, NodeRunState::Ready);
     assert!(readiness.missing_refs.is_empty());
-    assert!(readiness.needs_detect);
-}
-
-struct StaticDetectResolver;
-
-impl DetectResolver for StaticDetectResolver {
-    fn resolve<'a>(
-        &'a self,
-        detect: &'a DetectSpec,
-        _context: &'a ResolverContext,
-        _options: &'a ValueRefEvalOptions,
-    ) -> futures::future::LocalBoxFuture<'a, Result<Value, ValueRefEvalError>> {
-        async move { Ok(json!({"selected": detect.kind})) }.boxed_local()
-    }
+    assert!(readiness.errors.is_empty());
 }
 
 #[test]
-fn readiness_async_detect_resolver_unblocks_node() {
+fn readiness_async_matches_sync() {
     let context = ResolverContext::new();
     let node = make_evm_call_node(json!({
         "type": "evm_call",
@@ -100,20 +84,17 @@ fn readiness_async_detect_resolver_unblocks_node() {
         "abi": {"type": "function", "name": "swap", "inputs": [], "outputs": []},
         "method": "swap",
         "args": {
-            "route": {"detect": {"kind": "choose_one"}}
+            "route": {"lit": "static"}
         }
     }));
-    let resolver = StaticDetectResolver;
 
     let readiness = block_on(get_node_readiness_async(
         &node,
         &context,
         &ValueRefEvalOptions::default(),
-        Some(&resolver),
     ));
 
     assert_eq!(readiness.state, NodeRunState::Ready);
-    assert!(!readiness.needs_detect);
     assert!(readiness.missing_refs.is_empty());
     assert!(readiness.errors.is_empty());
 }
@@ -149,6 +130,9 @@ fn readiness_resolves_bindings_params_for_execution_refs() {
     assert_eq!(readiness.state, NodeRunState::Ready);
     assert_eq!(
         readiness.resolved_params,
-        Some(serde_json::Map::from_iter([("amount".to_string(), json!("100"))]))
+        Some(serde_json::Map::from_iter([(
+            "amount".to_string(),
+            json!("100")
+        )]))
     );
 }

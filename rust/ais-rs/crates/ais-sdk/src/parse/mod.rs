@@ -3,14 +3,14 @@ mod json;
 mod yaml;
 
 use crate::documents::{
-    CatalogDocument, PackDocument, PlanDocument, PlanSkeletonDocument, ProtocolDocument,
-    WorkflowDocument,
+    CatalogDocument, PackDocument, PlanDocument, PlanSkeletonDocument, PlanSketchDocument,
+    ProtocolDocument, WorkflowDocument,
 };
 use ais_core::{FieldPath, IssueSeverity, StructuredIssue};
 use ais_schema::validate_schema_instance;
 use ais_schema::versions::{
     SCHEMA_CATALOG_0_0_1, SCHEMA_PACK_0_0_2, SCHEMA_PLAN_0_0_3, SCHEMA_PLAN_SKELETON_0_0_1,
-    SCHEMA_PROTOCOL_0_0_2, SCHEMA_WORKFLOW_0_0_3,
+    SCHEMA_PLAN_SKETCH_0_1_0, SCHEMA_PROTOCOL_0_0_2, SCHEMA_WORKFLOW_0_0_3,
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -47,6 +47,7 @@ pub enum AisDocument {
     Plan(PlanDocument),
     Catalog(CatalogDocument),
     PlanSkeleton(PlanSkeletonDocument),
+    PlanSketch(PlanSketchDocument),
 }
 
 impl AisDocument {
@@ -58,6 +59,7 @@ impl AisDocument {
             AisDocument::Plan(_) => SCHEMA_PLAN_0_0_3,
             AisDocument::Catalog(_) => SCHEMA_CATALOG_0_0_1,
             AisDocument::PlanSkeleton(_) => SCHEMA_PLAN_SKELETON_0_0_1,
+            AisDocument::PlanSketch(_) => SCHEMA_PLAN_SKETCH_0_1_0,
         }
     }
 
@@ -69,6 +71,7 @@ impl AisDocument {
             AisDocument::Plan(value) => serde_json::to_value(value).expect("serializable"),
             AisDocument::Catalog(value) => serde_json::to_value(value).expect("serializable"),
             AisDocument::PlanSkeleton(value) => serde_json::to_value(value).expect("serializable"),
+            AisDocument::PlanSketch(value) => serde_json::to_value(value).expect("serializable"),
         }
     }
 }
@@ -119,9 +122,12 @@ pub fn parse_document_with_options(
         SCHEMA_CATALOG_0_0_1 => {
             AisDocument::Catalog(parse_typed_document::<CatalogDocument>(value, &schema_id)?)
         }
-        SCHEMA_PLAN_SKELETON_0_0_1 => {
-            AisDocument::PlanSkeleton(parse_typed_document::<PlanSkeletonDocument>(value, &schema_id)?)
-        }
+        SCHEMA_PLAN_SKELETON_0_0_1 => AisDocument::PlanSkeleton(parse_typed_document::<
+            PlanSkeletonDocument,
+        >(value, &schema_id)?),
+        SCHEMA_PLAN_SKETCH_0_1_0 => AisDocument::PlanSketch(parse_typed_document::<
+            PlanSketchDocument,
+        >(value, &schema_id)?),
         _ => {
             return Err(vec![StructuredIssue {
                 kind: "parse_error".to_string(),

@@ -4,7 +4,7 @@ Status: Draft
 Spec Version: 0.0.3  
 Schema: `ais-flow/0.0.3`
 
-Workflows orchestrate protocol/query/action nodes as a DAG. Dynamic node values use `ValueRef` (`lit/ref/cel/detect/object/array`).
+Workflows orchestrate protocol/query/action nodes as a DAG. Dynamic node values use `ValueRef` (`lit/ref/cel/object/array`).
 
 ## 1. Strictness and extensions
 
@@ -58,12 +58,12 @@ Runner/SDK SHOULD ensure the selected pack includes all protocols used by workfl
 
 Node required fields:
 - `id`
-- `type` (`query_ref` | `action_ref`)
+- `type` (`query_ref` | `action_ref` | `assert` | `branch`)
 - `protocol` (`<protocol>@<version>`)
 
 Node optional fields:
 - `chain`
-- `query` / `action` (by node `type`)
+- `query` / `action` (by node `type`; for `assert|branch`, exactly one of `query` or `action` is required)
 - `args`
 - `calculated_overrides`
 - `deps`
@@ -97,11 +97,25 @@ Scheduling recommendations:
 - ready nodes MAY run in parallel
 - same-account same-chain EVM write broadcasts SHOULD be serialized (nonce safety)
 
+## 5.1 Control-intent node types (`assert` / `branch`)
+
+`assert` and `branch` are control-intent labels for planner readability.
+
+Current compile behavior:
+- they are not standalone execution handlers;
+- compiler resolves target operation from `query` or `action`;
+- compiled plan node kind is lowered to executable `query_ref` or `action_ref`;
+- original control label SHOULD be preserved in node extensions for trace/audit.
+
+Invalid control node shapes MUST be rejected:
+- both `query` and `action` present;
+- neither `query` nor `action` present.
+
 ## 6. Node lifecycle semantics
 
 Recommended per-attempt evaluation order:
 1. Evaluate `condition` (pre-check); falsy => node skipped
-2. Execute node (`query_ref` / `action_ref`)
+2. Execute node (`query_ref` / `action_ref`; `assert`/`branch` compile to one of these)
 3. Apply outputs/writes to runtime
 4. Evaluate `assert`; falsy => fail-fast
 5. Evaluate `until`; falsy => retry loop (subject to retry/timeout)

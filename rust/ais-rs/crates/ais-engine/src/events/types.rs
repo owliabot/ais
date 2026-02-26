@@ -10,6 +10,7 @@ pub enum EngineEventType {
     NodeReady,
     NodeBlocked,
     NeedUserConfirm,
+    NeedUserInput,
     QueryResult,
     TxPrepared,
     TxSent,
@@ -21,10 +22,12 @@ pub enum EngineEventType {
     SolverApplied,
     NodePaused,
     Skipped,
+    PlanReplaced,
     CommandAccepted,
     CommandRejected,
     PatchApplied,
     PatchRejected,
+    SideEffectObserved,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,7 +65,12 @@ pub struct EngineEventRecord {
 }
 
 impl EngineEventRecord {
-    pub fn new(run_id: impl Into<String>, seq: u64, ts: impl Into<String>, event: EngineEvent) -> Self {
+    pub fn new(
+        run_id: impl Into<String>,
+        seq: u64,
+        ts: impl Into<String>,
+        event: EngineEvent,
+    ) -> Self {
         Self {
             schema: ENGINE_EVENT_SCHEMA_0_0_3.to_string(),
             run_id: run_id.into(),
@@ -119,7 +127,9 @@ pub enum EngineEventSequenceError {
     },
 }
 
-pub fn ensure_monotonic_sequence(records: &[EngineEventRecord]) -> Result<(), EngineEventSequenceError> {
+pub fn ensure_monotonic_sequence(
+    records: &[EngineEventRecord],
+) -> Result<(), EngineEventSequenceError> {
     let Some(first) = records.first() else {
         return Err(EngineEventSequenceError::Empty);
     };

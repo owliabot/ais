@@ -1,9 +1,13 @@
+use crate::signer::SolanaTransactionSigner;
 use crate::types::{
     ProviderError, SolanaInstructionAccount, SolanaInstructionRequest, SolanaProviderRegistry,
     SolanaRpcClientFactory,
 };
-use crate::signer::SolanaTransactionSigner;
-use ais_engine::{Executor, ExecutorOutput};
+use ais_engine::{
+    canonical_side_effect_status, is_pending_side_effect_status, CheckpointSideEffectRecord,
+    Executor, ExecutorOutput, SIDE_EFFECT_RECORD_SCHEMA_0_1_0, SIDE_EFFECT_STATUS_CONFIRMED,
+    SIDE_EFFECT_STATUS_REVERTED, SIDE_EFFECT_STATUS_SENT,
+};
 use serde_json::{json, Map, Value};
 
 const SOLANA_READ_ALLOWLIST: &[&str] = &[
@@ -38,7 +42,10 @@ impl Default for SolanaInstructionExecutionConfig {
 }
 
 impl SolanaExecutor {
-    pub fn new(providers: SolanaProviderRegistry, client_factory: Box<dyn SolanaRpcClientFactory>) -> Self {
+    pub fn new(
+        providers: SolanaProviderRegistry,
+        client_factory: Box<dyn SolanaRpcClientFactory>,
+    ) -> Self {
         Self {
             providers,
             client_factory,
@@ -70,6 +77,11 @@ impl SolanaExecutor {
 
 impl Executor for SolanaExecutor {
     fn execute(&self, node: &Value, _runtime: &mut Value) -> Result<ExecutorOutput, String> {
+        let node_id = node
+            .as_object()
+            .and_then(|object| object.get("id"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| "node.id must be string".to_string())?;
         let chain = node
             .as_object()
             .and_then(|object| object.get("chain"))
@@ -93,9 +105,80 @@ impl Executor for SolanaExecutor {
 
         match execution_type {
             "solana_read" => self.execute_solana_read(chain, execution),
-            "solana_instruction" => self.execute_solana_instruction(chain, execution),
-            other => Err(format!("unsupported execution type for solana executor: {other}")),
+            "solana_instruction" => self.execute_solana_instruction(node_id, chain, execution),
+            other => Err(format!(
+                "unsupported execution type for solana executor: {other}"
+            )),
         }
+    }
+
+    fn reconcile_side_effect(
+        &self,
+        record: &CheckpointSideEffectRecord,
+    ) -> Result<Option<CheckpointSideEffectRecord>, String> {
+        if record.execution_type.as_deref() != Some("solana_instruction") {
+            return Ok(None);
+        }
+        let Some(chain) = record.chain.as_deref() else {
+            return Ok(None);
+        };
+        if !self.supports(chain, "solana_instruction") {
+            return Ok(None);
+        }
+        if !is_pending_side_effect_status(record.status.as_str()) {
+            return Ok(Some(record.clone()));
+        }
+
+        let mut updated = record.clone();
+        updated.observed_at = "1970-01-01T00:00:00Z".to_string();
+
+        let Some(signature) = updated.tx_hash.as_deref() else {
+            updated.reason_code = Some("side_effect_reconcile_missing_tx_hash".to_string());
+            return Ok(Some(updated));
+        };
+
+        let client = match self
+            .providers
+            .build_client_for_chain(chain, self.client_factory.as_ref())
+        {
+            Ok(client) => client,
+            Err(error) => {
+                updated.reason_code =
+                    Some("side_effect_reconcile_provider_unavailable".to_string());
+                updated.details = Some(json!({ "error": error.to_string() }));
+                return Ok(Some(updated));
+            }
+        };
+        let statuses = match client.get_signature_statuses(&[signature.to_string()]) {
+            Ok(value) => value,
+            Err(error) => {
+                updated.reason_code = Some("side_effect_reconcile_rpc_error".to_string());
+                updated.details = Some(json!({ "error": provider_to_string(error) }));
+                return Ok(Some(updated));
+            }
+        };
+        let status_item = statuses
+            .as_array()
+            .and_then(|items| items.first())
+            .cloned()
+            .unwrap_or(Value::Null);
+        if status_item.is_null() {
+            updated.reason_code = Some("side_effect_reconcile_pending".to_string());
+            return Ok(Some(updated));
+        }
+
+        updated.details = Some(json!({ "confirmation_status": status_item.clone() }));
+        updated.reason_code = Some("side_effect_reconciled".to_string());
+        if status_item
+            .as_object()
+            .and_then(|object| object.get("err"))
+            .is_some_and(|err| !err.is_null())
+        {
+            updated.status = SIDE_EFFECT_STATUS_REVERTED.to_string();
+        } else {
+            updated.status = SIDE_EFFECT_STATUS_CONFIRMED.to_string();
+        }
+        Ok(Some(updated))
     }
 }
 
@@ -115,7 +198,11 @@ impl SolanaExecutor {
                 SOLANA_READ_ALLOWLIST.join(",")
             ));
         }
-        let params = execution.get("params").map(lit_or_value).cloned().unwrap_or(Value::Null);
+        let params = execution
+            .get("params")
+            .map(lit_or_value)
+            .cloned()
+            .unwrap_or(Value::Null);
         let client = self
             .providers
             .build_client_for_chain(chain, self.client_factory.as_ref())
@@ -128,7 +215,9 @@ impl SolanaExecutor {
             }
             "getAccountInfo" => {
                 let pubkey = first_param_as_str(&params, "getAccountInfo")?;
-                client.get_account_info(pubkey).map_err(provider_to_string)?
+                client
+                    .get_account_info(pubkey)
+                    .map_err(provider_to_string)?
             }
             "getTokenAccountBalance" => {
                 let pubkey = first_param_as_str(&params, "getTokenAccountBalance")?;
@@ -143,10 +232,9 @@ impl SolanaExecutor {
                     .iter()
                     .map(lit_or_value)
                     .map(|value| {
-                        value
-                            .as_str()
-                            .map(str::to_string)
-                            .ok_or_else(|| "getSignatureStatuses signatures must be strings".to_string())
+                        value.as_str().map(str::to_string).ok_or_else(|| {
+                            "getSignatureStatuses signatures must be strings".to_string()
+                        })
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 client
@@ -164,11 +252,13 @@ impl SolanaExecutor {
                 "result": result,
             }),
             writes: Map::new(),
+            side_effects: Vec::new(),
         })
     }
 
     fn execute_solana_instruction(
         &self,
+        node_id: &str,
         chain: &str,
         execution: &Map<String, Value>,
     ) -> Result<ExecutorOutput, String> {
@@ -176,13 +266,7 @@ impl SolanaExecutor {
             .get("tx_version")
             .map(lit_or_value)
             .and_then(Value::as_str)
-            .unwrap_or_else(|| {
-                if execution.get("lookup_tables").is_some() {
-                    "v0"
-                } else {
-                    "legacy"
-                }
-            })
+            .unwrap_or("v0")
             .to_string();
         let program = value_or_lit_as_str(execution, "program")?.to_string();
         let instruction = execution
@@ -209,8 +293,8 @@ impl SolanaExecutor {
             lookup_tables,
         };
 
-        if request.lookup_tables.is_some() && request.tx_version != "v0" {
-            return Err("solana_instruction with lookup_tables must use tx_version=v0".to_string());
+        if request.tx_version != "v0" {
+            return Err("solana_instruction must use tx_version=v0".to_string());
         }
 
         let Some(signer) = self.signer.as_ref() else {
@@ -249,6 +333,29 @@ impl SolanaExecutor {
             None
         };
 
+        let signed_tx_hash = signed.tx_hash.clone();
+        let mut side_effect = CheckpointSideEffectRecord {
+            schema: Some(SIDE_EFFECT_RECORD_SCHEMA_0_1_0.to_string()),
+            idempotency_key: format!("tx:{node_id}:{signature}"),
+            node_id: node_id.to_string(),
+            effect_type: "tx".to_string(),
+            chain: Some(chain.to_string()),
+            execution_type: Some("solana_instruction".to_string()),
+            tx_hash: Some(signature.clone()),
+            nonce: None,
+            provider_ref: None,
+            reason_code: None,
+            details: Some(json!({
+                "signed_tx_hash": signed_tx_hash
+            })),
+            status: if confirmation_status.is_some() {
+                SIDE_EFFECT_STATUS_CONFIRMED.to_string()
+            } else {
+                SIDE_EFFECT_STATUS_SENT.to_string()
+            },
+            observed_at: "1970-01-01T00:00:00Z".to_string(),
+        };
+        side_effect.status = canonical_side_effect_status(side_effect.status.as_str()).to_string();
         Ok(ExecutorOutput {
             result: json!({
                 "execution_type": "solana_instruction",
@@ -260,6 +367,7 @@ impl SolanaExecutor {
                 "confirmation_status": confirmation_status,
             }),
             writes: Map::new(),
+            side_effects: vec![side_effect],
         })
     }
 }
@@ -299,10 +407,7 @@ fn parse_instruction_accounts(
         .collect::<Result<Vec<_>, _>>()
 }
 
-fn value_or_lit_as_str<'a>(
-    object: &'a Map<String, Value>,
-    key: &str,
-) -> Result<&'a str, String> {
+fn value_or_lit_as_str<'a>(object: &'a Map<String, Value>, key: &str) -> Result<&'a str, String> {
     let value = object
         .get(key)
         .ok_or_else(|| format!("missing field `{key}`"))?;

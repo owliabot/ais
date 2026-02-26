@@ -77,13 +77,23 @@ fn build_patch_audit_events(
     if apply_result.audit.applied_count > 0 {
         events.push(stream.next_record(
             ts.clone(),
-            patch_event(EngineEventType::PatchApplied, command_id, apply_result, false),
+            patch_event(
+                EngineEventType::PatchApplied,
+                command_id,
+                apply_result,
+                false,
+            ),
         ));
     }
     if apply_result.audit.rejected_count > 0 {
         events.push(stream.next_record(
             ts,
-            patch_event(EngineEventType::PatchRejected, command_id, apply_result, true),
+            patch_event(
+                EngineEventType::PatchRejected,
+                command_id,
+                apply_result,
+                true,
+            ),
         ));
     }
 
@@ -97,24 +107,31 @@ fn patch_event(
     include_rejections: bool,
 ) -> EngineEvent {
     let mut event = EngineEvent::new(event_type);
-    event
-        .data
-        .insert("command_id".to_string(), Value::String(command_id.to_string()));
+    event.data.insert(
+        "command_id".to_string(),
+        Value::String(command_id.to_string()),
+    );
     event.data.insert(
         "audit_hash".to_string(),
         Value::String(apply_result.audit.hash.clone()),
     );
     event.data.insert(
         "patch_count".to_string(),
-        Value::Number(serde_json::Number::from(apply_result.audit.patch_count as u64)),
+        Value::Number(serde_json::Number::from(
+            apply_result.audit.patch_count as u64,
+        )),
     );
     event.data.insert(
         "applied_count".to_string(),
-        Value::Number(serde_json::Number::from(apply_result.audit.applied_count as u64)),
+        Value::Number(serde_json::Number::from(
+            apply_result.audit.applied_count as u64,
+        )),
     );
     event.data.insert(
         "rejected_count".to_string(),
-        Value::Number(serde_json::Number::from(apply_result.audit.rejected_count as u64)),
+        Value::Number(serde_json::Number::from(
+            apply_result.audit.rejected_count as u64,
+        )),
     );
     event.data.insert(
         "partial_success".to_string(),

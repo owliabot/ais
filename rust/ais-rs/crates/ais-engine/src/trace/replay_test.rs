@@ -1,5 +1,9 @@
-use super::{replay_from_checkpoint, replay_trace_events, replay_trace_jsonl, ReplayOptions, ReplayStatus};
-use crate::checkpoint::{create_checkpoint_document, decode_checkpoint_json, CheckpointDocument, CheckpointEngineState};
+use super::{
+    replay_from_checkpoint, replay_trace_events, replay_trace_jsonl, ReplayOptions, ReplayStatus,
+};
+use crate::checkpoint::{
+    create_checkpoint_document, decode_checkpoint_json, CheckpointDocument, CheckpointEngineState,
+};
 use crate::events::{
     encode_event_jsonl_line, EngineEvent, EngineEventRecord, EngineEventStream, EngineEventType,
 };
@@ -22,6 +26,7 @@ impl Executor for MockExecutor {
         Ok(ExecutorOutput {
             result: json!({"done": true, "node_id": id}),
             writes: Map::new(),
+            side_effects: Vec::new(),
         })
     }
 }
@@ -101,8 +106,11 @@ fn replay_from_checkpoint_until_node_behavior() {
             paused_reason: Some("paused".to_string()),
             seen_command_ids: Vec::new(),
             pending_retries: Map::new(),
+            plan_epoch: 0,
+            plan_hash_history: vec!["plan-hash".to_string()],
         },
         Some(json!({"inputs":{"amount":"1"}})),
+        None,
         None,
     );
     let mut router = RouterExecutor::new();
@@ -180,6 +188,5 @@ fn load_checkpoint_fixture(relative: &str) -> CheckpointDocument {
 }
 
 fn fixture_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../fixtures/plan-events")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/plan-events")
 }

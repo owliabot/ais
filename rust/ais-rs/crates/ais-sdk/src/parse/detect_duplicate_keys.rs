@@ -35,8 +35,9 @@ pub fn detect_yaml_duplicate_keys(input: &str) -> Vec<StructuredIssue> {
 
         if let Some(item) = trimmed.strip_prefix("- ") {
             let item_trimmed = item.trim_start();
-            let seq_path = if let Some(existing) =
-                sequence_stack.last().filter(|sequence| sequence.indent == indent)
+            let seq_path = if let Some(existing) = sequence_stack
+                .last()
+                .filter(|sequence| sequence.indent == indent)
             {
                 existing.path.clone()
             } else {
@@ -164,7 +165,9 @@ fn strip_inline_comment(line: &str) -> &str {
 }
 
 fn count_leading_spaces(line: &str) -> usize {
-    line.chars().take_while(|character| *character == ' ').count()
+    line.chars()
+        .take_while(|character| *character == ' ')
+        .count()
 }
 
 fn parse_key_value(line: &str) -> Option<(String, Option<&str>)> {

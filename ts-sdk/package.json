@@ -21,6 +21,9 @@
     "build": "tsc",
     "build:schema": "npm run build && node dist/scripts/build-schema.js",
     "test": "vitest run",
+    "test:conformance:core": "AIS_CONFORMANCE_PROFILE=core vitest run tests/conformance-vectors.test.ts",
+    "test:conformance:extended": "AIS_CONFORMANCE_PROFILE=extended vitest run tests/conformance-vectors.test.ts",
+    "test:conformance:all": "AIS_CONFORMANCE_PROFILE=all vitest run tests/conformance-vectors.test.ts",
     "test:watch": "vitest",
     "lint": "eslint src tests",
     "prepublishOnly": "npm run build"

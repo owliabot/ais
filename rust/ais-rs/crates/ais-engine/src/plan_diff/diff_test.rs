@@ -98,6 +98,5 @@ fn load_plan_fixture(relative: &str) -> PlanDocument {
 }
 
 fn fixture_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../fixtures/plan-events")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/plan-events")
 }

@@ -6,23 +6,11 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CalculatedOverrideError {
     OverridesMustBeObject,
-    EntryMustBeObject {
-        key: String,
-    },
-    ExprMissing {
-        key: String,
-    },
-    ExprInvalid {
-        key: String,
-        reason: String,
-    },
-    MissingDependency {
-        key: String,
-        dependency: String,
-    },
-    DependencyCycle {
-        cycle: Vec<String>,
-    },
+    EntryMustBeObject { key: String },
+    ExprMissing { key: String },
+    ExprInvalid { key: String, reason: String },
+    MissingDependency { key: String, dependency: String },
+    DependencyCycle { cycle: Vec<String> },
 }
 
 pub fn calculated_override_order(
@@ -95,7 +83,13 @@ pub fn calculated_override_order_from_map(
 
     let mut ready = indegree
         .iter()
-        .filter_map(|(key, degree)| if *degree == 0 { Some(key.clone()) } else { None })
+        .filter_map(|(key, degree)| {
+            if *degree == 0 {
+                Some(key.clone())
+            } else {
+                None
+            }
+        })
         .collect::<Vec<_>>();
     ready.sort();
     let mut queue = VecDeque::from(ready);
@@ -122,7 +116,9 @@ pub fn calculated_override_order_from_map(
             .filter_map(|(key, degree)| if degree > 0 { Some(key) } else { None })
             .collect::<Vec<_>>();
         unresolved.sort();
-        return Err(vec![CalculatedOverrideError::DependencyCycle { cycle: unresolved }]);
+        return Err(vec![CalculatedOverrideError::DependencyCycle {
+            cycle: unresolved,
+        }]);
     }
 
     Ok(order)
@@ -147,7 +143,6 @@ fn collect_calculated_dependencies_inner(value_ref: &ValueRef, out: &mut BTreeSe
                 out.insert(dep);
             }
         }
-        ValueRef::Detect { .. } => {}
         ValueRef::Object { object } => {
             for child in object.values() {
                 collect_calculated_dependencies_inner(child, out);

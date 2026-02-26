@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ais:0.0.2:policy-gate-output",
+  "title": "AIS Policy Gate Output (ais-policy-gate-output/0.0.1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "kind"],
+  "properties": {
+    "schema": { "const": "ais-policy-gate-output/0.0.1" },
+    "kind": { "type": "string", "enum": ["ok", "need_user_confirm", "hard_block"] },
+    "reason": { "type": "string" },
+    "details": { "type": "object", "additionalProperties": true },
+    "extensions": { "type": "object", "additionalProperties": true }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "kind": { "const": "need_user_confirm" } },
+        "required": ["kind"]
+      },
+      "then": {
+        "required": ["reason", "details"]
+      }
+    },
+    {
+      "if": {
+        "properties": { "kind": { "const": "hard_block" } },
+        "required": ["kind"]
+      },
+      "then": {
+        "required": ["reason", "details"]
+      }
+    }
+  ]
+}
+

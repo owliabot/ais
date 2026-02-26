@@ -97,10 +97,6 @@ actions:
 
     requires_queries: ["quote", "allowance"]
 
-    hard_constraints:
-      max_slippage_bps: { ref: "params.slippage_bps" }
-      allow_unlimited_approval: { lit: false }
-
     calculated_fields:
       amount_in_atomic:
         expr: { cel: "to_atomic(params.amount_in, params.token_in)" }

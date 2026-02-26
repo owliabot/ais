@@ -79,7 +79,10 @@ pub fn replay_trace_events(events: &[EngineEventRecord], options: &ReplayOptions
     }
 }
 
-pub fn replay_trace_jsonl(input: &str, options: &ReplayOptions) -> Result<ReplayResult, ReplayError> {
+pub fn replay_trace_jsonl(
+    input: &str,
+    options: &ReplayOptions,
+) -> Result<ReplayResult, ReplayError> {
     let mut events = Vec::<EngineEventRecord>::new();
     for line in input.lines() {
         if line.trim().is_empty() {
@@ -108,6 +111,8 @@ pub fn replay_from_checkpoint(
         seen_command_ids: checkpoint.engine_state.seen_command_ids.clone(),
         paused_reason: checkpoint.engine_state.paused_reason.clone(),
         pending_retries: checkpoint.engine_state.pending_retries.clone(),
+        plan_epoch: checkpoint.engine_state.plan_epoch,
+        plan_hash_history: checkpoint.engine_state.plan_hash_history.clone(),
         next_seq: 0,
     };
 

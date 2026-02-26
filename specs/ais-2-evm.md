@@ -104,6 +104,12 @@ This repository's TypeScript SDK ships a built-in plugin execution type `evm_rpc
 - gated by packs under `plugins.execution.enabled` when a pack is in use
 - executor-enforced to a read-only allowlist of safe methods
 
+Normative plugin rules:
+- `evm_rpc` MUST be treated as a plugin execution type (non-core).
+- Engines MUST NOT execute `evm_rpc` unless:
+  - an `evm_rpc` handler is registered by the host/runner, and
+  - when a pack is active, `evm_rpc` is allowlisted under `pack.plugins.execution.enabled` for the target chain.
+
 Shape (informative):
 
 ```yaml

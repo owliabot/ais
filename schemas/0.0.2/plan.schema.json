@@ -60,59 +60,6 @@
       ],
       "additionalProperties": false
     },
-    "constraints_30": {
-      "type": "object",
-      "additionalProperties": {}
-    },
-    "detect_25": {
-      "type": "object",
-      "properties": {
-        "kind": {
-          "type": "string",
-          "enum": [
-            "choose_one",
-            "best_quote",
-            "best_path",
-            "protocol_specific"
-          ]
-        },
-        "provider": {
-          "type": "string"
-        },
-        "candidates": {
-          "type": "array",
-          "items": {}
-        },
-        "constraints": {
-          "$ref": "#/$defs/constraints_30"
-        },
-        "requires_capabilities": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "extensions": {
-          "$ref": "#/$defs/extensions_7"
-        }
-      },
-      "required": [
-        "kind"
-      ],
-      "additionalProperties": false
-    },
-    "Union24_3_24": {
-      "type": "object",
-      "properties": {
-        "detect": {
-          "$ref": "#/$defs/detect_25"
-        }
-      },
-      "required": [
-        "detect"
-      ],
-      "additionalProperties": false
-    },
     "object_35": {
       "type": "object",
       "additionalProperties": {
@@ -156,9 +103,6 @@
         },
         {
           "$ref": "#/$defs/Union22_2_22"
-        },
-        {
-          "$ref": "#/$defs/Union24_3_24"
         },
         {
           "$ref": "#/$defs/Union34_4_34"

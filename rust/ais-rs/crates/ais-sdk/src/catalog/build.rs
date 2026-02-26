@@ -1,3 +1,4 @@
+use crate::catalog::types::{ActionCard, CatalogCardLevel, CatalogParam, CatalogReturn, QueryCard};
 use crate::documents::{CatalogDocument, PackDocument, ProtocolDocument, WorkflowDocument};
 use ais_core::{stable_hash_hex, StableJsonOptions};
 use ais_schema::versions::SCHEMA_CATALOG_0_0_1;
@@ -14,6 +15,7 @@ pub struct CatalogBuildInput<'a> {
 #[derive(Debug, Clone, Default)]
 pub struct CatalogBuildOptions {
     pub created_at: Option<String>,
+    pub card_level: CatalogCardLevel,
 }
 
 pub fn build_catalog(
@@ -36,10 +38,10 @@ pub fn build_catalog(
         }));
 
         for action_id in protocol.actions.keys() {
-            actions.push(action_card(protocol, action_id));
+            actions.push(action_card(protocol, action_id, options.card_level)?.into_json_value()?);
         }
         for query_id in protocol.queries.keys() {
-            queries.push(query_card(protocol, query_id));
+            queries.push(query_card(protocol, query_id, options.card_level)?.into_json_value()?);
         }
     }
 
@@ -113,35 +115,98 @@ fn catalog_hash(catalog: &CatalogDocument) -> serde_json::Result<String> {
     stable_hash_hex(&value, &options)
 }
 
-fn action_card(protocol: &ProtocolDocument, action_id: &str) -> Value {
+fn action_card(
+    protocol: &ProtocolDocument,
+    action_id: &str,
+    card_level: CatalogCardLevel,
+) -> serde_json::Result<ActionCard> {
     let protocol_id = protocol_meta_field(protocol, "protocol").unwrap_or("unknown-protocol");
     let version = protocol_meta_field(protocol, "version").unwrap_or("0.0.0");
-    let spec = protocol.actions.get(action_id).cloned().unwrap_or(Value::Null);
+    let spec = protocol
+        .actions
+        .get(action_id)
+        .cloned()
+        .unwrap_or(Value::Null);
 
-    json!({
-        "ref": format!("{protocol_id}@{version}/{action_id}"),
-        "protocol": protocol_id,
-        "version": version,
-        "id": action_id,
-        "execution_types": extract_execution_types(&spec),
-        "execution_chains": extract_execution_chains(&spec),
-        "capabilities_required": merge_capabilities(protocol, &spec),
+    let include_detail = matches!(card_level, CatalogCardLevel::Detail);
+    Ok(ActionCard {
+        level: card_level,
+        ref_id: format!("{protocol_id}@{version}/{action_id}"),
+        protocol: protocol_id.to_string(),
+        version: version.to_string(),
+        id: action_id.to_string(),
+        description: spec
+            .as_object()
+            .and_then(|obj| obj.get("description"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        risk_level: normalize_risk_level(spec.as_object().and_then(|obj| obj.get("risk_level"))),
+        risk_tags: extract_string_array(spec.as_object().and_then(|obj| obj.get("risk_tags"))),
+        params: if include_detail {
+            extract_params(spec.as_object().and_then(|obj| obj.get("params")))
+        } else {
+            None
+        },
+        returns: if include_detail {
+            extract_returns(spec.as_object().and_then(|obj| obj.get("returns")))
+        } else {
+            None
+        },
+        requires_queries: if include_detail {
+            let values =
+                extract_string_array(spec.as_object().and_then(|obj| obj.get("requires_queries")));
+            if values.is_empty() {
+                None
+            } else {
+                Some(values)
+            }
+        } else {
+            None
+        },
+        capabilities_required: merge_capabilities(protocol, &spec),
+        execution_types: extract_execution_types(&spec),
+        execution_chains: extract_execution_chains(&spec),
     })
 }
 
-fn query_card(protocol: &ProtocolDocument, query_id: &str) -> Value {
+fn query_card(
+    protocol: &ProtocolDocument,
+    query_id: &str,
+    card_level: CatalogCardLevel,
+) -> serde_json::Result<QueryCard> {
     let protocol_id = protocol_meta_field(protocol, "protocol").unwrap_or("unknown-protocol");
     let version = protocol_meta_field(protocol, "version").unwrap_or("0.0.0");
-    let spec = protocol.queries.get(query_id).cloned().unwrap_or(Value::Null);
+    let spec = protocol
+        .queries
+        .get(query_id)
+        .cloned()
+        .unwrap_or(Value::Null);
 
-    json!({
-        "ref": format!("{protocol_id}@{version}/{query_id}"),
-        "protocol": protocol_id,
-        "version": version,
-        "id": query_id,
-        "execution_types": extract_execution_types(&spec),
-        "execution_chains": extract_execution_chains(&spec),
-        "capabilities_required": merge_capabilities(protocol, &spec),
+    let include_detail = matches!(card_level, CatalogCardLevel::Detail);
+    Ok(QueryCard {
+        level: card_level,
+        ref_id: format!("{protocol_id}@{version}/{query_id}"),
+        protocol: protocol_id.to_string(),
+        version: version.to_string(),
+        id: query_id.to_string(),
+        description: spec
+            .as_object()
+            .and_then(|obj| obj.get("description"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        params: if include_detail {
+            extract_params(spec.as_object().and_then(|obj| obj.get("params")))
+        } else {
+            None
+        },
+        returns: if include_detail {
+            extract_returns(spec.as_object().and_then(|obj| obj.get("returns")))
+        } else {
+            None
+        },
+        capabilities_required: merge_capabilities(protocol, &spec),
+        execution_types: extract_execution_types(&spec),
+        execution_chains: extract_execution_chains(&spec),
     })
 }
 
@@ -184,10 +249,8 @@ fn pack_card(pack: &PackDocument) -> Value {
     }
 
     includes.sort_by(|left, right| {
-        (value_str(left, "protocol"), value_str(left, "version")).cmp(&(
-            value_str(right, "protocol"),
-            value_str(right, "version"),
-        ))
+        (value_str(left, "protocol"), value_str(left, "version"))
+            .cmp(&(value_str(right, "protocol"), value_str(right, "version")))
     });
 
     json!({
@@ -197,6 +260,11 @@ fn pack_card(pack: &PackDocument) -> Value {
         "description": pack.description
             .clone()
             .or_else(|| pack.meta.as_ref().and_then(Value::as_object).and_then(|meta| meta.get("description")).and_then(Value::as_str).map(str::to_string)),
+        "policy": pack.policy.clone(),
+        "token_policy": pack.token_policy.clone(),
+        "providers": pack.providers.clone(),
+        "plugins": pack.plugins.clone(),
+        "overrides": pack.overrides.clone(),
     })
 }
 
@@ -305,6 +373,82 @@ fn merge_capabilities(protocol: &ProtocolDocument, spec: &Value) -> Vec<String> 
     values
 }
 
+fn normalize_risk_level(value: Option<&Value>) -> u8 {
+    value
+        .and_then(Value::as_u64)
+        .and_then(|risk| u8::try_from(risk).ok())
+        .filter(|risk| (1..=5).contains(risk))
+        .unwrap_or(3)
+}
+
+fn extract_params(value: Option<&Value>) -> Option<Vec<CatalogParam>> {
+    let mut params = value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let object = entry.as_object()?;
+            let name = object.get("name")?.as_str()?.to_string();
+            let param_type = object.get("type")?.as_str()?.to_string();
+            let description = object
+                .get("description")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let required = object.get("required").and_then(Value::as_bool);
+            let asset_ref = object
+                .get("asset_ref")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            Some(CatalogParam {
+                name,
+                param_type,
+                description,
+                required,
+                asset_ref,
+            })
+        })
+        .collect::<Vec<_>>();
+    params.sort_by(|left, right| left.name.cmp(&right.name));
+    if params.is_empty() {
+        None
+    } else {
+        Some(params)
+    }
+}
+
+fn extract_returns(value: Option<&Value>) -> Option<Vec<CatalogReturn>> {
+    let mut returns = value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let object = entry.as_object()?;
+            let name = object.get("name")?.as_str()?.to_string();
+            let return_type = object.get("type")?.as_str()?.to_string();
+            Some(CatalogReturn { name, return_type })
+        })
+        .collect::<Vec<_>>();
+    returns.sort_by(|left, right| left.name.cmp(&right.name));
+    if returns.is_empty() {
+        None
+    } else {
+        Some(returns)
+    }
+}
+
+fn extract_string_array(value: Option<&Value>) -> Vec<String> {
+    let mut values = value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    values.sort();
+    values.dedup();
+    values
+}
+
 fn extract_execution_chains(spec: &Value) -> Vec<String> {
     let mut chains = spec
         .as_object()
@@ -382,17 +526,13 @@ fn query_sort_key(left: &Value, right: &Value) -> std::cmp::Ordering {
 }
 
 fn pack_sort_key(left: &Value, right: &Value) -> std::cmp::Ordering {
-    (value_str(left, "name"), value_str(left, "version")).cmp(&(
-        value_str(right, "name"),
-        value_str(right, "version"),
-    ))
+    (value_str(left, "name"), value_str(left, "version"))
+        .cmp(&(value_str(right, "name"), value_str(right, "version")))
 }
 
 fn document_sort_key(left: &Value, right: &Value) -> std::cmp::Ordering {
-    (value_str(left, "kind"), value_str(left, "id")).cmp(&(
-        value_str(right, "kind"),
-        value_str(right, "id"),
-    ))
+    (value_str(left, "kind"), value_str(left, "id"))
+        .cmp(&(value_str(right, "kind"), value_str(right, "id")))
 }
 
 fn value_str<'a>(value: &'a Value, key: &str) -> &'a str {

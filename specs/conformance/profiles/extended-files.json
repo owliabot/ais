@@ -1,0 +1,11 @@
+{
+  "schema": "ais-conformance-profile/0.0.1",
+  "profile": "extended",
+  "vector_files": [
+    "specs/conformance/vectors/catalog.json",
+    "specs/conformance/vectors/confirmation-hash.json",
+    "specs/conformance/vectors/core.json",
+    "specs/conformance/vectors/numeric.json",
+    "specs/conformance/vectors/pattern.json"
+  ]
+}

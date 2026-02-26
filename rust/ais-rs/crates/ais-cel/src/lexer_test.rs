@@ -3,7 +3,10 @@ use super::{tokenize, TokenKind};
 #[test]
 fn tokenizes_composite_expression() {
     let tokens = tokenize("a.b[0] >= 10 && contains(name, 'x')").expect("tokenize");
-    let kinds = tokens.into_iter().map(|token| token.kind).collect::<Vec<_>>();
+    let kinds = tokens
+        .into_iter()
+        .map(|token| token.kind)
+        .collect::<Vec<_>>();
     assert_eq!(
         kinds,
         vec![

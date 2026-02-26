@@ -18,7 +18,10 @@ pub struct EvmRpcEndpoint {
 }
 
 impl EvmRpcEndpoint {
-    pub fn new(chain: impl Into<String>, rpc_url: impl Into<String>) -> Result<Self, ProviderError> {
+    pub fn new(
+        chain: impl Into<String>,
+        rpc_url: impl Into<String>,
+    ) -> Result<Self, ProviderError> {
         let endpoint = Self {
             chain: chain.into(),
             rpc_url: rpc_url.into(),

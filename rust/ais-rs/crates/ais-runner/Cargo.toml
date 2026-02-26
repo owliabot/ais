@@ -8,6 +8,9 @@ license.workspace = true
 ais-core = { path = "../ais-core" }
 ais-engine = { path = "../ais-engine" }
 ais-evm-executor = { path = "../ais-evm-executor" }
+ais-llm = { path = "../ais-llm" }
+ais-offchain-executor = { path = "../ais-offchain-executor" }
+ais-schema = { path = "../ais-schema" }
 ais-sdk = { path = "../ais-sdk" }
 ais-solana-executor = { path = "../ais-solana-executor" }
 clap = { version = "4", features = ["derive"] }

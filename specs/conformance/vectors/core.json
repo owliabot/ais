@@ -1,5 +1,6 @@
 {
   "schema": "ais-conformance/0.0.2",
+  "profile": "extended",
   "cases": [
     {
       "id": "jcs-basic",

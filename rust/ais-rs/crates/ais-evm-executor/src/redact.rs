@@ -109,8 +109,7 @@ fn looks_like_secret_string(text: &str) -> bool {
     lower.contains("private key")
         || lower.contains("seed phrase")
         || lower.contains("mnemonic")
-        || lower.starts_with("0x")
-            && text.len() > 120
+        || lower.starts_with("0x") && text.len() > 120
 }
 
 #[cfg(test)]

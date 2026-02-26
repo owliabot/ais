@@ -10,12 +10,7 @@ fn jsonl_roundtrip_produces_valid_envelope() {
     let mut event = EngineEvent::new(EngineEventType::PlanReady);
     event.data.insert("node_count".to_string(), json!(3));
 
-    let record = EngineEventRecord::new(
-        "run-1",
-        0,
-        "2026-02-13T00:00:00Z",
-        event,
-    );
+    let record = EngineEventRecord::new("run-1", 0, "2026-02-13T00:00:00Z", event);
     let line = encode_event_jsonl_line(&record).expect("must encode");
     assert!(line.ends_with('\n'));
 
@@ -30,9 +25,18 @@ fn jsonl_roundtrip_produces_valid_envelope() {
 #[test]
 fn stream_emits_monotonic_sequence() {
     let mut stream = EngineEventStream::new("run-2");
-    let first = stream.next_record("2026-02-13T00:00:00Z", EngineEvent::new(EngineEventType::PlanReady));
-    let second = stream.next_record("2026-02-13T00:00:01Z", EngineEvent::new(EngineEventType::NodeReady));
-    let third = stream.next_record("2026-02-13T00:00:02Z", EngineEvent::new(EngineEventType::TxSent));
+    let first = stream.next_record(
+        "2026-02-13T00:00:00Z",
+        EngineEvent::new(EngineEventType::PlanReady),
+    );
+    let second = stream.next_record(
+        "2026-02-13T00:00:01Z",
+        EngineEvent::new(EngineEventType::NodeReady),
+    );
+    let third = stream.next_record(
+        "2026-02-13T00:00:02Z",
+        EngineEvent::new(EngineEventType::TxSent),
+    );
 
     assert_eq!(first.seq, 0);
     assert_eq!(second.seq, 1);
@@ -66,4 +70,16 @@ fn sequence_validator_rejects_gap() {
             actual: 2,
         }
     );
+}
+
+#[test]
+fn side_effect_observed_variant_serializes_with_stable_name() {
+    let value = serde_json::to_value(EngineEventType::SideEffectObserved).expect("serialize");
+    assert_eq!(value.as_str(), Some("side_effect_observed"));
+}
+
+#[test]
+fn need_user_input_variant_serializes_with_stable_name() {
+    let value = serde_json::to_value(EngineEventType::NeedUserInput).expect("serialize");
+    assert_eq!(value.as_str(), Some("need_user_input"));
 }

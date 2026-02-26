@@ -18,7 +18,9 @@ pub fn save_checkpoint_to_path(
     Ok(())
 }
 
-pub fn load_checkpoint_from_path(path: impl AsRef<Path>) -> Result<CheckpointDocument, CheckpointStoreError> {
+pub fn load_checkpoint_from_path(
+    path: impl AsRef<Path>,
+) -> Result<CheckpointDocument, CheckpointStoreError> {
     let content = std::fs::read_to_string(path)?;
     Ok(decode_checkpoint_json(&content)?)
 }

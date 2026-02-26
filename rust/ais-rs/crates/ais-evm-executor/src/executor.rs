@@ -3,11 +3,19 @@ use crate::client_pool::AlloyRpcClientPool;
 use crate::provider::EvmProviderRegistry;
 use crate::signer::EvmTransactionSigner;
 use crate::types::EVM_RPC_ALLOWLIST;
+pub use crate::types::{
+    EvmCallExecutionConfig, EvmCallSendRequest, EvmCallSendResult, EvmCallSender, EvmExecutorError,
+    EvmReadRequest, EvmReadRpcSender, EvmRpcRequest,
+};
 use crate::utils::{
     lit_or_value, normalize_evm_rpc_params, optional_u128_field, optional_u64_field, parse_address,
     parse_u256, parse_u256_quantity, value_or_lit_as_str,
 };
-use ais_engine::{Executor, ExecutorOutput};
+use ais_engine::{
+    canonical_side_effect_status, is_pending_side_effect_status, CheckpointSideEffectRecord,
+    Executor, ExecutorOutput, SIDE_EFFECT_RECORD_SCHEMA_0_1_0, SIDE_EFFECT_STATUS_CONFIRMED,
+    SIDE_EFFECT_STATUS_REVERTED, SIDE_EFFECT_STATUS_SENT,
+};
 use alloy::{
     consensus::Transaction,
     network::{EthereumWallet, TransactionBuilder},
@@ -21,10 +29,6 @@ use serde_json::{json, Map, Value};
 use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::Duration;
-pub use crate::types::{
-    EvmCallExecutionConfig, EvmCallSendRequest, EvmCallSendResult, EvmCallSender, EvmExecutorError,
-    EvmReadRequest, EvmReadRpcSender, EvmRpcRequest,
-};
 
 pub struct EvmExecutor {
     providers: EvmProviderRegistry,
@@ -79,6 +83,11 @@ impl EvmExecutor {
 
 impl Executor for EvmExecutor {
     fn execute(&self, node: &Value, _runtime: &mut Value) -> Result<ExecutorOutput, String> {
+        let node_id = node
+            .as_object()
+            .and_then(|object| object.get("id"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| "node.id must be string".to_string())?;
         let chain = node
             .as_object()
             .and_then(|object| object.get("chain"))
@@ -102,10 +111,81 @@ impl Executor for EvmExecutor {
 
         match execution_type {
             "evm_read" => self.execute_evm_read(chain, execution),
-            "evm_call" => self.execute_evm_call(chain, execution),
+            "evm_call" => self.execute_evm_call(node_id, chain, execution),
             "evm_rpc" => self.execute_evm_rpc(chain, execution),
-            other => Err(format!("unsupported execution type for evm executor: {other}")),
+            other => Err(format!(
+                "unsupported execution type for evm executor: {other}"
+            )),
         }
+    }
+
+    fn reconcile_side_effect(
+        &self,
+        record: &CheckpointSideEffectRecord,
+    ) -> Result<Option<CheckpointSideEffectRecord>, String> {
+        if record.execution_type.as_deref() != Some("evm_call") {
+            return Ok(None);
+        }
+        let Some(chain) = record.chain.as_deref() else {
+            return Ok(None);
+        };
+        if !self.supports(chain, "evm_call") {
+            return Ok(None);
+        }
+        if !is_pending_side_effect_status(record.status.as_str()) {
+            return Ok(Some(record.clone()));
+        }
+
+        let mut updated = record.clone();
+        updated.observed_at = "1970-01-01T00:00:00Z".to_string();
+
+        let Some(tx_hash) = updated.tx_hash.as_deref() else {
+            updated.reason_code = Some("side_effect_reconcile_missing_tx_hash".to_string());
+            return Ok(Some(updated));
+        };
+        if !looks_like_evm_tx_hash(tx_hash) {
+            updated.reason_code = Some("side_effect_reconcile_invalid_tx_hash".to_string());
+            return Ok(Some(updated));
+        }
+
+        let endpoint = match self.providers.endpoint(chain) {
+            Ok(endpoint) => endpoint,
+            Err(error) => {
+                updated.reason_code =
+                    Some("side_effect_reconcile_provider_unavailable".to_string());
+                updated.details = Some(json!({ "error": error.to_string() }));
+                return Ok(Some(updated));
+            }
+        };
+        let receipt = match self.read_rpc_sender.rpc_request(EvmRpcRequest {
+            chain: chain.to_string(),
+            rpc_url: endpoint.rpc_url.clone(),
+            timeout_ms: endpoint.timeout_ms,
+            method: "eth_getTransactionReceipt".to_string(),
+            params: json!([tx_hash]),
+        }) {
+            Ok(value) => value,
+            Err(error) => {
+                updated.reason_code = Some("side_effect_reconcile_rpc_error".to_string());
+                updated.details = Some(json!({ "error": error }));
+                return Ok(Some(updated));
+            }
+        };
+
+        if receipt.is_null() {
+            updated.reason_code = Some("side_effect_reconcile_pending".to_string());
+            return Ok(Some(updated));
+        }
+
+        let receipt_success = is_receipt_success(&receipt);
+        updated.details = Some(json!({ "receipt": receipt }));
+        updated.reason_code = Some("side_effect_reconciled".to_string());
+        if receipt_success {
+            updated.status = SIDE_EFFECT_STATUS_CONFIRMED.to_string();
+        } else {
+            updated.status = SIDE_EFFECT_STATUS_REVERTED.to_string();
+        }
+        Ok(Some(updated))
     }
 }
 
@@ -161,11 +241,13 @@ impl EvmExecutor {
         Ok(ExecutorOutput {
             result: Value::Object(payload),
             writes: Map::new(),
+            side_effects: Vec::new(),
         })
     }
 
     fn execute_evm_call(
         &self,
+        node_id: &str,
         chain: &str,
         execution: &Map<String, Value>,
     ) -> Result<ExecutorOutput, String> {
@@ -205,9 +287,9 @@ impl EvmExecutor {
         let from = signer
             .address()
             .ok_or_else(|| "evm_call signer must expose address".to_string())?;
-        let private_key_hex = signer
-            .private_key_hex()
-            .ok_or_else(|| "evm_call signer must expose private_key_hex for alloy wallet".to_string())?;
+        let private_key_hex = signer.private_key_hex().ok_or_else(|| {
+            "evm_call signer must expose private_key_hex for alloy wallet".to_string()
+        })?;
         let endpoint = self
             .providers
             .endpoint(chain)
@@ -228,6 +310,33 @@ impl EvmExecutor {
             wait_for_receipt: self.call_config.wait_for_receipt,
         })?;
 
+        let status = match send_result.receipt.as_ref() {
+            Some(receipt) => {
+                if is_receipt_success(receipt) {
+                    SIDE_EFFECT_STATUS_CONFIRMED
+                } else {
+                    SIDE_EFFECT_STATUS_REVERTED
+                }
+            }
+            None => SIDE_EFFECT_STATUS_SENT,
+        };
+        let tx_hash = send_result.tx_hash.clone();
+        let side_effect = CheckpointSideEffectRecord {
+            schema: Some(SIDE_EFFECT_RECORD_SCHEMA_0_1_0.to_string()),
+            idempotency_key: format!("tx:{node_id}:{tx_hash}"),
+            node_id: node_id.to_string(),
+            effect_type: "tx".to_string(),
+            chain: Some(chain.to_string()),
+            execution_type: Some("evm_call".to_string()),
+            tx_hash: Some(tx_hash),
+            nonce: send_result.nonce,
+            provider_ref: None,
+            reason_code: None,
+            details: None,
+            status: canonical_side_effect_status(status).to_string(),
+            observed_at: "1970-01-01T00:00:00Z".to_string(),
+        };
+
         Ok(ExecutorOutput {
             result: json!({
                 "execution_type": "evm_call",
@@ -246,6 +355,7 @@ impl EvmExecutor {
                 "receipt": send_result.receipt,
             }),
             writes: Map::new(),
+            side_effects: vec![side_effect],
         })
     }
 
@@ -264,7 +374,11 @@ impl EvmExecutor {
                 EVM_RPC_ALLOWLIST.join(",")
             ));
         }
-        let params = execution.get("params").map(lit_or_value).cloned().unwrap_or(Value::Null);
+        let params = execution
+            .get("params")
+            .map(lit_or_value)
+            .cloned()
+            .unwrap_or(Value::Null);
         let params = normalize_evm_rpc_params(method, params)?;
         let endpoint = self
             .providers
@@ -296,8 +410,34 @@ impl EvmExecutor {
         Ok(ExecutorOutput {
             result: Value::Object(payload),
             writes: Map::new(),
+            side_effects: Vec::new(),
         })
     }
+}
+
+fn is_receipt_success(receipt: &Value) -> bool {
+    receipt
+        .as_object()
+        .and_then(|object| object.get("status"))
+        .map_or(true, |status| match status {
+            Value::String(value) => {
+                let normalized = value.trim().to_ascii_lowercase();
+                normalized == "0x1" || normalized == "1" || normalized == "true"
+            }
+            Value::Number(value) => value.as_u64() == Some(1),
+            Value::Bool(value) => *value,
+            _ => false,
+        })
+}
+
+fn looks_like_evm_tx_hash(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 66 || !(bytes.starts_with(b"0x") || bytes.starts_with(b"0X")) {
+        return false;
+    }
+    bytes[2..]
+        .iter()
+        .all(|ch| (*ch as char).is_ascii_hexdigit())
 }
 
 pub struct AlloyEvmCallSender {
@@ -341,9 +481,9 @@ impl EvmReadRpcSender for AlloyEvmReadRpcSender {
                 Duration::from_millis(request.timeout_ms),
                 provider.call(&tx),
             )
-                .await
-                .map_err(|_| format!("eth_call timeout after {}ms", request.timeout_ms))?
-                .map_err(|error| format!("eth_call failed: {error}"))
+            .await
+            .map_err(|_| format!("eth_call timeout after {}ms", request.timeout_ms))?
+            .map_err(|error| format!("eth_call failed: {error}"))
         })
     }
 
@@ -355,15 +495,21 @@ impl EvmReadRpcSender for AlloyEvmReadRpcSender {
         )?;
         self.client_pool.runtime.block_on(async move {
             let provider = ProviderBuilder::new().on_client(client);
-            let raw_params = serde_json::value::to_raw_value(&request.params)
-                .map_err(|error| format!("rpc `{}` params encode failed: {error}", request.method))?;
+            let raw_params = serde_json::value::to_raw_value(&request.params).map_err(|error| {
+                format!("rpc `{}` params encode failed: {error}", request.method)
+            })?;
             let raw_result = tokio::time::timeout(
                 Duration::from_millis(request.timeout_ms),
                 provider.raw_request_dyn(Cow::Owned(request.method.clone()), &raw_params),
             )
-                .await
-                .map_err(|_| format!("rpc `{}` timeout after {}ms", request.method, request.timeout_ms))?
-                .map_err(|error| format!("evm_rpc `{}` failed: {error}", request.method))?;
+            .await
+            .map_err(|_| {
+                format!(
+                    "rpc `{}` timeout after {}ms",
+                    request.method, request.timeout_ms
+                )
+            })?
+            .map_err(|error| format!("evm_rpc `{}` failed: {error}", request.method))?;
             serde_json::from_str::<Value>(raw_result.get())
                 .map_err(|error| format!("rpc `{}` result decode failed: {error}", request.method))
         })
@@ -408,8 +554,7 @@ fn send_evm_call_with_fillers(
             tx = tx.with_max_priority_fee_per_gas(max_priority_fee_per_gas);
         }
 
-        let pending = provider
-            .send_transaction(tx);
+        let pending = provider.send_transaction(tx);
         let pending = tokio::time::timeout(Duration::from_millis(request.timeout_ms), pending)
             .await
             .map_err(|_| format!("send transaction timeout after {}ms", request.timeout_ms))?
@@ -419,9 +564,9 @@ fn send_evm_call_with_fillers(
             Duration::from_millis(request.timeout_ms),
             provider.get_transaction_by_hash(tx_hash),
         )
-            .await
-            .map_err(|_| format!("get transaction timeout after {}ms", request.timeout_ms))?
-            .map_err(|error| format!("get transaction by hash failed: {error}"))?;
+        .await
+        .map_err(|_| format!("get transaction timeout after {}ms", request.timeout_ms))?
+        .map_err(|error| format!("get transaction by hash failed: {error}"))?;
         let receipt = if request.wait_for_receipt {
             Some(
                 serde_json::to_value(
@@ -429,9 +574,9 @@ fn send_evm_call_with_fillers(
                         Duration::from_millis(request.timeout_ms),
                         pending.get_receipt(),
                     )
-                        .await
-                        .map_err(|_| format!("get receipt timeout after {}ms", request.timeout_ms))?
-                        .map_err(|error| format!("get receipt failed: {error}"))?,
+                    .await
+                    .map_err(|_| format!("get receipt timeout after {}ms", request.timeout_ms))?
+                    .map_err(|error| format!("get receipt failed: {error}"))?,
                 )
                 .map_err(|error| format!("receipt json encode failed: {error}"))?,
             )

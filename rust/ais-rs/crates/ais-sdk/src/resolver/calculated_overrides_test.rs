@@ -10,7 +10,10 @@ fn override_order_supports_chained_dependencies() {
     });
     let order = calculated_override_order_from_map(overrides.as_object().expect("object"))
         .expect("must order");
-    assert_eq!(order, vec!["amount_out_min", "slippage_bps", "amount_out_limit"]);
+    assert_eq!(
+        order,
+        vec!["amount_out_min", "slippage_bps", "amount_out_limit"]
+    );
 }
 
 #[test]

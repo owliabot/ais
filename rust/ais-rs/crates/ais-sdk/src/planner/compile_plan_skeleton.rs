@@ -1,4 +1,4 @@
-use crate::documents::{PlanDocument, PlanSkeletonDocument, WorkflowDocument};
+use crate::documents::{PlanDocument, PlanSkeletonDocument, ProtocolDocument, WorkflowDocument};
 use crate::resolver::ResolverContext;
 use ais_core::{FieldPath, FieldPathSegment, IssueSeverity, StructuredIssue};
 use ais_schema::versions::{SCHEMA_PLAN_0_0_3, SCHEMA_WORKFLOW_0_0_3};
@@ -199,70 +199,28 @@ fn compile_node(
         )]);
     };
 
-    let (leaf_key, operation_spec) = match kind {
-        "action_ref" => {
-            let Some(action) = node_obj.get("action").and_then(Value::as_str) else {
-                return Err(vec![issue(
-                    "reference_error",
-                    path_with_key(&base_path, "action"),
-                    "action_ref node must include `action`",
-                    "skeleton.node.action_required",
-                )]);
-            };
-            let Some(spec) = protocol.actions.get(action) else {
-                return Err(vec![issue(
-                    "reference_error",
-                    path_with_key(&base_path, "action"),
-                    &format!("action not found: {protocol_key}/{action}"),
-                    "skeleton.node.action_missing",
-                )]);
-            };
-            ("action", (action, spec))
-        }
-        "query_ref" => {
-            let Some(query) = node_obj.get("query").and_then(Value::as_str) else {
-                return Err(vec![issue(
-                    "reference_error",
-                    path_with_key(&base_path, "query"),
-                    "query_ref node must include `query`",
-                    "skeleton.node.query_required",
-                )]);
-            };
-            let Some(spec) = protocol.queries.get(query) else {
-                return Err(vec![issue(
-                    "reference_error",
-                    path_with_key(&base_path, "query"),
-                    &format!("query not found: {protocol_key}/{query}"),
-                    "skeleton.node.query_missing",
-                )]);
-            };
-            ("query", (query, spec))
-        }
-        _ => {
-            return Err(vec![issue(
-                "plan_build_error",
-                path_with_key(&base_path, "type"),
-                "skeleton node type must be action_ref or query_ref",
-                "skeleton.node.type_invalid",
-            )])
-        }
-    };
+    let resolved =
+        resolve_skeleton_operation(node_obj, &base_path, protocol, protocol_key.as_str(), kind)?;
 
-    let execution = select_execution_for_chain(operation_spec.1, &chain).ok_or_else(|| {
-        vec![issue(
-            "reference_error",
-            path_with_key(&base_path, "chain"),
-            &format!(
-                "no execution mapping for chain `{chain}` in {protocol_key}/{}",
-                operation_spec.0
-            ),
-            "skeleton.node.execution_missing_for_chain",
-        )]
-    })?;
+    let execution =
+        select_execution_for_chain(resolved.operation_spec, &chain).ok_or_else(|| {
+            vec![issue(
+                "reference_error",
+                path_with_key(&base_path, "chain"),
+                &format!(
+                    "no execution mapping for chain `{chain}` in {protocol_key}/{}",
+                    resolved.source_leaf_value
+                ),
+                "skeleton.node.execution_missing_for_chain",
+            )]
+        })?;
 
     let mut plan_node = Map::new();
     plan_node.insert("id".to_string(), Value::String(node_id.to_string()));
-    plan_node.insert("kind".to_string(), Value::String(kind.to_string()));
+    plan_node.insert(
+        "kind".to_string(),
+        Value::String(resolved.executable_kind.to_string()),
+    );
     plan_node.insert("chain".to_string(), Value::String(chain));
     plan_node.insert("execution".to_string(), execution);
 
@@ -301,11 +259,17 @@ fn compile_node(
     );
     source.insert("node_id".to_string(), Value::String(node_id.to_string()));
     source.insert("protocol".to_string(), Value::String(protocol_key));
-    source.insert(leaf_key.to_string(), Value::String(operation_spec.0.to_string()));
+    source.insert(
+        resolved.source_leaf_key.to_string(),
+        Value::String(resolved.source_leaf_value.clone()),
+    );
     plan_node.insert("source".to_string(), Value::Object(source));
+    if let Some(control_step_kind) = resolved.control_step_kind.as_deref() {
+        insert_control_step_kind_extension(&mut plan_node, control_step_kind);
+    }
 
-    if let Some(description) = operation_spec
-        .1
+    if let Some(description) = resolved
+        .operation_spec
         .as_object()
         .and_then(|obj| obj.get("description"))
         .cloned()
@@ -314,6 +278,152 @@ fn compile_node(
     }
 
     Ok(Value::Object(plan_node))
+}
+
+#[derive(Debug)]
+struct ResolvedSkeletonOperation<'a> {
+    executable_kind: &'static str,
+    source_leaf_key: &'static str,
+    source_leaf_value: String,
+    operation_spec: &'a Value,
+    control_step_kind: Option<String>,
+}
+
+fn resolve_skeleton_operation<'a>(
+    node_obj: &Map<String, Value>,
+    base_path: &[FieldPathSegment],
+    protocol: &'a ProtocolDocument,
+    protocol_key: &str,
+    kind: &str,
+) -> Result<ResolvedSkeletonOperation<'a>, Vec<StructuredIssue>> {
+    let action = node_obj.get("action").and_then(Value::as_str);
+    let query = node_obj.get("query").and_then(Value::as_str);
+
+    match kind {
+        "action_ref" => {
+            let Some(action) = action else {
+                return Err(vec![issue(
+                    "reference_error",
+                    path_with_key(base_path, "action"),
+                    "action_ref node must include `action`",
+                    "skeleton.node.action_required",
+                )]);
+            };
+            let Some(spec) = protocol.actions.get(action) else {
+                return Err(vec![issue(
+                    "reference_error",
+                    path_with_key(base_path, "action"),
+                    &format!("action not found: {protocol_key}/{action}"),
+                    "skeleton.node.action_missing",
+                )]);
+            };
+            Ok(ResolvedSkeletonOperation {
+                executable_kind: "action_ref",
+                source_leaf_key: "action",
+                source_leaf_value: action.to_string(),
+                operation_spec: spec,
+                control_step_kind: None,
+            })
+        }
+        "query_ref" => {
+            let Some(query) = query else {
+                return Err(vec![issue(
+                    "reference_error",
+                    path_with_key(base_path, "query"),
+                    "query_ref node must include `query`",
+                    "skeleton.node.query_required",
+                )]);
+            };
+            let Some(spec) = protocol.queries.get(query) else {
+                return Err(vec![issue(
+                    "reference_error",
+                    path_with_key(base_path, "query"),
+                    &format!("query not found: {protocol_key}/{query}"),
+                    "skeleton.node.query_missing",
+                )]);
+            };
+            Ok(ResolvedSkeletonOperation {
+                executable_kind: "query_ref",
+                source_leaf_key: "query",
+                source_leaf_value: query.to_string(),
+                operation_spec: spec,
+                control_step_kind: None,
+            })
+        }
+        "assert" | "branch" => match (action, query) {
+            (Some(action), None) => {
+                let Some(spec) = protocol.actions.get(action) else {
+                    return Err(vec![issue(
+                        "reference_error",
+                        path_with_key(base_path, "action"),
+                        &format!("action not found: {protocol_key}/{action}"),
+                        "skeleton.node.action_missing",
+                    )]);
+                };
+                Ok(ResolvedSkeletonOperation {
+                    executable_kind: "action_ref",
+                    source_leaf_key: "action",
+                    source_leaf_value: action.to_string(),
+                    operation_spec: spec,
+                    control_step_kind: Some(kind.to_string()),
+                })
+            }
+            (None, Some(query)) => {
+                let Some(spec) = protocol.queries.get(query) else {
+                    return Err(vec![issue(
+                        "reference_error",
+                        path_with_key(base_path, "query"),
+                        &format!("query not found: {protocol_key}/{query}"),
+                        "skeleton.node.query_missing",
+                    )]);
+                };
+                Ok(ResolvedSkeletonOperation {
+                    executable_kind: "query_ref",
+                    source_leaf_key: "query",
+                    source_leaf_value: query.to_string(),
+                    operation_spec: spec,
+                    control_step_kind: Some(kind.to_string()),
+                })
+            }
+            (Some(_), Some(_)) => Err(vec![issue(
+                "plan_build_error",
+                path_with_key(base_path, "type"),
+                "control node type assert/branch must set exactly one of `action` or `query`",
+                "skeleton.node.control_target_ambiguous",
+            )]),
+            (None, None) => Err(vec![issue(
+                "plan_build_error",
+                path_with_key(base_path, "type"),
+                "control node type assert/branch requires `action` or `query`",
+                "skeleton.node.control_target_required",
+            )]),
+        },
+        _ => Err(vec![issue(
+            "plan_build_error",
+            path_with_key(base_path, "type"),
+            "skeleton node type must be action_ref/query_ref/assert/branch",
+            "skeleton.node.type_invalid",
+        )]),
+    }
+}
+
+fn insert_control_step_kind_extension(plan_node: &mut Map<String, Value>, step_kind: &str) {
+    let extensions = plan_node
+        .entry("extensions".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    let Some(extensions_obj) = extensions.as_object_mut() else {
+        return;
+    };
+    let control = extensions_obj
+        .entry("control".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    let Some(control_obj) = control.as_object_mut() else {
+        return;
+    };
+    control_obj.insert(
+        "step_kind".to_string(),
+        Value::String(step_kind.to_string()),
+    );
 }
 
 fn select_execution_for_chain(operation_spec: &Value, chain: &str) -> Option<Value> {
@@ -472,7 +582,12 @@ fn copy_if_present(from: &Map<String, Value>, to: &mut Map<String, Value>, key: 
     }
 }
 
-fn issue(kind: &str, path: Vec<FieldPathSegment>, message: &str, reference: &str) -> StructuredIssue {
+fn issue(
+    kind: &str,
+    path: Vec<FieldPathSegment>,
+    message: &str,
+    reference: &str,
+) -> StructuredIssue {
     StructuredIssue {
         kind: kind.to_string(),
         severity: IssueSeverity::Error,
@@ -490,7 +605,11 @@ fn path_with_key(path: &[FieldPathSegment], key: &str) -> Vec<FieldPathSegment> 
     out
 }
 
-fn path_with_key_index(path: &[FieldPathSegment], key: &str, index: usize) -> Vec<FieldPathSegment> {
+fn path_with_key_index(
+    path: &[FieldPathSegment],
+    key: &str,
+    index: usize,
+) -> Vec<FieldPathSegment> {
     let mut out = path.to_vec();
     out.push(FieldPathSegment::Key(key.to_string()));
     out.push(FieldPathSegment::Index(index));

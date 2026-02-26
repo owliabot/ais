@@ -152,59 +152,6 @@
       ],
       "additionalProperties": false
     },
-    "constraints_48": {
-      "type": "object",
-      "additionalProperties": {}
-    },
-    "detect_43": {
-      "type": "object",
-      "properties": {
-        "kind": {
-          "type": "string",
-          "enum": [
-            "choose_one",
-            "best_quote",
-            "best_path",
-            "protocol_specific"
-          ]
-        },
-        "provider": {
-          "type": "string"
-        },
-        "candidates": {
-          "type": "array",
-          "items": {}
-        },
-        "constraints": {
-          "$ref": "#/$defs/constraints_48"
-        },
-        "requires_capabilities": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "extensions": {
-          "$ref": "#/$defs/extensions_7"
-        }
-      },
-      "required": [
-        "kind"
-      ],
-      "additionalProperties": false
-    },
-    "Union42_3_42": {
-      "type": "object",
-      "properties": {
-        "detect": {
-          "$ref": "#/$defs/detect_43"
-        }
-      },
-      "required": [
-        "detect"
-      ],
-      "additionalProperties": false
-    },
     "object_53": {
       "type": "object",
       "additionalProperties": {
@@ -248,9 +195,6 @@
         },
         {
           "$ref": "#/$defs/Union40_2_40"
-        },
-        {
-          "$ref": "#/$defs/Union42_3_42"
         },
         {
           "$ref": "#/$defs/Union52_4_52"
@@ -323,7 +267,9 @@
           "type": "string",
           "enum": [
             "query_ref",
-            "action_ref"
+            "action_ref",
+            "assert",
+            "branch"
           ]
         },
         "chain": {
@@ -386,18 +332,11 @@
       "type": "object",
       "additionalProperties": {}
     },
-    "hard_constraints_69": {
-      "type": "object",
-      "additionalProperties": {}
-    },
     "policy_66": {
       "type": "object",
       "properties": {
         "approvals": {
           "$ref": "#/$defs/approvals_67"
-        },
-        "hard_constraints": {
-          "$ref": "#/$defs/hard_constraints_69"
         },
         "extensions": {
           "$ref": "#/$defs/extensions_7"

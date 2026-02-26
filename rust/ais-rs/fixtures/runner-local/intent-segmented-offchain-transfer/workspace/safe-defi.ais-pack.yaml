@@ -1,0 +1,25 @@
+schema: "ais-pack/0.0.2"
+
+meta:
+  name: "safe-defi"
+  version: "0.0.2"
+  description: "Segmented intent offchain transfer fixture pack"
+
+includes:
+  - protocol: "demo-bank"
+    version: "0.0.1"
+    source: "local"
+    chain_scope: ["eip155:31338"]
+
+policy:
+  approvals:
+    auto_execute_max_risk_level: 2
+    require_approval_min_risk_level: 3
+
+plugins:
+  execution:
+    enabled:
+      - type: "offchain_apy_query"
+        chains: ["eip155:31338"]
+
+extensions: {}

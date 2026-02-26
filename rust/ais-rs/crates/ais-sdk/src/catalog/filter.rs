@@ -11,8 +11,6 @@ pub struct EngineCapabilities {
     pub capabilities: Vec<String>,
     #[serde(default)]
     pub execution_types: Vec<String>,
-    #[serde(default)]
-    pub detect_kinds: Vec<String>,
 }
 
 pub const EXECUTABLE_CANDIDATES_SCHEMA_0_0_1: &str = "ais-executable-candidates/0.0.1";
@@ -30,7 +28,6 @@ pub struct ExecutableCandidates {
     pub chain_scope: Option<Vec<String>>,
     pub actions: Vec<Value>,
     pub queries: Vec<Value>,
-    pub detect_providers: Vec<Value>,
     pub execution_plugins: Vec<Value>,
 }
 
@@ -81,12 +78,14 @@ pub fn filter_by_pack(index: &CatalogIndex, pack: &PackDocument) -> CatalogIndex
         index.packs.clone(),
     );
 
-    out.detect_providers = Some(derive_detect_providers(pack));
     out.execution_plugins = Some(derive_execution_plugins(pack));
     out
 }
 
-pub fn filter_by_engine_capabilities(index: &CatalogIndex, capabilities: &EngineCapabilities) -> CatalogIndex {
+pub fn filter_by_engine_capabilities(
+    index: &CatalogIndex,
+    capabilities: &EngineCapabilities,
+) -> CatalogIndex {
     let supported_caps: HashSet<String> = capabilities
         .capabilities
         .iter()
@@ -99,24 +98,21 @@ pub fn filter_by_engine_capabilities(index: &CatalogIndex, capabilities: &Engine
         .filter(|value| !value.is_empty())
         .cloned()
         .collect();
-    let supported_detect_kinds: HashSet<String> = capabilities
-        .detect_kinds
-        .iter()
-        .filter(|value| !value.is_empty())
-        .cloned()
-        .collect();
-
     let actions = index
         .actions
         .iter()
-        .filter(|action| card_matches_capabilities(action, &supported_caps, &supported_execution_types))
+        .filter(|action| {
+            card_matches_capabilities(action, &supported_caps, &supported_execution_types)
+        })
         .cloned()
         .collect::<Vec<_>>();
 
     let queries = index
         .queries
         .iter()
-        .filter(|query| card_matches_capabilities(query, &supported_caps, &supported_execution_types))
+        .filter(|query| {
+            card_matches_capabilities(query, &supported_caps, &supported_execution_types)
+        })
         .cloned()
         .collect::<Vec<_>>();
 
@@ -127,23 +123,6 @@ pub fn filter_by_engine_capabilities(index: &CatalogIndex, capabilities: &Engine
         queries,
         index.packs.clone(),
     );
-
-    if let Some(providers) = &index.detect_providers {
-        out.detect_providers = Some(
-            providers
-                .iter()
-                .filter(|provider| {
-                    if supported_detect_kinds.is_empty() {
-                        return true;
-                    }
-                    value_str_opt(provider, "kind")
-                        .map(|kind| supported_detect_kinds.contains(kind))
-                        .unwrap_or(false)
-                })
-                .cloned()
-                .collect(),
-        );
-    }
 
     if let Some(plugins) = &index.execution_plugins {
         out.execution_plugins = Some(
@@ -215,44 +194,19 @@ pub fn get_executable_candidates(
         .collect::<Vec<_>>();
     queries.sort_by(|left, right| value_str(left, "ref").cmp(value_str(right, "ref")));
 
-    let mut detect_providers = explode_detect_providers(
-        scoped_index.detect_providers.as_deref().unwrap_or(&[]),
-    );
-    let mut execution_plugins = explode_execution_plugins(
-        scoped_index.execution_plugins.as_deref().unwrap_or(&[]),
-    );
+    let mut execution_plugins =
+        explode_execution_plugins(scoped_index.execution_plugins.as_deref().unwrap_or(&[]));
     if let Some(scope) = chain_scope {
         let scope_set: HashSet<String> = scope.iter().cloned().collect();
-        detect_providers.retain(|provider| {
-            value_str_opt(provider, "chain")
-                .map(|chain| scope_set.contains(chain))
-                .unwrap_or(true)
-        });
         execution_plugins.retain(|plugin| {
             value_str_opt(plugin, "chain")
                 .map(|chain| scope_set.contains(chain))
                 .unwrap_or(true)
         });
     }
-    detect_providers.sort_by(|left, right| {
-        (
-            value_str(left, "kind"),
-            value_str(left, "chain"),
-            -value_i64(left, "priority"),
-            value_str(left, "provider"),
-        )
-            .cmp(&(
-                value_str(right, "kind"),
-                value_str(right, "chain"),
-                -value_i64(right, "priority"),
-                value_str(right, "provider"),
-            ))
-    });
     execution_plugins.sort_by(|left, right| {
-        (value_str(left, "type"), value_str(left, "chain")).cmp(&(
-            value_str(right, "type"),
-            value_str(right, "chain"),
-        ))
+        (value_str(left, "type"), value_str(left, "chain"))
+            .cmp(&(value_str(right, "type"), value_str(right, "chain")))
     });
 
     let pack_value = pack.map(pack_identity_value);
@@ -272,7 +226,6 @@ pub fn get_executable_candidates(
             "chain_scope": chain_scope_value,
             "actions": actions,
             "queries": queries,
-            "detect_providers": detect_providers,
             "execution_plugins": execution_plugins,
         });
         if let Some(obj) = content.as_object_mut() {
@@ -295,7 +248,6 @@ pub fn get_executable_candidates(
         chain_scope: chain_scope_value,
         actions,
         queries,
-        detect_providers,
         execution_plugins,
     })
 }
@@ -341,7 +293,11 @@ fn trim_card_by_chain_scope(card: &Value, chain_scope: &Option<HashSet<String>>)
                     values
                         .iter()
                         .filter_map(Value::as_str)
-                        .filter(|chain| scope.contains(*chain))
+                        .filter(|chain| {
+                            scope
+                                .iter()
+                                .any(|candidate| chain_patterns_match(candidate.as_str(), chain))
+                        })
                         .map(str::to_string)
                         .collect::<Vec<_>>()
                 })
@@ -363,6 +319,21 @@ fn trim_card_by_chain_scope(card: &Value, chain_scope: &Option<HashSet<String>>)
     }
 }
 
+fn chain_patterns_match(left: &str, right: &str) -> bool {
+    left == right || chain_pattern_matches(left, right) || chain_pattern_matches(right, left)
+}
+
+fn chain_pattern_matches(pattern: &str, concrete: &str) -> bool {
+    let Some((pattern_ns, pattern_value)) = pattern.split_once(':') else {
+        return false;
+    };
+    let Some((concrete_ns, concrete_value)) = concrete.split_once(':') else {
+        return false;
+    };
+    pattern_ns == concrete_ns && pattern_value == "*"
+        || (pattern_ns == concrete_ns && pattern_value == concrete_value)
+}
+
 fn card_matches_capabilities(
     card: &Value,
     supported_caps: &HashSet<String>,
@@ -375,7 +346,10 @@ fn card_matches_capabilities(
             .and_then(Value::as_array)
             .map(|items| items.iter().filter_map(Value::as_str).collect::<Vec<_>>())
             .unwrap_or_default();
-        if required_caps.iter().any(|cap| !supported_caps.contains(*cap)) {
+        if required_caps
+            .iter()
+            .any(|cap| !supported_caps.contains(*cap))
+        {
             return false;
         }
     }
@@ -396,61 +370,6 @@ fn card_matches_capabilities(
     }
 
     true
-}
-
-fn derive_detect_providers(pack: &PackDocument) -> Vec<Value> {
-    let providers = pack
-        .providers
-        .as_ref()
-        .and_then(Value::as_object)
-        .and_then(|providers| providers.get("detect"))
-        .and_then(Value::as_object)
-        .and_then(|detect| detect.get("enabled"))
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-
-    let mut out = providers
-        .into_iter()
-        .filter_map(|entry| {
-            let entry_obj = entry.as_object()?;
-            let kind = entry_obj.get("kind")?.as_str()?;
-            let provider = entry_obj.get("provider")?.as_str()?;
-            let priority = entry_obj.get("priority").and_then(Value::as_i64).unwrap_or(0);
-            let mut chains = entry_obj
-                .get("chains")
-                .and_then(Value::as_array)
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_string)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            chains.sort();
-            chains.dedup();
-            Some(json!({
-                "kind": kind,
-                "provider": provider,
-                "chains": chains,
-                "priority": priority
-            }))
-        })
-        .collect::<Vec<_>>();
-
-    out.sort_by(|left, right| {
-        (
-            value_str(left, "kind"),
-            -value_i64(left, "priority"),
-            value_str(left, "provider"),
-        )
-            .cmp(&(
-                value_str(right, "kind"),
-                -value_i64(right, "priority"),
-                value_str(right, "provider"),
-            ))
-    });
-    out
 }
 
 fn derive_execution_plugins(pack: &PackDocument) -> Vec<Value> {
@@ -513,49 +432,7 @@ fn apply_chain_scope(index: &CatalogIndex, chain_scope: &[String]) -> CatalogInd
         queries,
         index.packs.clone(),
     );
-    out.detect_providers = index.detect_providers.clone();
     out.execution_plugins = index.execution_plugins.clone();
-    out
-}
-
-fn explode_detect_providers(providers: &[Value]) -> Vec<Value> {
-    let mut out = Vec::new();
-    for provider in providers {
-        let Some(provider_obj) = provider.as_object() else {
-            continue;
-        };
-        let kind = provider_obj.get("kind").and_then(Value::as_str).unwrap_or("");
-        let provider_name = provider_obj
-            .get("provider")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let priority = provider_obj.get("priority").and_then(Value::as_i64).unwrap_or(0);
-        let chains = provider_obj.get("chains").and_then(Value::as_array);
-        if let Some(chains) = chains {
-            if chains.is_empty() {
-                out.push(json!({
-                    "kind": kind,
-                    "provider": provider_name,
-                    "priority": priority
-                }));
-            } else {
-                for chain in chains.iter().filter_map(Value::as_str) {
-                    out.push(json!({
-                        "kind": kind,
-                        "provider": provider_name,
-                        "chain": chain,
-                        "priority": priority
-                    }));
-                }
-            }
-        } else {
-            out.push(json!({
-                "kind": kind,
-                "provider": provider_name,
-                "priority": priority
-            }));
-        }
-    }
     out
 }
 
@@ -615,14 +492,6 @@ fn value_str<'a>(value: &'a Value, key: &str) -> &'a str {
 
 fn value_str_opt<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.as_object()?.get(key)?.as_str()
-}
-
-fn value_i64(value: &Value, key: &str) -> i64 {
-    value
-        .as_object()
-        .and_then(|obj| obj.get(key))
-        .and_then(Value::as_i64)
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

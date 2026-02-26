@@ -1,0 +1,373 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ais-spec.dev/schemas/0.0.2/plan-sketch.schema.json",
+  "title": "AIS Plan Sketch",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "intent",
+    "pack_snapshot",
+    "catalog_snapshot",
+    "segments"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ais-plan-sketch/0.1.0"
+    },
+    "intent": {
+      "type": "string",
+      "minLength": 1
+    },
+    "pack_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "hash"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "catalog_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "hash"
+      ],
+      "properties": {
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        },
+        "hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "chain_scope": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "session": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "cursor"
+      ],
+      "properties": {
+        "session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cursor": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "segments": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/segment"
+      }
+    },
+    "meta": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "created_at": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        }
+      }
+    },
+    "extensions": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "$defs": {
+    "segment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "segment_id",
+        "cursor_in",
+        "cursor_out",
+        "done",
+        "steps"
+      ],
+      "properties": {
+        "segment_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cursor_in": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cursor_out": {
+          "type": "string",
+          "minLength": 1
+        },
+        "done": {
+          "type": "boolean"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/step"
+          }
+        },
+        "extensions": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "candidate_ref",
+        "inputs"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "query",
+            "action",
+            "assert",
+            "branch"
+          ]
+        },
+        "candidate_ref": {
+          "type": "string",
+          "pattern": ".+@.+/.+"
+        },
+        "inputs": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "depends_on": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "stores": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1
+          },
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "when": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "cel"
+          ],
+          "properties": {
+            "cel": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "until": {
+          "$ref": "#/$defs/value_ref"
+        },
+        "retry": {
+          "$ref": "#/$defs/retry_policy"
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "exclusiveMinimum": 0
+        },
+        "constraint_templates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/constraint_template"
+          }
+        },
+        "reason": {
+          "type": "string"
+        },
+        "extensions": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+    "constraint_template": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+    "value_ref_lit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lit"
+      ],
+      "properties": {
+        "lit": {}
+      }
+    },
+    "value_ref_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ref"
+      ],
+      "properties": {
+        "ref": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "value_ref_cel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cel"
+      ],
+      "properties": {
+        "cel": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "value_ref_object": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "object"
+      ],
+      "properties": {
+        "object": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/value_ref"
+          }
+        }
+      }
+    },
+    "value_ref_array": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "array"
+      ],
+      "properties": {
+        "array": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/value_ref"
+          }
+        }
+      }
+    },
+    "value_ref": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/value_ref_lit"
+        },
+        {
+          "$ref": "#/$defs/value_ref_ref"
+        },
+        {
+          "$ref": "#/$defs/value_ref_cel"
+        },
+        {
+          "$ref": "#/$defs/value_ref_object"
+        },
+        {
+          "$ref": "#/$defs/value_ref_array"
+        }
+      ]
+    },
+    "retry_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "interval_ms"
+      ],
+      "properties": {
+        "interval_ms": {
+          "type": "integer",
+          "exclusiveMinimum": 0
+        },
+        "max_attempts": {
+          "type": "integer",
+          "exclusiveMinimum": 0
+        },
+        "backoff": {
+          "type": "string",
+          "enum": [
+            "fixed"
+          ]
+        },
+        "extensions": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    }
+  }
+}

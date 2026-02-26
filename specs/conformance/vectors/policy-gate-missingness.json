@@ -1,0 +1,57 @@
+{
+  "schema": "ais-conformance/0.0.2",
+  "profile": "core",
+  "cases": [
+    {
+      "id": "missingness-hard-block-fields-wins",
+      "kind": "policy_gate_missingness_decision",
+      "input": {
+        "hard_block_fields": ["chain"],
+        "missing_fields": ["slippage_bps"],
+        "unknown_fields": []
+      },
+      "expect": { "kind": "hard_block" }
+    },
+    {
+      "id": "missingness-missing-fields-defaults-to-confirm",
+      "kind": "policy_gate_missingness_decision",
+      "input": {
+        "hard_block_fields": [],
+        "missing_fields": ["slippage_bps"],
+        "unknown_fields": []
+      },
+      "expect": { "kind": "need_user_confirm" }
+    },
+    {
+      "id": "missingness-missing-fields-can-hard-block",
+      "kind": "policy_gate_missingness_decision",
+      "input": {
+        "hard_block_fields": [],
+        "missing_fields": ["slippage_bps"],
+        "unknown_fields": [],
+        "options": { "hard_block_on_missing": true }
+      },
+      "expect": { "kind": "hard_block" }
+    },
+    {
+      "id": "missingness-unknown-fields-confirm",
+      "kind": "policy_gate_missingness_decision",
+      "input": {
+        "hard_block_fields": [],
+        "missing_fields": [],
+        "unknown_fields": ["unlimited_approval"]
+      },
+      "expect": { "kind": "need_user_confirm" }
+    },
+    {
+      "id": "missingness-none-ok",
+      "kind": "policy_gate_missingness_decision",
+      "input": {
+        "hard_block_fields": [],
+        "missing_fields": [],
+        "unknown_fields": []
+      },
+      "expect": { "kind": "ok" }
+    }
+  ]
+}

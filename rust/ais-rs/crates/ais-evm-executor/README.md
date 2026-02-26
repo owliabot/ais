@@ -53,6 +53,9 @@ EVM executor crate for AIS, backed by the Alloy ecosystem.
   - `LocalPrivateKeySigner` now focuses on validated local key/address source for Alloy wallet filling/signing flow.
   - `evm_call` supports optional tx override fields: `nonce`, `gas_limit`, `max_fee_per_gas`, `max_priority_fee_per_gas` (defaults are used when omitted).
   - `evm_call` result includes filled tx fields (`nonce/gas_limit/max_fee_per_gas/max_priority_fee_per_gas`) fetched from pending tx for workflow traceability.
+  - `evm_call` now emits canonical side-effect records via `ExecutorOutput.side_effects` (`tx` idempotency key + status from receipt/sent state), so engine does not need to infer tx side-effects from result payloads.
+  - executor-level side-effect reconciliation for `evm_call` is supported: `sent` records query `eth_getTransactionReceipt` and transition to `confirmed|reverted|sent` with stable reconcile reason codes.
+  - `evm_call` side-effect tests覆盖 `confirmed/sent/reverted` 状态映射与 `idempotency_key/tx_hash/nonce` 字段稳定性。
   - `AISRS-EVM-013` `evm_rpc` read-only allowlist gate.
   - `evm_rpc` now normalizes object-style params into positional JSON-RPC arrays for allowlisted methods (e.g. `eth_getBalance`) to avoid RPC tuple decode errors, including protocol `params.array` wrapper form.
   - `eth_getBalance` `evm_rpc` result additionally exposes decimal `balance` field (alongside raw `result`) for query assertions using `outputs.balance`.
@@ -62,7 +65,7 @@ EVM executor crate for AIS, backed by the Alloy ecosystem.
   - built-in transport URL support extended to `http(s)` and `ws(s)` endpoints.
   - `timeout_ms` is applied to RPC connect/read/call/send/receipt awaits (HTTP + WS) via Tokio timeout guards.
   - Minor cleanup: remove needless borrows in executor dispatch path, keeping clippy output focused on substantive warnings.
-- Executor uses Alloy providers for read/call/rpc paths; no crate-local legacy HTTP RPC client/factory layer.
+- Executor uses Alloy providers for read/call/rpc paths; no crate-local older HTTP RPC client/factory layer.
 - Executor expects execution payload to be materialized by engine (literal values), and focuses on EVM request building/sign/send/receipt only.
 - Planned next:
   - engine/runner wiring for real provider + signer config.

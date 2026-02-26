@@ -52,11 +52,19 @@ impl Parser {
     }
 
     fn parse_or(&mut self) -> Result<AstNode, ParseError> {
-        self.parse_binary_chain(|token| matches!(token, TokenKind::OrOr), Self::parse_and, BinaryOp::Or)
+        self.parse_binary_chain(
+            |token| matches!(token, TokenKind::OrOr),
+            Self::parse_and,
+            BinaryOp::Or,
+        )
     }
 
     fn parse_and(&mut self) -> Result<AstNode, ParseError> {
-        self.parse_binary_chain(|token| matches!(token, TokenKind::AndAnd), Self::parse_equality, BinaryOp::And)
+        self.parse_binary_chain(
+            |token| matches!(token, TokenKind::AndAnd),
+            Self::parse_equality,
+            BinaryOp::And,
+        )
     }
 
     fn parse_equality(&mut self) -> Result<AstNode, ParseError> {

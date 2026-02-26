@@ -2,7 +2,7 @@ use super::{
     build_confirmation_summary, confirmation_hash, enrich_need_user_confirm_output,
     ConfirmationSummary,
 };
-use crate::policy::{PolicyGateInput, PolicyGateOutput};
+use crate::policy::{PolicyGateInput, PolicyGateOutput, PolicyGateReasonCode};
 use serde_json::{json, Map};
 
 fn sample_gate_input() -> PolicyGateInput {
@@ -21,6 +21,7 @@ fn sample_gate_input() -> PolicyGateInput {
         missing_fields: vec!["slippage_bps".to_string()],
         unknown_fields: vec![],
         hard_block_fields: vec![],
+        constraint_templates: vec![],
     }
 }
 
@@ -35,6 +36,7 @@ fn confirmation_hash_is_stable_ignoring_timestamps() {
 
     let summary_a = ConfirmationSummary {
         kind: "need_user_confirm".to_string(),
+        reason_code: "missing_fields".to_string(),
         reason: "policy gate input is incomplete".to_string(),
         node_id: Some("swap-1".to_string()),
         chain: "eip155:1".to_string(),
@@ -59,6 +61,7 @@ fn confirmation_hash_is_stable_ignoring_timestamps() {
 fn enrich_need_user_confirm_output_contains_summary_and_hash() {
     let input = sample_gate_input();
     let gate_output = PolicyGateOutput::NeedUserConfirm {
+        reason_code: PolicyGateReasonCode::MissingFields,
         reason: "policy gate input is incomplete".to_string(),
         details: Map::from_iter([
             ("missing_fields".to_string(), json!(["slippage_bps"])),
@@ -79,6 +82,8 @@ fn enrich_need_user_confirm_output_contains_summary_and_hash() {
 #[test]
 fn build_confirmation_summary_returns_none_for_non_confirm_output() {
     let input = sample_gate_input();
-    let output = PolicyGateOutput::Ok { details: Map::new() };
+    let output = PolicyGateOutput::Ok {
+        details: Map::new(),
+    };
     assert!(build_confirmation_summary(&input, &output).is_none());
 }

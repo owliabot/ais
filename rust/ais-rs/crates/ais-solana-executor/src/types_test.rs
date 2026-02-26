@@ -15,7 +15,10 @@ fn endpoint_rejects_non_solana_chain() {
 fn endpoint_rejects_invalid_rpc_url() {
     let error = SolanaRpcEndpoint::new("solana:mainnet", "ws://rpc.example")
         .expect_err("must reject non-http url");
-    assert_eq!(error, ProviderError::InvalidRpcUrl("ws://rpc.example".to_string()));
+    assert_eq!(
+        error,
+        ProviderError::InvalidRpcUrl("ws://rpc.example".to_string())
+    );
 }
 
 #[test]

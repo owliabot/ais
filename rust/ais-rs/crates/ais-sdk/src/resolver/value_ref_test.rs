@@ -1,10 +1,6 @@
-use super::{
-    evaluate_value_ref, evaluate_value_ref_async, DetectResolver, DetectSpec, ValueRef,
-    ValueRefEvalError, ValueRefEvalOptions,
-};
+use super::{evaluate_value_ref, evaluate_value_ref_async, ValueRef, ValueRefEvalOptions};
 use crate::resolver::ResolverContext;
 use futures::executor::block_on;
-use futures::FutureExt;
 use serde_json::json;
 use std::collections::BTreeMap;
 
@@ -31,11 +27,19 @@ fn evaluate_object_and_array_walks_recursively() {
     let context = ResolverContext::with_runtime(json!({"ctx": {"chain": "eip155:1"}}));
     let value_ref = ValueRef::Object {
         object: BTreeMap::from([
-            ("network".to_string(), ValueRef::Ref { ref_path: "ctx.chain".to_string() }),
+            (
+                "network".to_string(),
+                ValueRef::Ref {
+                    ref_path: "ctx.chain".to_string(),
+                },
+            ),
             (
                 "list".to_string(),
                 ValueRef::Array {
-                    array: vec![ValueRef::Lit { lit: json!(1) }, ValueRef::Lit { lit: json!(2) }],
+                    array: vec![
+                        ValueRef::Lit { lit: json!(1) },
+                        ValueRef::Lit { lit: json!(2) },
+                    ],
                 },
             ),
         ]),
@@ -70,61 +74,17 @@ fn evaluate_ref_uses_root_override() {
     assert_eq!(value, json!("override"));
 }
 
-struct StaticDetectResolver;
-
-impl DetectResolver for StaticDetectResolver {
-    fn resolve<'a>(
-        &'a self,
-        detect: &'a DetectSpec,
-        _context: &'a ResolverContext,
-        _options: &'a ValueRefEvalOptions,
-    ) -> futures::future::LocalBoxFuture<'a, Result<serde_json::Value, ValueRefEvalError>> {
-        async move { Ok(json!({"kind": detect.kind, "provider": detect.provider})) }.boxed_local()
-    }
-}
-
 #[test]
-fn evaluate_detect_async_calls_resolver() {
-    let context = ResolverContext::new();
-    let value_ref = ValueRef::Detect {
-        detect: DetectSpec {
-            kind: "choose_one".to_string(),
-            provider: Some("mock".to_string()),
-            candidates: vec![],
-            constraints: BTreeMap::new(),
-        },
+fn evaluate_async_matches_sync_semantics() {
+    let context = ResolverContext::with_runtime(json!({"inputs": {"amount": 10}}));
+    let value_ref = ValueRef::Cel {
+        cel: "inputs.amount > 0".to_string(),
     };
-    let options = ValueRefEvalOptions::default();
-    let resolver = StaticDetectResolver;
-
     let value = block_on(evaluate_value_ref_async(
         &value_ref,
         &context,
-        &options,
-        Some(&resolver),
+        &ValueRefEvalOptions::default(),
     ))
     .expect("must evaluate");
-    assert_eq!(value, json!({"kind": "choose_one", "provider": "mock"}));
-}
-
-#[test]
-fn evaluate_detect_async_without_resolver_fails() {
-    let context = ResolverContext::new();
-    let value_ref = ValueRef::Detect {
-        detect: DetectSpec {
-            kind: "choose_one".to_string(),
-            provider: None,
-            candidates: vec![],
-            constraints: BTreeMap::new(),
-        },
-    };
-
-    let err = block_on(evaluate_value_ref_async(
-        &value_ref,
-        &context,
-        &ValueRefEvalOptions::default(),
-        None,
-    ))
-    .expect_err("must fail");
-    assert!(matches!(err, ValueRefEvalError::NeedDetect { .. }));
+    assert_eq!(value, json!(true));
 }

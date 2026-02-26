@@ -94,7 +94,10 @@ nodes:
 #[test]
 fn load_workspace_documents_reports_parse_issues_with_file_context() {
     let root = temp_dir("workspace-issues");
-    write(root.join("broken.yaml"), "schema: ais-flow/0.0.3\nmeta: [\n");
+    write(
+        root.join("broken.yaml"),
+        "schema: ais-flow/0.0.3\nmeta: [\n",
+    );
 
     let issues = load_workspace_documents(root.as_path()).expect_err("must fail");
     assert!(!issues.is_empty());

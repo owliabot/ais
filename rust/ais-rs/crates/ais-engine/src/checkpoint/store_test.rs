@@ -18,9 +18,15 @@ fn checkpoint_store_roundtrip_path() {
             completed_node_ids: vec!["node-1".to_string()],
             paused_reason: Some("paused".to_string()),
             seen_command_ids: vec!["cmd-1".to_string()],
-            pending_retries: serde_json::Map::from_iter([("node-2".to_string(), json!({"attempt": 1}))]),
+            pending_retries: serde_json::Map::from_iter([(
+                "node-2".to_string(),
+                json!({"attempt": 1}),
+            )]),
+            plan_epoch: 0,
+            plan_hash_history: vec!["plan-store-hash".to_string()],
         },
         Some(json!({"ctx": {"chain_id": "eip155:1"}})),
+        None,
         None,
     );
 

@@ -20,14 +20,69 @@ fn filter_by_pack_enforces_includes_and_chain_scope() {
     );
 
     let filtered = filter_by_pack(&index, &pack);
-    assert!(filtered.actions.iter().all(|card| value_str(card, "protocol") == "p1"));
+    assert!(filtered
+        .actions
+        .iter()
+        .all(|card| value_str(card, "protocol") == "p1"));
 
     let action = filtered
         .actions
         .iter()
         .find(|card| value_str(card, "id") == "a_evm")
         .expect("a_evm exists");
-    assert_eq!(value_array_str(action, "execution_chains"), vec!["eip155:1"]);
+    assert_eq!(
+        value_array_str(action, "execution_chains"),
+        vec!["eip155:1"]
+    );
+}
+
+#[test]
+fn filter_by_pack_matches_wildcard_execution_chain_with_concrete_scope() {
+    let catalog = CatalogDocument {
+        schema: "ais-catalog/0.0.1".to_string(),
+        created_at: None,
+        hash: Some("hash-wildcard".to_string()),
+        documents: vec![],
+        actions: vec![json!({
+            "level":"index",
+            "ref":"p1@0.0.1/a_wild",
+            "protocol":"p1",
+            "version":"0.0.1",
+            "id":"a_wild",
+            "risk_level":2,
+            "execution_types":["evm_call"],
+            "execution_chains":["eip155:*"],
+        })],
+        queries: vec![json!({
+            "level":"index",
+            "ref":"p1@0.0.1/q_wild",
+            "protocol":"p1",
+            "version":"0.0.1",
+            "id":"q_wild",
+            "execution_types":["evm_read"],
+            "execution_chains":["eip155:*"],
+        })],
+        packs: vec![],
+        extensions: Map::new(),
+    };
+    let index = build_catalog_index(&catalog);
+    let pack = pack_doc(
+        "pack",
+        "1.0.0",
+        vec![json!({
+            "protocol":"p1",
+            "version":"0.0.1",
+            "chain_scope":["eip155:31338"]
+        })],
+    );
+
+    let filtered = filter_by_pack(&index, &pack);
+    assert_eq!(filtered.actions.len(), 1);
+    assert_eq!(filtered.queries.len(), 1);
+    assert_eq!(
+        value_array_str(&filtered.actions[0], "execution_chains"),
+        vec!["eip155:*"]
+    );
 }
 
 #[test]
@@ -49,7 +104,6 @@ fn filter_by_engine_capabilities_filters_cards_and_derived_candidates() {
         &EngineCapabilities {
             capabilities: vec![],
             execution_types: vec!["evm_call".to_string()],
-            detect_kinds: vec!["token".to_string()],
         },
     );
 
@@ -64,12 +118,6 @@ fn filter_by_engine_capabilities_filters_cards_and_derived_candidates() {
         .expect("plugins")
         .iter()
         .all(|plugin| value_str(plugin, "type") == "evm_call"));
-    assert!(out
-        .detect_providers
-        .as_ref()
-        .expect("providers")
-        .iter()
-        .all(|provider| value_str(provider, "kind") == "token"));
 }
 
 #[test]
@@ -92,7 +140,6 @@ fn get_executable_candidates_is_stable_and_scoped() {
         Some(&EngineCapabilities {
             capabilities: vec![],
             execution_types: vec!["evm_call".to_string()],
-            detect_kinds: vec!["token".to_string()],
         }),
         Some(&scope),
         Some("2026-02-13T01:00:00Z".to_string()),
@@ -105,7 +152,6 @@ fn get_executable_candidates_is_stable_and_scoped() {
         Some(&EngineCapabilities {
             capabilities: vec![],
             execution_types: vec!["evm_call".to_string()],
-            detect_kinds: vec!["token".to_string()],
         }),
         Some(&scope),
         Some("2026-02-13T02:00:00Z".to_string()),
@@ -118,10 +164,6 @@ fn get_executable_candidates_is_stable_and_scoped() {
             .iter()
             .all(|chain| chain == "eip155:1")
     }));
-    assert!(first
-        .detect_providers
-        .iter()
-        .all(|provider| value_str(provider, "chain") == "eip155:1"));
 }
 
 fn sample_catalog() -> CatalogDocument {
@@ -132,31 +174,38 @@ fn sample_catalog() -> CatalogDocument {
         documents: vec![],
         actions: vec![
             json!({
+                "level":"index",
                 "ref":"p1@0.0.1/a_evm",
                 "protocol":"p1",
                 "version":"0.0.1",
                 "id":"a_evm",
+                "risk_level":3,
                 "execution_types":["evm_call"],
                 "execution_chains":["eip155:1","eip155:137"],
             }),
             json!({
+                "level":"index",
                 "ref":"p1@0.0.1/a_solana",
                 "protocol":"p1",
                 "version":"0.0.1",
                 "id":"a_solana",
+                "risk_level":2,
                 "execution_types":["solana_instruction"],
                 "execution_chains":["solana:mainnet"],
             }),
             json!({
+                "level":"index",
                 "ref":"p2@0.0.1/a2",
                 "protocol":"p2",
                 "version":"0.0.1",
                 "id":"a2",
+                "risk_level":1,
                 "execution_types":["evm_call"],
                 "execution_chains":["eip155:1"],
             }),
         ],
         queries: vec![json!({
+            "level":"index",
             "ref":"p1@0.0.1/q1",
             "protocol":"p1",
             "version":"0.0.1",
@@ -182,14 +231,7 @@ fn pack_doc(name: &str, version: &str, includes: Vec<Value>) -> PackDocument {
         includes,
         policy: None,
         token_policy: None,
-        providers: Some(json!({
-            "detect": {
-                "enabled": [
-                    {"kind":"token","provider":"mock","chains":["eip155:1"],"priority":10},
-                    {"kind":"address","provider":"fallback","chains":["eip155:1"],"priority":1}
-                ]
-            }
-        })),
+        providers: None,
         plugins: Some(json!({
             "execution": {
                 "enabled": [

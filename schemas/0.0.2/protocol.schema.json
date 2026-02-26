@@ -228,59 +228,6 @@
       ],
       "additionalProperties": false
     },
-    "constraints_69": {
-      "type": "object",
-      "additionalProperties": {}
-    },
-    "detect_64": {
-      "type": "object",
-      "properties": {
-        "kind": {
-          "type": "string",
-          "enum": [
-            "choose_one",
-            "best_quote",
-            "best_path",
-            "protocol_specific"
-          ]
-        },
-        "provider": {
-          "type": "string"
-        },
-        "candidates": {
-          "type": "array",
-          "items": {}
-        },
-        "constraints": {
-          "$ref": "#/$defs/constraints_69"
-        },
-        "requires_capabilities": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "extensions": {
-          "$ref": "#/$defs/extensions_13"
-        }
-      },
-      "required": [
-        "kind"
-      ],
-      "additionalProperties": false
-    },
-    "Union63_3_63": {
-      "type": "object",
-      "properties": {
-        "detect": {
-          "$ref": "#/$defs/detect_64"
-        }
-      },
-      "required": [
-        "detect"
-      ],
-      "additionalProperties": false
-    },
     "object_74": {
       "type": "object",
       "additionalProperties": {
@@ -326,42 +273,12 @@
           "$ref": "#/$defs/Union61_2_61"
         },
         {
-          "$ref": "#/$defs/Union63_3_63"
-        },
-        {
           "$ref": "#/$defs/Union73_4_73"
         },
         {
           "$ref": "#/$defs/Union75_5_75"
         }
       ]
-    },
-    "hard_constraints_55": {
-      "type": "object",
-      "properties": {
-        "max_slippage_bps": {
-          "$ref": "#/$defs/max_slippage_bps_56"
-        },
-        "max_spend": {
-          "$ref": "#/$defs/max_slippage_bps_56"
-        },
-        "max_approval": {
-          "$ref": "#/$defs/max_slippage_bps_56"
-        },
-        "allow_unlimited_approval": {
-          "$ref": "#/$defs/max_slippage_bps_56"
-        },
-        "max_price_impact_bps": {
-          "$ref": "#/$defs/max_slippage_bps_56"
-        },
-        "min_health_factor_after": {
-          "$ref": "#/$defs/max_slippage_bps_56"
-        },
-        "extensions": {
-          "$ref": "#/$defs/extensions_13"
-        }
-      },
-      "additionalProperties": false
     },
     "Def_78": {
       "type": "object",
@@ -895,9 +812,6 @@
           "items": {
             "type": "string"
           }
-        },
-        "hard_constraints": {
-          "$ref": "#/$defs/hard_constraints_55"
         },
         "calculated_fields": {
           "$ref": "#/$defs/calculated_fields_77"

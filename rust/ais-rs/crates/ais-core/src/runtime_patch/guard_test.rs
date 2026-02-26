@@ -1,4 +1,6 @@
-use super::{build_runtime_patch_guard_policy, check_runtime_patch_path_allowed, RuntimePatchGuardPolicy};
+use super::{
+    build_runtime_patch_guard_policy, check_runtime_patch_path_allowed, RuntimePatchGuardPolicy,
+};
 use crate::runtime_patch::{RuntimePatch, RuntimePatchOp};
 use serde_json::json;
 

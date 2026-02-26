@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ais:0.0.2:catalog",
+  "title": "AIS Catalog Cards (ais-catalog/0.0.1)",
+  "$ref": "#/$defs/root",
+  "$defs": {
+    "extensions": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "sha256Hex": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "cardLevel": {
+      "type": "string",
+      "enum": ["index"]
+    },
+    "param": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "type"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "type": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "required": { "type": "boolean" },
+        "asset_ref": { "type": "string" },
+        "extensions": { "$ref": "#/$defs/extensions" }
+      }
+    },
+    "ret": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "type"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "type": { "type": "string", "minLength": 1 },
+        "extensions": { "$ref": "#/$defs/extensions" }
+      }
+    },
+    "actionCard": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ref",
+        "protocol",
+        "version",
+        "id",
+        "risk_level",
+        "execution_types",
+        "execution_chains"
+      ],
+      "properties": {
+        "level": { "$ref": "#/$defs/cardLevel" },
+        "ref": { "type": "string", "minLength": 1 },
+        "protocol": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 },
+        "id": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "risk_level": { "type": "integer", "minimum": 1, "maximum": 5 },
+        "risk_tags": { "type": "array", "items": { "type": "string" } },
+        "capabilities_required": { "type": "array", "items": { "type": "string" } },
+        "execution_types": { "type": "array", "items": { "type": "string" } },
+        "execution_chains": { "type": "array", "items": { "type": "string" } },
+        "extensions": { "$ref": "#/$defs/extensions" }
+      }
+    },
+    "queryCard": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "protocol", "version", "id", "execution_types", "execution_chains"],
+      "properties": {
+        "level": { "$ref": "#/$defs/cardLevel" },
+        "ref": { "type": "string", "minLength": 1 },
+        "protocol": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 },
+        "id": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "capabilities_required": { "type": "array", "items": { "type": "string" } },
+        "execution_types": { "type": "array", "items": { "type": "string" } },
+        "execution_chains": { "type": "array", "items": { "type": "string" } },
+        "extensions": { "$ref": "#/$defs/extensions" }
+      }
+    },
+    "packCard": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "includes"],
+      "properties": {
+        "name": { "type": "string" },
+        "version": { "type": "string" },
+        "description": { "type": "string" },
+        "includes": {
+          "type": "array",
+          "items": { "type": "object", "additionalProperties": true }
+        },
+        "policy": { "type": "object", "additionalProperties": true },
+        "token_policy": { "type": "object", "additionalProperties": true },
+        "providers": { "type": "object", "additionalProperties": true },
+        "plugins": { "type": "object", "additionalProperties": true },
+        "overrides": { "type": "object", "additionalProperties": true },
+        "extensions": { "$ref": "#/$defs/extensions" }
+      }
+    },
+    "documentRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id", "hash"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["protocol", "pack", "workflow"]
+        },
+        "id": { "type": "string" },
+        "hash": { "$ref": "#/$defs/sha256Hex" },
+        "extensions": { "$ref": "#/$defs/extensions" }
+      }
+    },
+    "root": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "hash", "actions", "queries", "packs"],
+      "properties": {
+        "schema": { "const": "ais-catalog/0.0.1" },
+        "created_at": { "type": "string" },
+        "hash": { "$ref": "#/$defs/sha256Hex" },
+        "documents": { "type": "array", "items": { "$ref": "#/$defs/documentRef" } },
+        "actions": { "type": "array", "items": { "$ref": "#/$defs/actionCard" } },
+        "queries": { "type": "array", "items": { "$ref": "#/$defs/queryCard" } },
+        "packs": { "type": "array", "items": { "$ref": "#/$defs/packCard" } },
+        "extensions": { "$ref": "#/$defs/extensions" }
+      }
+    }
+  }
+}

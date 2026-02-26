@@ -42,27 +42,15 @@ impl Decimal {
 
     pub fn add(&self, other: &Decimal) -> Result<Decimal, NumericError> {
         let scale = self.scale.max(other.scale);
-        let left = self
-            .mantissa
-            .clone()
-            * pow10((scale - self.scale) as usize);
-        let right = other
-            .mantissa
-            .clone()
-            * pow10((scale - other.scale) as usize);
+        let left = self.mantissa.clone() * pow10((scale - self.scale) as usize);
+        let right = other.mantissa.clone() * pow10((scale - other.scale) as usize);
         Ok(Self::normalize(left + right, scale))
     }
 
     pub fn sub(&self, other: &Decimal) -> Result<Decimal, NumericError> {
         let scale = self.scale.max(other.scale);
-        let left = self
-            .mantissa
-            .clone()
-            * pow10((scale - self.scale) as usize);
-        let right = other
-            .mantissa
-            .clone()
-            * pow10((scale - other.scale) as usize);
+        let left = self.mantissa.clone() * pow10((scale - self.scale) as usize);
+        let right = other.mantissa.clone() * pow10((scale - other.scale) as usize);
         Ok(Self::normalize(left - right, scale))
     }
 
@@ -228,14 +216,8 @@ impl PartialOrd for Decimal {
 impl Ord for Decimal {
     fn cmp(&self, other: &Self) -> Ordering {
         let scale = self.scale.max(other.scale);
-        let left = self
-            .mantissa
-            .clone()
-            * pow10((scale - self.scale) as usize);
-        let right = other
-            .mantissa
-            .clone()
-            * pow10((scale - other.scale) as usize);
+        let left = self.mantissa.clone() * pow10((scale - self.scale) as usize);
+        let right = other.mantissa.clone() * pow10((scale - other.scale) as usize);
         left.cmp(&right)
     }
 }

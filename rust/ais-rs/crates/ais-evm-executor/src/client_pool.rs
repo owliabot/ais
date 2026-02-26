@@ -60,20 +60,19 @@ impl AlloyRpcClientPool {
                 return Err(format!("connect rpc `{rpc_url}` failed: {error}"));
             }
             Err(_) => {
-                return Err(format!("connect rpc `{rpc_url}` timeout after {timeout_ms}ms"));
+                return Err(format!(
+                    "connect rpc `{rpc_url}` timeout after {timeout_ms}ms"
+                ));
             }
         };
-        self.clients
-            .lock()
-            .expect("evm pool lock")
-            .insert(
-                chain.to_string(),
-                CachedRpcClient {
-                    rpc_url: rpc_url.to_string(),
-                    timeout_ms,
-                    client: client.clone(),
-                },
-            );
+        self.clients.lock().expect("evm pool lock").insert(
+            chain.to_string(),
+            CachedRpcClient {
+                rpc_url: rpc_url.to_string(),
+                timeout_ms,
+                client: client.clone(),
+            },
+        );
         Ok(client)
     }
 }

@@ -1,0 +1,18 @@
+schema: ais-runner/0.0.1
+
+llm:
+  provider: openrouter
+  model: openai/gpt-4.1-mini
+  api_key: ${OPENROUTER_API_KEY}
+  api_base: https://openrouter.ai/api/v1
+  max_retries_per_provider: 2
+  rotation: round_robin
+  fallback:
+    - provider: groq
+      model: llama-3.3-70b-versatile
+      api_key: ${GROQ_API_KEY}
+      api_base: https://api.groq.com/openai/v1
+
+chains:
+  eip155:1:
+    rpc_url: ${EVM_RPC_URL}

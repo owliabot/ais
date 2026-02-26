@@ -1,12 +1,12 @@
 use crate::documents::{
-    CatalogDocument, PackDocument, PlanDocument, PlanSkeletonDocument, ProtocolDocument,
-    WorkflowDocument,
+    CatalogDocument, PackDocument, PlanDocument, PlanSkeletonDocument, PlanSketchDocument,
+    ProtocolDocument, WorkflowDocument,
 };
 use crate::parse::AisDocument;
 use ais_core::{FieldPath, FieldPathSegment, IssueSeverity, StructuredIssue};
 use ais_schema::versions::{
     SCHEMA_CATALOG_0_0_1, SCHEMA_PACK_0_0_2, SCHEMA_PLAN_0_0_3, SCHEMA_PLAN_SKELETON_0_0_1,
-    SCHEMA_PROTOCOL_0_0_2, SCHEMA_WORKFLOW_0_0_3,
+    SCHEMA_PLAN_SKETCH_0_1_0, SCHEMA_PROTOCOL_0_0_2, SCHEMA_WORKFLOW_0_0_3,
 };
 use regex::Regex;
 use serde_json::Value;
@@ -26,6 +26,7 @@ pub fn validate_document_semantics(document: &AisDocument) -> Vec<StructuredIssu
         AisDocument::Plan(plan) => validate_plan(plan, &mut issues),
         AisDocument::Catalog(catalog) => validate_catalog(catalog, &mut issues),
         AisDocument::PlanSkeleton(skeleton) => validate_plan_skeleton(skeleton, &mut issues),
+        AisDocument::PlanSketch(sketch) => validate_plan_sketch(sketch, &mut issues),
     }
 
     StructuredIssue::sort_stable(&mut issues);
@@ -220,7 +221,12 @@ fn validate_workflow(workflow: &WorkflowDocument, issues: &mut Vec<StructuredIss
             match deps.as_array() {
                 Some(items) => {
                     for (dep_index, dep) in items.iter().enumerate() {
-                        if dep.as_str().map(str::trim).filter(|it| !it.is_empty()).is_none() {
+                        if dep
+                            .as_str()
+                            .map(str::trim)
+                            .filter(|it| !it.is_empty())
+                            .is_none()
+                        {
                             issues.push(issue(
                                 "semantic_error",
                                 path_with_key_index(&base_path, "deps", dep_index),
@@ -286,6 +292,39 @@ fn validate_plan_skeleton(skeleton: &PlanSkeletonDocument, issues: &mut Vec<Stru
     }
 }
 
+fn validate_plan_sketch(sketch: &PlanSketchDocument, issues: &mut Vec<StructuredIssue>) {
+    validate_schema_field(
+        &sketch.schema,
+        SCHEMA_PLAN_SKETCH_0_1_0,
+        vec![FieldPathSegment::Key("schema".to_string())],
+        issues,
+    );
+
+    if sketch.segments.is_empty() {
+        issues.push(issue(
+            "semantic_error",
+            vec![FieldPathSegment::Key("segments".to_string())],
+            "plan sketch segments must not be empty",
+            "plan_sketch.segments.non_empty",
+        ));
+    }
+
+    for (segment_index, segment) in sketch.segments.iter().enumerate() {
+        if segment.steps.is_empty() {
+            issues.push(issue(
+                "semantic_error",
+                vec![
+                    FieldPathSegment::Key("segments".to_string()),
+                    FieldPathSegment::Index(segment_index),
+                    FieldPathSegment::Key("steps".to_string()),
+                ],
+                "plan sketch segment steps must not be empty",
+                "plan_sketch.steps.non_empty",
+            ));
+        }
+    }
+}
+
 fn validate_operation_spec(
     spec: &Value,
     base_path: Vec<FieldPathSegment>,
@@ -305,7 +344,12 @@ fn validate_operation_spec(
         match capabilities.as_array() {
             Some(items) => {
                 for (index, item) in items.iter().enumerate() {
-                    if item.as_str().map(str::trim).filter(|it| !it.is_empty()).is_none() {
+                    if item
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|it| !it.is_empty())
+                        .is_none()
+                    {
                         issues.push(issue(
                             "semantic_error",
                             path_with_key_index(&base_path, "capabilities_required", index),
@@ -407,7 +451,12 @@ fn is_valid_execution_type(value: &str) -> bool {
     pattern.is_match(value)
 }
 
-fn issue(kind: &str, path: Vec<FieldPathSegment>, message: &str, reference: &str) -> StructuredIssue {
+fn issue(
+    kind: &str,
+    path: Vec<FieldPathSegment>,
+    message: &str,
+    reference: &str,
+) -> StructuredIssue {
     StructuredIssue {
         kind: kind.to_string(),
         severity: IssueSeverity::Error,
@@ -431,7 +480,11 @@ fn path_with_index(path: &[FieldPathSegment], index: usize) -> Vec<FieldPathSegm
     out
 }
 
-fn path_with_key_index(path: &[FieldPathSegment], key: &str, index: usize) -> Vec<FieldPathSegment> {
+fn path_with_key_index(
+    path: &[FieldPathSegment],
+    key: &str,
+    index: usize,
+) -> Vec<FieldPathSegment> {
     let mut out = path.to_vec();
     out.push(FieldPathSegment::Key(key.to_string()));
     out.push(FieldPathSegment::Index(index));
