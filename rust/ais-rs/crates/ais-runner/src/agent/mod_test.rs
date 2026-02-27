@@ -1380,44 +1380,42 @@ fn segmented_intent_fixture_repairs_format_then_compiles_assert_branch_segment()
     .expect("compile second segment");
     assert_eq!(second_plan.nodes.len(), 2);
 
-    let assert_node = second_plan
+    let query_node = second_plan
         .nodes
         .iter()
         .find(|node| {
             node.get("id")
                 .and_then(Value::as_str)
-                .is_some_and(|id| id == "seg_transfer__assert_gate")
+                .is_some_and(|id| id == "seg_transfer__q_native_balance")
         })
-        .expect("assert node");
+        .expect("query node");
     assert_eq!(
-        assert_node
-            .pointer("/extensions/plan_sketch/step_kind")
-            .and_then(Value::as_str),
-        Some("assert")
+        query_node.pointer("/kind").and_then(Value::as_str),
+        Some("query_ref")
     );
 
-    let branch_node = second_plan
+    let transfer_node = second_plan
         .nodes
         .iter()
         .find(|node| {
             node.get("id")
                 .and_then(Value::as_str)
-                .is_some_and(|id| id == "seg_transfer__branch_transfer")
+                .is_some_and(|id| id == "seg_transfer__a_transfer_native_5")
         })
-        .expect("branch node");
+        .expect("transfer node");
     assert_eq!(
-        branch_node.pointer("/kind").and_then(Value::as_str),
+        transfer_node.pointer("/kind").and_then(Value::as_str),
         Some("action_ref")
     );
     assert_eq!(
-        branch_node
-            .pointer("/extensions/plan_sketch/step_kind")
-            .and_then(Value::as_str),
-        Some("branch")
+        transfer_node.pointer("/deps/0").and_then(Value::as_str),
+        Some("seg_transfer__q_native_balance")
     );
     assert_eq!(
-        branch_node.pointer("/deps/0").and_then(Value::as_str),
-        Some("seg_transfer__assert_gate")
+        transfer_node
+            .pointer("/condition/cel")
+            .and_then(Value::as_str),
+        Some("nodes.seg_transfer__q_native_balance.outputs.balance != null")
     );
     session.cursor = second_cursor_next;
 }
@@ -1549,7 +1547,7 @@ fn planner_missing_candidate_ref_payload_has_targeted_sub_reason_and_hint() {
     );
     assert_eq!(
         payload.pointer("/hint/required_step_fields/2"),
-        Some(&json!("candidate_ref"))
+        Some(&json!("inputs"))
     );
 }
 
@@ -2545,7 +2543,12 @@ fn render_agent_output_includes_llm_usage_line_when_available() {
                     "source": "estimated(chars_div_4)",
                     "context_limit_tokens": 8192,
                     "context_soft_limit_tokens": 7372,
-                    "context_remaining_tokens": 7212
+                    "context_remaining_tokens": 7212,
+                    "diagnostics": {
+                        "duplicate_tool_call_ratio_bps": 1200,
+                        "discovery_tool_call_ratio_bps": 6400,
+                        "empty_search_streak_max": 2
+                    }
                 }
             }
         }),
@@ -2560,6 +2563,9 @@ fn render_agent_output_includes_llm_usage_line_when_available() {
     assert!(output.contains("context_limit_tokens=8192"));
     assert!(output.contains("context_soft_limit_tokens=7372"));
     assert!(output.contains("context_remaining_tokens=7212"));
+    assert!(output.contains("duplicate_tool_call_ratio_bps=1200"));
+    assert!(output.contains("discovery_tool_call_ratio_bps=6400"));
+    assert!(output.contains("empty_search_streak_max=2"));
 }
 
 #[test]
@@ -2669,9 +2675,15 @@ fn segmented_max_tool_rounds_resolution_prefers_cli_then_config_then_default() {
         plugins: RunnerPluginsConfig::default(),
     };
 
-    assert_eq!(super::resolve_segmented_max_tool_rounds(&command, &config), 18);
+    assert_eq!(
+        super::resolve_segmented_max_tool_rounds(&command, &config),
+        18
+    );
     command.max_tool_rounds = Some(30);
-    assert_eq!(super::resolve_segmented_max_tool_rounds(&command, &config), 30);
+    assert_eq!(
+        super::resolve_segmented_max_tool_rounds(&command, &config),
+        30
+    );
     command.max_tool_rounds = None;
     config.llm = None;
     assert_eq!(

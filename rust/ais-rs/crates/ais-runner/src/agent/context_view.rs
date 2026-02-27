@@ -8,14 +8,16 @@ use std::collections::{BTreeMap, BTreeSet};
 const MAX_FACT_ENTRIES_IN_SUMMARY: usize = 24;
 pub(super) const DEFAULT_PLANNER_CONTEXT_TOKEN_BUDGET: usize = 6_000;
 const CHARS_PER_TOKEN_ESTIMATE: usize = 4;
-const ADAPTIVE_RELAXED_THRESHOLD_BPS: u64 = 6_000;
-const ADAPTIVE_TIGHT_THRESHOLD_BPS: u64 = 2_000;
-const CONTEXT_PRESSURE_CRITICAL_THRESHOLD_BPS: u64 = 1_000;
+const CONTEXT_USAGE_LIGHT_THRESHOLD_BPS: u64 = 7_000;
+const CONTEXT_USAGE_MEDIUM_THRESHOLD_BPS: u64 = 8_500;
+const CONTEXT_USAGE_CRITICAL_THRESHOLD_BPS: u64 = 9_200;
 const CONTEXT_PRESSURE_TIGHT_REMAINING_TOKENS: u64 = 8_000;
 const CONTEXT_PRESSURE_CRITICAL_REMAINING_TOKENS: u64 = 3_000;
 const ADAPTIVE_RELAXED_MAX_MULTIPLIER: usize = 3;
-const ADAPTIVE_TIGHT_NUMERATOR: usize = 7;
-const ADAPTIVE_TIGHT_DENOMINATOR: usize = 10;
+const ADAPTIVE_MEDIUM_NUMERATOR: usize = 17;
+const ADAPTIVE_MEDIUM_DENOMINATOR: usize = 20;
+const ADAPTIVE_CRITICAL_NUMERATOR: usize = 3;
+const ADAPTIVE_CRITICAL_DENOMINATOR: usize = 5;
 const PRIORITY_SLOTS: &[&str] = &[
     "owner",
     "wallet.default",
@@ -137,34 +139,14 @@ impl PlanningContextManager {
         self.version = self.version.saturating_add(1);
         self.last_hash = Some(hash.clone());
 
-        let wrapped = if unchanged {
-            json!({
-                "context_version": self.version,
-                "context_hash": hash,
-                "context_unchanged": true,
-                "completed_segments": completed_segments,
-                "completed_nodes": state.completed_node_ids.len(),
-                "plan_epoch": state.plan_epoch,
-                "paused_reason": state.paused_reason,
-                "done": done,
-                "previous_error": previous_error,
-                "todo_state": state.runtime.pointer("/agent/todo_progress"),
-                "tool_memory_projection": base.get("tool_memory_projection"),
-                "fact_store": {
-                    "projection": "unchanged",
-                    "max_entries": MAX_FACT_ENTRIES_IN_SUMMARY
-                }
-            })
-        } else {
-            let mut object = base.as_object().cloned().unwrap_or_default();
-            object.insert(
-                "context_version".to_string(),
-                Value::Number(self.version.into()),
-            );
-            object.insert("context_hash".to_string(), Value::String(hash));
-            object.insert("context_unchanged".to_string(), Value::Bool(false));
-            Value::Object(object)
-        };
+        let mut object = base.as_object().cloned().unwrap_or_default();
+        object.insert(
+            "context_version".to_string(),
+            Value::Number(self.version.into()),
+        );
+        object.insert("context_hash".to_string(), Value::String(hash));
+        object.insert("context_unchanged".to_string(), Value::Bool(unchanged));
+        let wrapped = Value::Object(object);
         compact_json_for_llm(&wrapped)
     }
 }
@@ -235,15 +217,18 @@ struct AdaptivePlannerBudget {
     base_token_limit: usize,
     effective_token_limit: usize,
     mode: &'static str,
+    window_input_tokens: Option<u64>,
     remaining_tokens: Option<u64>,
     soft_limit_tokens: Option<u64>,
+    usage_ratio_bps: Option<u64>,
     remaining_ratio_bps: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ContextPressureMode {
     Normal,
-    Tight,
+    Light,
+    Medium,
     Critical,
 }
 
@@ -251,7 +236,8 @@ impl ContextPressureMode {
     fn as_str(self) -> &'static str {
         match self {
             Self::Normal => "normal",
-            Self::Tight => "tight",
+            Self::Light => "light",
+            Self::Medium => "medium",
             Self::Critical => "critical",
         }
     }
@@ -273,38 +259,58 @@ fn derive_adaptive_planner_budget(
     base_token_limit: usize,
 ) -> AdaptivePlannerBudget {
     let usage = state.runtime.pointer("/agent/llm_usage");
+    let window_input_tokens = usage
+        .and_then(|value| value.get("context_window_input_tokens"))
+        .and_then(Value::as_u64);
     let remaining_tokens = usage
         .and_then(|value| value.get("context_remaining_tokens"))
         .and_then(Value::as_u64);
     let soft_limit_tokens = usage
         .and_then(|value| value.get("context_soft_limit_tokens"))
         .and_then(Value::as_u64);
+    let usage_ratio_bps = match (window_input_tokens, soft_limit_tokens) {
+        (Some(window_input), Some(soft_limit)) if soft_limit > 0 => {
+            Some(window_input.saturating_mul(10_000) / soft_limit)
+        }
+        _ => None,
+    };
     let remaining_ratio_bps = match (remaining_tokens, soft_limit_tokens) {
         (Some(remaining), Some(soft_limit)) if soft_limit > 0 => {
             Some(remaining.saturating_mul(10_000) / soft_limit)
         }
         _ => None,
     };
+    let usage_ratio_bps = usage_ratio_bps.or_else(|| match (remaining_tokens, soft_limit_tokens) {
+        (Some(remaining), Some(soft_limit)) if soft_limit > 0 => Some(
+            soft_limit
+                .saturating_sub(remaining.min(soft_limit))
+                .saturating_mul(10_000)
+                / soft_limit,
+        ),
+        _ => None,
+    });
 
     let mut effective = base_token_limit.max(1);
     let mut mode = "default";
-    if let (Some(remaining), Some(ratio_bps)) = (remaining_tokens, remaining_ratio_bps) {
-        if ratio_bps >= ADAPTIVE_RELAXED_THRESHOLD_BPS {
-            let remaining_target = usize::try_from(remaining)
-                .unwrap_or(usize::MAX)
-                .saturating_mul(35)
-                / 100;
+    if let Some(usage_bps) = usage_ratio_bps {
+        if usage_bps < CONTEXT_USAGE_LIGHT_THRESHOLD_BPS {
             let relaxed_cap = base_token_limit
                 .saturating_mul(ADAPTIVE_RELAXED_MAX_MULTIPLIER)
                 .max(base_token_limit);
-            effective = remaining_target
-                .max(base_token_limit)
-                .min(relaxed_cap)
-                .max(1);
+            let relaxed_target = base_token_limit.saturating_mul(3).saturating_div(2);
+            effective = relaxed_target.max(base_token_limit).min(relaxed_cap).max(1);
             mode = "relaxed";
-        } else if ratio_bps <= ADAPTIVE_TIGHT_THRESHOLD_BPS {
-            effective = base_token_limit.saturating_mul(ADAPTIVE_TIGHT_NUMERATOR)
-                / ADAPTIVE_TIGHT_DENOMINATOR;
+        } else if usage_bps < CONTEXT_USAGE_MEDIUM_THRESHOLD_BPS {
+            effective = base_token_limit.max(1);
+            mode = "balanced";
+        } else if usage_bps < CONTEXT_USAGE_CRITICAL_THRESHOLD_BPS {
+            effective = base_token_limit.saturating_mul(ADAPTIVE_MEDIUM_NUMERATOR)
+                / ADAPTIVE_MEDIUM_DENOMINATOR;
+            effective = effective.max(1);
+            mode = "medium";
+        } else {
+            effective = base_token_limit.saturating_mul(ADAPTIVE_CRITICAL_NUMERATOR)
+                / ADAPTIVE_CRITICAL_DENOMINATOR;
             effective = effective.max(1);
             mode = "tight";
         }
@@ -314,17 +320,19 @@ fn derive_adaptive_planner_budget(
         base_token_limit,
         effective_token_limit: effective,
         mode,
+        window_input_tokens,
         remaining_tokens,
         soft_limit_tokens,
+        usage_ratio_bps,
         remaining_ratio_bps,
     }
 }
 
 fn resolve_context_compaction_strategy(budget: AdaptivePlannerBudget) -> ContextCompactionStrategy {
     let critical = budget
-        .remaining_ratio_bps
-        .is_some_and(|ratio| ratio <= CONTEXT_PRESSURE_CRITICAL_THRESHOLD_BPS)
-        || (budget.remaining_ratio_bps.is_none()
+        .usage_ratio_bps
+        .is_some_and(|ratio| ratio >= CONTEXT_USAGE_CRITICAL_THRESHOLD_BPS)
+        || (budget.usage_ratio_bps.is_none()
             && budget
                 .remaining_tokens
                 .is_some_and(|remaining| remaining <= CONTEXT_PRESSURE_CRITICAL_REMAINING_TOKENS));
@@ -355,16 +363,16 @@ fn resolve_context_compaction_strategy(budget: AdaptivePlannerBudget) -> Context
         };
     }
 
-    let tight = budget
-        .remaining_ratio_bps
-        .is_some_and(|ratio| ratio <= ADAPTIVE_TIGHT_THRESHOLD_BPS)
-        || (budget.remaining_ratio_bps.is_none()
+    let medium = budget
+        .usage_ratio_bps
+        .is_some_and(|ratio| ratio >= CONTEXT_USAGE_MEDIUM_THRESHOLD_BPS)
+        || (budget.usage_ratio_bps.is_none()
             && budget
                 .remaining_tokens
                 .is_some_and(|remaining| remaining <= CONTEXT_PRESSURE_TIGHT_REMAINING_TOKENS));
-    if tight {
+    if medium {
         return ContextCompactionStrategy {
-            mode: ContextPressureMode::Tight,
+            mode: ContextPressureMode::Medium,
             final_compact_options: JsonBudgetOptions {
                 max_depth: 9,
                 max_object_entries: 112,
@@ -385,6 +393,36 @@ fn resolve_context_compaction_strategy(budget: AdaptivePlannerBudget) -> Context
                 max_object_entries: 48,
                 max_array_items: 20,
                 max_string_chars: 900,
+            }),
+        };
+    }
+
+    let light = budget
+        .usage_ratio_bps
+        .is_some_and(|ratio| ratio >= CONTEXT_USAGE_LIGHT_THRESHOLD_BPS);
+    if light {
+        return ContextCompactionStrategy {
+            mode: ContextPressureMode::Light,
+            final_compact_options: JsonBudgetOptions {
+                max_depth: 10,
+                max_object_entries: 120,
+                max_array_items: 120,
+                max_string_chars: 3072,
+            },
+            drop_input_slot_canonical_refs: false,
+            drop_capability_protocols: false,
+            drop_last_failed_assistant_content: false,
+            tool_memory_compact_options: Some(JsonBudgetOptions {
+                max_depth: 8,
+                max_object_entries: 96,
+                max_array_items: 48,
+                max_string_chars: 1800,
+            }),
+            failed_finalize_compact_options: Some(JsonBudgetOptions {
+                max_depth: 8,
+                max_object_entries: 96,
+                max_array_items: 48,
+                max_string_chars: 2000,
             }),
         };
     }
@@ -869,8 +907,10 @@ fn apply_planner_context_budget(mut base: Value, budget: AdaptivePlannerBudget) 
                 "base_token_limit": budget.base_token_limit,
                 "adaptive_mode": budget.mode,
                 "adaptive": {
+                    "window_input_tokens": budget.window_input_tokens,
                     "remaining_tokens": budget.remaining_tokens,
                     "soft_limit_tokens": budget.soft_limit_tokens,
+                    "usage_ratio_bps": budget.usage_ratio_bps,
                     "remaining_ratio_bps": budget.remaining_ratio_bps,
                 },
                 "estimated_tokens": selected_tokens,
@@ -1365,6 +1405,10 @@ mod tests {
         assert_eq!(
             second.pointer("/context_unchanged"),
             Some(&Value::Bool(true))
+        );
+        assert!(
+            second.pointer("/input_registry").is_some(),
+            "unchanged summaries must still include full projected context"
         );
     }
 

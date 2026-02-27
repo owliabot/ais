@@ -11,9 +11,9 @@ use std::collections::BTreeSet;
 const MAX_PLANNER_OUTPUT_REPAIR_RETRIES: usize = 2;
 const GROUND_INPUT_CONFIDENCE_THRESHOLD: u8 = 80;
 const GROUND_FACT_CONFIDENCE_THRESHOLD: u8 = 65;
-const TOOL_MEMORY_PROJECTION_MIN_TOKENS: usize = 800;
-const TOOL_MEMORY_PROJECTION_DEFAULT_TOKENS: usize = 1200;
-const TOOL_MEMORY_PROJECTION_MAX_TOKENS: usize = 1500;
+const TOOL_MEMORY_PROJECTION_MIN_TOKENS: usize = 1200;
+const TOOL_MEMORY_PROJECTION_DEFAULT_TOKENS: usize = 2400;
+const TOOL_MEMORY_PROJECTION_MAX_TOKENS: usize = 6000;
 const TOOL_MEMORY_PROJECTION_TIGHT_THRESHOLD_BPS: u64 = 2000;
 const TOOL_MEMORY_PROJECTION_RELAXED_THRESHOLD_BPS: u64 = 6000;
 const TOOL_MEMORY_REMAINING_ABS_MIN: u64 = 4_000;
@@ -552,6 +552,11 @@ pub(super) fn execute_segmented_intent_agent(
         ) {
             Ok(plan) => plan,
             Err(error_payload) => {
+                eprintln!(
+                    "[agent] compile_guard_failed segment_id={} reason={}",
+                    planned_segment.segment.segment_id,
+                    compile_error_compact(&error_payload)
+                );
                 context.set_previous_error_and_refresh(
                     &state,
                     planned_segment.done,
@@ -1405,6 +1410,19 @@ fn plan_round<P: LlmProvider>(
         } else {
             "plan.propose_segment"
         };
+        if let Some(previous_error) = context.previous_error.as_ref() {
+            eprintln!(
+                "[agent] plan_round={} mode={} previous_error={}",
+                context.planning_rounds,
+                expected_finalize_tool,
+                previous_error_compact(previous_error)
+            );
+        } else {
+            eprintln!(
+                "[agent] plan_round={} mode={} previous_error=-",
+                context.planning_rounds, expected_finalize_tool
+            );
+        }
         let draft_result = if context.previous_error.is_some() {
             planner.revise_segment(request)
         } else {
@@ -1422,6 +1440,10 @@ fn plan_round<P: LlmProvider>(
                 {
                     context.planner_output_retries =
                         context.planner_output_retries.saturating_add(1);
+                    eprintln!(
+                        "[agent] planner_output_retry retry={}/{} reason={}",
+                        context.planner_output_retries, MAX_PLANNER_OUTPUT_REPAIR_RETRIES, error
+                    );
                     let last_failed_finalize = planner.take_last_failed_finalize();
                     context.set_previous_error_and_refresh(
                         state,
@@ -1458,6 +1480,42 @@ fn compile_guard(
         chain_scope,
         Some(&context.fact_store),
     )
+}
+
+fn previous_error_compact(error: &Value) -> String {
+    let phase = error.get("phase").and_then(Value::as_str).unwrap_or("-");
+    let reason_code = error
+        .get("reason_code")
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    let sub_reason_code = error
+        .get("sub_reason_code")
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    format!("phase={phase},reason={reason_code},sub_reason={sub_reason_code}")
+}
+
+fn compile_error_compact(error: &Value) -> String {
+    let reason_code = error
+        .get("reason_code")
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    let message = error.get("message").and_then(Value::as_str).unwrap_or("-");
+    let first_issue = error
+        .get("issues")
+        .and_then(Value::as_array)
+        .and_then(|issues| issues.first())
+        .map(|issue| {
+            let kind = issue.get("kind").and_then(Value::as_str).unwrap_or("-");
+            let reference = issue
+                .get("reference")
+                .and_then(Value::as_str)
+                .unwrap_or("-");
+            let issue_message = issue.get("message").and_then(Value::as_str).unwrap_or("-");
+            format!("{kind}/{reference}:{issue_message}")
+        })
+        .unwrap_or_else(|| "-".to_string());
+    format!("reason={reason_code},message={message},first_issue={first_issue}")
 }
 
 #[allow(clippy::too_many_arguments)]

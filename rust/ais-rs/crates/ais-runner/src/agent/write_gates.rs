@@ -2,7 +2,7 @@ use super::candidates::CandidateContext;
 use super::facts::{FactStore, VolatileFactSignal};
 use ais_sdk::documents::{PlanSketchSegment, PlanSketchStep};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const VOLATILE_FACT_MAX_AGE_MS: u64 = 30_000;
@@ -18,31 +18,32 @@ pub(super) fn validate_segment_write_gates(
         .iter()
         .map(|step| (step.id.as_str(), step))
         .collect::<BTreeMap<_, _>>();
-    let query_step_ids = segment
-        .steps
-        .iter()
-        .filter(|step| step.kind == "query")
-        .map(|step| step.id.as_str())
-        .collect::<BTreeSet<_>>();
 
     for step in &segment.steps {
         if step.kind != "action" {
             continue;
         }
-        let detail = candidate_context
-            .detail_by_ref
-            .get(step.candidate_ref.as_str());
+        let Some(step_candidate_ref) = step_candidate_ref(step) else {
+            issues.push(json!({
+                "kind": "write_gate_missing",
+                "reason_code": "missing_action_candidate_ref",
+                "message": "action step missing candidate_ref",
+                "step_id": step.id,
+            }));
+            continue;
+        };
+        let detail = candidate_context.detail_by_ref.get(step_candidate_ref);
         if !action_requires_write_gate(detail) {
             continue;
         }
 
-        if !has_required_write_gate_chain(step, &step_by_id, &query_step_ids, candidate_context) {
+        if !has_required_write_gate_chain(step, &step_by_id, candidate_context) {
             issues.push(json!({
                 "kind": "write_gate_missing",
                 "reason_code": "missing_query_assert_branch_chain",
                 "message": "write action must depend on assert/branch gate backed by query facts in the same segment",
                 "step_id": step.id,
-                "candidate_ref": step.candidate_ref,
+                "candidate_ref": step_candidate_ref,
                 "required_pattern": "query -> assert|branch -> action",
             }));
         }
@@ -55,7 +56,7 @@ pub(super) fn validate_segment_write_gates(
                         "reason_code": "missing_required_query",
                         "message": format!("action requires query `{query_name}` before execution"),
                         "step_id": step.id,
-                        "candidate_ref": step.candidate_ref,
+                        "candidate_ref": step_candidate_ref,
                         "required_query": query_name,
                     }));
                 }
@@ -71,7 +72,7 @@ pub(super) fn validate_segment_write_gates(
                     "reason_code": "missing_token_decimals",
                     "message": "token decimals unavailable; add decimals query (e.g. erc20/decimals) or return missing_required_input",
                     "step_id": step.id,
-                    "candidate_ref": step.candidate_ref,
+                    "candidate_ref": step_candidate_ref,
                     "required_fact": "token.decimals",
                 }));
             }
@@ -91,7 +92,7 @@ pub(super) fn validate_segment_write_gates(
                     "reason_code": "stale_volatile_fact",
                     "message": format!("volatile fact `{}` is stale or missing; add fresh query in this segment before write", volatile_signal_name(signal)),
                     "step_id": step.id,
-                    "candidate_ref": step.candidate_ref,
+                    "candidate_ref": step_candidate_ref,
                     "required_signal": volatile_signal_name(signal),
                     "max_age_ms": VOLATILE_FACT_MAX_AGE_MS,
                 }));
@@ -241,31 +242,67 @@ fn action_has_allowance_like_risk_tags(detail: &Value) -> bool {
 fn has_required_write_gate_chain<'a>(
     action_step: &'a PlanSketchStep,
     step_by_id: &BTreeMap<&'a str, &'a PlanSketchStep>,
-    query_step_ids: &BTreeSet<&'a str>,
     candidate_context: &CandidateContext,
 ) -> bool {
     if action_step.depends_on.is_empty() {
         return false;
     }
 
+    let mut visited = HashSet::<String>::new();
     for dep in &action_step.depends_on {
-        let Some(gate_step) = step_by_id.get(dep.as_str()) else {
-            continue;
-        };
-        if gate_step.kind != "assert" && gate_step.kind != "branch" {
-            continue;
-        }
-        let guard_has_query_dep = gate_step
-            .depends_on
-            .iter()
-            .any(|query_dep| query_step_ids.contains(query_dep.as_str()));
-        let assert_queries_directly = gate_step.kind == "assert"
-            && is_query_candidate_ref(gate_step.candidate_ref.as_str(), candidate_context);
-        if guard_has_query_dep || assert_queries_directly {
+        if has_query_backed_gate_path(
+            dep.as_str(),
+            false,
+            step_by_id,
+            candidate_context,
+            &mut visited,
+        ) {
             return true;
         }
     }
     false
+}
+
+fn has_query_backed_gate_path<'a>(
+    step_id: &'a str,
+    seen_gate: bool,
+    step_by_id: &BTreeMap<&'a str, &'a PlanSketchStep>,
+    candidate_context: &CandidateContext,
+    visited: &mut HashSet<String>,
+) -> bool {
+    if !visited.insert(format!("{step_id}|{seen_gate}")) {
+        return false;
+    }
+    let Some(step) = step_by_id.get(step_id).copied() else {
+        return false;
+    };
+
+    if step.kind == "query" {
+        return seen_gate
+            && step_candidate_ref(step)
+                .is_some_and(|reference| is_query_candidate_ref(reference, candidate_context));
+    }
+
+    let is_gate = step.kind == "assert" || step.kind == "branch";
+    let next_seen_gate = seen_gate || is_gate;
+    if next_seen_gate
+        && step
+            .candidate_ref
+            .as_deref()
+            .is_some_and(|reference| is_query_candidate_ref(reference, candidate_context))
+    {
+        return true;
+    }
+
+    step.depends_on.iter().any(|dep| {
+        has_query_backed_gate_path(
+            dep.as_str(),
+            next_seen_gate,
+            step_by_id,
+            candidate_context,
+            visited,
+        )
+    })
 }
 
 fn is_query_candidate_ref(candidate_ref: &str, candidate_context: &CandidateContext) -> bool {
@@ -303,10 +340,13 @@ fn segment_has_query_name(
         if step.kind != "query" && step.kind != "assert" {
             return false;
         }
-        if !is_query_candidate_ref(step.candidate_ref.as_str(), candidate_context) {
+        let Some(reference) = step_candidate_ref(step) else {
+            return false;
+        };
+        if !is_query_candidate_ref(reference, candidate_context) {
             return false;
         }
-        candidate_leaf_name(step.candidate_ref.as_str()) == target
+        candidate_leaf_name(reference) == target
     })
 }
 
@@ -319,10 +359,13 @@ fn segment_has_query_for_signal(
         if step.kind != "query" {
             return false;
         }
-        if !is_query_candidate_ref(step.candidate_ref.as_str(), candidate_context) {
+        let Some(reference) = step_candidate_ref(step) else {
+            return false;
+        };
+        if !is_query_candidate_ref(reference, candidate_context) {
             return false;
         }
-        query_candidate_matches_signal(step.candidate_ref.as_str(), candidate_context, signal)
+        query_candidate_matches_signal(reference, candidate_context, signal)
     })
 }
 
@@ -374,11 +417,21 @@ fn token_decimals_available(
         if step.kind != "query" && step.kind != "assert" {
             return false;
         }
-        if !is_query_candidate_ref(step.candidate_ref.as_str(), candidate_context) {
+        let Some(reference) = step_candidate_ref(step) else {
+            return false;
+        };
+        if !is_query_candidate_ref(reference, candidate_context) {
             return false;
         }
-        query_candidate_returns_decimals(step.candidate_ref.as_str(), candidate_context)
+        query_candidate_returns_decimals(reference, candidate_context)
     })
+}
+
+fn step_candidate_ref(step: &PlanSketchStep) -> Option<&str> {
+    step.candidate_ref
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 fn query_candidate_returns_decimals(
@@ -541,4 +594,81 @@ fn current_unix_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn candidate_context_with_demo_refs() -> CandidateContext {
+        let mut context = CandidateContext::default();
+        context.detail_by_ref.insert(
+            "demo-bank@0.0.1/native-balance".to_string(),
+            json!({
+                "ref": "demo-bank@0.0.1/native-balance",
+                "kind": "query"
+            }),
+        );
+        context.detail_by_ref.insert(
+            "demo-bank@0.0.1/native-transfer".to_string(),
+            json!({
+                "ref": "demo-bank@0.0.1/native-transfer",
+                "kind": "action",
+                "risk_tags": ["transfer"]
+            }),
+        );
+        context
+    }
+
+    #[test]
+    fn write_gate_accepts_recursive_query_assert_branch_action_chain() {
+        let segment: PlanSketchSegment = serde_json::from_value(json!({
+            "segment_id": "seg-1",
+            "cursor_in": "0",
+            "cursor_out": "1",
+            "done": false,
+            "steps": [
+                {"id":"q_balance","kind":"query","candidate_ref":"demo-bank@0.0.1/native-balance","inputs":{}},
+                {"id":"g_assert","kind":"assert","depends_on":["q_balance"],"inputs":{"condition":{"cel":"nodes.q_balance.outputs.balance != null"}}},
+                {"id":"g_branch","kind":"branch","depends_on":["g_assert"],"inputs":{"condition":{"cel":"nodes.q_balance.outputs.balance > 0"}}},
+                {"id":"a_transfer","kind":"action","candidate_ref":"demo-bank@0.0.1/native-transfer","depends_on":["g_branch"],"inputs":{}}
+            ],
+            "extensions": {}
+        }))
+        .expect("segment");
+        let context = candidate_context_with_demo_refs();
+
+        let result = validate_segment_write_gates(&segment, &context, None);
+        assert!(result.is_ok(), "recursive gate chain should pass: {result:?}");
+    }
+
+    #[test]
+    fn write_gate_rejects_chain_without_query_backing() {
+        let segment: PlanSketchSegment = serde_json::from_value(json!({
+            "segment_id": "seg-1",
+            "cursor_in": "0",
+            "cursor_out": "1",
+            "done": false,
+            "steps": [
+                {"id":"g_assert","kind":"assert","inputs":{"condition":{"cel":"true"}}},
+                {"id":"g_branch","kind":"branch","depends_on":["g_assert"],"inputs":{"condition":{"cel":"true"}}},
+                {"id":"a_transfer","kind":"action","candidate_ref":"demo-bank@0.0.1/native-transfer","depends_on":["g_branch"],"inputs":{}}
+            ],
+            "extensions": {}
+        }))
+        .expect("segment");
+        let context = candidate_context_with_demo_refs();
+
+        let error = validate_segment_write_gates(&segment, &context, None)
+            .expect_err("missing query-backed gate chain must fail");
+        assert_eq!(
+            error.pointer("/reason_code").and_then(Value::as_str),
+            Some("write_gate_missing")
+        );
+        assert!(error
+            .pointer("/issues/0/reason_code")
+            .and_then(Value::as_str)
+            .is_some_and(|code| code == "missing_query_assert_branch_chain"));
+    }
 }

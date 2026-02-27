@@ -154,6 +154,7 @@ pub struct LlmSegmentedIntentPlanner<P> {
     provider: P,
     candidate_context: Option<CandidateContext>,
     planning_memory: PlanningMemory,
+    diagnostics_tracker: PlannerDiagnosticsTracker,
     last_failed_finalize: Option<Value>,
     begin_context: Option<PlannerBeginContext>,
     prompt_builder: SegmentedPromptContextBuilder,
@@ -218,6 +219,179 @@ struct PlannerLlmUsageTracker {
     context_limit_tokens: Option<u64>,
     latest_input_tokens: u64,
     latest_total_tokens: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PlannerDiagnosticsTracker {
+    total_tool_calls: u64,
+    duplicate_tool_calls: u64,
+    tool_call_count_by_tool: BTreeMap<String, u64>,
+    tool_result_count_by_tool: BTreeMap<String, u64>,
+    memory_hits_by_tool: BTreeMap<String, u64>,
+    phase_round_count: BTreeMap<String, u64>,
+    empty_search_streak_max: u64,
+    seen_tool_call_keys: BTreeSet<String>,
+}
+
+impl PlannerDiagnosticsTracker {
+    fn observe_phase_round(&mut self, phase: PlannerRoundPhase) {
+        let key = phase_name(phase).to_string();
+        let entry = self.phase_round_count.entry(key).or_insert(0);
+        *entry = entry.saturating_add(1);
+    }
+
+    fn observe_tool_call(&mut self, tool_name: &str, dedupe_key: Option<String>) -> bool {
+        self.total_tool_calls = self.total_tool_calls.saturating_add(1);
+        let entry = self
+            .tool_call_count_by_tool
+            .entry(tool_name.to_string())
+            .or_insert(0);
+        *entry = entry.saturating_add(1);
+        let Some(key) = dedupe_key else {
+            return false;
+        };
+        if !self.seen_tool_call_keys.insert(key) {
+            self.duplicate_tool_calls = self.duplicate_tool_calls.saturating_add(1);
+            return true;
+        }
+        false
+    }
+
+    fn observe_tool_result(&mut self, tool_name: &str, cached: bool) {
+        let total = self
+            .tool_result_count_by_tool
+            .entry(tool_name.to_string())
+            .or_insert(0);
+        *total = total.saturating_add(1);
+        if cached {
+            let hits = self
+                .memory_hits_by_tool
+                .entry(tool_name.to_string())
+                .or_insert(0);
+            *hits = hits.saturating_add(1);
+        }
+    }
+
+    fn observe_empty_search_streak(&mut self, streak: u64) {
+        if streak > self.empty_search_streak_max {
+            self.empty_search_streak_max = streak;
+        }
+    }
+
+    fn duplicate_ratio_bps(&self) -> u64 {
+        if self.total_tool_calls == 0 {
+            return 0;
+        }
+        self.duplicate_tool_calls.saturating_mul(10_000) / self.total_tool_calls
+    }
+
+    fn discovery_ratio_bps(&self) -> u64 {
+        if self.total_tool_calls == 0 {
+            return 0;
+        }
+        let discovery_calls = [
+            "list_candidates",
+            "catalog.search",
+            "get_candidate_detail",
+            "guide.get",
+        ]
+        .iter()
+        .map(|tool| {
+            self.tool_call_count_by_tool
+                .get(*tool)
+                .copied()
+                .unwrap_or(0)
+        })
+        .sum::<u64>();
+        discovery_calls.saturating_mul(10_000) / self.total_tool_calls
+    }
+
+    fn memory_hit_rate_by_tool_value(&self) -> Value {
+        let mut output = serde_json::Map::<String, Value>::new();
+        for (tool_name, total) in &self.tool_result_count_by_tool {
+            let hits = self
+                .memory_hits_by_tool
+                .get(tool_name)
+                .copied()
+                .unwrap_or(0);
+            let rate_bps = if *total == 0 {
+                0
+            } else {
+                hits.saturating_mul(10_000) / *total
+            };
+            output.insert(
+                tool_name.clone(),
+                json!({
+                    "hits": hits,
+                    "total": total,
+                    "rate_bps": rate_bps,
+                }),
+            );
+        }
+        Value::Object(output)
+    }
+
+    fn to_value(&self) -> Value {
+        let ratio_bps = self.duplicate_ratio_bps();
+        let discovery_ratio_bps = self.discovery_ratio_bps();
+        json!({
+            "tool_calls_total": self.total_tool_calls,
+            "tool_calls_duplicate": self.duplicate_tool_calls,
+            "duplicate_tool_call_ratio_bps": ratio_bps,
+            "duplicate_tool_call_ratio": (ratio_bps as f64) / 10_000.0_f64,
+            "discovery_tool_call_ratio_bps": discovery_ratio_bps,
+            "discovery_tool_call_ratio": (discovery_ratio_bps as f64) / 10_000.0_f64,
+            "tool_call_count_by_tool": self.tool_call_count_by_tool,
+            "memory_hit_rate_by_tool": self.memory_hit_rate_by_tool_value(),
+            "phase_round_count": self.phase_round_count,
+            "empty_search_streak_max": self.empty_search_streak_max,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct CatalogSearchLoopGuard {
+    current_streak: u64,
+    max_streak: u64,
+    previous_signature: Option<String>,
+}
+
+impl CatalogSearchLoopGuard {
+    fn observe_empty(&mut self, signature: Option<String>) -> bool {
+        if let (Some(previous), Some(current)) =
+            (self.previous_signature.as_ref(), signature.as_ref())
+        {
+            if previous == current {
+                self.current_streak = self.current_streak.saturating_add(1);
+            } else {
+                self.current_streak = 1;
+            }
+        } else {
+            self.current_streak = 1;
+        }
+        self.previous_signature = signature;
+        if self.current_streak > self.max_streak {
+            self.max_streak = self.current_streak;
+        }
+        // Emit loop-guard hint only once when an empty-search streak first
+        // reaches the threshold; avoid injecting the same hint every round.
+        self.current_streak == 2
+    }
+
+    fn observe_non_empty(&mut self) {
+        self.current_streak = 0;
+        self.previous_signature = None;
+    }
+
+    fn max_streak(&self) -> u64 {
+        self.max_streak
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct RoundContextSignal {
+    pressure_mode: Option<String>,
+    compressed: bool,
 }
 
 impl PlannerLlmUsageTracker {
@@ -326,15 +500,16 @@ impl Default for SegmentedPromptContextBuilder {
                 "Check state_summary.tool_memory_projection first; call discovery/schema tools only when required information is missing or stale.",
                 "For schema/topic contracts, call guide.get first using canonical request shape; schema lookups are digest-first and should request {full:true} only when digest is insufficient.",
                 "For capability narrowing, prefer catalog.search first (compact ref-first cards: ref/kind/chains?/risk_level?), then get_candidate_detail for selected refs.",
-                "Use list_candidates as broad inventory only when needed, and avoid repeating it in the same snapshot scope.",
+                "Use list_candidates as broad inventory only when needed; if state_summary.tool_memory_projection.recent.list_inventory exists, reuse it first.",
+                "Avoid repeating list_candidates in the same snapshot scope.",
                 "assert/branch/until/retry are PlanSketch control-step semantics, not catalog candidates.",
-                "Control-step semantics are not catalog candidates, but every step (including assert/branch) still requires candidate_ref from discovered candidates.",
+                "Control-step semantics are built in; assert/branch do not require candidate_ref.",
                 "Never use catalog.search to look up control-step semantics; use guide.get ({schema:\"ais-plan-sketch/0.1.0\"} / {topic:\"cel\"}).",
                 "Tool results for list_candidates/catalog.search/get_candidate_detail are cached by snapshot scope; repeated identical calls return cached snapshots.",
                 "A segment is PlanSketch-compatible: segment_id/cursor_in/cursor_out/done/steps.",
                 "Use state_summary.todo_state.current_todo as the only objective for this round; output exactly one segment for that todo.",
                 "Use only refs listed in state_summary.input_registry.known_refs for inputs.* bindings; do not invent unknown input refs.",
-                "Each step needs id + kind + candidate_ref + inputs; depends_on references step ids in the same segment.",
+                "Each step needs id + kind + inputs; candidate_ref is required for query/action and optional for assert/branch.",
                 "In CEL/ValueRef node refs, use nodes.<step_id>.outputs.<field> with same-segment step ids only (no segment/step path).",
                 "Use only refs from candidates; never invent protocols/actions.",
                 "For errors, return status=invalid|unavailable with error.reason_code; for missing_required_input include error.details.questions[].",
@@ -386,8 +561,9 @@ impl Default for SegmentedPromptContextBuilder {
                 "Allowed tools: list_candidates, catalog.search, get_candidate_detail, guide.get, plan.check_segment, and one final plan.propose_segment (must be last).",
                 "Host enforces 1 todo = 1 segment; plan only for current state_summary.todo_state.current_todo.",
                 "If schema/topic contract is needed, call guide.get first; for capability narrowing, use catalog.search (ref-first compact cards) then get_candidate_detail.",
+                "Call list_candidates in this phase only if tool_memory_projection lacks recent.list_inventory.",
                 "assert/branch/until/retry semantics must be read from guide.get, not catalog.search.",
-                "Even for assert/branch control steps, candidate_ref is required in steps[] and must be a discovered candidate ref.",
+                "assert/branch are control steps and may omit candidate_ref.",
                 "If uncertain about output shape or CEL/ValueRef contracts, call guide.get using canonical shape {schema:\"...\"} or {topic:\"...\"} before finalizing.",
                 "You must call plan.check_segment and only finalize when check result has ok=true.",
                 "Repair order is strict: shape -> ref -> slot -> semantic.",
@@ -406,8 +582,9 @@ impl Default for SegmentedPromptContextBuilder {
                 "Allowed tools: list_candidates, catalog.search, get_candidate_detail, guide.get, plan.check_segment, and one final plan.revise_segment (must be last).",
                 "Keep repairing the same current todo from state_summary.todo_state.current_todo; do not switch to a different objective.",
                 "If schema/topic contract is needed, call guide.get first; for capability narrowing, use catalog.search (ref-first compact cards) then get_candidate_detail.",
+                "Call list_candidates in this phase only if tool_memory_projection lacks recent.list_inventory.",
                 "assert/branch/until/retry semantics must be read from guide.get, not catalog.search.",
-                "Even for assert/branch control steps, candidate_ref is required in steps[] and must be a discovered candidate ref.",
+                "assert/branch are control steps and may omit candidate_ref.",
                 "Use guide.get for contract lookups with canonical shape {schema:\"...\"} or {topic:\"...\"} instead of guessing field names.",
                 "You must call plan.check_segment and only finalize when check result has ok=true.",
                 "Repair order is strict: shape -> ref -> slot -> semantic; keep semantic edits minimal.",
@@ -510,6 +687,7 @@ impl<P> LlmSegmentedIntentPlanner<P> {
             provider,
             candidate_context: None,
             planning_memory: PlanningMemory::default(),
+            diagnostics_tracker: PlannerDiagnosticsTracker::default(),
             last_failed_finalize: None,
             begin_context: None,
             prompt_builder: SegmentedPromptContextBuilder::default(),
@@ -564,7 +742,14 @@ impl<P> LlmSegmentedIntentPlanner<P> {
     }
 
     pub fn llm_usage_value(&self) -> Value {
-        self.usage_tracker.to_value()
+        let mut usage = self.usage_tracker.to_value();
+        if let Some(usage_object) = usage.as_object_mut() {
+            usage_object.insert(
+                "diagnostics".to_string(),
+                self.diagnostics_tracker.to_value(),
+            );
+        }
+        usage
     }
 
     pub fn tool_memory_projection_value(&self, max_tokens: usize) -> Option<Value> {
@@ -609,6 +794,14 @@ impl<P> LlmSegmentedIntentPlanner<P> {
                 tool_calls: vec![],
             },
         ];
+        let round_signal = extract_round_context_signal(
+            messages
+                .get(1)
+                .and_then(|message| message.content.as_deref())
+                .unwrap_or_default(),
+        );
+        let mut loop_guard = CatalogSearchLoopGuard::default();
+        let mut control_step_ref_hint_emitted = false;
         let tools = segmented_planner_tools_for_phase(phase);
         if self.verbose_llm {
             eprintln!(
@@ -638,6 +831,7 @@ impl<P> LlmSegmentedIntentPlanner<P> {
         }
 
         for round in 0..self.max_tool_rounds {
+            self.diagnostics_tracker.observe_phase_round(phase);
             let llm_request = CompleteWithToolsRequest {
                 messages: messages.clone(),
                 tools: tools.clone(),
@@ -711,7 +905,23 @@ impl<P> LlmSegmentedIntentPlanner<P> {
             }
 
             let mut tool_results = Vec::<LlmMessage>::new();
+            let mut round_memory_hits = 0u64;
+            let mut round_loop_hint: Option<Value> = None;
+            let mut round_control_ref_hint: Option<Value> = None;
             for call in &response.tool_calls {
+                let dedupe_key = tool_cache_key(call.name.as_str(), &call.arguments);
+                let duplicate = self
+                    .diagnostics_tracker
+                    .observe_tool_call(call.name.as_str(), dedupe_key);
+                if self.verbose_llm && duplicate {
+                    eprintln!(
+                        "[llm] segmented planner duplicate_tool_call round={} phase={} tool={} tool_call_id={}",
+                        round + 1,
+                        phase_name(phase),
+                        call.name,
+                        call.id
+                    );
+                }
                 let decoded = match decode_segmented_tool_call_with_memory(
                     call,
                     finalize_tool,
@@ -772,8 +982,36 @@ impl<P> LlmSegmentedIntentPlanner<P> {
                         content,
                         cached,
                     } => {
+                        self.diagnostics_tracker
+                            .observe_tool_result(tool_name.as_str(), cached);
+                        if cached {
+                            round_memory_hits = round_memory_hits.saturating_add(1);
+                        }
                         if tool_name == "plan.check_segment" {
                             latest_segment_check_ok = plan_check_result_ok(content.as_str());
+                            if !control_step_ref_hint_emitted
+                                && plan_check_has_control_step_candidate_not_found(content.as_str())
+                            {
+                                control_step_ref_hint_emitted = true;
+                                round_control_ref_hint =
+                                    Some(control_step_candidate_ref_hint_payload());
+                            }
+                        }
+                        if tool_name == "catalog.search" {
+                            let signature = catalog_search_signature_from_result(content.as_str());
+                            let is_empty = catalog_search_result_is_empty(content.as_str());
+                            if is_empty {
+                                let should_hint = loop_guard.observe_empty(signature);
+                                self.diagnostics_tracker
+                                    .observe_empty_search_streak(loop_guard.max_streak());
+                                if should_hint {
+                                    round_loop_hint = Some(catalog_search_loop_guard_hint_payload(
+                                        loop_guard.current_streak,
+                                    ));
+                                }
+                            } else {
+                                loop_guard.observe_non_empty();
+                            }
                         }
                         if self.verbose_llm {
                             eprintln!(
@@ -807,6 +1045,60 @@ impl<P> LlmSegmentedIntentPlanner<P> {
                 ));
             }
             messages.extend(tool_results);
+            if let Some(control_hint) = round_control_ref_hint {
+                let hint_text = serde_json::to_string_pretty(&control_hint)
+                    .unwrap_or_else(|_| "{}".to_string());
+                if self.verbose_llm {
+                    eprintln!(
+                        "[llm] segmented planner control_ref_hint round={} phase={} hint={}",
+                        round + 1,
+                        phase_name(phase),
+                        truncate_for_log(hint_text.as_str(), 600)
+                    );
+                }
+                messages.push(LlmMessage {
+                    role: MessageRole::User,
+                    content: Some(hint_text),
+                    tool_name: None,
+                    tool_call_id: None,
+                    tool_calls: vec![],
+                });
+            }
+            if let Some(loop_hint) = round_loop_hint {
+                let hint_text =
+                    serde_json::to_string_pretty(&loop_hint).unwrap_or_else(|_| "{}".to_string());
+                if self.verbose_llm {
+                    eprintln!(
+                        "[llm] segmented planner loop_guard round={} phase={} hint={}",
+                        round + 1,
+                        phase_name(phase),
+                        truncate_for_log(hint_text.as_str(), 600)
+                    );
+                }
+                messages.push(LlmMessage {
+                    role: MessageRole::User,
+                    content: Some(hint_text),
+                    tool_name: None,
+                    tool_call_id: None,
+                    tool_calls: vec![],
+                });
+            }
+            if self.verbose_llm {
+                let duplicate_ratio_bps = self.diagnostics_tracker.duplicate_ratio_bps();
+                eprintln!(
+                    "[llm] segmented planner round_summary round={} phase={} pressure_mode={} compressed={} memory_hits={} duplicate_ratio_bps={} empty_search_streak_max={}",
+                    round + 1,
+                    phase_name(phase),
+                    round_signal
+                        .pressure_mode
+                        .as_deref()
+                        .unwrap_or("-"),
+                    round_signal.compressed,
+                    round_memory_hits,
+                    duplicate_ratio_bps,
+                    self.diagnostics_tracker.empty_search_streak_max
+                );
+            }
         }
 
         Err(RunnerError::Llm(
@@ -824,6 +1116,9 @@ where
         request: SegmentBeginRequest,
     ) -> Result<SegmentPlanningSession, RunnerError> {
         self.planning_memory.clear();
+        self.diagnostics_tracker = PlannerDiagnosticsTracker::default();
+        self.usage_tracker = PlannerLlmUsageTracker::default()
+            .with_context_limit_tokens(self.usage_tracker.context_limit_tokens);
         self.begin_context = None;
         let output = self.run_with_finalize_tool(
             render_begin_prompt_with_patch(
@@ -1713,7 +2008,38 @@ fn normalize_tool_arguments(tool_name: &str, arguments: &Value) -> Value {
             refs.dedup();
             json!({ "refs": refs })
         }
-        "catalog.search" => arguments.clone(),
+        "catalog.search" => {
+            let query = arguments
+                .get("query")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .and_then(normalize_catalog_search_query_for_cache)
+                .map(Value::String)
+                .unwrap_or(Value::Null);
+            let kind = arguments
+                .get("kind")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| Value::String(value.to_ascii_lowercase()))
+                .unwrap_or(Value::Null);
+            let chain = arguments
+                .get("chain")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| Value::String(value.to_ascii_lowercase()))
+                .unwrap_or(Value::Null);
+            json!({
+                "query": query,
+                "kind": kind,
+                "chain": chain,
+                "min_risk_level": arguments.get("min_risk_level").cloned().unwrap_or(Value::Null),
+                "max_risk_level": arguments.get("max_risk_level").cloned().unwrap_or(Value::Null),
+                "limit": arguments.get("limit").cloned().unwrap_or(Value::Null),
+            })
+        }
         "guide.get" => {
             let schema = arguments
                 .get("schema")
@@ -1739,6 +2065,33 @@ fn normalize_tool_arguments(tool_name: &str, arguments: &Value) -> Value {
         }),
         _ => arguments.clone(),
     }
+}
+
+fn normalize_catalog_search_query_for_cache(query: &str) -> Option<String> {
+    let stop_words = ["a", "an", "the", "for", "on", "to", "my", "me", "please"];
+    let lowered = query
+        .to_ascii_lowercase()
+        .replace("erc-20", "erc20")
+        .replace("erc 20", "erc20")
+        .replace("balanceof", "balance");
+    let mut tokens = lowered
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(|token| match token {
+            "erc20" | "token" | "tokens" => "token".to_string(),
+            "native" | "eth" => "native".to_string(),
+            "balanceof" | "balance" | "balances" => "balance".to_string(),
+            "transfer" | "send" | "payment" => "transfer".to_string(),
+            other => other.to_string(),
+        })
+        .filter(|token| !stop_words.contains(&token.as_str()))
+        .collect::<Vec<_>>();
+    if tokens.is_empty() {
+        return None;
+    }
+    tokens.sort();
+    tokens.dedup();
+    Some(tokens.join(" "))
 }
 
 fn guide_get_requires_full_schema(tool_name: &str, arguments: &Value) -> bool {
@@ -1901,6 +2254,29 @@ fn plan_check_result_ok(content: &str) -> bool {
         .ok()
         .and_then(|value| value.get("ok").and_then(Value::as_bool))
         .unwrap_or(false)
+}
+
+fn plan_check_has_control_step_candidate_not_found(content: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(content) else {
+        return false;
+    };
+    let issues = value
+        .get("issues")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    issues.iter().any(|issue| {
+        let reference = issue
+            .get("reference")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let message = issue
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        reference == "candidate_not_found"
+            && message.contains("candidate not found for control step")
+    })
 }
 
 fn finalized_segment_is_proposed(result: &PlannerToolOutput) -> bool {
@@ -2171,7 +2547,7 @@ fn decode_plan_sketch_segment_arg(raw: &Value) -> Result<PlanSketchSegment, Runn
     }
     if let Some(details) = missing_step_candidate_ref_diagnostics(raw) {
         return Err(RunnerError::Llm(format!(
-            "proposed segment draft `segment` is invalid: steps missing required `candidate_ref`: {details}. Every step (query/action/assert/branch) must include candidate_ref; assert/branch also require candidate_ref from discovered candidates."
+            "proposed segment draft `segment` is invalid: steps missing required `candidate_ref`: {details}. Only query/action steps require candidate_ref."
         )));
     }
     let value = raw.clone();
@@ -2189,6 +2565,15 @@ fn missing_step_candidate_ref_diagnostics(raw: &Value) -> Option<String> {
         let Some(step_obj) = step.as_object() else {
             continue;
         };
+        let kind = step_obj
+            .get("kind")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if kind == "assert" || kind == "branch" {
+            continue;
+        }
         if step_obj.contains_key("candidate_ref") {
             continue;
         }
@@ -2574,7 +2959,8 @@ fn render_segment_prompt_with_patch(
             ]
         },
         "segment_contract": {
-            "required_step_fields": ["id", "kind", "candidate_ref", "inputs"],
+            "required_step_fields": ["id", "kind", "inputs"],
+            "candidate_ref_rule": "required for query/action; optional for assert/branch control steps",
             "kind_enum": ["action", "query", "assert", "branch"],
             "optional_runtime_controls": ["until", "retry", "timeout_ms"],
             "forbidden_step_fields": ["if_true", "if_false", "then", "else", "children", "steps_if_true", "steps_if_false"],
@@ -2938,6 +3324,90 @@ fn control_semantics_search_hint_payload(
             "guide_requests": [
                 { "schema": "ais-plan-sketch/0.1.0" },
                 { "topic": "cel" }
+            ]
+        }
+    })
+}
+
+fn extract_round_context_signal(user_prompt: &str) -> RoundContextSignal {
+    let parsed = serde_json::from_str::<Value>(user_prompt).ok();
+    let pressure_mode = parsed
+        .as_ref()
+        .and_then(|value| value.pointer("/state_summary/context_budget/pressure_mode"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let compressed = parsed
+        .as_ref()
+        .and_then(|value| value.pointer("/state_summary/context_budget/pressure_actions"))
+        .and_then(Value::as_array)
+        .map(|actions| !actions.is_empty())
+        .unwrap_or(false);
+    RoundContextSignal {
+        pressure_mode,
+        compressed,
+    }
+}
+
+fn catalog_search_result_is_empty(content: &str) -> bool {
+    let Ok(parsed) = serde_json::from_str::<Value>(content) else {
+        return false;
+    };
+    let total = parsed
+        .get("total_matches")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let returned = parsed
+        .get("returned_matches")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    total == 0 && returned == 0
+}
+
+fn catalog_search_signature_from_result(content: &str) -> Option<String> {
+    let parsed = serde_json::from_str::<Value>(content).ok()?;
+    let query = parsed
+        .get("query")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("-");
+    let kind = parsed
+        .pointer("/filters/kind")
+        .and_then(Value::as_str)
+        .unwrap_or("any");
+    let chain = parsed
+        .pointer("/filters/chain")
+        .and_then(Value::as_str)
+        .unwrap_or("*");
+    Some(format!("{kind}|{chain}|{query}"))
+}
+
+fn catalog_search_loop_guard_hint_payload(streak: u64) -> Value {
+    json!({
+        "loop_guard": {
+            "kind": "catalog_search_empty_streak",
+            "streak": streak,
+            "rule": "Avoid repeating semantically similar catalog.search queries that keep returning empty.",
+            "next_step_order": [
+                "reuse state_summary.tool_memory_projection.recent.list_inventory if present",
+                "if discovery baseline is missing, call list_candidates once",
+                "narrow by explicit refs and call get_candidate_detail",
+                "for control semantics (assert/branch/until/retry), call guide.get with {\"schema\":\"ais-plan-sketch/0.1.0\"} or {\"topic\":\"cel\"}"
+            ]
+        }
+    })
+}
+
+fn control_step_candidate_ref_hint_payload() -> Value {
+    json!({
+        "repair_hint": {
+            "kind": "control_step_candidate_ref",
+            "reason_code": "control_step_candidate_not_found",
+            "rule": "Do not search catalog for synthetic refs like `.../assert` or `.../branch`. Control steps are built in.",
+            "fix": [
+                "For kind=assert|branch, keep kind as assert/branch and use when.cel / inputs.condition to express gate logic.",
+                "Then express gate semantics via when.cel and depends_on (query -> assert|branch -> action).",
+                "Re-run plan.check_segment and finalize only when ok=true."
             ]
         }
     })
@@ -4220,7 +4690,6 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert!(required_set.contains("id"));
         assert!(required_set.contains("kind"));
-        assert!(required_set.contains("candidate_ref"));
         assert!(required_set.contains("inputs"));
     }
 
@@ -4524,6 +4993,27 @@ mod tests {
     }
 
     #[test]
+    fn catalog_search_cache_key_normalizes_synonyms_and_token_order() {
+        let first = tool_cache_key(
+            "catalog.search",
+            &json!({"kind":"query","query":"erc20 balance"}),
+        )
+        .expect("first cache key");
+        let second = tool_cache_key(
+            "catalog.search",
+            &json!({"kind":"query","query":"token   balance"}),
+        )
+        .expect("second cache key");
+        let third = tool_cache_key(
+            "catalog.search",
+            &json!({"kind":"query","query":"balance token"}),
+        )
+        .expect("third cache key");
+        assert_eq!(first, second);
+        assert_eq!(second, third);
+    }
+
+    #[test]
     fn requires_successful_check_only_for_segment_finalize_with_context() {
         assert!(!requires_successful_check_before_finalize(
             PlannerRoundPhase::Begin,
@@ -4634,8 +5124,10 @@ mod tests {
             Some(&json!("until"))
         );
         assert_eq!(
-            value.pointer("/segment_contract/required_step_fields/2"),
-            Some(&json!("candidate_ref"))
+            value.pointer("/segment_contract/candidate_ref_rule"),
+            Some(&json!(
+                "required for query/action; optional for assert/branch control steps"
+            ))
         );
         assert_eq!(
             value.pointer("/segment_contract/kind_enum/2"),
@@ -4701,7 +5193,7 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("missing required `candidate_ref`"));
         assert!(message.contains("q_balance(query)"));
-        assert!(message.contains("a_guard(assert)"));
+        assert!(!message.contains("a_guard(assert)"));
     }
 
     #[test]
@@ -4798,6 +5290,174 @@ mod tests {
         assert_eq!(
             value.pointer("/context_remaining_tokens"),
             Some(&json!(900_u64.saturating_sub(usage.input_tokens)))
+        );
+    }
+
+    #[test]
+    fn extract_round_context_signal_reads_pressure_and_compression_flags() {
+        let signal = extract_round_context_signal(
+            json!({
+                "state_summary": {
+                    "context_budget": {
+                        "pressure_mode": "critical",
+                        "pressure_actions": ["compress_tool_memory_projection"]
+                    }
+                }
+            })
+            .to_string()
+            .as_str(),
+        );
+        assert_eq!(signal.pressure_mode.as_deref(), Some("critical"));
+        assert!(signal.compressed);
+    }
+
+    #[test]
+    fn diagnostics_tracker_reports_duplicate_and_empty_search_streak_metrics() {
+        let context = large_catalog_candidate_context(2, 2);
+        let provider = ScriptedLlmProvider::from_responses(vec![
+            Ok(CompleteWithToolsResponse {
+                assistant_content: Some("search-1".to_string()),
+                tool_calls: vec![ToolCall {
+                    id: "tool-search-1".to_string(),
+                    name: "catalog.search".to_string(),
+                    arguments: json!({"query":"unknown-thing","kind":"query"}),
+                }],
+            }),
+            Ok(CompleteWithToolsResponse {
+                assistant_content: Some("search-2".to_string()),
+                tool_calls: vec![ToolCall {
+                    id: "tool-search-2".to_string(),
+                    name: "catalog.search".to_string(),
+                    arguments: json!({"query":"unknown-thing","kind":"query"}),
+                }],
+            }),
+            Ok(CompleteWithToolsResponse {
+                assistant_content: Some("finalize".to_string()),
+                tool_calls: vec![ToolCall {
+                    id: "tool-final".to_string(),
+                    name: "plan.propose_todos".to_string(),
+                    arguments: json!({
+                        "status":"proposed",
+                        "summary":"done",
+                        "todos":[{"title":"t1"}]
+                    }),
+                }],
+            }),
+        ]);
+
+        let mut planner =
+            LlmSegmentedIntentPlanner::new(provider).with_candidate_context(Some(context));
+        let draft = planner.propose_todos(TodoPlanningRequest {
+            intent: "plan todos".to_string(),
+            session: SegmentPlanningSession {
+                session_id: "sess-1".to_string(),
+                snapshot_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+                cursor: "0".to_string(),
+                max_rounds: 8,
+                max_segments: 8,
+            },
+            state_summary: Some(json!({
+                "context_budget": {
+                    "pressure_mode": "light",
+                    "pressure_actions": []
+                }
+            })),
+        });
+        assert!(matches!(draft, Ok(TodoDraft::Proposed { .. })));
+
+        let usage = planner.llm_usage_value();
+        assert_eq!(
+            usage.pointer("/diagnostics/tool_calls_total"),
+            Some(&json!(3))
+        );
+        assert_eq!(
+            usage.pointer("/diagnostics/tool_call_count_by_tool/catalog.search"),
+            Some(&json!(2))
+        );
+        assert_eq!(
+            usage.pointer("/diagnostics/tool_calls_duplicate"),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            usage.pointer("/diagnostics/empty_search_streak_max"),
+            Some(&json!(2))
+        );
+        assert_eq!(
+            usage.pointer("/diagnostics/memory_hit_rate_by_tool/catalog.search/hits"),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            usage.pointer("/diagnostics/phase_round_count/propose_todos"),
+            Some(&json!(3))
+        );
+        assert_eq!(
+            usage.pointer("/diagnostics/discovery_tool_call_ratio_bps"),
+            Some(&json!(6666))
+        );
+    }
+
+    #[test]
+    fn catalog_search_loop_guard_emits_hint_once_per_streak() {
+        let mut guard = CatalogSearchLoopGuard::default();
+        assert!(!guard.observe_empty(Some("query|q".to_string())));
+        assert!(guard.observe_empty(Some("query|q".to_string())));
+        assert!(!guard.observe_empty(Some("query|q".to_string())));
+        assert_eq!(guard.max_streak(), 3);
+        guard.observe_non_empty();
+        assert!(!guard.observe_empty(Some("query|q".to_string())));
+        assert!(guard.observe_empty(Some("query|q".to_string())));
+    }
+
+    #[test]
+    fn begin_session_resets_usage_and_diagnostics_trackers() {
+        let begin_payload = || {
+            Ok(CompleteWithToolsResponse {
+                assistant_content: Some("begin".to_string()),
+                tool_calls: vec![ToolCall {
+                    id: "tool-begin".to_string(),
+                    name: "plan.begin".to_string(),
+                    arguments: json!({
+                        "session_id":"sess",
+                        "snapshot_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        "cursor":"0",
+                        "limits":{"max_rounds":4,"max_segments":3}
+                    }),
+                }],
+            })
+        };
+        let provider = ScriptedLlmProvider::from_responses(vec![begin_payload(), begin_payload()]);
+        let mut planner =
+            LlmSegmentedIntentPlanner::new(provider).with_context_limit_tokens(Some(1000));
+
+        planner
+            .begin_session(SegmentBeginRequest {
+                intent: "a".to_string(),
+                pack_snapshot_hash:
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+                catalog_hash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                    .to_string(),
+                chain_scope: vec!["eip155:1".to_string()],
+            })
+            .expect("first begin");
+        let first_usage = planner.llm_usage_value();
+        assert_eq!(first_usage.pointer("/calls"), Some(&json!(1)));
+
+        planner
+            .begin_session(SegmentBeginRequest {
+                intent: "b".to_string(),
+                pack_snapshot_hash:
+                    "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".to_string(),
+                catalog_hash: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+                    .to_string(),
+                chain_scope: vec!["eip155:1".to_string()],
+            })
+            .expect("second begin");
+        let second_usage = planner.llm_usage_value();
+        assert_eq!(second_usage.pointer("/calls"), Some(&json!(1)));
+        assert_eq!(
+            second_usage.pointer("/diagnostics/tool_calls_total"),
+            Some(&json!(1))
         );
     }
 

@@ -57,11 +57,16 @@ Intent mode requires `--workspace` candidates and uses the vNext segmented loop:
 - segmented planner `state_summary` also carries `input_slots` (`resolved`/`missing`/`canonical_refs`) so model output can anchor to stable `inputs.*` refs instead of guessing input paths
 - segmented planner `state_summary` now carries `input_registry` (`known_refs` + entry metadata) and planner prompts require `inputs.*` refs to come from this registry
 - segmented planner `state_summary` now carries chain-agnostic `canonical_context` (`chain_refs/account_refs/asset_refs/amount_refs`) so planning can reason across EVM/Solana-style account/asset shapes without EVM-only field assumptions
-- segmented planner `state_summary` now carries `tool_memory_projection` (bounded recent memory for `catalog.search` / `get_candidate_detail` / `guide.get`) so planner can reuse high-value discovery/schema context before issuing duplicate tool calls
+- segmented planner `state_summary` now carries `tool_memory_projection` (bounded recent memory for `list_candidates` / `catalog.search` / `get_candidate_detail` / `guide.get`) so planner can reuse high-value discovery/schema context before issuing duplicate tool calls
+  - projection now includes `recent.list_inventory[]` (protocol-grouped inventory summaries) to avoid repeated broad discovery in propose/revise phases
   - projection applies stronger dedupe (cross-entry `ref` dedupe and repeated schema/topic collapse) and guide priority ranking (`ais-plan-sketch` / `cel` first) to keep high-signal context within token budget
   - guide memory is structured as keyed maps (`recent.guide.schema.<schema_id>` / `recent.guide.topic.<topic_id>`), and schema `full` payloads replace prior digest entries for the same schema id
-  - projection token budget is adaptive (`800~1500`): derived from current context headroom (`context_remaining_tokens/context_soft_limit_tokens`) when available, otherwise by absolute remaining-token fallback
+  - projection token budget is adaptive (`1200~6000`): derived from current context headroom (`context_remaining_tokens/context_soft_limit_tokens`) when available, otherwise by absolute remaining-token fallback
+- segmented planner now tracks loop/efficiency diagnostics in `runtime.agent.llm_usage.diagnostics`: `duplicate_tool_call_ratio`, `discovery_tool_call_ratio`, `empty_search_streak_max`, `memory_hit_rate_by_tool`, `phase_round_count`
+- segmented planner includes a phase-local loop guard for repeated empty `catalog.search`; when the same empty search pattern repeats, runner injects structured guidance to pivot to memory/list/detail/guide tools instead of continuing empty discovery (hint is emitted once per streak threshold hit, not every round)
+- when `plan.check_segment` reports `candidate not found for control step`, runner injects a targeted repair hint (avoid searching synthetic `.../assert` refs; use discovered refs + `when/depends_on` gating) to reduce revise-loop thrashing
 - segmented runner also maintains `runtime.agent.todo_progress` and injects `state_summary.todo_state` (`current_todo` + progress counters), so each planning round is scoped to one explicit todo objective
+- `context_unchanged=true` now keeps the full projected `state_summary` payload (marker only), so cross-phase planning does not lose registry/fact/tool-memory context.
 - initial `fact_store` seeds flattened runtime `inputs` into both `<slot>` and canonical `inputs.<slot>` keys (for example `owner` + `inputs.owner`, `token.address` + `inputs.token.address`) in addition to runtime fallback owner/wallet and signer-derived addresses (`owner_by_chain.<chain>`), with priority order `user > query > config > runtime > derived > intent`
 - `guide.get` request shape is strict and string-only: `{schema:"ais-plan-sketch/0.1.0"}` or `{topic:"cel"}`; object/nested compatibility shapes are rejected
   - schema responses default to compact `digest` mode (`schema.digest`) instead of returning the full schema JSON; use `{schema:"...",full:true}` only when full schema payload is strictly required
@@ -69,8 +74,8 @@ Intent mode requires `--workspace` candidates and uses the vNext segmented loop:
 - `plan.check_segment` runs compile-only segment validation and returns structured issues (`ok=false` + `issues[]`) without mutating active plan or executing nodes
 - runner enforces a successful `plan.check_segment` (`ok=true`) before accepting `plan.propose_segment`/`plan.revise_segment` outputs with `status=proposed` (unavailable/invalid drafts are exempt from this gate)
 - compile guard validates `inputs.*` ValueRef references against known input registry and returns structured `unknown_input_ref` issues with suggested canonical refs
-- segmented draft step contract is strict: each `segment.steps[]` must include `id/kind/candidate_ref/inputs`
-  - when planner omits `candidate_ref`, runner emits targeted diagnostics with missing step ids/kinds and classifies retry reason as `missing_candidate_ref` for deterministic repair prompts
+- segmented draft step contract is conditional: each `segment.steps[]` must include `id/kind/inputs`; `candidate_ref` is required for `query|action` and optional for built-in `assert|branch`
+  - when planner omits `candidate_ref` on executable steps (`query|action`), runner emits targeted diagnostics with missing step ids/kinds and classifies retry reason as `missing_candidate_ref` for deterministic repair prompts
   - planner-output repair payload now includes `previous_error.last_failed_finalize` (failed finalize tool call args + assistant snippet, compacted), so revise rounds can patch the previous draft instead of regenerating from scratch
 - `segment.steps[].depends_on` may only reference step ids in the same segment (cross-segment ids like `seg_1/...` are invalid)
 - planner missing-input contract: when required facts are missing, planner should return `status=unavailable` + `error.reason_code=missing_required_input` + `error.details.questions[]`
@@ -79,7 +84,7 @@ Intent mode requires `--workspace` candidates and uses the vNext segmented loop:
 - on interactive TTY runs, runner prompts user to answer `questions[]` (choose option index or enter custom JSON/string), backfills `runtime.inputs.*` + planning `fact_store`, and immediately retries planning via `plan.revise_segment`
 - segmented orchestrator also handles execution-time missing-input pauses by prompting/回填/自动继续; unresolved answers keep pause as `missing_required_input` and block current todo deterministically.
 - todo-first loop is host-enforced: each round advances exactly one current todo (`todo -> in_progress -> done|blocked`), and non-final rounds auto-open follow-up todo entries
-- host-side write gate validation blocks transfer/swap segments without `query -> assert|branch -> action` dependency chain and enforces token-decimals availability for asset writes
+- host-side write gate validation blocks transfer/swap segments without a query-backed control gate path (`query -> ... -> assert|branch -> ... -> action`, recursive across segment-local deps); query endpoints in this chain must resolve to discovered query candidates. It also enforces token-decimals availability for asset writes
 - compile segment (`plan-sketch` IR) to executable `ais-plan`
 - append via guarded `replace_plan`
 - execute + checkpoint, then continue next segment
@@ -127,7 +132,8 @@ cargo run -p ais-runner -- agent \
 - `context_limit_tokens`: optional LLM context limit for usage tracking (supports integer or human-readable string like `262k` / `1M` / `262,144`); runner computes remaining headroom against a 90% soft limit.
 - planner context projection now uses adaptive budgeting: when `runtime.agent.llm_usage.context_remaining_tokens` ratio is high, `state_summary` budget is relaxed (less aggressive trimming); when low, it tightens automatically.
   - `context_remaining_tokens` now means per-call context-window headroom (soft limit - current request input tokens).
-  - when context usage exceeds 90% (remaining ratio `<=10%`), a dedicated pressure strategy is applied: trim duplicate projections first (for example `input_slots.canonical_refs`), drop low-priority heavy sections (`capability_view.protocols`), and aggressively compact large blobs (`tool_memory_projection`, `previous_error.last_failed_finalize`).
+  - compression is near-window driven: `<70%` usage keeps full context, `70~85%` light compaction, `85~92%` medium compaction, `>92%` critical compaction.
+  - critical pressure applies structural shedding: trim duplicate projections first (for example `input_slots.canonical_refs`), drop low-priority heavy sections (`capability_view.protocols`), and aggressively compact large blobs (`tool_memory_projection`, `previous_error.last_failed_finalize`).
 
 Prompt override file names under `prompts_dir`:
 
@@ -163,6 +169,8 @@ Prompt file format:
 
 - `--verbose`: prints engine event stream + policy gate output details + checkpoint load/save hash/epoch details.
 - `--verbose-llm`: prints planner tool definitions at startup (name + input schema), system/user prompts, assistant content per round, tool-calls (`tool_call_id` + tool name + args), candidate tool result summaries + returned tool prompts, repair payloads/diffs (`plan.revise_segment`), and per-call context usage metrics (`input_tokens/output_tokens/total_tokens`, cumulative input/output split, and current-window headroom `context_remaining_tokens` when `llm.context_limit_tokens` is configured).
+- `--verbose-llm` also prints per-round planner summary (`phase/pressure_mode/compressed/memory_hits/duplicate_ratio_bps/empty_search_streak_max`) and duplicate tool-call diagnostics, so discovery loops can be identified directly from one log.
+- segmented orchestrator now logs planning attempt mode and previous error compactly (`phase/reason/sub_reason`), plus compile guard compact failure summaries (reason + first issue), so repeated `revise_segment` restarts are attributable from logs.
 - Checkpoint persistence now includes `approvals_ledger` + `side_effects` (tx hash/idempotency key); on resume, runner marks only `confirmed` side-effects as completed and asks chain executors to reconcile `sent` side-effects before continuing (pending reconcile pauses run to avoid blind replay; reverted reconcile statuses pause with `side_effect_reconcile_reverted:*`).
 - runner records normalized side-effect lifecycle summary at `runtime.agent.side_effect_lifecycle` (`sent/confirmed/reverted` counters + per execution type breakdown), and `state_summary` projects this structure for segmented planning context.
 - segmented checkpoint extensions also persist `fact_store` + `todo_progress` (with `planning_memory`) so resumed runs keep planning context and previously supplied facts.

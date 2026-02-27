@@ -245,10 +245,11 @@ fn planner_hint_for_sub_reason(sub_reason_code: &str) -> Value {
         }),
         "missing_candidate_ref" => json!({
             "summary": "one or more steps are missing candidate_ref",
-            "required_step_fields": ["id","kind","candidate_ref","inputs"],
+            "required_step_fields": ["id","kind","inputs"],
             "rules": [
-                "Every step kind requires candidate_ref, including assert and branch.",
-                "candidate_ref must come from discovered candidates (catalog.search/get_candidate_detail).",
+                "query/action steps require candidate_ref.",
+                "assert/branch are built-in control steps and may omit candidate_ref.",
+                "when candidate_ref is present, it must come from discovered candidates (catalog.search/get_candidate_detail).",
                 "Do not invent refs; reuse known candidate refs and keep semantics unchanged while fixing shape."
             ]
         }),

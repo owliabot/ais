@@ -460,31 +460,11 @@ fn compile_plan_sketch_accepts_assert_and_branch_step_kinds() {
         CompilePlanSketchResult::Err { issues } => panic!("must compile: {issues:?}"),
     };
 
-    assert_eq!(plan.nodes.len(), 2);
-    assert_eq!(
-        plan.nodes[0].pointer("/kind").and_then(Value::as_str),
-        Some("query_ref")
-    );
-    assert_eq!(
-        plan.nodes[0]
-            .pointer("/extensions/plan_sketch/step_kind")
-            .and_then(Value::as_str),
-        Some("assert")
-    );
-    assert_eq!(
-        plan.nodes[1].pointer("/kind").and_then(Value::as_str),
-        Some("action_ref")
-    );
-    assert_eq!(
-        plan.nodes[1]
-            .pointer("/extensions/plan_sketch/step_kind")
-            .and_then(Value::as_str),
-        Some("branch")
-    );
+    assert_eq!(plan.nodes.len(), 0);
 }
 
 #[test]
-fn compile_plan_sketch_rejects_control_kind_without_discovered_candidate() {
+fn compile_plan_sketch_control_kind_without_discovered_candidate_is_noop() {
     let mut context = ResolverContext::new();
     context.register_protocol(demo_protocol());
 
@@ -504,14 +484,11 @@ fn compile_plan_sketch_rejects_control_kind_without_discovered_candidate() {
         None,
         &CompilePlanSketchOptions::default(),
     );
-    match result {
-        CompilePlanSketchResult::Ok { .. } => panic!("must fail"),
-        CompilePlanSketchResult::Err { issues } => {
-            assert!(issues
-                .iter()
-                .any(|issue| issue.reference.as_deref() == Some("candidate_not_found")));
-        }
-    }
+    let plan = match result {
+        CompilePlanSketchResult::Ok { plan } => plan,
+        CompilePlanSketchResult::Err { issues } => panic!("must compile as control no-op: {issues:?}"),
+    };
+    assert!(plan.nodes.is_empty());
 }
 
 #[test]

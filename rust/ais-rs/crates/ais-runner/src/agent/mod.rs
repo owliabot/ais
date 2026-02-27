@@ -1882,6 +1882,26 @@ fn render_llm_usage_line(llm_usage: Option<&Value>) -> Option<String> {
             .as_str(),
         );
     }
+    if let Some(duplicate_ratio_bps) = usage
+        .pointer("/diagnostics/duplicate_tool_call_ratio_bps")
+        .and_then(Value::as_u64)
+    {
+        line.push_str(
+            format!(
+                " duplicate_tool_call_ratio_bps={} discovery_tool_call_ratio_bps={} empty_search_streak_max={}",
+                duplicate_ratio_bps,
+                usage
+                    .pointer("/diagnostics/discovery_tool_call_ratio_bps")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+                usage
+                    .pointer("/diagnostics/empty_search_streak_max")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+            )
+            .as_str(),
+        );
+    }
     Some(line)
 }
 

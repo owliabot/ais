@@ -24,12 +24,13 @@ impl Default for PlanningMemoryBudget {
     }
 }
 
-const TOOL_MEMORY_MIN_TOKENS: usize = 800;
-const TOOL_MEMORY_MAX_TOKENS: usize = 1500;
-const TOOL_MEMORY_DEFAULT_TOKENS: usize = 1200;
-const TOOL_MEMORY_MAX_CATALOG_ENTRIES: usize = 2;
-const TOOL_MEMORY_MAX_DETAIL_ENTRIES: usize = 2;
-const TOOL_MEMORY_MAX_GUIDE_ENTRIES: usize = 2;
+const TOOL_MEMORY_MIN_TOKENS: usize = 1200;
+const TOOL_MEMORY_MAX_TOKENS: usize = 6000;
+const TOOL_MEMORY_DEFAULT_TOKENS: usize = 2400;
+const TOOL_MEMORY_MAX_LIST_INVENTORY_ENTRIES: usize = 2;
+const TOOL_MEMORY_MAX_CATALOG_ENTRIES: usize = 6;
+const TOOL_MEMORY_MAX_DETAIL_ENTRIES: usize = 6;
+const TOOL_MEMORY_MAX_GUIDE_ENTRIES: usize = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct GuideProjection {
@@ -207,6 +208,7 @@ impl PlanningMemory {
     pub(crate) fn tool_memory_projection(&self, max_tokens: usize) -> Option<Value> {
         let snapshot_hash = self.scope.as_ref()?.snapshot_hash.clone();
         let token_budget = normalize_tool_memory_token_budget(max_tokens);
+        let mut list_inventory_raw = Vec::<(usize, Value)>::new();
         let mut catalog_search_raw = Vec::<(usize, Value)>::new();
         let mut candidate_detail_raw = Vec::<(usize, Value)>::new();
         let mut guide_raw = Vec::<GuideSummaryEntry>::new();
@@ -217,6 +219,11 @@ impl PlanningMemory {
             };
             let tool_name = key.split(':').next().unwrap_or_default();
             match tool_name {
+                "list_candidates" => {
+                    if let Some(entry) = summarize_list_candidates(content.as_str()) {
+                        list_inventory_raw.push((recency_rank, entry));
+                    }
+                }
                 "catalog.search" => {
                     if let Some(entry) = summarize_catalog_search(content.as_str()) {
                         catalog_search_raw.push((recency_rank, entry));
@@ -236,11 +243,16 @@ impl PlanningMemory {
             }
         }
 
+        let list_inventory = select_list_inventory_entries(list_inventory_raw);
         let catalog_search = select_catalog_entries(catalog_search_raw);
         let candidate_detail = select_candidate_detail_entries(candidate_detail_raw);
         let guide = select_guide_entries(guide_raw);
 
-        if catalog_search.is_empty() && candidate_detail.is_empty() && guide.is_empty() {
+        if list_inventory.is_empty()
+            && catalog_search.is_empty()
+            && candidate_detail.is_empty()
+            && guide.is_empty()
+        {
             return None;
         }
 
@@ -248,6 +260,7 @@ impl PlanningMemory {
             "schema": "ais-agent-tool-memory-projection/0.0.1",
             "snapshot_hash": snapshot_hash,
             "recent": {
+                "list_inventory": list_inventory,
                 "catalog_search": catalog_search,
                 "candidate_detail": candidate_detail,
                 "guide": {
@@ -384,6 +397,80 @@ fn summarize_catalog_search(content: &str) -> Option<Value> {
     Some(Value::Object(entry))
 }
 
+fn summarize_list_candidates(content: &str) -> Option<Value> {
+    let payload = serde_json::from_str::<Value>(content).ok()?;
+    let protocols = payload.get("protocols").and_then(Value::as_array)?;
+    let mut compact_protocols = Vec::<Value>::new();
+    let mut action_count = 0usize;
+    let mut query_count = 0usize;
+
+    for protocol in protocols.iter().take(8) {
+        let Some(protocol_name) = protocol.get("protocol").and_then(Value::as_str) else {
+            continue;
+        };
+        let actions = protocol
+            .get("actions")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.get("ref").and_then(Value::as_str))
+                    .take(8)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let queries = protocol
+            .get("queries")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.get("ref").and_then(Value::as_str))
+                    .take(8)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        action_count = action_count.saturating_add(actions.len());
+        query_count = query_count.saturating_add(queries.len());
+
+        let chains = protocol
+            .get("chains")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .take(4)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        compact_protocols.push(json!({
+            "protocol": protocol_name,
+            "chains": chains,
+            "actions": actions,
+            "queries": queries,
+        }));
+    }
+
+    if compact_protocols.is_empty() {
+        return None;
+    }
+
+    let protocol_count = compact_protocols.len();
+    Some(json!({
+        "protocols": compact_protocols,
+        "counts": {
+            "protocols": protocol_count,
+            "actions": action_count,
+            "queries": query_count,
+        }
+    }))
+}
+
 fn summarize_candidate_detail(content: &str) -> Option<Value> {
     let payload = serde_json::from_str::<Value>(content).ok()?;
     let details = payload.get("details").and_then(Value::as_array)?;
@@ -459,7 +546,10 @@ fn summarize_guide_get(content: &str, recency_rank: usize) -> Option<GuideSummar
         .and_then(Value::as_str)
         .map(str::to_string);
     if kind == "schema" {
-        let schema_id = payload.pointer("/schema/id").and_then(Value::as_str)?.to_string();
+        let schema_id = payload
+            .pointer("/schema/id")
+            .and_then(Value::as_str)?
+            .to_string();
         let mode = payload
             .pointer("/schema/mode")
             .and_then(Value::as_str)
@@ -513,6 +603,22 @@ fn summarize_guide_get(content: &str, recency_rank: usize) -> Option<GuideSummar
         });
     }
     None
+}
+
+fn select_list_inventory_entries(raw: Vec<(usize, Value)>) -> Vec<Value> {
+    let mut output = Vec::<Value>::new();
+    let mut seen_signatures = BTreeSet::<String>::new();
+    for (_, entry) in raw {
+        let signature = serde_json::to_string(&entry).unwrap_or_default();
+        if !seen_signatures.insert(signature) {
+            continue;
+        }
+        output.push(entry);
+        if output.len() >= TOOL_MEMORY_MAX_LIST_INVENTORY_ENTRIES {
+            break;
+        }
+    }
+    output
 }
 
 fn select_catalog_entries(raw: Vec<(usize, Value)>) -> Vec<Value> {
@@ -753,6 +859,15 @@ fn trim_tool_memory_projection_once(projection: &mut Value) -> bool {
         target_len = detail_len;
         target = Some("candidate_detail");
     }
+    let list_len = recent
+        .get("list_inventory")
+        .and_then(Value::as_array)
+        .map(|items| items.len())
+        .unwrap_or(0);
+    if list_len > target_len {
+        target_len = list_len;
+        target = Some("list_inventory");
+    }
     let guide_len = recent
         .get("guide")
         .and_then(guide_projection_entry_count)
@@ -768,7 +883,7 @@ fn trim_tool_memory_projection_once(projection: &mut Value) -> bool {
         return false;
     }
     match target_key {
-        "catalog_search" | "candidate_detail" => recent
+        "list_inventory" | "catalog_search" | "candidate_detail" => recent
             .get_mut(target_key)
             .and_then(Value::as_array_mut)
             .and_then(|items| items.pop())
@@ -784,6 +899,13 @@ fn tool_memory_projection_empty(projection: &Value) -> bool {
     let Some(recent) = projection.get("recent").and_then(Value::as_object) else {
         return true;
     };
+    if recent
+        .get("list_inventory")
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty())
+    {
+        return false;
+    }
     if recent
         .get("catalog_search")
         .and_then(Value::as_array)
@@ -831,12 +953,20 @@ fn pop_one_guide_projection_entry(value: &mut Value) -> bool {
         let mut candidates = Vec::<(i32, &'static str, String)>::new();
         if let Some(schema) = guide.get("schema").and_then(Value::as_object) {
             for id in schema.keys() {
-                candidates.push((guide_entry_priority(GuideEntryKind::Schema, id), "schema", id.clone()));
+                candidates.push((
+                    guide_entry_priority(GuideEntryKind::Schema, id),
+                    "schema",
+                    id.clone(),
+                ));
             }
         }
         if let Some(topic) = guide.get("topic").and_then(Value::as_object) {
             for id in topic.keys() {
-                candidates.push((guide_entry_priority(GuideEntryKind::Topic, id), "topic", id.clone()));
+                candidates.push((
+                    guide_entry_priority(GuideEntryKind::Topic, id),
+                    "topic",
+                    id.clone(),
+                ));
             }
         }
         candidates.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.2.cmp(&right.2)));
@@ -922,6 +1052,20 @@ mod tests {
         let mut memory = PlanningMemory::default();
         memory.ensure_scope("s", "snap-1");
         memory.insert(
+            "list_candidates:k0".to_string(),
+            json!({
+                "protocols":[
+                    {
+                        "protocol":"erc20@0.0.2",
+                        "chains":["eip155:*"],
+                        "actions":[{"ref":"erc20@0.0.2/transfer"}],
+                        "queries":[{"ref":"erc20@0.0.2/balance-of"}]
+                    }
+                ]
+            })
+            .to_string(),
+        );
+        memory.insert(
             "catalog.search:k1".to_string(),
             json!({
                 "query":"transfer",
@@ -966,6 +1110,12 @@ mod tests {
         assert_eq!(
             projection.get("schema").and_then(Value::as_str),
             Some("ais-agent-tool-memory-projection/0.0.1")
+        );
+        assert_eq!(
+            projection
+                .pointer("/recent/list_inventory/0/protocols/0/protocol")
+                .and_then(Value::as_str),
+            Some("erc20@0.0.2")
         );
         assert_eq!(
             projection

@@ -159,8 +159,29 @@
       "required": [
         "id",
         "kind",
-        "candidate_ref",
         "inputs"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "query",
+                  "action"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "candidate_ref"
+            ]
+          }
+        }
       ],
       "properties": {
         "id": {

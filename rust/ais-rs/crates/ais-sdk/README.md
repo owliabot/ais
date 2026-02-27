@@ -139,8 +139,11 @@ Pure AIS SDK logic: document parsing, typed models, resolver context, and value-
       - `missing_required_input`
       - `input_type_mismatch`
       - `unknown_input_ref` (when `CompilePlanSketchOptions.known_input_refs` is provided and step ValueRef uses unknown `inputs.*` path)
-    - plan-sketch step kinds `assert`/`branch` are accepted in compile path by resolving `candidate_ref` kind from discovered candidates and lowering to executable `query_ref`/`action_ref` nodes; original control-kind is preserved at `node.extensions.plan_sketch.step_kind` for tracing
-    - control-kind (`assert`/`branch`) compile currently requires discovery candidates context; if candidates are absent or ref not discovered, compile emits `candidate_not_found`
+    - plan-sketch control kinds `assert`/`branch` are built-in compile-time control semantics:
+      - they do not require `candidate_ref`
+      - they are not emitted as executable runtime nodes
+      - downstream executable step dependencies are flattened through control steps
+      - control conditions (`when.cel` or `inputs.condition.cel`) are merged into downstream executable `condition.cel`
   - `AISNEXT-TEST-001`:
     - compile canary snapshot test for `plan-sketch -> plan` deterministic mapping
     - fixed canary hash to detect unintentional compiler shape changes

@@ -68,6 +68,8 @@ pub fn compile_plan_sketch(
     let mut nodes = Vec::<Value>::new();
     for (segment_index, segment) in sketch.segments.iter().enumerate() {
         let mut segment_step_to_node_id = HashMap::<String, String>::new();
+        let mut segment_steps_by_id = HashMap::<String, crate::documents::PlanSketchStep>::new();
+        let mut control_steps = HashMap::<String, ControlStepMeta>::new();
         let mut segment_step_ids = HashSet::<String>::new();
         let mut segment_node_ids = HashSet::<String>::new();
         for step in &segment.steps {
@@ -76,6 +78,16 @@ pub fn compile_plan_sketch(
             segment_node_ids.insert(node_id.clone());
             segment_step_to_node_id.insert(step.id.clone(), node_id.clone());
             segment_step_to_node_id.insert(node_id.clone(), node_id);
+            segment_steps_by_id.insert(step.id.clone(), step.clone());
+            if matches!(step.kind.as_str(), "assert" | "branch") {
+                control_steps.insert(
+                    step.id.clone(),
+                    ControlStepMeta {
+                        depends_on: step.depends_on.clone(),
+                        condition_cel: control_or_step_condition_cel(step),
+                    },
+                );
+            }
         }
         for (step_index, step) in segment.steps.iter().enumerate() {
             let step_path = vec![
@@ -84,6 +96,24 @@ pub fn compile_plan_sketch(
                 FieldPathSegment::Key("steps".to_string()),
                 FieldPathSegment::Index(step_index),
             ];
+            if matches!(step.kind.as_str(), "assert" | "branch") {
+                continue;
+            }
+            let mut effective_step = step.clone();
+            let mut inherited_conditions = Vec::<String>::new();
+            effective_step.depends_on = resolve_non_control_dependencies(
+                step.depends_on.as_slice(),
+                &control_steps,
+                &mut inherited_conditions,
+            );
+            if let Some(merged_condition) = merge_condition_cels(
+                effective_step.when.as_ref().map(|when| when.cel.as_str()),
+                inherited_conditions.as_slice(),
+            ) {
+                effective_step.when = Some(crate::documents::PlanSketchWhen {
+                    cel: merged_condition,
+                });
+            }
             match compile_step(
                 sketch,
                 segment.segment_id.as_str(),
@@ -93,13 +123,14 @@ pub fn compile_plan_sketch(
                     .and_then(Value::as_str)
                     .map(str::trim)
                     .filter(|value| !value.is_empty()),
-                step,
+                &effective_step,
                 step_path.as_slice(),
                 chain.as_str(),
                 &known_input_refs,
                 context,
                 &candidate_index,
                 &segment_step_to_node_id,
+                &segment_steps_by_id,
                 &segment_step_ids,
                 &segment_node_ids,
             ) {
@@ -190,6 +221,7 @@ fn compile_step(
     context: &ResolverContext,
     candidate_index: &HashMap<String, CandidateMeta>,
     segment_step_to_node_id: &HashMap<String, String>,
+    _segment_steps_by_id: &HashMap<String, crate::documents::PlanSketchStep>,
     segment_step_ids: &HashSet<String>,
     segment_node_ids: &HashSet<String>,
 ) -> Result<Value, Vec<StructuredIssue>> {
@@ -198,50 +230,39 @@ fn compile_step(
         .get(step.id.as_str())
         .cloned()
         .unwrap_or_else(|| canonical_node_id(segment_id, step.id.as_str()));
-    let expected_kind = match step.kind.as_str() {
-        "query" => Some(CandidateKind::Query),
-        "action" => Some(CandidateKind::Action),
-        // Control-oriented kinds are compiled by resolving candidate kind from discovery index.
-        "assert" | "branch" => None,
+    let resolved_kind = match step.kind.as_str() {
+        "query" => CandidateKind::Query,
+        "action" => CandidateKind::Action,
         _ => {
             issues.push(issue(
                 "compile_error",
                 path_with_key(step_path, "kind"),
-                &format!("unsupported step kind `{}`", step.kind),
+                &format!("unsupported executable step kind `{}`", step.kind),
                 "input_type_mismatch",
             ));
             return Err(issues);
         }
     };
 
-    let resolved_kind = match expected_kind {
-        Some(kind) => kind,
-        None => {
-            if let Some(meta) = candidate_index.get(step.candidate_ref.as_str()) {
-                meta.kind
-            } else {
-                issues.push(issue(
-                    "compile_error",
-                    path_with_key(step_path, "candidate_ref"),
-                    &format!(
-                        "candidate not found for control step `{}`: {}",
-                        step.kind, step.candidate_ref
-                    ),
-                    "candidate_not_found",
-                ));
-                return Err(issues);
-            }
-        }
+    let Some(candidate_ref) = normalized_candidate_ref(step.candidate_ref.as_deref()) else {
+        issues.push(issue(
+            "compile_error",
+            path_with_key(step_path, "candidate_ref"),
+            "candidate_ref is required for query/action steps",
+            "missing_required_input",
+        ));
+        return Err(issues);
     };
+    let effective_inputs = step.inputs.clone();
 
-    if let Some(meta) = candidate_index.get(step.candidate_ref.as_str()) {
+    if let Some(meta) = candidate_index.get(candidate_ref.as_str()) {
         if meta.kind != resolved_kind {
             issues.push(issue(
                 "compile_error",
                 path_with_key(step_path, "candidate_ref"),
                 &format!(
                     "candidate kind mismatch for `{}`: expected {}, got {}",
-                    step.candidate_ref,
+                    candidate_ref,
                     kind_label(resolved_kind),
                     kind_label(meta.kind)
                 ),
@@ -259,7 +280,7 @@ fn compile_step(
                 path_with_key(step_path, "candidate_ref"),
                 &format!(
                     "candidate `{}` is not allowlisted for chain `{chain}`",
-                    step.candidate_ref
+                    candidate_ref
                 ),
                 "candidate_chain_not_allowed",
             ));
@@ -268,13 +289,13 @@ fn compile_step(
         issues.push(issue(
             "compile_error",
             path_with_key(step_path, "candidate_ref"),
-            &format!("candidate not found: {}", step.candidate_ref),
+            &format!("candidate not found: {}", candidate_ref),
             "candidate_not_found",
         ));
     }
 
     let (operation_spec, source_key, source_leaf) = match resolved_kind {
-        CandidateKind::Action => match resolve_action_ref(context, step.candidate_ref.as_str()) {
+        CandidateKind::Action => match resolve_action_ref(context, candidate_ref.as_str()) {
             Ok(resolved) => (resolved.action_spec, "action", resolved.reference.action),
             Err(error) => {
                 issues.push(issue(
@@ -286,7 +307,7 @@ fn compile_step(
                 return Err(issues);
             }
         },
-        CandidateKind::Query => match resolve_query_ref(context, step.candidate_ref.as_str()) {
+        CandidateKind::Query => match resolve_query_ref(context, candidate_ref.as_str()) {
             Ok(resolved) => (resolved.query_spec, "query", resolved.reference.query),
             Err(error) => {
                 issues.push(issue(
@@ -300,12 +321,17 @@ fn compile_step(
         },
     };
 
-    validate_required_params(operation_spec, step, &mut issues);
+    validate_required_params(
+        operation_spec,
+        &effective_inputs,
+        candidate_ref.as_str(),
+        &mut issues,
+    );
     let mut normalized_inputs = normalize_step_inputs(
         operation_spec,
-        &step.inputs,
+        &effective_inputs,
         chain,
-        step.candidate_ref.as_str(),
+        candidate_ref.as_str(),
         step_path,
         &mut issues,
     );
@@ -331,7 +357,7 @@ fn compile_step(
                 path_with_key(step_path, "candidate_ref"),
                 &format!(
                     "no execution mapping for chain `{chain}` in `{}`",
-                    step.candidate_ref
+                    candidate_ref
                 ),
                 "candidate_chain_not_allowed",
             ));
@@ -343,10 +369,9 @@ fn compile_step(
         .as_object()
         .and_then(|obj| obj.get("type"))
         .and_then(Value::as_str);
-    if let (Some(meta), Some(execution_type)) = (
-        candidate_index.get(step.candidate_ref.as_str()),
-        execution_type,
-    ) {
+    if let (Some(meta), Some(execution_type)) =
+        (candidate_index.get(candidate_ref.as_str()), execution_type)
+    {
         if !meta.execution_types.is_empty()
             && !meta.execution_types.iter().any(|v| v == execution_type)
         {
@@ -355,7 +380,7 @@ fn compile_step(
                 path_with_key(step_path, "candidate_ref"),
                 &format!(
                     "execution type `{execution_type}` is not allowlisted for candidate `{}`",
-                    step.candidate_ref
+                    candidate_ref
                 ),
                 "execution_type_not_allowed",
             ));
@@ -393,16 +418,16 @@ fn compile_step(
     node.insert(
         "source".to_string(),
         json!({
-            "protocol": step.candidate_ref.split('/').next().unwrap_or_default(),
+            "protocol": candidate_ref.split('/').next().unwrap_or_default(),
             source_key: source_leaf
         }),
     );
     let mut plan_sketch_extension = json!({
         "schema": sketch.schema,
         "segment_id": segment_id,
-        "step_id": step.id,
-        "candidate_ref": step.candidate_ref
+        "step_id": step.id
     });
+    plan_sketch_extension["candidate_ref"] = Value::String(candidate_ref.clone());
     if let Some(todo_id) = segment_todo_id {
         plan_sketch_extension["todo_id"] = Value::String(todo_id.to_string());
     }
@@ -422,7 +447,8 @@ fn compile_step(
         }),
     );
     if let Some(when) = &step.when {
-        let cel = rewrite_node_refs_in_cel(when.cel.as_str(), segment_step_to_node_id);
+        let cel = when.cel.as_str();
+        let cel = rewrite_node_refs_in_cel(cel, segment_step_to_node_id);
         node.insert("condition".to_string(), json!({"cel": cel}));
     }
     if let Some(until) = &step.until {
@@ -460,9 +486,129 @@ fn compile_step(
     Ok(Value::Object(node))
 }
 
+fn normalized_candidate_ref(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+#[derive(Debug, Clone)]
+struct ControlStepMeta {
+    depends_on: Vec<String>,
+    condition_cel: Option<String>,
+}
+
+fn resolve_non_control_dependencies(
+    deps: &[String],
+    control_steps: &HashMap<String, ControlStepMeta>,
+    inherited_conditions: &mut Vec<String>,
+) -> Vec<String> {
+    let mut out = Vec::<String>::new();
+    let mut seen = HashSet::<String>::new();
+    let mut stack_guard = HashSet::<String>::new();
+    for dep in deps {
+        expand_dependency(
+            dep,
+            control_steps,
+            inherited_conditions,
+            &mut out,
+            &mut seen,
+            &mut stack_guard,
+        );
+    }
+    out
+}
+
+fn expand_dependency(
+    dep: &str,
+    control_steps: &HashMap<String, ControlStepMeta>,
+    inherited_conditions: &mut Vec<String>,
+    out: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+    stack_guard: &mut HashSet<String>,
+) {
+    if let Some(control) = control_steps.get(dep) {
+        if !stack_guard.insert(dep.to_string()) {
+            return;
+        }
+        if let Some(cel) = control.condition_cel.as_ref() {
+            inherited_conditions.push(cel.clone());
+        }
+        for upstream in &control.depends_on {
+            expand_dependency(
+                upstream.as_str(),
+                control_steps,
+                inherited_conditions,
+                out,
+                seen,
+                stack_guard,
+            );
+        }
+        stack_guard.remove(dep);
+        return;
+    }
+    if seen.insert(dep.to_string()) {
+        out.push(dep.to_string());
+    }
+}
+
+fn merge_condition_cels(base: Option<&str>, inherited_conditions: &[String]) -> Option<String> {
+    let mut conditions = Vec::<String>::new();
+    let mut seen = HashSet::<String>::new();
+    if let Some(base_condition) = base
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+    {
+        if seen.insert(base_condition.clone()) {
+            conditions.push(base_condition);
+        }
+    }
+    for condition in inherited_conditions {
+        let trimmed = condition.trim();
+        if !trimmed.is_empty() {
+            let normalized = trimmed.to_string();
+            if seen.insert(normalized.clone()) {
+                conditions.push(normalized);
+            }
+        }
+    }
+    if conditions.is_empty() {
+        return None;
+    }
+    if conditions.len() == 1 {
+        return conditions.first().cloned();
+    }
+    Some(
+        conditions
+            .into_iter()
+            .map(|condition| format!("({condition})"))
+            .collect::<Vec<_>>()
+            .join(" && "),
+    )
+}
+
+fn control_or_step_condition_cel(step: &crate::documents::PlanSketchStep) -> Option<String> {
+    if let Some(when) = step.when.as_ref() {
+        let cel = when.cel.trim();
+        if !cel.is_empty() {
+            return Some(cel.to_string());
+        }
+    }
+    step.inputs.get("condition").and_then(|raw| {
+        raw.get("cel")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    })
+}
+
 fn validate_required_params(
     operation_spec: &Value,
-    step: &crate::documents::PlanSketchStep,
+    inputs: &Map<String, Value>,
+    candidate_ref: &str,
     issues: &mut Vec<StructuredIssue>,
 ) {
     let Some(params) = operation_spec
@@ -487,7 +633,7 @@ fn validate_required_params(
         let Some(name) = param_obj.get("name").and_then(Value::as_str) else {
             continue;
         };
-        if !step.inputs.contains_key(name) {
+        if !inputs.contains_key(name) {
             issues.push(issue(
                 "compile_error",
                 vec![
@@ -495,10 +641,7 @@ fn validate_required_params(
                     FieldPathSegment::Index(param_index),
                     FieldPathSegment::Key("name".to_string()),
                 ],
-                &format!(
-                    "missing required input `{name}` for `{}`",
-                    step.candidate_ref
-                ),
+                &format!("missing required input `{name}` for `{}`", candidate_ref),
                 "missing_required_input",
             ));
         }

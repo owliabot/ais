@@ -74,7 +74,8 @@ pub struct PlanSketchSegment {
 pub struct PlanSketchStep {
     pub id: String,
     pub kind: String,
-    pub candidate_ref: String,
+    #[serde(default)]
+    pub candidate_ref: Option<String>,
     pub inputs: Map<String, Value>,
     #[serde(default)]
     pub depends_on: Vec<String>,

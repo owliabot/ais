@@ -81,12 +81,13 @@ impl CandidateContext {
     }
 
     pub fn search_candidates(&self, request: &CandidateSearchRequest) -> Value {
-        let query = request
+        let query_tokens = request
             .query
             .as_ref()
-            .map(|value| value.trim())
+            .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
-            .map(|value| value.to_lowercase());
+            .map(|value| normalize_search_query_tokens(value.as_str()))
+            .filter(|tokens| !tokens.is_empty());
         let kind = request
             .kind
             .as_ref()
@@ -108,7 +109,7 @@ impl CandidateContext {
 
         if kind == "any" || kind == "action" {
             for action in &self.executable_candidates.actions {
-                if !matches_keyword(action, query.as_deref()) {
+                if !matches_keyword(action, query_tokens.as_deref()) {
                     continue;
                 }
                 if !matches_chain(action, chain) {
@@ -123,7 +124,7 @@ impl CandidateContext {
 
         if kind == "any" || kind == "query" {
             for query_card in &self.executable_candidates.queries {
-                if !matches_keyword(query_card, query.as_deref()) {
+                if !matches_keyword(query_card, query_tokens.as_deref()) {
                     continue;
                 }
                 if !matches_chain(query_card, chain) {
@@ -874,10 +875,13 @@ fn to_discovery_card(card: &Value, kind: &str) -> Value {
     Value::Object(compact)
 }
 
-fn matches_keyword(card: &Value, query: Option<&str>) -> bool {
-    let Some(query) = query else {
+fn matches_keyword(card: &Value, query_tokens: Option<&[String]>) -> bool {
+    let Some(query_tokens) = query_tokens else {
         return true;
     };
+    if query_tokens.is_empty() {
+        return true;
+    }
 
     let ref_text = card.get("ref").and_then(Value::as_str).unwrap_or_default();
     let id_text = card.get("id").and_then(Value::as_str).unwrap_or_default();
@@ -885,20 +889,72 @@ fn matches_keyword(card: &Value, query: Option<&str>) -> bool {
         .get("description")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if ref_text.to_lowercase().contains(query)
-        || id_text.to_lowercase().contains(query)
-        || desc_text.to_lowercase().contains(query)
-    {
-        return true;
-    }
-    card.get("risk_tags")
+    let mut haystacks = vec![
+        normalize_search_text(ref_text),
+        normalize_search_text(id_text),
+        normalize_search_text(desc_text),
+    ];
+    let risk_haystacks = card
+        .get("risk_tags")
         .and_then(Value::as_array)
         .map(|tags| {
             tags.iter()
                 .filter_map(Value::as_str)
-                .any(|tag| tag.to_lowercase().contains(query))
+                .map(normalize_search_text)
+                .collect::<Vec<_>>()
         })
-        .unwrap_or(false)
+        .unwrap_or_default();
+    haystacks.extend(risk_haystacks);
+    query_tokens.iter().all(|token| {
+        haystacks
+            .iter()
+            .any(|haystack| haystack.contains(token.as_str()))
+    })
+}
+
+fn normalize_search_query_tokens(value: &str) -> Vec<String> {
+    let stop_words = ["a", "an", "the", "for", "on", "to", "my", "me", "please"];
+    let mut tokens = tokenize_search_text(value)
+        .into_iter()
+        .map(canonicalize_search_token)
+        .filter(|token| !token.is_empty())
+        .filter(|token| !stop_words.contains(&token.as_str()))
+        .collect::<Vec<_>>();
+    tokens.sort();
+    tokens.dedup();
+    tokens
+}
+
+fn normalize_search_text(value: &str) -> String {
+    tokenize_search_text(value)
+        .into_iter()
+        .map(canonicalize_search_token)
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn tokenize_search_text(value: &str) -> Vec<String> {
+    let lowered = value
+        .to_ascii_lowercase()
+        .replace("erc-20", "erc20")
+        .replace("erc 20", "erc20")
+        .replace("balanceof", "balance");
+    lowered
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>()
+}
+
+fn canonicalize_search_token(token: String) -> String {
+    match token.as_str() {
+        "erc20" | "token" | "tokens" => "token".to_string(),
+        "native" | "eth" => "native".to_string(),
+        "balanceof" | "balance" | "balances" => "balance".to_string(),
+        "transfer" | "send" | "payment" => "transfer".to_string(),
+        _ => token,
+    }
 }
 
 fn matches_chain(card: &Value, chain: Option<&str>) -> bool {
@@ -1091,11 +1147,15 @@ mod tests {
             Some("action")
         );
         assert_eq!(
-            result.pointer("/results/0/risk_level").and_then(Value::as_u64),
+            result
+                .pointer("/results/0/risk_level")
+                .and_then(Value::as_u64),
             Some(3)
         );
         assert_eq!(
-            result.pointer("/results/0/chains/0").and_then(Value::as_str),
+            result
+                .pointer("/results/0/chains/0")
+                .and_then(Value::as_str),
             Some("eip155:*")
         );
         assert!(result.pointer("/results/0/description").is_none());
@@ -1138,6 +1198,58 @@ mod tests {
             Some(7)
         );
         assert_eq!(result.get("truncated").and_then(Value::as_bool), Some(true));
+    }
+
+    #[test]
+    fn search_candidates_matches_normalized_token_synonyms() {
+        let context = CandidateContext {
+            executable_candidates: ExecutableCandidates {
+                schema: "ais-executable-candidates/0.0.1".to_string(),
+                created_at: None,
+                hash: "x".to_string(),
+                catalog_schema: "ais-catalog/0.0.1".to_string(),
+                catalog_hash: "y".to_string(),
+                pack: None,
+                chain_scope: None,
+                actions: vec![json!({
+                    "ref":"evm-native-utils@0.0.1/native-transfer",
+                    "id":"native-transfer",
+                    "description":"Send native ETH",
+                    "risk_level":3,
+                    "execution_chains":["eip155:*"]
+                })],
+                queries: vec![json!({
+                    "ref":"erc20@0.0.2/balance-of",
+                    "id":"balance-of",
+                    "description":"Read ERC-20 balanceOf(owner).",
+                    "execution_chains":["eip155:*"]
+                })],
+                execution_plugins: vec![],
+            },
+            ..CandidateContext::default()
+        };
+        let token_balance = context.search_candidates(&CandidateSearchRequest {
+            kind: Some("query".to_string()),
+            query: Some("token balance".to_string()),
+            ..CandidateSearchRequest::default()
+        });
+        assert_eq!(
+            token_balance
+                .pointer("/results/0/ref")
+                .and_then(Value::as_str),
+            Some("erc20@0.0.2/balance-of")
+        );
+        let native_transfer = context.search_candidates(&CandidateSearchRequest {
+            kind: Some("action".to_string()),
+            query: Some("eth transfer".to_string()),
+            ..CandidateSearchRequest::default()
+        });
+        assert_eq!(
+            native_transfer
+                .pointer("/results/0/ref")
+                .and_then(Value::as_str),
+            Some("evm-native-utils@0.0.1/native-transfer")
+        );
     }
 
     #[test]
