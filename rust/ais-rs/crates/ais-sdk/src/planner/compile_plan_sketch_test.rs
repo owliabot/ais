@@ -426,6 +426,134 @@ fn compile_plan_sketch_copies_segment_todo_id_into_plan_sketch_extensions() {
 }
 
 #[test]
+fn compile_plan_sketch_copies_candidate_risk_metadata_into_extensions() {
+    let mut context = ResolverContext::new();
+    context.register_protocol(demo_protocol());
+
+    let sketch: PlanSketchDocument = serde_json::from_value(json!({
+      "schema":"ais-plan-sketch/0.1.0",
+      "intent":"copy candidate risk metadata",
+      "pack_snapshot":{"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+      "catalog_snapshot":{"schema":"ais-catalog/0.0.1","hash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+      "chain_scope":["eip155:1"],
+      "segments":[{
+        "segment_id":"s1",
+        "cursor_in":"c0",
+        "cursor_out":"c1",
+        "done":true,
+        "steps":[
+          {
+            "id":"q1",
+            "kind":"query",
+            "candidate_ref":"demo@0.0.2/quote",
+            "inputs":{"owner":"0xabc"}
+          },
+          {
+            "id":"a1",
+            "kind":"action",
+            "candidate_ref":"demo@0.0.2/swap",
+            "depends_on":["q1"],
+            "inputs":{"amount":"100"}
+          }
+        ]
+      }]
+    }))
+    .expect("valid sketch");
+
+    let mut candidates = demo_candidates("evm_read", "evm_call");
+    candidates.queries[0]
+        .as_object_mut()
+        .expect("query card object")
+        .insert("risk_level".to_string(), json!(2));
+    candidates.queries[0]
+        .as_object_mut()
+        .expect("query card object")
+        .insert("risk_tags".to_string(), json!(["readonly", "pricing"]));
+    candidates.actions[0]
+        .as_object_mut()
+        .expect("action card object")
+        .insert("risk_level".to_string(), json!(4));
+    candidates.actions[0]
+        .as_object_mut()
+        .expect("action card object")
+        .insert("risk_tags".to_string(), json!(["slippage"]));
+
+    let result = compile_plan_sketch(
+        &sketch,
+        &context,
+        Some(&candidates),
+        &CompilePlanSketchOptions::default(),
+    );
+    let plan = match result {
+        CompilePlanSketchResult::Ok { plan } => plan,
+        CompilePlanSketchResult::Err { issues } => panic!("must compile: {issues:?}"),
+    };
+
+    let query_node = plan.nodes.first().expect("query node");
+    let action_node = plan.nodes.get(1).expect("action node");
+    assert_eq!(
+        query_node.pointer("/extensions/risk_level"),
+        Some(&json!(2))
+    );
+    assert_eq!(
+        query_node.pointer("/extensions/risk_tags"),
+        Some(&json!(["readonly", "pricing"]))
+    );
+    assert_eq!(
+        action_node.pointer("/extensions/risk_level"),
+        Some(&json!(4))
+    );
+    assert_eq!(
+        action_node.pointer("/extensions/risk_tags"),
+        Some(&json!(["slippage"]))
+    );
+}
+
+#[test]
+fn compile_plan_sketch_keeps_risk_extensions_absent_when_candidate_has_no_risk_metadata() {
+    let mut context = ResolverContext::new();
+    context.register_protocol(demo_protocol());
+
+    let sketch: PlanSketchDocument = serde_json::from_value(json!({
+      "schema":"ais-plan-sketch/0.1.0",
+      "intent":"risk extensions default compatibility",
+      "pack_snapshot":{"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+      "catalog_snapshot":{"schema":"ais-catalog/0.0.1","hash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+      "chain_scope":["eip155:1"],
+      "segments":[{
+        "segment_id":"s1",
+        "cursor_in":"c0",
+        "cursor_out":"c1",
+        "done":true,
+        "steps":[
+          {
+            "id":"a1",
+            "kind":"action",
+            "candidate_ref":"demo@0.0.2/swap",
+            "inputs":{"amount":"100"}
+          }
+        ]
+      }]
+    }))
+    .expect("valid sketch");
+
+    let result = compile_plan_sketch(
+        &sketch,
+        &context,
+        Some(&demo_candidates("evm_read", "evm_call")),
+        &CompilePlanSketchOptions::default(),
+    );
+    let plan = match result {
+        CompilePlanSketchResult::Ok { plan } => plan,
+        CompilePlanSketchResult::Err { issues } => panic!("must compile: {issues:?}"),
+    };
+
+    let node = plan.nodes.first().expect("node");
+    assert!(node.pointer("/extensions/risk_level").is_none());
+    assert!(node.pointer("/extensions/risk_tags").is_none());
+}
+
+#[test]
 fn compile_plan_sketch_accepts_assert_and_branch_step_kinds() {
     let mut context = ResolverContext::new();
     context.register_protocol(demo_protocol());
@@ -486,7 +614,9 @@ fn compile_plan_sketch_control_kind_without_discovered_candidate_is_noop() {
     );
     let plan = match result {
         CompilePlanSketchResult::Ok { plan } => plan,
-        CompilePlanSketchResult::Err { issues } => panic!("must compile as control no-op: {issues:?}"),
+        CompilePlanSketchResult::Err { issues } => {
+            panic!("must compile as control no-op: {issues:?}")
+        }
     };
     assert!(plan.nodes.is_empty());
 }

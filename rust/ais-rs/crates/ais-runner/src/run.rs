@@ -4,6 +4,7 @@ use crate::config::{build_router_executor_for_plan, load_runner_config};
 use crate::error::RunnerError;
 use crate::io::load_workspace_documents_excluding;
 use ais_core::StructuredIssue;
+use ais_engine::events::wall_clock_timestamp_rfc3339;
 use ais_engine::{
     apply_command_with_dedupe, create_checkpoint_document, decode_command_jsonl_line,
     diff_plans_json, diff_plans_text, encode_event_jsonl_line, encode_trace_jsonl_line,
@@ -528,7 +529,10 @@ fn execute_plan_with_engine(
         let mut iteration_events = processed.events;
         iteration_events.extend(run_result.events);
         checkpoint_ledger.absorb_events(&iteration_events);
-        checkpoint_ledger.mark_approved_nodes(&state.approved_node_ids, "1970-01-01T00:00:00Z");
+        checkpoint_ledger.mark_approved_nodes(
+            &state.approved_node_ids,
+            wall_clock_timestamp_rfc3339().as_str(),
+        );
         record_side_effect_lifecycle(&mut state.runtime, &checkpoint_ledger);
         write_event_sinks(command, &iteration_events)?;
         all_events.extend(iteration_events);
@@ -595,8 +599,12 @@ pub(crate) fn process_replace_plan_commands(
             continue;
         }
 
-        let command_result =
-            apply_command_with_dedupe(&mut deduper, &mut stream, "1970-01-01T00:00:00Z", command);
+        let command_result = apply_command_with_dedupe(
+            &mut deduper,
+            &mut stream,
+            wall_clock_timestamp_rfc3339(),
+            command,
+        );
         events.push(command_result.event_record);
         if !command_result.accepted || command_result.duplicate {
             continue;
@@ -608,12 +616,12 @@ pub(crate) fn process_replace_plan_commands(
             forbidden_replace_reason(active_plan, &new_plan, &state.completed_node_ids)
         {
             events.push(stream.next_record(
-                "1970-01-01T00:00:00Z",
+                wall_clock_timestamp_rfc3339(),
                 replace_plan_error_event(&command.command.id, reason_code, &diff),
             ));
             state.paused_reason = Some(format!("replace_plan_rejected:{}", reason_code.as_str()));
             events.push(stream.next_record(
-                "1970-01-01T00:00:00Z",
+                wall_clock_timestamp_rfc3339(),
                 engine_paused_event("replace_plan_rejected"),
             ));
             pause_after_processing = true;
@@ -629,12 +637,12 @@ pub(crate) fn process_replace_plan_commands(
             .unwrap_or(false);
         if requires_confirm && !confirmed {
             events.push(stream.next_record(
-                "1970-01-01T00:00:00Z",
+                wall_clock_timestamp_rfc3339(),
                 replace_plan_confirm_event(&command.command.id, &diff),
             ));
             state.paused_reason = Some("need_user_confirm:replace_plan".to_string());
             events.push(stream.next_record(
-                "1970-01-01T00:00:00Z",
+                wall_clock_timestamp_rfc3339(),
                 engine_paused_event("need_user_confirm"),
             ));
             pause_after_processing = true;
@@ -653,7 +661,7 @@ pub(crate) fn process_replace_plan_commands(
         plan_replaced = true;
 
         events.push(stream.next_record(
-            "1970-01-01T00:00:00Z",
+            wall_clock_timestamp_rfc3339(),
             plan_replaced_event(
                 &command.command.id,
                 command.command.data.get("reason").and_then(Value::as_str),
@@ -992,9 +1000,34 @@ fn write_verbose_events(events: &[EngineEventRecord]) {
             .get("reason")
             .and_then(Value::as_str)
             .unwrap_or("-");
+        let checks = record
+            .event
+            .data
+            .get("checks")
+            .and_then(Value::as_object)
+            .map(|checks| {
+                let mut parts = Vec::<String>::new();
+                for check_key in ["condition", "gate", "assert"] {
+                    let Some(result) = checks
+                        .get(check_key)
+                        .and_then(Value::as_object)
+                        .and_then(|item| item.get("result"))
+                        .and_then(Value::as_bool)
+                    else {
+                        continue;
+                    };
+                    parts.push(format!("{check_key}={result}"));
+                }
+                if parts.is_empty() {
+                    "-".to_string()
+                } else {
+                    parts.join(",")
+                }
+            })
+            .unwrap_or_else(|| "-".to_string());
         eprintln!(
-            "[event seq={} type={} node={} reason={}]",
-            record.seq, event_type, node_id, reason
+            "[event seq={} type={} node={} reason={} checks={}]",
+            record.seq, event_type, node_id, reason, checks
         );
         if event_type == "error" {
             if let Ok(detail) = serde_json::to_string(&record.event.data) {

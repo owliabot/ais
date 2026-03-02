@@ -35,3 +35,46 @@ fn set_ref_rejects_index_path() {
         ResolverError::InvalidPath("nodes[0].outputs".to_string())
     );
 }
+
+#[test]
+fn get_ref_address_suffix_accepts_string_asset_slot() {
+    let context = ResolverContext::with_runtime(json!({
+        "inputs": {
+            "erc20_token": "0x8464135c8F25Da09e49BC8782676a84730C318bC"
+        },
+        "params": {
+            "token": "0x8464135c8F25Da09e49BC8782676a84730C318bC"
+        }
+    }));
+
+    let input_token_address = context
+        .get_ref("inputs.erc20_token.address")
+        .expect("string token should satisfy .address read");
+    assert_eq!(
+        input_token_address,
+        json!("0x8464135c8F25Da09e49BC8782676a84730C318bC")
+    );
+
+    let param_token_address = context
+        .get_ref("params.token.address")
+        .expect("string token should satisfy .address read");
+    assert_eq!(
+        param_token_address,
+        json!("0x8464135c8F25Da09e49BC8782676a84730C318bC")
+    );
+}
+
+#[test]
+fn get_ref_non_address_suffix_still_rejects_string_slot() {
+    let context = ResolverContext::with_runtime(json!({
+        "params": {"token": "0xabc"}
+    }));
+
+    let error = context
+        .get_ref("params.token.chain_id")
+        .expect_err("non-address suffix on string should stay invalid");
+    assert_eq!(
+        error,
+        ResolverError::NotFound("params.token.chain_id".to_string())
+    );
+}

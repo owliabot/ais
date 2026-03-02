@@ -1,5 +1,6 @@
 use super::candidates::CandidateContext;
-use super::facts::{FactStore, VolatileFactSignal};
+use super::input_normalize::normalize_input_slot_key;
+use super::input_store::{InputStore, VolatileInputSignal};
 use ais_sdk::documents::{PlanSketchSegment, PlanSketchStep};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -7,10 +8,19 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const VOLATILE_FACT_MAX_AGE_MS: u64 = 30_000;
 
+#[derive(Debug, Clone)]
+struct WriteGateChainDiagnostics {
+    gate_reason_code: &'static str,
+    message: String,
+    action_depends_on: Vec<String>,
+    gate_step_ids: Vec<String>,
+    gates_missing_query_dep: Vec<String>,
+}
+
 pub(super) fn validate_segment_write_gates(
     segment: &PlanSketchSegment,
     candidate_context: &CandidateContext,
-    fact_store: Option<&FactStore>,
+    input_store: Option<&InputStore>,
 ) -> Result<(), Value> {
     let mut issues = Vec::<Value>::new();
     let step_by_id = segment
@@ -37,14 +47,20 @@ pub(super) fn validate_segment_write_gates(
             continue;
         }
 
-        if !has_required_write_gate_chain(step, &step_by_id, candidate_context) {
+        if let Some(chain_issue) =
+            diagnose_required_write_gate_chain(step, &step_by_id, candidate_context)
+        {
             issues.push(json!({
                 "kind": "write_gate_missing",
                 "reason_code": "missing_query_assert_branch_chain",
-                "message": "write action must depend on assert/branch gate backed by query facts in the same segment",
+                "gate_reason_code": chain_issue.gate_reason_code,
+                "message": chain_issue.message,
                 "step_id": step.id,
                 "candidate_ref": step_candidate_ref,
                 "required_pattern": "query -> assert|branch -> action",
+                "action_depends_on": chain_issue.action_depends_on,
+                "gate_step_ids": chain_issue.gate_step_ids,
+                "gates_missing_query_dep": chain_issue.gates_missing_query_dep,
             }));
         }
 
@@ -63,18 +79,19 @@ pub(super) fn validate_segment_write_gates(
             }
         }
 
-        if let Some(store) = fact_store {
-            if action_has_asset_inputs_without_decimals(step, detail)
-                && !token_decimals_available(step, segment, candidate_context, store)
-            {
-                issues.push(json!({
-                    "kind": "write_gate_missing",
-                    "reason_code": "missing_token_decimals",
-                    "message": "token decimals unavailable; add decimals query (e.g. erc20/decimals) or return missing_required_input",
-                    "step_id": step.id,
-                    "candidate_ref": step_candidate_ref,
-                    "required_fact": "token.decimals",
-                }));
+        if let Some(store) = input_store {
+            if let Some(required_fact) = missing_asset_decimals_fact(step, detail) {
+                if !asset_decimals_available(step, segment, candidate_context, store) {
+                    issues.push(json!({
+                        "kind": "write_gate_missing",
+                        "reason_code": "missing_token_decimals",
+                        "message": "asset decimals unavailable; add decimals query or return missing_required_input",
+                        "step_id": step.id,
+                        "candidate_ref": step_candidate_ref,
+                        "required_fact": required_fact,
+                        "required_object_fields": ["decimals"],
+                    }));
+                }
             }
 
             for signal in required_volatile_signals(step, detail) {
@@ -239,38 +256,101 @@ fn action_has_allowance_like_risk_tags(detail: &Value) -> bool {
         .unwrap_or(false)
 }
 
-fn has_required_write_gate_chain<'a>(
+fn diagnose_required_write_gate_chain<'a>(
     action_step: &'a PlanSketchStep,
     step_by_id: &BTreeMap<&'a str, &'a PlanSketchStep>,
     candidate_context: &CandidateContext,
-) -> bool {
-    if action_step.depends_on.is_empty() {
-        return false;
+) -> Option<WriteGateChainDiagnostics> {
+    let action_depends_on = action_step.depends_on.clone();
+    if action_depends_on.is_empty() {
+        return Some(WriteGateChainDiagnostics {
+            gate_reason_code: "missing_action_gate_dep",
+            message: "write action is missing assert/branch gate dependency in depends_on"
+                .to_string(),
+            action_depends_on,
+            gate_step_ids: Vec::new(),
+            gates_missing_query_dep: Vec::new(),
+        });
     }
-
-    let mut visited = HashSet::<String>::new();
-    for dep in &action_step.depends_on {
-        if has_query_backed_gate_path(
-            dep.as_str(),
-            false,
-            step_by_id,
-            candidate_context,
-            &mut visited,
-        ) {
-            return true;
-        }
+    let gate_step_ids = reachable_gate_step_ids(action_step, step_by_id);
+    if gate_step_ids.is_empty() {
+        return Some(WriteGateChainDiagnostics {
+            gate_reason_code: "missing_action_gate_dep",
+            message:
+                "write action depends_on does not include any assert/branch gate step in dependency ancestry"
+                    .to_string(),
+            action_depends_on,
+            gate_step_ids,
+            gates_missing_query_dep: Vec::new(),
+        });
     }
-    false
+    let gates_missing_query_dep = gate_step_ids
+        .iter()
+        .filter(|gate_id| !gate_has_query_backing(gate_id.as_str(), step_by_id, candidate_context))
+        .cloned()
+        .collect::<Vec<_>>();
+    if gates_missing_query_dep.len() == gate_step_ids.len() {
+        return Some(WriteGateChainDiagnostics {
+            gate_reason_code: "missing_gate_query_dep",
+            message:
+                "assert/branch gate steps must depend_on query facts in the same segment before write actions"
+                    .to_string(),
+            action_depends_on,
+            gate_step_ids,
+            gates_missing_query_dep,
+        });
+    }
+    None
 }
 
-fn has_query_backed_gate_path<'a>(
+fn reachable_gate_step_ids<'a>(
+    action_step: &'a PlanSketchStep,
+    step_by_id: &BTreeMap<&'a str, &'a PlanSketchStep>,
+) -> Vec<String> {
+    let mut gate_ids = BTreeSet::<String>::new();
+    let mut visited = HashSet::<String>::new();
+    for dep in &action_step.depends_on {
+        collect_reachable_gate_step_ids(dep.as_str(), step_by_id, &mut visited, &mut gate_ids);
+    }
+    gate_ids.into_iter().collect::<Vec<_>>()
+}
+
+fn collect_reachable_gate_step_ids<'a>(
     step_id: &'a str,
-    seen_gate: bool,
+    step_by_id: &BTreeMap<&'a str, &'a PlanSketchStep>,
+    visited: &mut HashSet<String>,
+    gate_ids: &mut BTreeSet<String>,
+) {
+    if !visited.insert(step_id.to_string()) {
+        return;
+    }
+    let Some(step) = step_by_id.get(step_id).copied() else {
+        return;
+    };
+    if step.kind == "assert" || step.kind == "branch" {
+        gate_ids.insert(step.id.clone());
+    }
+    for dep in &step.depends_on {
+        collect_reachable_gate_step_ids(dep.as_str(), step_by_id, visited, gate_ids);
+    }
+}
+
+fn gate_has_query_backing<'a>(
+    step_id: &'a str,
+    step_by_id: &BTreeMap<&'a str, &'a PlanSketchStep>,
+    candidate_context: &CandidateContext,
+) -> bool {
+    let mut visited = HashSet::<String>::new();
+    gate_has_query_backing_inner(step_id, step_by_id, candidate_context, &mut visited)
+}
+
+fn gate_has_query_backing_inner<'a>(
+    step_id: &'a str,
     step_by_id: &BTreeMap<&'a str, &'a PlanSketchStep>,
     candidate_context: &CandidateContext,
     visited: &mut HashSet<String>,
 ) -> bool {
-    if !visited.insert(format!("{step_id}|{seen_gate}")) {
+    if !visited.insert(step_id.to_string()) {
         return false;
     }
     let Some(step) = step_by_id.get(step_id).copied() else {
@@ -278,30 +358,12 @@ fn has_query_backed_gate_path<'a>(
     };
 
     if step.kind == "query" {
-        return seen_gate
-            && step_candidate_ref(step)
-                .is_some_and(|reference| is_query_candidate_ref(reference, candidate_context));
-    }
-
-    let is_gate = step.kind == "assert" || step.kind == "branch";
-    let next_seen_gate = seen_gate || is_gate;
-    if next_seen_gate
-        && step
-            .candidate_ref
-            .as_deref()
-            .is_some_and(|reference| is_query_candidate_ref(reference, candidate_context))
-    {
-        return true;
+        return step_candidate_ref(step)
+            .is_some_and(|reference| is_query_candidate_ref(reference, candidate_context));
     }
 
     step.depends_on.iter().any(|dep| {
-        has_query_backed_gate_path(
-            dep.as_str(),
-            next_seen_gate,
-            step_by_id,
-            candidate_context,
-            visited,
-        )
+        gate_has_query_backing_inner(dep.as_str(), step_by_id, candidate_context, visited)
     })
 }
 
@@ -353,7 +415,7 @@ fn segment_has_query_name(
 fn segment_has_query_for_signal(
     segment: &PlanSketchSegment,
     candidate_context: &CandidateContext,
-    signal: VolatileFactSignal,
+    signal: VolatileInputSignal,
 ) -> bool {
     segment.steps.iter().any(|step| {
         if step.kind != "query" {
@@ -369,48 +431,50 @@ fn segment_has_query_for_signal(
     })
 }
 
-fn action_has_asset_inputs_without_decimals(
+fn missing_asset_decimals_fact(
     action_step: &PlanSketchStep,
     detail: Option<&Value>,
-) -> bool {
+) -> Option<String> {
     let Some(detail) = detail else {
-        return false;
+        return None;
     };
     let Some(params) = detail.get("params").and_then(Value::as_array) else {
-        return false;
+        return None;
     };
 
     params
         .iter()
-        .filter_map(|param| {
-            let param_type = param.get("type").and_then(Value::as_str)?;
-            if !param_type.eq_ignore_ascii_case("asset") {
-                return None;
-            }
-            param.get("name").and_then(Value::as_str)
-        })
-        .any(|name| {
+        .filter_map(asset_param_slot)
+        .find(|slot| {
             action_step
                 .inputs
-                .get(name)
-                .is_some_and(|value| !value_contains_token_decimals(value))
+                .get(slot.as_str())
+                .is_some_and(|value| !value_contains_asset_decimals(value))
         })
+        .map(|slot| format!("{slot}.decimals"))
 }
 
-fn token_decimals_available(
+fn asset_decimals_available(
     action_step: &PlanSketchStep,
     segment: &PlanSketchSegment,
     candidate_context: &CandidateContext,
-    fact_store: &FactStore,
+    input_store: &InputStore,
 ) -> bool {
     if action_step
         .inputs
         .values()
-        .any(value_contains_token_decimals)
+        .any(value_contains_asset_decimals)
     {
         return true;
     }
-    if fact_store.any_key_ends_with(".decimals") {
+    if input_store
+        .list_ref_strings()
+        .iter()
+        .any(|slot| slot.ends_with(".decimals"))
+    {
+        return true;
+    }
+    if query_steps_store_asset_decimals(segment, candidate_context) {
         return true;
     }
     segment.steps.iter().any(|step| {
@@ -425,6 +489,64 @@ fn token_decimals_available(
         }
         query_candidate_returns_decimals(reference, candidate_context)
     })
+}
+
+fn query_steps_store_asset_decimals(
+    segment: &PlanSketchSegment,
+    candidate_context: &CandidateContext,
+) -> bool {
+    segment.steps.iter().any(|step| {
+        if step.kind != "query" {
+            return false;
+        }
+        let slot_has_asset_decimals = step
+            .stores
+            .values()
+            .any(|slot| slot_is_asset_decimals(slot.as_str()));
+        if slot_has_asset_decimals {
+            return true;
+        }
+        let Some(reference) = step_candidate_ref(step) else {
+            return false;
+        };
+        is_query_candidate_ref(reference, candidate_context)
+            && query_candidate_returns_decimals(reference, candidate_context)
+    })
+}
+
+fn slot_is_asset_decimals(slot: &str) -> bool {
+    let Some(canonical) = normalize_input_slot_key(slot) else {
+        return false;
+    };
+    let lowered = canonical.to_lowercase();
+    lowered.ends_with(".decimals")
+}
+
+fn asset_param_slot(param: &Value) -> Option<String> {
+    let param_type = param.get("type").and_then(Value::as_str)?;
+    if !param_type.eq_ignore_ascii_case("asset") {
+        return None;
+    }
+
+    let explicit_slot = [
+        "input_slot",
+        "input_ref",
+        "slot",
+        "source_slot",
+        "source_ref",
+        "ref",
+    ]
+    .into_iter()
+    .find_map(|key| param.get(key).and_then(Value::as_str))
+    .and_then(normalize_input_slot_key);
+    if explicit_slot.is_some() {
+        return explicit_slot;
+    }
+
+    param
+        .get("name")
+        .and_then(Value::as_str)
+        .and_then(normalize_input_slot_key)
 }
 
 fn step_candidate_ref(step: &PlanSketchStep) -> Option<&str> {
@@ -461,7 +583,7 @@ fn query_candidate_returns_decimals(
 fn query_candidate_matches_signal(
     candidate_ref: &str,
     candidate_context: &CandidateContext,
-    signal: VolatileFactSignal,
+    signal: VolatileInputSignal,
 ) -> bool {
     let leaf_name = candidate_leaf_name(candidate_ref);
     if leaf_matches_signal(leaf_name.as_str(), signal) {
@@ -484,18 +606,18 @@ fn query_candidate_matches_signal(
         .unwrap_or(false)
 }
 
-fn leaf_matches_signal(name: &str, signal: VolatileFactSignal) -> bool {
+fn leaf_matches_signal(name: &str, signal: VolatileInputSignal) -> bool {
     let lowered = name.to_lowercase();
     match signal {
-        VolatileFactSignal::Balance => lowered.contains("balance"),
-        VolatileFactSignal::Allowance => lowered.contains("allowance"),
+        VolatileInputSignal::Balance => lowered.contains("balance"),
+        VolatileInputSignal::Allowance => lowered.contains("allowance"),
     }
 }
 
 fn required_volatile_signals(
     step: &PlanSketchStep,
     detail: Option<&Value>,
-) -> Vec<VolatileFactSignal> {
+) -> Vec<VolatileInputSignal> {
     let Some(detail) = detail else {
         return Vec::new();
     };
@@ -518,14 +640,14 @@ fn required_volatile_signals(
             }
         }
     }
-    if action_has_asset_inputs_without_decimals(step, Some(detail)) {
+    if missing_asset_decimals_fact(step, Some(detail)).is_some() {
         out.insert("balance".to_string());
     }
 
     out.into_iter()
         .filter_map(|signal| match signal.as_str() {
-            "balance" => Some(VolatileFactSignal::Balance),
-            "allowance" => Some(VolatileFactSignal::Allowance),
+            "balance" => Some(VolatileInputSignal::Balance),
+            "allowance" => Some(VolatileInputSignal::Allowance),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -559,7 +681,7 @@ fn candidate_leaf_name(candidate_ref: &str) -> String {
         .to_lowercase()
 }
 
-fn value_contains_token_decimals(value: &Value) -> bool {
+fn value_contains_asset_decimals(value: &Value) -> bool {
     match value {
         Value::Object(object) => {
             if let Some(decimals) = object.get("decimals") {
@@ -568,24 +690,24 @@ fn value_contains_token_decimals(value: &Value) -> bool {
                 }
             }
             if let Some(lit) = object.get("lit") {
-                if value_contains_token_decimals(lit) {
+                if value_contains_asset_decimals(lit) {
                     return true;
                 }
             }
             if let Some(inner_object) = object.get("object") {
-                return value_contains_token_decimals(inner_object);
+                return value_contains_asset_decimals(inner_object);
             }
             false
         }
-        Value::Array(values) => values.iter().any(value_contains_token_decimals),
+        Value::Array(values) => values.iter().any(value_contains_asset_decimals),
         _ => false,
     }
 }
 
-fn volatile_signal_name(signal: VolatileFactSignal) -> &'static str {
+fn volatile_signal_name(signal: VolatileInputSignal) -> &'static str {
     match signal {
-        VolatileFactSignal::Balance => "balance",
-        VolatileFactSignal::Allowance => "allowance",
+        VolatileInputSignal::Balance => "balance",
+        VolatileInputSignal::Allowance => "allowance",
     }
 }
 
@@ -597,78 +719,5 @@ fn current_unix_ms() -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    fn candidate_context_with_demo_refs() -> CandidateContext {
-        let mut context = CandidateContext::default();
-        context.detail_by_ref.insert(
-            "demo-bank@0.0.1/native-balance".to_string(),
-            json!({
-                "ref": "demo-bank@0.0.1/native-balance",
-                "kind": "query"
-            }),
-        );
-        context.detail_by_ref.insert(
-            "demo-bank@0.0.1/native-transfer".to_string(),
-            json!({
-                "ref": "demo-bank@0.0.1/native-transfer",
-                "kind": "action",
-                "risk_tags": ["transfer"]
-            }),
-        );
-        context
-    }
-
-    #[test]
-    fn write_gate_accepts_recursive_query_assert_branch_action_chain() {
-        let segment: PlanSketchSegment = serde_json::from_value(json!({
-            "segment_id": "seg-1",
-            "cursor_in": "0",
-            "cursor_out": "1",
-            "done": false,
-            "steps": [
-                {"id":"q_balance","kind":"query","candidate_ref":"demo-bank@0.0.1/native-balance","inputs":{}},
-                {"id":"g_assert","kind":"assert","depends_on":["q_balance"],"inputs":{"condition":{"cel":"nodes.q_balance.outputs.balance != null"}}},
-                {"id":"g_branch","kind":"branch","depends_on":["g_assert"],"inputs":{"condition":{"cel":"nodes.q_balance.outputs.balance > 0"}}},
-                {"id":"a_transfer","kind":"action","candidate_ref":"demo-bank@0.0.1/native-transfer","depends_on":["g_branch"],"inputs":{}}
-            ],
-            "extensions": {}
-        }))
-        .expect("segment");
-        let context = candidate_context_with_demo_refs();
-
-        let result = validate_segment_write_gates(&segment, &context, None);
-        assert!(result.is_ok(), "recursive gate chain should pass: {result:?}");
-    }
-
-    #[test]
-    fn write_gate_rejects_chain_without_query_backing() {
-        let segment: PlanSketchSegment = serde_json::from_value(json!({
-            "segment_id": "seg-1",
-            "cursor_in": "0",
-            "cursor_out": "1",
-            "done": false,
-            "steps": [
-                {"id":"g_assert","kind":"assert","inputs":{"condition":{"cel":"true"}}},
-                {"id":"g_branch","kind":"branch","depends_on":["g_assert"],"inputs":{"condition":{"cel":"true"}}},
-                {"id":"a_transfer","kind":"action","candidate_ref":"demo-bank@0.0.1/native-transfer","depends_on":["g_branch"],"inputs":{}}
-            ],
-            "extensions": {}
-        }))
-        .expect("segment");
-        let context = candidate_context_with_demo_refs();
-
-        let error = validate_segment_write_gates(&segment, &context, None)
-            .expect_err("missing query-backed gate chain must fail");
-        assert_eq!(
-            error.pointer("/reason_code").and_then(Value::as_str),
-            Some("write_gate_missing")
-        );
-        assert!(error
-            .pointer("/issues/0/reason_code")
-            .and_then(Value::as_str)
-            .is_some_and(|code| code == "missing_query_assert_branch_chain"));
-    }
-}
+#[path = "tests/write_gates_module.rs"]
+mod tests;

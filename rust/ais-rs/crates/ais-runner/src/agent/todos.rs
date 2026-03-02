@@ -169,6 +169,23 @@ impl TodoBoard {
         );
     }
 
+    pub fn intent_acceptance_complete(&self, state_summary: Option<&Value>) -> bool {
+        if self.current().is_some() {
+            return false;
+        }
+        let acceptance_rules = self
+            .todos
+            .iter()
+            .flat_map(|item| item.acceptance.iter().map(String::as_str))
+            .collect::<Vec<_>>();
+        if acceptance_rules.is_empty() {
+            return false;
+        }
+        acceptance_rules
+            .iter()
+            .all(|rule| acceptance_rule_resolved_from_state_summary(state_summary, rule))
+    }
+
     pub fn record_receipt_for_todo(&mut self, todo_id: &str, receipt: TodoReceipt) -> bool {
         let Some(item) = self.todos.iter_mut().find(|item| item.id == todo_id) else {
             return false;
@@ -338,6 +355,35 @@ fn initial_title_from_intent(intent: &str) -> String {
     format!("Execute intent: {preview}")
 }
 
+fn acceptance_rule_resolved_from_state_summary(state_summary: Option<&Value>, rule: &str) -> bool {
+    let Some(summary) = state_summary else {
+        return false;
+    };
+    let rule = rule.trim();
+    if rule.is_empty() {
+        return false;
+    }
+    if let Some(canonical_slot) = super::input_normalize::normalize_input_slot_key(rule) {
+        let canonical_ref = format!("inputs.{canonical_slot}");
+        if super::known_input_refs_from_state_summary(Some(summary))
+            .iter()
+            .any(|known| known == &canonical_ref)
+        {
+            return true;
+        }
+    }
+    value_at_dotted_path(summary.pointer("/intent_context/facts"), rule).is_some()
+        || value_at_dotted_path(summary.pointer("/intent_slots/intent_facts"), rule).is_some()
+}
+
+fn value_at_dotted_path<'a>(root: Option<&'a Value>, dotted: &str) -> Option<&'a Value> {
+    let mut current = root?;
+    for segment in dotted.split('.').filter(|part| !part.is_empty()) {
+        current = current.get(segment)?;
+    }
+    Some(current)
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 struct TodoBoardRuntime {
@@ -364,150 +410,5 @@ impl From<TodoBoardRuntime> for TodoBoard {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{TodoBoard, TodoReceipt, TodoSpec, TodoStatus};
-    use serde_json::json;
-
-    #[test]
-    fn todo_board_transitions_current_item() {
-        let mut board = TodoBoard::bootstrap("transfer 10 usdc");
-        assert_eq!(
-            board.current().map(|item| item.status),
-            Some(TodoStatus::Todo)
-        );
-
-        board.mark_current_in_progress(Some("query balances"), "seg_1");
-        let current = board.current().expect("current todo");
-        assert_eq!(current.status, TodoStatus::InProgress);
-        assert_eq!(current.segment_id.as_deref(), Some("seg_1"));
-        assert_eq!(current.title, "query balances");
-
-        board.mark_current_blocked("missing_required_input");
-        assert_eq!(
-            board
-                .current()
-                .and_then(|item| item.blocked_reason.as_deref()),
-            Some("missing_required_input")
-        );
-
-        board.mark_current_todo();
-        assert_eq!(
-            board.current().map(|item| item.status),
-            Some(TodoStatus::Todo)
-        );
-
-        board.mark_current_done();
-        assert_eq!(board.current(), None);
-
-        board.open_follow_up_todo();
-        let current = board.current().expect("follow-up todo");
-        assert_eq!(current.id, "todo_2");
-        assert_eq!(current.status, TodoStatus::Todo);
-    }
-
-    #[test]
-    fn todo_board_can_restore_from_runtime_payload() {
-        let runtime = json!({
-            "agent": {
-                "todo_progress": {
-                    "todos": [{
-                        "id": "todo_7",
-                        "title": "resume",
-                        "status": "in_progress",
-                        "acceptance": [],
-                        "required_facts": [],
-                        "produced_facts": [],
-                        "segment_id": "seg_7"
-                    }],
-                    "next_seq": 8
-                }
-            }
-        });
-        let board = TodoBoard::restore_or_bootstrap(&runtime, "ignored");
-        let current = board.current().expect("current todo");
-        assert_eq!(current.id, "todo_7");
-        assert_eq!(current.status, TodoStatus::InProgress);
-        assert_eq!(current.segment_id.as_deref(), Some("seg_7"));
-        let value = board.to_runtime_value();
-        assert_eq!(value.pointer("/next_seq"), Some(&json!(8)));
-    }
-
-    #[test]
-    fn todo_board_replace_from_specs_normalizes_and_dedupes() {
-        let mut board = TodoBoard::bootstrap("transfer 10 usdc");
-        board.replace_from_specs(
-            "transfer 10 usdc",
-            &[
-                TodoSpec {
-                    title: " Query allowance ".to_string(),
-                    required_facts: vec![" owner ".to_string(), "owner".to_string()],
-                    produced_facts: vec![" allowance ".to_string()],
-                    acceptance: vec!["".to_string(), "allowance_ready".to_string()],
-                },
-                TodoSpec {
-                    title: "query allowance".to_string(),
-                    required_facts: vec!["ignored".to_string()],
-                    produced_facts: vec![],
-                    acceptance: vec![],
-                },
-                TodoSpec {
-                    title: "Execute transfer".to_string(),
-                    required_facts: vec!["allowance".to_string()],
-                    produced_facts: vec!["tx_hash".to_string()],
-                    acceptance: vec![],
-                },
-            ],
-        );
-        let runtime = board.to_runtime_value();
-        assert_eq!(runtime.pointer("/todos/0/id"), Some(&json!("todo_1")));
-        assert_eq!(
-            runtime.pointer("/todos/0/title"),
-            Some(&json!("Query allowance"))
-        );
-        assert_eq!(
-            runtime.pointer("/todos/0/required_facts"),
-            Some(&json!(["owner"]))
-        );
-        assert_eq!(
-            runtime.pointer("/todos/0/acceptance"),
-            Some(&json!(["allowance_ready"]))
-        );
-        assert_eq!(runtime.pointer("/todos/1/id"), Some(&json!("todo_2")));
-        assert_eq!(
-            runtime.pointer("/todos/1/title"),
-            Some(&json!("Execute transfer"))
-        );
-        assert_eq!(runtime.pointer("/next_seq"), Some(&json!(3)));
-    }
-
-    #[test]
-    fn todo_board_records_receipt_by_todo_id() {
-        let mut board = TodoBoard::bootstrap("transfer 10 usdc");
-        let todo_id = board.current_todo_id().expect("todo id").to_string();
-        let recorded = board.record_receipt_for_todo(
-            todo_id.as_str(),
-            TodoReceipt {
-                schema: "ais-agent-todo-receipt/0.0.1".to_string(),
-                todo_id: todo_id.clone(),
-                segment_id: "seg_1".to_string(),
-                status: "completed".to_string(),
-                paused_reason: None,
-                node_ids: vec!["seg_1/q1".to_string()],
-                completed_node_ids: vec!["seg_1/q1".to_string()],
-                tx_hashes: vec!["0xabc".to_string()],
-                event_types: vec!["query_result".to_string()],
-                event_count: 2,
-            },
-        );
-        assert!(recorded);
-        let runtime = board.to_runtime_value();
-        assert_eq!(
-            runtime.pointer("/current_todo/receipt/segment_id"),
-            Some(&json!("seg_1"))
-        );
-        assert_eq!(
-            runtime.pointer("/current_todo/receipt/event_count"),
-            Some(&json!(2))
-        );
-    }
-}
+#[path = "tests/todos.rs"]
+mod tests;

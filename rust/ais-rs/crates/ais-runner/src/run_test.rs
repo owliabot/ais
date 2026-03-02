@@ -770,8 +770,24 @@ chains:
 
     let events_content = fs::read_to_string(events_path).expect("events must exist");
     assert!(events_content.contains("\"type\":\"engine_paused\""));
+    for line in events_content.lines() {
+        let record: Value = serde_json::from_str(line).expect("events jsonl line");
+        let ts = record
+            .get("ts")
+            .and_then(Value::as_str)
+            .expect("event timestamp");
+        assert_timestamp_is_wall_clock_rfc3339(ts);
+    }
     let trace_content = fs::read_to_string(trace_path).expect("trace must exist");
     assert!(trace_content.contains("\"schema\":\"ais-engine-event/0.0.3\""));
+    for line in trace_content.lines() {
+        let record: Value = serde_json::from_str(line).expect("trace jsonl line");
+        let ts = record
+            .get("ts")
+            .and_then(Value::as_str)
+            .expect("trace timestamp");
+        assert_timestamp_is_wall_clock_rfc3339(ts);
+    }
     let checkpoint_content = fs::read_to_string(checkpoint_path).expect("checkpoint must exist");
     assert!(checkpoint_content.contains("\"schema\": \"ais-checkpoint/0.0.1\""));
 }
@@ -1000,6 +1016,18 @@ chains:
         .expect("second need_user_confirm event");
     let first_record: Value = serde_json::from_str(first_confirm).expect("jsonl event");
     let second_record: Value = serde_json::from_str(second_confirm).expect("jsonl event");
+    assert_eq!(
+        first_record
+            .pointer("/event/data/checks/gate/result")
+            .and_then(Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        second_record
+            .pointer("/event/data/checks/gate/result")
+            .and_then(Value::as_bool),
+        Some(false)
+    );
     let first_hash = first_record
         .pointer("/event/data/details/confirmation_hash")
         .and_then(Value::as_str)
@@ -1517,6 +1545,18 @@ chains:
         .events
         .iter()
         .any(|record| record.event.event_type == EngineEventType::PlanReplaced));
+    let command_accepted = processed
+        .events
+        .iter()
+        .find(|record| record.event.event_type == EngineEventType::CommandAccepted)
+        .expect("command_accepted event");
+    assert_timestamp_is_wall_clock_rfc3339(command_accepted.ts.as_str());
+    let plan_replaced = processed
+        .events
+        .iter()
+        .find(|record| record.event.event_type == EngineEventType::PlanReplaced)
+        .expect("plan_replaced event");
+    assert_timestamp_is_wall_clock_rfc3339(plan_replaced.ts.as_str());
 }
 
 #[test]
@@ -1574,6 +1614,18 @@ chains:
         .events
         .iter()
         .any(|record| record.event.event_type == EngineEventType::EnginePaused));
+    let command_accepted = processed
+        .events
+        .iter()
+        .find(|record| record.event.event_type == EngineEventType::CommandAccepted)
+        .expect("command_accepted event");
+    assert_timestamp_is_wall_clock_rfc3339(command_accepted.ts.as_str());
+    let replace_error = processed
+        .events
+        .iter()
+        .find(|record| record.event.event_type == EngineEventType::Error)
+        .expect("replace_plan error event");
+    assert_timestamp_is_wall_clock_rfc3339(replace_error.ts.as_str());
 }
 
 fn sample_plan(method: &str, include_second_node: bool) -> PlanDocument {
@@ -1646,4 +1698,21 @@ fn write_temp_file_in(dir: &std::path::Path, name: &str, content: &str) -> PathB
     let path = dir.join(name);
     fs::write(&path, content).expect("must write file");
     path
+}
+
+fn assert_timestamp_is_wall_clock_rfc3339(ts: &str) {
+    assert_ne!(ts, "1970-01-01T00:00:00Z");
+    assert_eq!(ts.len(), 20);
+    assert_eq!(&ts[4..5], "-");
+    assert_eq!(&ts[7..8], "-");
+    assert_eq!(&ts[10..11], "T");
+    assert_eq!(&ts[13..14], ":");
+    assert_eq!(&ts[16..17], ":");
+    assert_eq!(&ts[19..20], "Z");
+    assert!(ts[..4].chars().all(|ch| ch.is_ascii_digit()));
+    assert!(ts[5..7].chars().all(|ch| ch.is_ascii_digit()));
+    assert!(ts[8..10].chars().all(|ch| ch.is_ascii_digit()));
+    assert!(ts[11..13].chars().all(|ch| ch.is_ascii_digit()));
+    assert!(ts[14..16].chars().all(|ch| ch.is_ascii_digit()));
+    assert!(ts[17..19].chars().all(|ch| ch.is_ascii_digit()));
 }

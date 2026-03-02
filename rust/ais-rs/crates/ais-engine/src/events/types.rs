@@ -1,7 +1,42 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const ENGINE_EVENT_SCHEMA_0_0_3: &str = "ais-engine-event/0.0.3";
+pub const ENGINE_EVENT_CHECKS_SCHEMA_0_0_1: &str = "ais-engine-checks/0.0.1";
+
+pub fn wall_clock_timestamp_rfc3339() -> String {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format_unix_seconds_rfc3339(seconds)
+}
+
+pub(crate) fn format_unix_seconds_rfc3339(seconds: u64) -> String {
+    let days = (seconds / 86_400) as i64;
+    let seconds_of_day = (seconds % 86_400) as u32;
+    let (year, month, day) = civil_from_days_since_unix_epoch(days);
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    let second = seconds_of_day % 60;
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+fn civil_from_days_since_unix_epoch(days: i64) -> (i32, u32, u32) {
+    // Howard Hinnant's civil-from-days algorithm for Gregorian calendar conversion.
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    let year = y + if month <= 2 { 1 } else { 0 };
+    (year as i32, month as u32, day as u32)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

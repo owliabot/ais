@@ -3,7 +3,7 @@ use crate::checkpoint::CheckpointSideEffectRecord;
 use crate::checkpoint::SIDE_EFFECT_RECORD_SCHEMA_0_1_0;
 use crate::commands::{EngineCommand, EngineCommandEnvelope, EngineCommandType};
 use crate::executor::{Executor, ExecutorOutput, RouterExecutor};
-use crate::solver::DefaultSolver;
+use crate::solver::{DefaultSolver, Solver, SolverContext, SolverDecision};
 use ais_sdk::PlanDocument;
 use serde_json::{json, Map, Value};
 use std::cell::RefCell;
@@ -151,6 +151,22 @@ impl Executor for PromptInjectionOutputExecutor {
     }
 }
 
+struct AlwaysConfirmSolver;
+
+impl Solver for AlwaysConfirmSolver {
+    fn solve(
+        &self,
+        _node: &Value,
+        _readiness: &ais_sdk::NodeReadinessResult,
+        _context: &SolverContext,
+    ) -> SolverDecision {
+        SolverDecision::NeedUserConfirm {
+            reason: "solver_fallback".to_string(),
+            details: Map::new(),
+        }
+    }
+}
+
 fn sample_plan() -> PlanDocument {
     PlanDocument {
         schema: "ais-plan/0.0.3".to_string(),
@@ -264,6 +280,33 @@ fn condition_plan(condition: Value) -> PlanDocument {
                 "args": {}
             },
             "writes": [{"path":"nodes.cond-1.outputs","mode":"set"}]
+        })],
+        extensions: Map::new(),
+    }
+}
+
+fn condition_branch_plan(condition: Value) -> PlanDocument {
+    PlanDocument {
+        schema: "ais-plan/0.0.3".to_string(),
+        meta: Some(json!({"name": "condition-branch-plan"})),
+        nodes: vec![json!({
+            "id": "branch-1",
+            "kind": "execution",
+            "chain": "eip155:1",
+            "condition": condition,
+            "extensions": {
+                "control": {
+                    "step_kind": "branch"
+                }
+            },
+            "execution": {
+                "type": "evm_read",
+                "to": {"lit": "0x0000000000000000000000000000000000000001"},
+                "abi": {"type": "function", "name": "balanceOf", "inputs": [], "outputs": []},
+                "method": "balanceOf",
+                "args": {}
+            },
+            "writes": [{"path":"nodes.branch-1.outputs","mode":"set"}]
         })],
         extensions: Map::new(),
     }
@@ -981,6 +1024,18 @@ fn policy_threshold_risk_level_exceeded_emits_need_user_confirm_summary() {
         confirm
             .event
             .data
+            .get("checks")
+            .and_then(Value::as_object)
+            .and_then(|checks| checks.get("gate"))
+            .and_then(Value::as_object)
+            .and_then(|gate| gate.get("result"))
+            .and_then(Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        confirm
+            .event
+            .data
             .get("details")
             .and_then(Value::as_object)
             .and_then(|details| details.get("confirmation_summary"))
@@ -988,6 +1043,16 @@ fn policy_threshold_risk_level_exceeded_emits_need_user_confirm_summary() {
             .and_then(|summary| summary.get("risk_level"))
             .and_then(Value::as_u64),
         Some(5)
+    );
+    assert_eq!(
+        confirm
+            .event
+            .data
+            .get("details")
+            .and_then(Value::as_object)
+            .and_then(|details| details.get("risk_source"))
+            .and_then(Value::as_str),
+        Some("extensions")
     );
     assert!(confirm
         .event
@@ -997,6 +1062,169 @@ fn policy_threshold_risk_level_exceeded_emits_need_user_confirm_summary() {
         .and_then(|details| details.get("hit_reasons"))
         .and_then(Value::as_array)
         .is_some());
+}
+
+#[test]
+fn policy_threshold_risk_level_unknown_reports_missing_root_cause() {
+    let plan = PlanDocument {
+        schema: "ais-plan/0.0.3".to_string(),
+        meta: Some(json!({"name": "risk-threshold-unknown-missing"})),
+        nodes: vec![json!({
+            "id": "risk-unknown-missing",
+            "kind": "execution",
+            "chain": "eip155:1",
+            "execution": {
+                "type": "evm_call",
+                "method": "transfer",
+                "args": {}
+            },
+            "writes": [{"path":"nodes.risk-unknown-missing.outputs","mode":"set"}]
+        })],
+        extensions: Map::new(),
+    };
+    let mut state = EngineRunnerState::default();
+    let mut router = RouterExecutor::new();
+    router.register("evm_call", "eip155:1", Box::new(MockExecutor));
+    let mut options = EngineRunnerOptions::default();
+    options.policy.thresholds.max_risk_level = Some(2);
+
+    let result = run_plan_once(
+        "run-risk-threshold-unknown-missing",
+        &plan,
+        &mut state,
+        &router,
+        &DefaultSolver,
+        &[],
+        &options,
+    );
+
+    assert_eq!(result.status, EngineRunStatus::Paused);
+    let confirm = result
+        .events
+        .iter()
+        .find(|record| record.event.event_type == crate::events::EngineEventType::NeedUserConfirm)
+        .expect("need_user_confirm event");
+    assert_eq!(
+        confirm
+            .event
+            .data
+            .get("reason_code")
+            .and_then(Value::as_str),
+        Some("threshold_risk_level_unknown")
+    );
+    let details = confirm
+        .event
+        .data
+        .get("details")
+        .and_then(Value::as_object)
+        .expect("details");
+    assert_eq!(
+        details.get("risk_source").and_then(Value::as_str),
+        Some("unknown")
+    );
+    assert_eq!(
+        details
+            .get("risk_level_unknown_cause_code")
+            .and_then(Value::as_str),
+        Some("risk_level_input_missing")
+    );
+    assert_eq!(
+        details
+            .get("risk_level_expected_path")
+            .and_then(Value::as_str),
+        Some("extensions.risk_level")
+    );
+}
+
+#[test]
+fn policy_threshold_risk_level_unknown_reports_parse_failed_root_cause() {
+    let plan = PlanDocument {
+        schema: "ais-plan/0.0.3".to_string(),
+        meta: Some(json!({"name": "risk-threshold-unknown-parse"})),
+        nodes: vec![json!({
+            "id": "risk-unknown-parse",
+            "kind": "execution",
+            "chain": "eip155:1",
+            "extensions": {
+                "risk_level": "high"
+            },
+            "execution": {
+                "type": "evm_call",
+                "method": "transfer",
+                "args": {}
+            },
+            "writes": [{"path":"nodes.risk-unknown-parse.outputs","mode":"set"}]
+        })],
+        extensions: Map::new(),
+    };
+    let mut state = EngineRunnerState::default();
+    let mut router = RouterExecutor::new();
+    router.register("evm_call", "eip155:1", Box::new(MockExecutor));
+    let mut options = EngineRunnerOptions::default();
+    options.policy.thresholds.max_risk_level = Some(2);
+
+    let result = run_plan_once(
+        "run-risk-threshold-unknown-parse",
+        &plan,
+        &mut state,
+        &router,
+        &DefaultSolver,
+        &[],
+        &options,
+    );
+
+    assert_eq!(result.status, EngineRunStatus::Paused);
+    let confirm = result
+        .events
+        .iter()
+        .find(|record| record.event.event_type == crate::events::EngineEventType::NeedUserConfirm)
+        .expect("need_user_confirm event");
+    let details = confirm
+        .event
+        .data
+        .get("details")
+        .and_then(Value::as_object)
+        .expect("details");
+    assert_eq!(
+        details
+            .get("risk_level_unknown_cause_code")
+            .and_then(Value::as_str),
+        Some("risk_level_parse_failed")
+    );
+}
+
+#[test]
+fn solver_need_user_confirm_emits_fallback_risk_source() {
+    let plan = sample_plan();
+    let mut state = EngineRunnerState::default();
+    let router = RouterExecutor::new();
+
+    let result = run_plan_once(
+        "run-solver-fallback-risk-source",
+        &plan,
+        &mut state,
+        &router,
+        &AlwaysConfirmSolver,
+        &[],
+        &EngineRunnerOptions::default(),
+    );
+
+    assert_eq!(result.status, EngineRunStatus::Paused);
+    let confirm = result
+        .events
+        .iter()
+        .find(|record| record.event.event_type == crate::events::EngineEventType::NeedUserConfirm)
+        .expect("need_user_confirm event");
+    assert_eq!(
+        confirm
+            .event
+            .data
+            .get("details")
+            .and_then(Value::as_object)
+            .and_then(|details| details.get("risk_source"))
+            .and_then(Value::as_str),
+        Some("fallback")
+    );
 }
 
 #[test]
@@ -1194,14 +1422,66 @@ fn assert_failure_pauses_with_error_event() {
         state.paused_reason.as_deref(),
         Some("assert_failed:assert-1")
     );
-    assert!(result.events.iter().any(|record| {
-        record.event.event_type == crate::events::EngineEventType::Error
-            && record.event.data.get("reason") == Some(&json!("assert_failed"))
-    }));
+    let error = result
+        .events
+        .iter()
+        .find(|record| {
+            record.event.event_type == crate::events::EngineEventType::Error
+                && record.event.data.get("reason") == Some(&json!("assert_failed"))
+        })
+        .expect("assert_failed error event");
+    assert_eq!(
+        error
+            .event
+            .data
+            .get("checks")
+            .and_then(Value::as_object)
+            .and_then(|checks| checks.get("assert"))
+            .and_then(Value::as_object)
+            .and_then(|assert| assert.get("result"))
+            .and_then(Value::as_bool),
+        Some(false)
+    );
     assert!(result
         .events
         .iter()
         .any(|record| record.event.event_type == crate::events::EngineEventType::EnginePaused));
+}
+
+#[test]
+fn assert_true_records_assert_check_on_node_ready() {
+    let plan = assert_plan(json!({"lit": true}), None, None);
+    let mut state = EngineRunnerState::default();
+    let mut router = RouterExecutor::new();
+    router.register("evm", "eip155:1", Box::new(MockExecutor));
+
+    let result = run_plan_once(
+        "run-assert-true",
+        &plan,
+        &mut state,
+        &router,
+        &DefaultSolver,
+        &[],
+        &EngineRunnerOptions::default(),
+    );
+    assert_eq!(result.status, EngineRunStatus::Completed);
+    let ready = result
+        .events
+        .iter()
+        .find(|record| record.event.event_type == crate::events::EngineEventType::NodeReady)
+        .expect("node_ready event");
+    assert_eq!(
+        ready
+            .event
+            .data
+            .get("checks")
+            .and_then(Value::as_object)
+            .and_then(|checks| checks.get("assert"))
+            .and_then(Value::as_object)
+            .and_then(|assert| assert.get("result"))
+            .and_then(Value::as_bool),
+        Some(true)
+    );
 }
 
 #[test]
@@ -1303,10 +1583,71 @@ fn condition_false_skips_executor_and_completes_node() {
     assert_eq!(result.status, EngineRunStatus::Completed);
     assert_eq!(*calls.borrow(), 0);
     assert!(state.completed_node_ids.iter().any(|id| id == "cond-1"));
-    assert!(result.events.iter().any(|record| {
-        record.event.event_type == crate::events::EngineEventType::Skipped
-            && record.event.data.get("reason") == Some(&json!("condition_false"))
-    }));
+    let skipped = result
+        .events
+        .iter()
+        .find(|record| {
+            record.event.event_type == crate::events::EngineEventType::Skipped
+                && record.event.data.get("reason") == Some(&json!("condition_false"))
+        })
+        .expect("condition_false skipped event");
+    assert_eq!(
+        skipped
+            .event
+            .data
+            .get("checks")
+            .and_then(Value::as_object)
+            .and_then(|checks| checks.get("condition"))
+            .and_then(Value::as_object)
+            .and_then(|condition| condition.get("result"))
+            .and_then(Value::as_bool),
+        Some(false)
+    );
+}
+
+#[test]
+fn branch_condition_false_records_branch_control_kind() {
+    let plan = condition_branch_plan(json!({"lit": false}));
+    let mut state = EngineRunnerState::default();
+    let mut router = RouterExecutor::new();
+    let calls = Rc::new(RefCell::new(0usize));
+    router.register(
+        "evm",
+        "eip155:1",
+        Box::new(CountingExecutor {
+            calls: calls.clone(),
+        }),
+    );
+
+    let result = run_plan_once(
+        "run-branch-condition-false",
+        &plan,
+        &mut state,
+        &router,
+        &DefaultSolver,
+        &[],
+        &EngineRunnerOptions::default(),
+    );
+
+    assert_eq!(result.status, EngineRunStatus::Completed);
+    assert_eq!(*calls.borrow(), 0);
+    let skipped = result
+        .events
+        .iter()
+        .find(|record| record.event.event_type == crate::events::EngineEventType::Skipped)
+        .expect("branch skipped event");
+    assert_eq!(
+        skipped
+            .event
+            .data
+            .get("checks")
+            .and_then(Value::as_object)
+            .and_then(|checks| checks.get("condition"))
+            .and_then(Value::as_object)
+            .and_then(|condition| condition.get("control_kind"))
+            .and_then(Value::as_str),
+        Some("branch")
+    );
 }
 
 #[test]
@@ -1335,6 +1676,35 @@ fn condition_true_executes_node() {
 
     assert_eq!(result.status, EngineRunStatus::Completed);
     assert_eq!(*calls.borrow(), 1);
+    let ready = result
+        .events
+        .iter()
+        .find(|record| record.event.event_type == crate::events::EngineEventType::NodeReady)
+        .expect("node_ready event");
+    assert_eq!(
+        ready
+            .event
+            .data
+            .get("checks")
+            .and_then(Value::as_object)
+            .and_then(|checks| checks.get("condition"))
+            .and_then(Value::as_object)
+            .and_then(|condition| condition.get("result"))
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        ready
+            .event
+            .data
+            .get("checks")
+            .and_then(Value::as_object)
+            .and_then(|checks| checks.get("gate"))
+            .and_then(Value::as_object)
+            .and_then(|gate| gate.get("result"))
+            .and_then(Value::as_bool),
+        Some(true)
+    );
     assert_eq!(
         state
             .runtime
@@ -1368,10 +1738,26 @@ fn invalid_condition_pauses_with_error_event() {
         state.paused_reason.as_deref(),
         Some("condition_failed:cond-1")
     );
-    assert!(result.events.iter().any(|record| {
-        record.event.event_type == crate::events::EngineEventType::Error
-            && record.event.data.get("reason") == Some(&json!("condition_failed"))
-    }));
+    let error = result
+        .events
+        .iter()
+        .find(|record| {
+            record.event.event_type == crate::events::EngineEventType::Error
+                && record.event.data.get("reason") == Some(&json!("condition_failed"))
+        })
+        .expect("condition_failed error");
+    assert_eq!(
+        error
+            .event
+            .data
+            .get("checks")
+            .and_then(Value::as_object)
+            .and_then(|checks| checks.get("condition"))
+            .and_then(Value::as_object)
+            .and_then(|condition| condition.get("result"))
+            .and_then(Value::as_bool),
+        Some(false)
+    );
     assert!(result.events.iter().any(|record| {
         record.event.event_type == crate::events::EngineEventType::EnginePaused
             && record.event.data.get("reason") == Some(&json!("condition_failed"))

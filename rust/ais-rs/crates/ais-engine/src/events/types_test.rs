@@ -1,6 +1,7 @@
 use super::{
-    ensure_monotonic_sequence, EngineEvent, EngineEventRecord, EngineEventSequenceError,
-    EngineEventStream, EngineEventType, ENGINE_EVENT_SCHEMA_0_0_3,
+    ensure_monotonic_sequence, format_unix_seconds_rfc3339, wall_clock_timestamp_rfc3339,
+    EngineEvent, EngineEventRecord, EngineEventSequenceError, EngineEventStream, EngineEventType,
+    ENGINE_EVENT_SCHEMA_0_0_3,
 };
 use crate::events::{encode_event_jsonl_line, parse_event_jsonl_line};
 use serde_json::json;
@@ -82,4 +83,32 @@ fn side_effect_observed_variant_serializes_with_stable_name() {
 fn need_user_input_variant_serializes_with_stable_name() {
     let value = serde_json::to_value(EngineEventType::NeedUserInput).expect("serialize");
     assert_eq!(value.as_str(), Some("need_user_input"));
+}
+
+#[test]
+fn unix_seconds_rfc3339_format_is_stable() {
+    assert_eq!(format_unix_seconds_rfc3339(0), "1970-01-01T00:00:00Z");
+    assert_eq!(
+        format_unix_seconds_rfc3339(1_709_251_200),
+        "2024-03-01T00:00:00Z"
+    );
+}
+
+#[test]
+fn wall_clock_timestamp_is_not_epoch_and_uses_rfc3339_utc_seconds_shape() {
+    let ts = wall_clock_timestamp_rfc3339();
+    assert_ne!(ts, "1970-01-01T00:00:00Z");
+    assert_eq!(ts.len(), 20);
+    assert_eq!(&ts[4..5], "-");
+    assert_eq!(&ts[7..8], "-");
+    assert_eq!(&ts[10..11], "T");
+    assert_eq!(&ts[13..14], ":");
+    assert_eq!(&ts[16..17], ":");
+    assert_eq!(&ts[19..20], "Z");
+    assert!(ts[..4].chars().all(|ch| ch.is_ascii_digit()));
+    assert!(ts[5..7].chars().all(|ch| ch.is_ascii_digit()));
+    assert!(ts[8..10].chars().all(|ch| ch.is_ascii_digit()));
+    assert!(ts[11..13].chars().all(|ch| ch.is_ascii_digit()));
+    assert!(ts[14..16].chars().all(|ch| ch.is_ascii_digit()));
+    assert!(ts[17..19].chars().all(|ch| ch.is_ascii_digit()));
 }

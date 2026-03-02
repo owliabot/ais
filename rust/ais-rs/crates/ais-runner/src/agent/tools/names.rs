@@ -1,0 +1,11 @@
+pub(super) const TOOL_PLAN_BEGIN: &str = "plan.begin";
+pub(super) const TOOL_PLAN_GROUND_INTENT: &str = "plan.ground_intent";
+pub(super) const TOOL_PLAN_PROPOSE_TODOS: &str = "plan.propose_todos";
+pub(super) const TOOL_PLAN_PROPOSE_SEGMENT: &str = "plan.propose_segment";
+pub(super) const TOOL_PLAN_REVISE_SEGMENT: &str = "plan.revise_segment";
+pub(super) const TOOL_PLAN_CHECK_SEGMENT: &str = "plan.check_segment";
+pub(super) const TOOL_LIST_CANDIDATES: &str = "list_candidates";
+pub(super) const TOOL_CATALOG_SEARCH: &str = "catalog.search";
+pub(super) const TOOL_CATALOG_RESOLVE_MISSING_FACTS: &str = "catalog.resolve_missing_facts";
+pub(super) const TOOL_GET_CANDIDATE_DETAIL: &str = "get_candidate_detail";
+pub(super) const TOOL_GUIDE_GET: &str = "guide.get";

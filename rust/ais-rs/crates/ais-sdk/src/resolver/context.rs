@@ -50,10 +50,17 @@ impl ResolverContext {
         for segment in segments {
             match segment {
                 PathSegment::Key(key) => {
-                    current = current
-                        .as_object()
-                        .and_then(|object| object.get(&key))
-                        .ok_or_else(|| ResolverError::NotFound(path.to_string()))?;
+                    if let Some(next) = current.as_object().and_then(|object| object.get(&key)) {
+                        current = next;
+                        continue;
+                    }
+                    // Compatibility bridge for asset-like refs: when callers request
+                    // `<something>.address` but `<something>` is already a raw address string,
+                    // treat it as resolved instead of hard failing on missing nested object.
+                    if key == "address" && current.as_str().is_some() {
+                        continue;
+                    }
+                    return Err(ResolverError::NotFound(path.to_string()));
                 }
                 PathSegment::Index(index) => {
                     current = current

@@ -1,19 +1,19 @@
-use super::facts::FactStore;
+use super::input_store::InputStore;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
 const KEY_PLANNING_MEMORY: &str = "planning_memory";
-const KEY_FACT_STORE: &str = "fact_store";
+const KEY_INPUT_STORE: &str = "input_store";
 const KEY_TODO_PROGRESS: &str = "todo_progress";
 const KEY_INTENT_FACTS: &str = "intent_facts";
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct AgentCheckpointExtensions {
     planning_memory: Option<Value>,
-    fact_store: Option<FactStore>,
+    restored_input_store_projection: Option<InputStore>,
+    input_store: Option<InputStore>,
     todo_progress: Option<Value>,
     intent_facts: Option<BTreeMap<String, Value>>,
-    passthrough: Map<String, Value>,
 }
 
 impl AgentCheckpointExtensions {
@@ -25,25 +25,24 @@ impl AgentCheckpointExtensions {
         for (key, value) in raw {
             match key.as_str() {
                 KEY_PLANNING_MEMORY => decoded.planning_memory = Some(value.clone()),
-                KEY_FACT_STORE => match serde_json::from_value::<FactStore>(value.clone()) {
-                    Ok(store) => decoded.fact_store = Some(store),
-                    Err(_) => {
-                        decoded.passthrough.insert(key.clone(), value.clone());
-                    }
+                KEY_INPUT_STORE => match serde_json::from_value::<InputStore>(value.clone()) {
+                    Ok(store) => decoded.input_store = Some(store),
+                    Err(_) => {}
                 },
-                KEY_TODO_PROGRESS => decoded.todo_progress = Some(value.clone()),
+                KEY_TODO_PROGRESS => {
+                    decoded.todo_progress = Some(normalize_todo_progress_receipt_tx_hashes(value));
+                }
                 KEY_INTENT_FACTS => {
                     match serde_json::from_value::<BTreeMap<String, Value>>(value.clone()) {
                         Ok(intent_facts) => decoded.intent_facts = Some(intent_facts),
-                        Err(_) => {
-                            decoded.passthrough.insert(key.clone(), value.clone());
-                        }
+                        Err(_) => {}
                     }
                 }
-                _ => {
-                    decoded.passthrough.insert(key.clone(), value.clone());
-                }
+                _ => {}
             }
+        }
+        if let Some(input_store) = decoded.input_store.as_ref() {
+            decoded.restored_input_store_projection = Some(input_store.clone());
         }
         decoded
     }
@@ -52,8 +51,8 @@ impl AgentCheckpointExtensions {
         self.planning_memory.as_ref()
     }
 
-    pub(super) fn fact_store(&self) -> Option<&FactStore> {
-        self.fact_store.as_ref()
+    pub(super) fn input_store(&self) -> Option<&InputStore> {
+        self.restored_input_store_projection.as_ref()
     }
 
     pub(super) fn todo_progress(&self) -> Option<&Value> {
@@ -67,16 +66,16 @@ impl AgentCheckpointExtensions {
     pub(super) fn encode_updated(
         &self,
         planning_memory: Option<Value>,
-        fact_store: &FactStore,
+        input_store: &InputStore,
         todo_progress: Option<&Value>,
         intent_facts: Option<&BTreeMap<String, Value>>,
     ) -> Map<String, Value> {
-        let mut output = self.passthrough.clone();
+        let mut output = Map::new();
         if let Some(memory) = planning_memory {
             output.insert(KEY_PLANNING_MEMORY.to_string(), memory);
         }
-        if let Ok(store) = serde_json::to_value(fact_store) {
-            output.insert(KEY_FACT_STORE.to_string(), store);
+        if let Ok(store) = serde_json::to_value(input_store) {
+            output.insert(KEY_INPUT_STORE.to_string(), store);
         }
         if let Some(todo_progress) = todo_progress {
             output.insert(KEY_TODO_PROGRESS.to_string(), todo_progress.clone());
@@ -90,78 +89,55 @@ impl AgentCheckpointExtensions {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::agent::facts::{FactLayer, FactSource};
-    use serde_json::json;
-
-    #[test]
-    fn decode_and_encode_preserves_unknown_extensions() {
-        let mut input = Map::<String, Value>::new();
-        input.insert("planning_memory".to_string(), json!({"snapshot":"abc"}));
-        input.insert("fact_store".to_string(), json!({"entries":{}}));
-        input.insert(
-            "todo_progress".to_string(),
-            json!({"current_todo":{"id":"todo_1"}}),
-        );
-        input.insert(
-            "intent_facts".to_string(),
-            json!({"recipient":"0xabc","amount":"1"}),
-        );
-        input.insert(
-            "vendor.custom".to_string(),
-            json!({"schema":"vendor-ext/0.0.1","x":1}),
-        );
-        let decoded = AgentCheckpointExtensions::decode(Some(&input));
-        assert!(decoded.planning_memory().is_some());
-        assert!(decoded.fact_store().is_some());
-        assert!(decoded.todo_progress().is_some());
-        assert!(decoded.intent_facts().is_some());
-
-        let mut fact_store = FactStore::default();
-        fact_store.upsert(
-            "owner",
-            json!("0xabc"),
-            FactLayer::Seed,
-            FactSource::RuntimeProvided,
-            "runtime.inputs.owner",
-        );
-        let output = decoded.encode_updated(
-            Some(json!({"snapshot":"next"})),
-            &fact_store,
-            Some(&json!({"current_todo":{"id":"todo_2"}})),
-            Some(&BTreeMap::from([("recipient".to_string(), json!("0xdef"))])),
-        );
-        assert_eq!(
-            output.get("vendor.custom"),
-            Some(&json!({"schema":"vendor-ext/0.0.1","x":1}))
-        );
-        assert_eq!(
-            output.get("planning_memory"),
-            Some(&json!({"snapshot":"next"}))
-        );
-        assert_eq!(
-            output
-                .get("todo_progress")
-                .and_then(|value| value.pointer("/current_todo/id")),
-            Some(&json!("todo_2"))
-        );
-        assert_eq!(
-            output
-                .get("intent_facts")
-                .and_then(|value| value.get("recipient")),
-            Some(&json!("0xdef"))
-        );
+fn normalize_todo_progress_receipt_tx_hashes(value: &Value) -> Value {
+    let mut normalized = value.clone();
+    let Some(progress) = normalized.as_object_mut() else {
+        return normalized;
+    };
+    if let Some(current_todo) = progress.get_mut("current_todo") {
+        normalize_todo_receipt_tx_hashes(current_todo);
     }
-
-    #[test]
-    fn decode_keeps_invalid_fact_store_passthrough() {
-        let mut input = Map::<String, Value>::new();
-        input.insert("fact_store".to_string(), json!({"entries":"invalid"}));
-        let decoded = AgentCheckpointExtensions::decode(Some(&input));
-        assert!(decoded.fact_store().is_none());
-        let output = decoded.encode_updated(None, &FactStore::default(), None, None);
-        assert!(output.get("fact_store").is_some());
+    if let Some(todos) = progress.get_mut("todos").and_then(Value::as_array_mut) {
+        for todo in todos {
+            normalize_todo_receipt_tx_hashes(todo);
+        }
     }
+    normalized
 }
+
+fn normalize_todo_receipt_tx_hashes(todo: &mut Value) {
+    let Some(receipt) = todo
+        .as_object_mut()
+        .and_then(|todo_obj| todo_obj.get_mut("receipt"))
+    else {
+        return;
+    };
+    let Some(receipt_obj) = receipt.as_object_mut() else {
+        return;
+    };
+    let tx_hashes = match receipt_obj.get("tx_hashes") {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| Value::String(value.to_string()))
+            .collect::<Vec<_>>(),
+        Some(Value::String(value)) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                Vec::new()
+            } else {
+                vec![Value::String(trimmed.to_string())]
+            }
+        }
+        Some(Value::Null) => Vec::new(),
+        Some(_) => Vec::new(),
+        None => return,
+    };
+    receipt_obj.insert("tx_hashes".to_string(), Value::Array(tx_hashes));
+}
+
+#[cfg(test)]
+#[path = "tests/checkpoint_ext_module.rs"]
+mod tests;

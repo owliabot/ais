@@ -1,1 +1,1 @@
-在 eip155:31338 链上，先检查我的 Native 余额和 ERC20(TST) : 0x8464135c8F25Da09e49BC8782676a84730C318bC的余额，如果两者都大于 100，则给地址 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 转 5 native 和 10 TST。
+在 eip155:31338 链上，先检查我的 Native 余额和 ERC20(TST) : 0x8464135c8F25Da09e49BC8782676a84730C318bC 的余额，如果两者都大于 100，则给地址 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 转 5 native 和 10 TST。

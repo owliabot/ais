@@ -95,7 +95,13 @@ Purpose:
 
 Input:
 
-- empty object (`{}`), or implementation-private filters under host-controlled extensions.
+- object with optional filters (both shapes SHOULD be accepted):
+  - top-level: `{ "chain"?: string, "protocol"?: string }`
+  - nested: `{ "filter"?: { "chain"?: string, "protocol"?: string } }`
+- `chain` matching rules:
+  - exact chain id supported (example: `eip155:31338`)
+  - namespace wildcard supported (example: `eip155:*`)
+- `protocol` is substring match on protocol name; case-insensitive matching is RECOMMENDED.
 
 Output:
 

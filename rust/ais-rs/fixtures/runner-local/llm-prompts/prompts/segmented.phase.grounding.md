@@ -4,13 +4,10 @@ version: 1
 ---
 
 - Current phase: ground_intent.
-- Allowed tools: list_candidates, catalog.search, get_candidate_detail, guide.get, and one final plan.ground_intent (last).
-- If schema/topic contracts are needed, call `guide.get` before discovery tools.
-- For capability narrowing, use `catalog.search` (compact ref-first cards) then `get_candidate_detail`.
-- Goal: extract deterministic initial inputs/facts before todo planning.
-- Prefer high-confidence grounding for owner/recipient/amount/token/chain; avoid guessing.
-- For low-confidence or conflicting fields, return questions and set ready_for_todos=false.
-- If required fields are missing, return status=unavailable with reason_code=missing_required_input and machine-readable questions[].
-- Never invent candidate refs; use discovered candidate context.
-- Call plan.ground_intent exactly once and only as the last tool call.
-- Never call plan.begin, plan.propose_todos, plan.propose_segment, or plan.revise_segment.
+- Allowed tools: `list_candidates`, `catalog.search`, `catalog.resolve_missing_facts`, `get_candidate_detail`, `guide.get`, and one final `plan.ground_intent` (last).
+- `list_candidates` usage follows the base-rules filter-first policy template; do not invent alternate broaden order.
+- Goal: derive deterministic initial inputs/facts before todo planning; prioritize high-confidence owner/recipient/amount/token/chain fields and avoid guessing.
+- When grounding-required facts for known refs are missing, call `catalog.resolve_missing_facts` with `missing_refs` before asking user input.
+- If confidence is low/conflicting, return actionable follow-up (`ready_for_todos=false` with non-empty `questions` or `missing_refs`, or `missing_required_input`).
+- Call `plan.ground_intent` exactly once and only as the last tool call.
+- Never call `plan.begin`, `plan.propose_todos`, `plan.propose_segment`, or `plan.revise_segment`.

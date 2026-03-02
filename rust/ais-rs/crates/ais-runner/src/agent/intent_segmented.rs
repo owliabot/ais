@@ -6,17 +6,21 @@ use ais_schema::{
     versions::{SCHEMA_AGENT_PLANNING_TOOLS_0_1_0, SCHEMA_PLAN_SKETCH_0_1_0},
 };
 use ais_sdk::documents::PlanSketchSegment;
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::budget::{compact_json_for_llm, compact_json_with_options, JsonBudgetOptions};
-use super::candidates::{
-    CandidateContext, CandidateSearchRequest, DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT,
-};
-use super::planning_memory::{PlanningMemory, PlanningMemoryBudget};
-use super::sanitize::{sanitize_for_llm_payload, sanitize_for_llm_payload_with_limit};
+use super::budget::{compact_json_with_options, JsonBudgetOptions};
+use super::candidates::{CandidateContext, DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT};
+use super::context::budget_policy::{ContextPressureMode, ToolMemoryBudgetPolicy};
+use super::planning_memory::{PlanningMemory, PlanningMemoryBudget, ToolMemoryPruneConfig};
+use super::sanitize::sanitize_for_llm_payload;
 use super::todos::TodoSpec;
+use super::tools::decode::{normalize_tool_args_for_validation, phase_from_finalize_tool};
+use super::tools::dispatch::{DecodedSegmentedToolCall, PlannerToolOutput};
+use super::tools::phase_policy::{
+    ensure_tool_allowed_for_phase, phase_name, validate_tool_calls_for_phase,
+};
 
 pub trait SegmentedIntentPlanner {
     fn begin_session(
@@ -45,6 +49,7 @@ pub trait SegmentedIntentPlanner {
 #[derive(Debug, Clone)]
 pub struct SegmentBeginRequest {
     pub intent: String,
+    pub snapshot_hash: String,
     pub pack_snapshot_hash: String,
     pub catalog_hash: String,
     pub chain_scope: Vec<String>,
@@ -171,16 +176,18 @@ struct PlannerBeginContext {
 }
 
 #[derive(Debug, Clone)]
-struct SegmentCheckContext {
-    intent: String,
-    session_id: String,
-    cursor: String,
-    pack_snapshot_hash: String,
-    chain_scope: Vec<String>,
+pub(super) struct SegmentCheckContext {
+    pub(super) intent: String,
+    pub(super) session_id: String,
+    pub(super) cursor: String,
+    pub(super) pack_snapshot_hash: String,
+    pub(super) chain_scope: Vec<String>,
+    pub(super) known_input_refs: Vec<String>,
+    pub(super) grounding_fact_keys: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PlannerRoundPhase {
+pub(super) enum PlannerRoundPhase {
     Begin,
     GroundIntent,
     ProposeTodos,
@@ -190,6 +197,8 @@ enum PlannerRoundPhase {
 
 const SEGMENTED_PROMPT_VERSION: &str = "aisrs-segmented-planner-v2";
 pub(crate) const DEFAULT_SEGMENTED_MAX_TOOL_ROUNDS: u8 = 24;
+const REPEATED_PLAN_CHECK_FAILURE_THRESHOLD: u64 = 3;
+const FINALIZE_SCHEMA_REPAIR_ATTEMPT_LIMIT: u8 = 2;
 const LLM_CHARS_PER_TOKEN_ESTIMATE: usize = 4;
 const CONTEXT_SOFT_LIMIT_NUMERATOR: u64 = 9;
 const CONTEXT_SOFT_LIMIT_DENOMINATOR: u64 = 10;
@@ -229,6 +238,15 @@ struct PlannerDiagnosticsTracker {
     tool_result_count_by_tool: BTreeMap<String, u64>,
     memory_hits_by_tool: BTreeMap<String, u64>,
     phase_round_count: BTreeMap<String, u64>,
+    memory_prune_runs: u64,
+    memory_pruned_entries_total: u64,
+    memory_pruned_by_tool: BTreeMap<String, u64>,
+    memory_projection_budget_tokens: u64,
+    memory_projection_estimated_tokens: u64,
+    memory_projection_empty_due_to_pressure_total: u64,
+    finalize_schema_repair_attempts_total: u64,
+    finalize_schema_repair_exhausted_total: u64,
+    finalize_schema_repair_by_sub_reason: BTreeMap<String, u64>,
     empty_search_streak_max: u64,
     seen_tool_call_keys: BTreeSet<String>,
 }
@@ -276,6 +294,54 @@ impl PlannerDiagnosticsTracker {
         if streak > self.empty_search_streak_max {
             self.empty_search_streak_max = streak;
         }
+    }
+
+    fn observe_finalize_schema_repair_attempt(&mut self, sub_reason_code: &str) {
+        self.finalize_schema_repair_attempts_total =
+            self.finalize_schema_repair_attempts_total.saturating_add(1);
+        let entry = self
+            .finalize_schema_repair_by_sub_reason
+            .entry(sub_reason_code.to_string())
+            .or_insert(0);
+        *entry = entry.saturating_add(1);
+    }
+
+    fn observe_tool_memory_prune(
+        &mut self,
+        prune_result: &super::planning_memory::PlanningMemoryPruneResult,
+    ) {
+        self.memory_prune_runs = self.memory_prune_runs.saturating_add(1);
+        self.memory_pruned_entries_total = self
+            .memory_pruned_entries_total
+            .saturating_add(prune_result.removed_total as u64);
+        for (tool_name, count) in &prune_result.removed_by_tool {
+            let entry = self
+                .memory_pruned_by_tool
+                .entry(tool_name.clone())
+                .or_insert(0);
+            *entry = entry.saturating_add(*count as u64);
+        }
+    }
+
+    fn observe_tool_memory_projection(
+        &mut self,
+        budget_tokens: usize,
+        estimated_tokens: Option<u64>,
+    ) {
+        self.memory_projection_budget_tokens = u64::try_from(budget_tokens).unwrap_or(u64::MAX);
+        self.memory_projection_estimated_tokens = estimated_tokens.unwrap_or(0);
+    }
+
+    fn observe_tool_memory_projection_empty_due_to_pressure(&mut self) {
+        self.memory_projection_empty_due_to_pressure_total = self
+            .memory_projection_empty_due_to_pressure_total
+            .saturating_add(1);
+    }
+
+    fn observe_finalize_schema_repair_exhausted(&mut self) {
+        self.finalize_schema_repair_exhausted_total = self
+            .finalize_schema_repair_exhausted_total
+            .saturating_add(1);
     }
 
     fn duplicate_ratio_bps(&self) -> u64 {
@@ -344,6 +410,15 @@ impl PlannerDiagnosticsTracker {
             "tool_call_count_by_tool": self.tool_call_count_by_tool,
             "memory_hit_rate_by_tool": self.memory_hit_rate_by_tool_value(),
             "phase_round_count": self.phase_round_count,
+            "finalize_schema_repair_attempts_total": self.finalize_schema_repair_attempts_total,
+            "finalize_schema_repair_exhausted_total": self.finalize_schema_repair_exhausted_total,
+            "finalize_schema_repair_by_sub_reason": self.finalize_schema_repair_by_sub_reason,
+            "memory_prune_runs": self.memory_prune_runs,
+            "memory_pruned_entries_total": self.memory_pruned_entries_total,
+            "memory_pruned_by_tool": self.memory_pruned_by_tool,
+            "memory_projection_budget_tokens": self.memory_projection_budget_tokens,
+            "memory_projection_estimated_tokens": self.memory_projection_estimated_tokens,
+            "memory_projection_empty_due_to_pressure_total": self.memory_projection_empty_due_to_pressure_total,
             "empty_search_streak_max": self.empty_search_streak_max,
         })
     }
@@ -385,6 +460,37 @@ impl CatalogSearchLoopGuard {
 
     fn max_streak(&self) -> u64 {
         self.max_streak
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct PlanCheckFailureLoopGuard {
+    current_streak: u64,
+    previous_signature: Option<String>,
+}
+
+impl PlanCheckFailureLoopGuard {
+    fn observe(&mut self, signature: Option<String>) -> bool {
+        let Some(current) = signature else {
+            self.current_streak = 0;
+            self.previous_signature = None;
+            return false;
+        };
+        if self
+            .previous_signature
+            .as_ref()
+            .is_some_and(|prev| prev == &current)
+        {
+            self.current_streak = self.current_streak.saturating_add(1);
+        } else {
+            self.current_streak = 1;
+        }
+        self.previous_signature = Some(current);
+        self.current_streak >= REPEATED_PLAN_CHECK_FAILURE_THRESHOLD
+    }
+
+    fn streak(&self) -> u64 {
+        self.current_streak
     }
 }
 
@@ -497,26 +603,21 @@ impl Default for SegmentedPromptContextBuilder {
         Self {
             base_rules: vec![
                 "Tool-calling only.",
-                "Check state_summary.tool_memory_projection first; call discovery/schema tools only when required information is missing or stale.",
-                "For schema/topic contracts, call guide.get first using canonical request shape; schema lookups are digest-first and should request {full:true} only when digest is insufficient.",
-                "For capability narrowing, prefer catalog.search first (compact ref-first cards: ref/kind/chains?/risk_level?), then get_candidate_detail for selected refs.",
-                "Use list_candidates as broad inventory only when needed; if state_summary.tool_memory_projection.recent.list_inventory exists, reuse it first.",
-                "Avoid repeating list_candidates in the same snapshot scope.",
+                "Emit schema-typed JSON only: when schema expects boolean/number, send JSON bool/number (never quoted strings).",
+                "Before every tool call/finalize, self-check: phase-allowed tool, required keys present, and JSON value types exactly match schema.",
+                "Check state_summary.tool_memory_projection first and reuse cached discovery/schema context; avoid repeating identical discovery calls in one snapshot scope.",
+                "For schema/topic and control-step contracts, use guide.get with canonical request shape; schema lookups are digest-first and should request {\"full\":true} only when digest is insufficient.",
+                "guide.get examples: good {\"schema\":\"ais-plan-sketch/0.1.0\"}, {\"schema\":\"ais-plan-sketch/0.1.0\",\"full\":true}, {\"topic\":\"cel\"}; bad {\"schema\":{\"id\":\"ais-plan-sketch/0.1.0\"}}, {\"full\":\"true\"}.",
+                "Capability narrowing order: prefer catalog.search first (compact ref-first cards: ref/kind/chains?/risk_level?), then get_candidate_detail for selected refs; use list_candidates only as broad inventory when needed.",
+                "list_candidates policy template (filter-first): start with exact chain, add protocol when hinted, and broaden only when empty/insufficient in strict order: exact chain+protocol -> exact chain -> chain namespace wildcard.",
                 "assert/branch/until/retry are PlanSketch control-step semantics, not catalog candidates.",
-                "Control-step semantics are built in; assert/branch do not require candidate_ref.",
-                "Never use catalog.search to look up control-step semantics; use guide.get ({schema:\"ais-plan-sketch/0.1.0\"} / {topic:\"cel\"}).",
-                "Tool results for list_candidates/catalog.search/get_candidate_detail are cached by snapshot scope; repeated identical calls return cached snapshots.",
-                "A segment is PlanSketch-compatible: segment_id/cursor_in/cursor_out/done/steps.",
-                "Use state_summary.todo_state.current_todo as the only objective for this round; output exactly one segment for that todo.",
-                "Use only refs listed in state_summary.input_registry.known_refs for inputs.* bindings; do not invent unknown input refs.",
-                "Each step needs id + kind + inputs; candidate_ref is required for query/action and optional for assert/branch.",
-                "In CEL/ValueRef node refs, use nodes.<step_id>.outputs.<field> with same-segment step ids only (no segment/step path).",
-                "Use only refs from candidates; never invent protocols/actions.",
-                "For errors, return status=invalid|unavailable with error.reason_code; for missing_required_input include error.details.questions[].",
-                "Repair order is strict: shape -> ref -> slot -> semantic. Do not rewrite semantics before shape/ref/slot are valid.",
-                "Keep segments small and deterministic; prefer read segment before write segment.",
-                "For transfer/swap writes, include pre-write gate chain query -> assert|branch -> action in the same segment.",
-                "Follow the phase-specific tool policy exactly.",
+                "candidate_ref is required for query/action steps and optional for assert/branch control steps.",
+                "Plan against state_summary.todo_state.current_todo only and produce exactly one deterministic segment for that todo.",
+                "depends_on may only reference step ids in the current segment; never use cross-segment refs like seg_1/....",
+                "For inputs.* refs, use only state_summary.input_registry.known_refs; never invent candidate/protocol/action refs outside discovered context.",
+                "For unknown_input_ref repair, preserve slot semantics: token/address params map to address-like refs (for example *.address), and *.decimals refs cannot substitute token/address slots.",
+                "For transfer/swap writes, enforce same-segment gate chain query -> assert|branch -> action and refresh volatile write facts by query when needed.",
+                "For errors, return status=invalid|unavailable with error.reason_code; for missing_required_input include error.details.questions[]. Repair order is strict: shape -> ref -> slot -> semantic.",
             ]
             .into_iter()
             .map(str::to_string)
@@ -531,12 +632,13 @@ impl Default for SegmentedPromptContextBuilder {
             .collect(),
             phase_rules_grounding: vec![
                 "Current phase: ground_intent.",
-                "Allowed tools: list_candidates, catalog.search, get_candidate_detail, guide.get, and one final plan.ground_intent (must be last).",
-                "If schema/topic contract is needed, call guide.get before discovery tools.",
-                "For candidate narrowing, use catalog.search (ref-first compact cards) then get_candidate_detail for selected refs.",
-                "Goal: extract deterministic initial inputs/facts from intent before todo planning.",
-                "Return status=proposed with ready_for_todos=true only when key fields are high-confidence.",
-                "Low-confidence or conflicting fields must be returned via missing_required_input questions (not guessed).",
+                "Allowed tools: list_candidates, catalog.search, catalog.resolve_missing_facts, get_candidate_detail, guide.get, and one final plan.ground_intent (must be last).",
+                "list_candidates usage follows the base-rules filter-first policy template; do not invent alternate broaden order.",
+                "Goal: derive deterministic initial inputs/facts before todo planning; prioritize high-confidence owner/recipient/amount/token/chain fields and avoid guessing.",
+                "When grounding-required facts for known refs are missing, call catalog.resolve_missing_facts with missing_refs before asking user input.",
+                "If status=proposed and ready_for_todos=false, include actionable questions or missing_refs (non-empty).",
+                "If required grounding fields remain missing, return unavailable with reason_code=missing_required_input and questions[].",
+                "Call plan.ground_intent exactly once and only as the last tool call.",
                 "Do not call plan.begin, plan.propose_todos, plan.propose_segment, or plan.revise_segment.",
             ]
             .into_iter()
@@ -544,13 +646,13 @@ impl Default for SegmentedPromptContextBuilder {
             .collect(),
             phase_rules_todos: vec![
                 "Current phase: propose_todos.",
-                "Allowed tools: list_candidates, catalog.search, get_candidate_detail, guide.get, and one final plan.propose_todos (must be last).",
-                "If schema/topic contract is needed, call guide.get before discovery tools.",
-                "For capability narrowing, use catalog.search (ref-first compact cards) then get_candidate_detail for selected refs.",
-                "assert/branch/until/retry semantics are control-step rules, not catalog candidates; use guide.get for these semantics.",
+                "Allowed tools: list_candidates, catalog.search, catalog.resolve_missing_facts, get_candidate_detail, guide.get, and one final plan.propose_todos (must be last).",
+                "list_candidates usage follows the base-rules filter-first policy template; do not invent alternate broaden order.",
                 "Output deterministic todos for the whole intent before segment planning.",
                 "Each todo must include title; optional fields: required_facts/produced_facts/acceptance.",
                 "Prefer 2-4 concise todos; avoid duplicates or overlapping objectives.",
+                "When todo-required facts for known refs are missing, call catalog.resolve_missing_facts with missing_refs before asking user input.",
+                "Call plan.propose_todos exactly once and only as the last tool call.",
                 "Do not call plan.begin, plan.propose_segment, or plan.revise_segment.",
             ]
             .into_iter()
@@ -558,20 +660,14 @@ impl Default for SegmentedPromptContextBuilder {
             .collect(),
             phase_rules_propose: vec![
                 "Current phase: propose_segment.",
-                "Allowed tools: list_candidates, catalog.search, get_candidate_detail, guide.get, plan.check_segment, and one final plan.propose_segment (must be last).",
+                "Allowed tools: list_candidates, catalog.search, catalog.resolve_missing_facts, get_candidate_detail, guide.get, plan.check_segment, and one final plan.propose_segment (must be last).",
+                "list_candidates usage follows the base-rules filter-first policy template; do not invent alternate broaden order.",
                 "Host enforces 1 todo = 1 segment; plan only for current state_summary.todo_state.current_todo.",
-                "If schema/topic contract is needed, call guide.get first; for capability narrowing, use catalog.search (ref-first compact cards) then get_candidate_detail.",
-                "Call list_candidates in this phase only if tool_memory_projection lacks recent.list_inventory.",
-                "assert/branch/until/retry semantics must be read from guide.get, not catalog.search.",
-                "assert/branch are control steps and may omit candidate_ref.",
-                "If uncertain about output shape or CEL/ValueRef contracts, call guide.get using canonical shape {schema:\"...\"} or {topic:\"...\"} before finalizing.",
+                "Segment shape must stay flat: do not output legacy branch-tree fields (if_true/if_false/then/else/children); encode branch paths via flat steps + when.cel + depends_on.",
                 "You must call plan.check_segment and only finalize when check result has ok=true.",
-                "Repair order is strict: shape -> ref -> slot -> semantic.",
-                "Transfer/swap actions must depend on an assert/branch gate step backed by query facts in the same segment.",
-                "If token decimals are unknown, add a decimals query (erc20/decimals or equivalent) before write; otherwise return missing_required_input.",
-                "For volatile facts (balance/allowance), include a fresh query in the same segment before write; do not rely on stale context-only values.",
-                "If compile errors mention unknown_input_ref, fix refs to entries from state_summary.input_registry.known_refs first.",
+                "If token decimals or write-required facts are unknown, call catalog.resolve_missing_facts with missing refs, then add corresponding query steps before write when possible; do not patch token/address slots with *.decimals refs.",
                 "If required facts are missing, return unavailable with reason_code=missing_required_input and include error.details.questions[].",
+                "Call plan.propose_segment exactly once and only as the last tool call.",
                 "Never call plan.begin or plan.revise_segment.",
             ]
             .into_iter()
@@ -579,20 +675,16 @@ impl Default for SegmentedPromptContextBuilder {
             .collect(),
             phase_rules_revise: vec![
                 "Current phase: revise_segment.",
-                "Allowed tools: list_candidates, catalog.search, get_candidate_detail, guide.get, plan.check_segment, and one final plan.revise_segment (must be last).",
+                "Allowed tools: list_candidates, catalog.search, catalog.resolve_missing_facts, get_candidate_detail, guide.get, plan.check_segment, and one final plan.revise_segment (must be last).",
+                "list_candidates usage follows the base-rules filter-first policy template; do not invent alternate broaden order.",
                 "Keep repairing the same current todo from state_summary.todo_state.current_todo; do not switch to a different objective.",
-                "If schema/topic contract is needed, call guide.get first; for capability narrowing, use catalog.search (ref-first compact cards) then get_candidate_detail.",
-                "Call list_candidates in this phase only if tool_memory_projection lacks recent.list_inventory.",
-                "assert/branch/until/retry semantics must be read from guide.get, not catalog.search.",
-                "assert/branch are control steps and may omit candidate_ref.",
-                "Use guide.get for contract lookups with canonical shape {schema:\"...\"} or {topic:\"...\"} instead of guessing field names.",
+                "Apply minimum edits to fix output shape and keep semantics stable; patch previous_error.last_failed_finalize when available instead of regenerating from scratch.",
+                "Segment shape must stay flat: do not output legacy branch-tree fields (if_true/if_false/then/else/children); encode branch paths via flat steps + when.cel + depends_on.",
                 "You must call plan.check_segment and only finalize when check result has ok=true.",
                 "Repair order is strict: shape -> ref -> slot -> semantic; keep semantic edits minimal.",
-                "Maintain transfer/swap pre-write gates (query -> assert|branch -> action) while repairing.",
-                "If decimals/facts are missing for token writes, prefer adding query steps or return missing_required_input with questions.",
-                "When repairing write paths, ensure volatile facts (balance/allowance) are refreshed by same-segment query steps.",
-                "If compile errors mention unknown_input_ref, replace guessed refs using state_summary.input_registry.known_refs.",
+                "If decimals/facts are missing, call catalog.resolve_missing_facts and prefer adding matched query steps before returning missing_required_input; do not patch token/address slots with *.decimals refs.",
                 "If required facts are missing, return unavailable with reason_code=missing_required_input and include error.details.questions[].",
+                "Call plan.revise_segment exactly once and only as the last tool call.",
                 "Never call plan.begin or plan.propose_segment.",
             ]
             .into_iter()
@@ -644,7 +736,8 @@ impl SegmentedPromptContextBuilder {
     ) -> PromptRenderOutput {
         let phase_rules = self.phase_rules(phase);
         let workspace_summary = workspace_summary(candidate_context);
-        let pack_summary = "Pack summary source: request.pack_snapshot_hash + request.chain_scope.";
+        let pack_summary =
+            "Planning snapshot source: request.snapshot_hash (derived from pack/catalog/chain_scope/approval mode).";
         let modules = json!({
             "version": SEGMENTED_PROMPT_VERSION,
             "phase": phase_name(phase),
@@ -732,13 +825,13 @@ impl<P> LlmSegmentedIntentPlanner<P> {
         let Some(value) = value else {
             return false;
         };
-        self.planning_memory
-            .restore_from_checkpoint(value, PlanningMemoryBudget::default())
+        let budget = self.planning_memory.current_budget();
+        self.planning_memory.restore_from_checkpoint(value, budget)
     }
 
     pub fn planning_memory_checkpoint_value(&self) -> Option<Value> {
         self.planning_memory
-            .checkpoint_value(PlanningMemoryBudget::default())
+            .checkpoint_value(self.planning_memory.current_budget())
     }
 
     pub fn llm_usage_value(&self) -> Value {
@@ -754,6 +847,48 @@ impl<P> LlmSegmentedIntentPlanner<P> {
 
     pub fn tool_memory_projection_value(&self, max_tokens: usize) -> Option<Value> {
         self.planning_memory.tool_memory_projection(max_tokens)
+    }
+
+    pub fn prune_tool_memory_for_pressure(
+        &mut self,
+        pressure_mode: ContextPressureMode,
+        active_todo: bool,
+        phase: &'static str,
+        projection_budget_tokens: Option<usize>,
+    ) -> super::planning_memory::PlanningMemoryPruneResult {
+        self.planning_memory
+            .prune_for_pressure(ToolMemoryPruneConfig {
+                pressure_mode,
+                active_todo,
+                phase,
+                projection_budget_tokens,
+            })
+    }
+
+    pub(crate) fn set_planning_memory_budget(&mut self, budget: PlanningMemoryBudget) {
+        self.planning_memory.set_budget(budget);
+    }
+
+    pub(crate) fn observe_tool_memory_prune(
+        &mut self,
+        prune_result: &super::planning_memory::PlanningMemoryPruneResult,
+    ) {
+        self.diagnostics_tracker
+            .observe_tool_memory_prune(prune_result);
+    }
+
+    pub(crate) fn observe_tool_memory_projection(
+        &mut self,
+        budget_tokens: usize,
+        estimated_tokens: Option<u64>,
+    ) {
+        self.diagnostics_tracker
+            .observe_tool_memory_projection(budget_tokens, estimated_tokens);
+    }
+
+    pub(crate) fn observe_tool_memory_projection_empty_due_to_pressure(&mut self) {
+        self.diagnostics_tracker
+            .observe_tool_memory_projection_empty_due_to_pressure();
     }
 
     pub fn take_last_failed_finalize(&mut self) -> Option<Value> {
@@ -778,6 +913,7 @@ impl<P> LlmSegmentedIntentPlanner<P> {
         let require_successful_segment_check =
             requires_successful_check_before_finalize(phase, segment_check_context);
         let mut latest_segment_check_ok = !require_successful_segment_check;
+        let mut latest_checked_segment_signature: Option<String> = None;
         let mut messages = vec![
             LlmMessage {
                 role: MessageRole::System,
@@ -801,7 +937,9 @@ impl<P> LlmSegmentedIntentPlanner<P> {
                 .unwrap_or_default(),
         );
         let mut loop_guard = CatalogSearchLoopGuard::default();
+        let mut plan_check_failure_guard = PlanCheckFailureLoopGuard::default();
         let mut control_step_ref_hint_emitted = false;
+        let mut finalize_schema_repair_attempts = 0u8;
         let tools = segmented_planner_tools_for_phase(phase);
         if self.verbose_llm {
             eprintln!(
@@ -909,7 +1047,27 @@ impl<P> LlmSegmentedIntentPlanner<P> {
             let mut round_loop_hint: Option<Value> = None;
             let mut round_control_ref_hint: Option<Value> = None;
             for call in &response.tool_calls {
-                let dedupe_key = tool_cache_key(call.name.as_str(), &call.arguments);
+                let normalized_args =
+                    normalize_tool_args_for_validation(call.name.as_str(), &call.arguments);
+                if normalized_args.changed() {
+                    super::trace::emit(
+                        self.verbose_llm,
+                        phase_name(phase),
+                        "tool_args_normalized",
+                        &[
+                            ("tool_call_id", call.id.clone()),
+                            ("tool", call.name.clone()),
+                            ("fields", normalized_args.normalized_fields.join(",")),
+                        ],
+                    );
+                }
+                let effective_arguments = if normalized_args.changed() {
+                    normalized_args.arguments
+                } else {
+                    call.arguments.clone()
+                };
+                let dedupe_key =
+                    super::tools::cache::tool_cache_key(call.name.as_str(), &effective_arguments);
                 let duplicate = self
                     .diagnostics_tracker
                     .observe_tool_call(call.name.as_str(), dedupe_key);
@@ -922,13 +1080,21 @@ impl<P> LlmSegmentedIntentPlanner<P> {
                         call.id
                     );
                 }
+                let mut effective_call = call.clone();
+                effective_call.arguments = effective_arguments;
+                let projection_budget_tokens =
+                    ToolMemoryBudgetPolicy::derive_tool_memory_projection_token_budget(
+                        Some(&self.llm_usage_value()),
+                        None,
+                    );
                 let decoded = match decode_segmented_tool_call_with_memory(
-                    call,
+                    &effective_call,
                     finalize_tool,
                     phase,
                     self.candidate_context.as_ref(),
                     segment_check_context,
                     Some(&mut self.planning_memory),
+                    Some(projection_budget_tokens),
                 ) {
                     Ok(decoded) => decoded,
                     Err(error) => {
@@ -938,6 +1104,80 @@ impl<P> LlmSegmentedIntentPlanner<P> {
                                 response.assistant_content.as_deref(),
                                 round.saturating_add(1),
                             ));
+                            if let Some(repair) = finalize_schema_repair_payload(
+                                &error,
+                                finalize_tool,
+                                round.saturating_add(1),
+                                finalize_schema_repair_attempts.saturating_add(1),
+                                FINALIZE_SCHEMA_REPAIR_ATTEMPT_LIMIT,
+                            ) {
+                                if finalize_schema_repair_attempts
+                                    < FINALIZE_SCHEMA_REPAIR_ATTEMPT_LIMIT
+                                {
+                                    finalize_schema_repair_attempts =
+                                        finalize_schema_repair_attempts.saturating_add(1);
+                                    self.diagnostics_tracker
+                                        .observe_finalize_schema_repair_attempt(
+                                            repair.sub_reason_code,
+                                        );
+                                    super::trace::emit(
+                                        self.verbose_llm,
+                                        phase_name(phase),
+                                        "finalize_schema_repair_retry",
+                                        &[
+                                            ("tool", finalize_tool.to_string()),
+                                            ("sub_reason_code", repair.sub_reason_code.to_string()),
+                                            ("retry", finalize_schema_repair_attempts.to_string()),
+                                            (
+                                                "max_retries",
+                                                FINALIZE_SCHEMA_REPAIR_ATTEMPT_LIMIT.to_string(),
+                                            ),
+                                        ],
+                                    );
+                                    let content = serde_json::to_string(&repair.payload)
+                                        .map_err(RunnerError::from)?;
+                                    if self.verbose_llm {
+                                        eprintln!(
+                                            "[llm] tool_result tool_call_id={} tool={} cached=false {}",
+                                            call.id,
+                                            call.name,
+                                            summarize_tool_message(
+                                                call.name.as_str(),
+                                                content.as_str()
+                                            )
+                                        );
+                                        eprintln!(
+                                            "[llm] tool_result_prompt tool_call_id={} tool={} content={}",
+                                            call.id,
+                                            call.name,
+                                            truncate_for_log(content.as_str(), 900)
+                                        );
+                                    }
+                                    tool_results.push(LlmMessage {
+                                        role: MessageRole::Tool,
+                                        content: Some(content),
+                                        tool_name: Some(call.name.clone()),
+                                        tool_call_id: Some(call.id.clone()),
+                                        tool_calls: vec![],
+                                    });
+                                    continue;
+                                }
+                                self.diagnostics_tracker
+                                    .observe_finalize_schema_repair_exhausted();
+                                super::trace::emit(
+                                    self.verbose_llm,
+                                    phase_name(phase),
+                                    "finalize_schema_repair_exhausted",
+                                    &[
+                                        ("tool", finalize_tool.to_string()),
+                                        ("sub_reason_code", repair.sub_reason_code.to_string()),
+                                        (
+                                            "max_retries",
+                                            FINALIZE_SCHEMA_REPAIR_ATTEMPT_LIMIT.to_string(),
+                                        ),
+                                    ],
+                                );
+                            }
                         }
                         return Err(error);
                     }
@@ -945,34 +1185,75 @@ impl<P> LlmSegmentedIntentPlanner<P> {
                 match decoded {
                     DecodedSegmentedToolCall::Final(result) => {
                         if require_successful_segment_check
-                            && !latest_segment_check_ok
                             && finalized_segment_is_proposed(&result)
                         {
-                            let payload = missing_pre_finalize_check_payload(finalize_tool);
-                            let content =
-                                serde_json::to_string(&payload).map_err(RunnerError::from)?;
-                            if self.verbose_llm {
-                                eprintln!(
-                                    "[llm] tool_result tool_call_id={} tool={} cached=false {}",
-                                    call.id,
-                                    call.name,
-                                    summarize_tool_message(call.name.as_str(), content.as_str())
-                                );
-                                eprintln!(
-                                    "[llm] tool_result_prompt tool_call_id={} tool={} content={}",
-                                    call.id,
-                                    call.name,
-                                    truncate_for_log(content.as_str(), 900)
-                                );
+                            if !latest_segment_check_ok {
+                                let payload = missing_pre_finalize_check_payload(finalize_tool);
+                                let content =
+                                    serde_json::to_string(&payload).map_err(RunnerError::from)?;
+                                if self.verbose_llm {
+                                    eprintln!(
+                                        "[llm] tool_result tool_call_id={} tool={} cached=false {}",
+                                        call.id,
+                                        call.name,
+                                        summarize_tool_message(
+                                            call.name.as_str(),
+                                            content.as_str()
+                                        )
+                                    );
+                                    eprintln!(
+                                        "[llm] tool_result_prompt tool_call_id={} tool={} content={}",
+                                        call.id,
+                                        call.name,
+                                        truncate_for_log(content.as_str(), 900)
+                                    );
+                                }
+                                tool_results.push(LlmMessage {
+                                    role: MessageRole::Tool,
+                                    content: Some(content),
+                                    tool_name: Some(call.name.clone()),
+                                    tool_call_id: Some(call.id.clone()),
+                                    tool_calls: vec![],
+                                });
+                                continue;
                             }
-                            tool_results.push(LlmMessage {
-                                role: MessageRole::Tool,
-                                content: Some(content),
-                                tool_name: Some(call.name.clone()),
-                                tool_call_id: Some(call.id.clone()),
-                                tool_calls: vec![],
-                            });
-                            continue;
+                            let finalized_signature = finalized_segment_signature(&result);
+                            if finalized_signature.is_none()
+                                || finalized_signature != latest_checked_segment_signature
+                            {
+                                let payload = pre_finalize_segment_mismatch_payload(
+                                    finalize_tool,
+                                    latest_checked_segment_signature.as_deref(),
+                                    finalized_signature.as_deref(),
+                                );
+                                let content =
+                                    serde_json::to_string(&payload).map_err(RunnerError::from)?;
+                                if self.verbose_llm {
+                                    eprintln!(
+                                        "[llm] tool_result tool_call_id={} tool={} cached=false {}",
+                                        call.id,
+                                        call.name,
+                                        summarize_tool_message(
+                                            call.name.as_str(),
+                                            content.as_str()
+                                        )
+                                    );
+                                    eprintln!(
+                                        "[llm] tool_result_prompt tool_call_id={} tool={} content={}",
+                                        call.id,
+                                        call.name,
+                                        truncate_for_log(content.as_str(), 900)
+                                    );
+                                }
+                                tool_results.push(LlmMessage {
+                                    role: MessageRole::Tool,
+                                    content: Some(content),
+                                    tool_name: Some(call.name.clone()),
+                                    tool_call_id: Some(call.id.clone()),
+                                    tool_calls: vec![],
+                                });
+                                continue;
+                            }
                         }
                         return Ok(result);
                     }
@@ -989,6 +1270,34 @@ impl<P> LlmSegmentedIntentPlanner<P> {
                         }
                         if tool_name == "plan.check_segment" {
                             latest_segment_check_ok = plan_check_result_ok(content.as_str());
+                            latest_checked_segment_signature = if latest_segment_check_ok {
+                                plan_check_segment_signature_from_tool_args(&call.arguments)
+                            } else {
+                                None
+                            };
+                            let repeated_failure_hit = plan_check_failure_guard
+                                .observe(plan_check_failure_signature(content.as_str()));
+                            if repeated_failure_hit {
+                                let payload = repeated_plan_check_failure_payload(
+                                    content.as_str(),
+                                    plan_check_failure_guard.streak(),
+                                    REPEATED_PLAN_CHECK_FAILURE_THRESHOLD,
+                                    finalize_tool,
+                                );
+                                let payload_text = serde_json::to_string(&payload)
+                                    .unwrap_or_else(|_| "{}".to_string());
+                                if self.verbose_llm {
+                                    eprintln!(
+                                        "[llm] segmented planner repeated_check_failure round={} phase={} payload={}",
+                                        round + 1,
+                                        phase_name(phase),
+                                        truncate_for_log(payload_text.as_str(), 900)
+                                    );
+                                }
+                                return Err(RunnerError::Llm(format!(
+                                    "segmented planner repeated plan.check_segment failure: {payload_text}"
+                                )));
+                            }
                             if !control_step_ref_hint_emitted
                                 && plan_check_has_control_step_candidate_not_found(content.as_str())
                             {
@@ -1254,71 +1563,279 @@ impl<P> LlmSegmentedIntentPlanner<P> {
             cursor: request.session.cursor.clone(),
             pack_snapshot_hash: begin.pack_snapshot_hash.clone(),
             chain_scope: begin.chain_scope.clone(),
+            known_input_refs: super::known_input_refs_from_state_summary(
+                request.state_summary.as_ref(),
+            ),
+            grounding_fact_keys: super::grounding_fact_keys_from_state_summary(
+                request.state_summary.as_ref(),
+            ),
         })
     }
 }
 
 #[derive(Debug, Deserialize)]
-struct CandidateDetailArgs {
-    refs: Vec<String>,
+pub(super) struct CandidateDetailArgs {
+    pub(super) refs: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub(super) struct ListCandidatesFilterArgs {
+    #[serde(default)]
+    pub(super) chain: Option<String>,
+    #[serde(default)]
+    pub(super) protocol: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
-struct CatalogSearchArgs {
+pub(super) struct ListCandidatesArgs {
     #[serde(default)]
-    query: Option<String>,
+    pub(super) chain: Option<String>,
     #[serde(default)]
-    kind: Option<String>,
+    pub(super) protocol: Option<String>,
     #[serde(default)]
-    chain: Option<String>,
-    #[serde(default)]
-    min_risk_level: Option<u8>,
-    #[serde(default)]
-    max_risk_level: Option<u8>,
-    #[serde(default)]
-    limit: Option<usize>,
+    pub(super) filter: Option<ListCandidatesFilterArgs>,
+}
+
+impl ListCandidatesArgs {
+    pub(super) fn normalized_filter(&self) -> ListCandidatesFilterArgs {
+        let chain = self
+            .filter
+            .as_ref()
+            .and_then(|filter| filter.chain.as_deref())
+            .or(self.chain.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let protocol = self
+            .filter
+            .as_ref()
+            .and_then(|filter| filter.protocol.as_deref())
+            .or(self.protocol.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_ascii_lowercase);
+        ListCandidatesFilterArgs { chain, protocol }
+    }
 }
 
 #[derive(Debug, Deserialize, Default)]
-struct GuideGetArgs {
+pub(super) struct CatalogSearchArgs {
     #[serde(default)]
-    schema: Option<String>,
+    pub(super) query: Option<String>,
     #[serde(default)]
-    topic: Option<String>,
+    pub(super) kind: Option<String>,
     #[serde(default)]
-    full: Option<bool>,
+    pub(super) chain: Option<String>,
+    #[serde(default)]
+    pub(super) min_risk_level: Option<u8>,
+    #[serde(default)]
+    pub(super) max_risk_level: Option<u8>,
+    #[serde(default)]
+    pub(super) limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub(super) struct GuideGetArgs {
+    #[serde(default)]
+    pub(super) schema: Option<String>,
+    #[serde(default)]
+    pub(super) topic: Option<String>,
+    #[serde(default)]
+    pub(super) full: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub(super) struct ResolveMissingFactsArgs {
+    #[serde(default)]
+    pub(super) missing_refs: Vec<String>,
+    #[serde(default)]
+    pub(super) limit_per_ref: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
-struct CheckSegmentArgs {
-    segment: Value,
+pub(super) struct CheckSegmentArgs {
+    pub(super) segment: Value,
 }
 
 #[derive(Debug, Deserialize)]
-struct BeginLimits {
-    max_rounds: u8,
-    max_segments: u8,
+pub(super) struct BeginLimits {
+    pub(super) max_rounds: u8,
+    pub(super) max_segments: u8,
 }
 
 #[derive(Debug, Deserialize)]
-struct BeginToolArgs {
-    session_id: Value,
-    snapshot_hash: Value,
-    cursor: Value,
-    limits: BeginLimits,
+pub(super) struct BeginToolArgs {
+    pub(super) session_id: Value,
+    pub(super) snapshot_hash: Value,
+    pub(super) cursor: Value,
+    pub(super) limits: BeginLimits,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+struct PlannerIssueObject {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reason_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reference: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+impl PlannerIssueObject {
+    fn into_value(self) -> Value {
+        serde_json::to_value(self).unwrap_or_else(|_| Value::Object(serde_json::Map::new()))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum PlannerIssue {
+    Typed(PlannerIssueObject),
+    Raw(Value),
+}
+
+impl PlannerIssue {
+    fn into_value(self) -> Value {
+        match self {
+            Self::Typed(typed) => typed.into_value(),
+            Self::Raw(raw) => raw,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+struct PlannerIssueList(Vec<PlannerIssue>);
+
+impl PlannerIssueList {
+    fn into_values(self) -> Vec<Value> {
+        self.0
+            .into_iter()
+            .map(PlannerIssue::into_value)
+            .collect::<Vec<_>>()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum PlannerQuestion {
+    Typed(MissingInputQuestion),
+    Raw(Value),
+}
+
+impl PlannerQuestion {
+    fn into_value(self) -> Value {
+        match self {
+            Self::Typed(typed) => serde_json::to_value(typed)
+                .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
+            Self::Raw(raw) => raw,
+        }
+    }
+
+    fn into_missing_input_question(self) -> Option<MissingInputQuestion> {
+        match self {
+            Self::Typed(typed) => Some(typed),
+            Self::Raw(raw) => serde_json::from_value::<MissingInputQuestion>(raw).ok(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+struct PlannerQuestionList(Vec<PlannerQuestion>);
+
+impl PlannerQuestionList {
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn to_values(&self) -> Vec<Value> {
+        self.0
+            .iter()
+            .cloned()
+            .map(PlannerQuestion::into_value)
+            .collect::<Vec<_>>()
+    }
+
+    fn into_values(self) -> Vec<Value> {
+        self.0
+            .into_iter()
+            .map(PlannerQuestion::into_value)
+            .collect::<Vec<_>>()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct PlannerErrorDetailsObject {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    questions: Vec<PlannerQuestion>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+impl PlannerErrorDetailsObject {
+    #[cfg(test)]
+    fn to_value(&self) -> Value {
+        serde_json::to_value(self).unwrap_or_else(|_| Value::Object(serde_json::Map::new()))
+    }
+
+    fn missing_input_questions(&self) -> Vec<MissingInputQuestion> {
+        self.questions
+            .iter()
+            .cloned()
+            .filter_map(PlannerQuestion::into_missing_input_question)
+            .collect::<Vec<_>>()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum PlannerErrorDetails {
+    Typed(PlannerErrorDetailsObject),
+    Raw(Value),
+}
+
+impl PlannerErrorDetails {
+    #[cfg(test)]
+    fn to_value(&self) -> Value {
+        match self {
+            Self::Typed(typed) => typed.to_value(),
+            Self::Raw(raw) => raw.clone(),
+        }
+    }
+
+    fn missing_input_questions(&self) -> Vec<MissingInputQuestion> {
+        match self {
+            Self::Typed(typed) => typed.missing_input_questions(),
+            Self::Raw(raw) => raw
+                .get("questions")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| {
+                            serde_json::from_value::<MissingInputQuestion>(item.clone()).ok()
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
-struct SegmentError {
+struct PlannerToolError {
     reason_code: String,
     #[serde(default)]
     message: Option<String>,
     #[serde(default)]
-    details: Option<Value>,
+    details: Option<PlannerErrorDetails>,
 }
 
 #[derive(Debug, Deserialize)]
-struct SegmentToolArgs {
+pub(super) struct SegmentToolArgs {
     status: String,
     done: bool,
     #[serde(default)]
@@ -1328,30 +1845,30 @@ struct SegmentToolArgs {
     #[serde(default)]
     cursor_next: Option<Value>,
     #[serde(default)]
-    issues: Vec<Value>,
+    issues: PlannerIssueList,
     #[serde(default)]
-    error: Option<SegmentError>,
+    error: Option<PlannerToolError>,
     #[serde(default)]
-    questions: Vec<Value>,
+    questions: PlannerQuestionList,
 }
 
 #[derive(Debug, Deserialize)]
-struct TodoToolArgs {
+pub(super) struct TodoToolArgs {
     status: String,
     #[serde(default)]
     todos: Vec<TodoSpec>,
     #[serde(default)]
     summary: Option<String>,
     #[serde(default)]
-    issues: Vec<Value>,
+    issues: PlannerIssueList,
     #[serde(default)]
-    error: Option<SegmentError>,
+    error: Option<PlannerToolError>,
     #[serde(default)]
-    questions: Vec<Value>,
+    questions: PlannerQuestionList,
 }
 
 #[derive(Debug, Deserialize)]
-struct GroundingToolArgs {
+pub(super) struct GroundingToolArgs {
     status: String,
     #[serde(default)]
     summary: Option<String>,
@@ -1364,30 +1881,36 @@ struct GroundingToolArgs {
     #[serde(default)]
     confidence: BTreeMap<String, u8>,
     #[serde(default)]
-    issues: Vec<Value>,
+    issues: PlannerIssueList,
     #[serde(default)]
-    error: Option<SegmentError>,
+    error: Option<PlannerToolError>,
     #[serde(default)]
-    questions: Vec<Value>,
+    questions: PlannerQuestionList,
+    #[serde(default)]
+    missing_refs: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct MissingInputOption {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     value: Option<Value>,
     label: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     description: Option<String>,
+    #[serde(default, flatten)]
+    extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct MissingInputQuestion {
     id: String,
     question: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     options: Vec<MissingInputOption>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     required: Option<bool>,
+    #[serde(default, flatten)]
+    extra: BTreeMap<String, Value>,
 }
 
 fn schema_guide_payload(topic: &str) -> Option<Value> {
@@ -1437,7 +1960,7 @@ fn schema_guide_payload(topic: &str) -> Option<Value> {
     }
 }
 
-fn guide_get_payload(args: GuideGetArgs) -> Value {
+pub(super) fn guide_get_payload(args: GuideGetArgs) -> Value {
     let schema_id = args.schema.as_ref().map(|value| value.trim().to_string());
     let schema_id = schema_id.filter(|value| !value.is_empty());
     let topic = args
@@ -1620,25 +2143,6 @@ fn sorted_object_keys(object: &serde_json::Map<String, Value>, limit: usize) -> 
     keys
 }
 
-#[derive(Debug)]
-enum PlannerToolOutput {
-    Begin(SegmentPlanningSession),
-    SegmentDraft(SegmentDraft),
-    TodoDraft(TodoDraft),
-    IntentGrounding(IntentGroundingDraft),
-}
-
-#[derive(Debug)]
-enum DecodedSegmentedToolCall {
-    Final(PlannerToolOutput),
-    ToolMessage {
-        tool_name: String,
-        tool_call_id: String,
-        content: String,
-        cached: bool,
-    },
-}
-
 #[cfg(test)]
 fn decode_segmented_tool_call(
     tool: &ToolCall,
@@ -1646,13 +2150,11 @@ fn decode_segmented_tool_call(
     phase: PlannerRoundPhase,
     candidate_context: Option<&CandidateContext>,
 ) -> Result<DecodedSegmentedToolCall, RunnerError> {
-    decode_segmented_tool_call_with_memory(
+    super::tools::dispatch::decode_segmented_tool_call(
         tool,
         finalize_tool,
         phase,
         candidate_context,
-        None,
-        None,
     )
 }
 
@@ -1663,590 +2165,392 @@ fn decode_segmented_tool_call_with_memory(
     candidate_context: Option<&CandidateContext>,
     segment_check_context: Option<&SegmentCheckContext>,
     memory: Option<&mut PlanningMemory>,
+    projection_budget_tokens: Option<usize>,
 ) -> Result<DecodedSegmentedToolCall, RunnerError> {
-    ensure_tool_allowed_for_phase(tool.name.as_str(), phase)?;
-
-    let cache_key = tool_cache_key(tool.name.as_str(), &tool.arguments);
-    let require_guide_schema_full =
-        guide_get_requires_full_schema(tool.name.as_str(), &tool.arguments);
-    if let (Some(memory), Some(cache_key)) = (memory.as_ref(), cache_key.as_ref()) {
-        if let Some(content) = memory.get(cache_key.as_str()) {
-            let can_use_cached =
-                !require_guide_schema_full || guide_get_payload_contains_full_schema(content);
-            if can_use_cached {
-                return Ok(DecodedSegmentedToolCall::ToolMessage {
-                    tool_name: tool.name.clone(),
-                    tool_call_id: tool.id.clone(),
-                    content: content.to_string(),
-                    cached: true,
-                });
-            }
-        }
-    }
-
-    match tool.name.as_str() {
-        "list_candidates" => {
-            let content = serde_json::to_string(&candidate_snapshot(candidate_context))
-                .map_err(RunnerError::from)?;
-            if let (Some(memory), Some(cache_key)) = (memory, cache_key) {
-                memory.insert(cache_key, content.clone());
-            }
-            Ok(DecodedSegmentedToolCall::ToolMessage {
-                tool_name: "list_candidates".to_string(),
-                tool_call_id: tool.id.clone(),
-                content,
-                cached: false,
-            })
-        }
-        "get_candidate_detail" => {
-            let Some(context) = candidate_context else {
-                return Err(RunnerError::Llm(
-                    "candidate detail tool is unavailable".to_string(),
-                ));
-            };
-            let args: CandidateDetailArgs = serde_json::from_value(tool.arguments.clone())
-                .map_err(|error| {
-                    RunnerError::Llm(format!("invalid get_candidate_detail args: {error}"))
-                })?;
-            let details = context.get_details_for_refs(&args.refs);
-            let sanitized = sanitize_for_llm_payload(&details);
-            let compacted = compact_json_with_options(
-                &sanitized,
-                &JsonBudgetOptions {
-                    max_depth: 8,
-                    ..JsonBudgetOptions::default()
-                },
-            );
-            let content = serde_json::to_string(&compacted).map_err(RunnerError::from)?;
-            if let (Some(memory), Some(cache_key)) = (memory, cache_key) {
-                memory.insert(cache_key, content.clone());
-            }
-            Ok(DecodedSegmentedToolCall::ToolMessage {
-                tool_name: "get_candidate_detail".to_string(),
-                tool_call_id: tool.id.clone(),
-                content,
-                cached: false,
-            })
-        }
-        "catalog.search" => {
-            let Some(context) = candidate_context else {
-                return Err(RunnerError::Llm(
-                    "catalog search tool is unavailable".to_string(),
-                ));
-            };
-            let args: CatalogSearchArgs =
-                serde_json::from_value(tool.arguments.clone()).map_err(|error| {
-                    RunnerError::Llm(format!("invalid catalog.search args: {error}"))
-                })?;
-            let query = args.query;
-            let searched = if is_control_semantics_query(query.as_deref()) {
-                control_semantics_search_hint_payload(
-                    query.clone(),
-                    args.kind.clone(),
-                    args.chain.clone(),
-                    args.min_risk_level,
-                    args.max_risk_level,
-                    args.limit,
-                )
-            } else {
-                context.search_candidates(&CandidateSearchRequest {
-                    query,
-                    kind: args.kind,
-                    chain: args.chain,
-                    min_risk_level: args.min_risk_level,
-                    max_risk_level: args.max_risk_level,
-                    limit: args.limit,
-                })
-            };
-            let sanitized = sanitize_for_llm_payload(&searched);
-            let compacted = compact_json_for_llm(&sanitized);
-            let content = serde_json::to_string(&compacted).map_err(RunnerError::from)?;
-            if let (Some(memory), Some(cache_key)) = (memory, cache_key) {
-                memory.insert(cache_key, content.clone());
-            }
-            Ok(DecodedSegmentedToolCall::ToolMessage {
-                tool_name: "catalog.search".to_string(),
-                tool_call_id: tool.id.clone(),
-                content,
-                cached: false,
-            })
-        }
-        "guide.get" => {
-            let args: GuideGetArgs = serde_json::from_value(tool.arguments.clone())
-                .map_err(|error| RunnerError::Llm(format!("invalid guide.get args: {error}")))?;
-            let payload = guide_get_payload(args);
-            let is_schema_request = payload.get("kind").and_then(Value::as_str) == Some("schema");
-            let schema_has_full_json = payload.pointer("/schema/json").is_some();
-            let sanitized = if is_schema_request && schema_has_full_json {
-                sanitize_for_llm_payload_with_limit(&payload, 16_000)
-            } else {
-                sanitize_for_llm_payload(&payload)
-            };
-            let compacted = if is_schema_request {
-                if schema_has_full_json {
-                    compact_json_with_options(
-                        &sanitized,
-                        &JsonBudgetOptions {
-                            max_depth: 64,
-                            max_object_entries: 4_096,
-                            max_array_items: 1_024,
-                            max_string_chars: 16_000,
-                        },
-                    )
-                } else {
-                    compact_json_with_options(
-                        &sanitized,
-                        &JsonBudgetOptions {
-                            max_depth: 10,
-                            max_object_entries: 128,
-                            max_array_items: 64,
-                            max_string_chars: 1600,
-                        },
-                    )
-                }
-            } else {
-                compact_json_with_options(
-                    &sanitized,
-                    &JsonBudgetOptions {
-                        max_depth: 8,
-                        max_object_entries: 64,
-                        max_array_items: 24,
-                        max_string_chars: 2400,
-                    },
-                )
-            };
-            let content = serde_json::to_string(&compacted).map_err(RunnerError::from)?;
-            if let (Some(memory), Some(cache_key)) = (memory, cache_key) {
-                memory.insert(cache_key, content.clone());
-            }
-            Ok(DecodedSegmentedToolCall::ToolMessage {
-                tool_name: "guide.get".to_string(),
-                tool_call_id: tool.id.clone(),
-                content,
-                cached: false,
-            })
-        }
-        "plan.check_segment" => {
-            let Some(context) = candidate_context else {
-                return Err(RunnerError::Llm(
-                    "plan.check_segment requires workspace candidate context".to_string(),
-                ));
-            };
-            let Some(check_context) = segment_check_context else {
-                return Err(RunnerError::Llm(
-                    "plan.check_segment is unavailable before plan.begin".to_string(),
-                ));
-            };
-            let args: CheckSegmentArgs =
-                serde_json::from_value(tool.arguments.clone()).map_err(|error| {
-                    RunnerError::Llm(format!("invalid plan.check_segment args: {error}"))
-                })?;
-            let segment = decode_plan_sketch_segment_arg(&args.segment)?;
-            let payload = match super::compile_segment_plan_with_snapshot_hash(
-                check_context.intent.as_str(),
-                check_context.session_id.as_str(),
-                check_context.cursor.as_str(),
-                &segment,
-                context,
-                check_context.pack_snapshot_hash.as_str(),
-                check_context.chain_scope.as_slice(),
-            ) {
-                Ok(plan) => json!({
-                    "ok": true,
-                    "segment_id": segment.segment_id,
-                    "node_count": plan.nodes.len(),
-                    "issues": []
-                }),
-                Err(error) => json!({
-                    "ok": false,
-                    "segment_id": segment.segment_id,
-                    "reason_code": error.get("reason_code").cloned().unwrap_or_else(|| json!("compile_error")),
-                    "issues": error.get("issues").cloned().unwrap_or_else(|| Value::Array(vec![])),
-                    "error": error
-                }),
-            };
-            let sanitized = sanitize_for_llm_payload(&payload);
-            let compacted = compact_json_with_options(
-                &sanitized,
-                &JsonBudgetOptions {
-                    max_depth: 8,
-                    max_object_entries: 64,
-                    max_array_items: 24,
-                    max_string_chars: 2400,
-                },
-            );
-            let content = serde_json::to_string(&compacted).map_err(RunnerError::from)?;
-            if let (Some(memory), Some(cache_key)) = (memory, cache_key) {
-                memory.insert(cache_key, content.clone());
-            }
-            Ok(DecodedSegmentedToolCall::ToolMessage {
-                tool_name: "plan.check_segment".to_string(),
-                tool_call_id: tool.id.clone(),
-                content,
-                cached: false,
-            })
-        }
-        "plan.begin" => {
-            if finalize_tool != "plan.begin" {
-                return Err(RunnerError::Llm(format!(
-                    "planner called `{}` while expecting `{}`",
-                    tool.name, finalize_tool
-                )));
-            }
-            let args: BeginToolArgs = serde_json::from_value(tool.arguments.clone())
-                .map_err(|error| RunnerError::Llm(format!("invalid plan.begin args: {error}")))?;
-            let session_id = coerce_required_scalar_string("session_id", &args.session_id)?;
-            let snapshot_hash =
-                coerce_required_scalar_string("snapshot_hash", &args.snapshot_hash)?;
-            let cursor = coerce_required_scalar_string("cursor", &args.cursor)?;
-            Ok(DecodedSegmentedToolCall::Final(PlannerToolOutput::Begin(
-                SegmentPlanningSession {
-                    session_id,
-                    snapshot_hash,
-                    cursor,
-                    max_rounds: args.limits.max_rounds.max(1),
-                    max_segments: args.limits.max_segments.max(1),
-                },
-            )))
-        }
-        "plan.ground_intent" => {
-            if tool.name != finalize_tool {
-                return Err(RunnerError::Llm(format!(
-                    "planner called `{}` while expecting `{}`",
-                    tool.name, finalize_tool
-                )));
-            }
-            let args: GroundingToolArgs =
-                serde_json::from_value(tool.arguments.clone()).map_err(|error| {
-                    RunnerError::Llm(format!("invalid {} args: {error}", tool.name))
-                })?;
-            Ok(DecodedSegmentedToolCall::Final(
-                PlannerToolOutput::IntentGrounding(parse_grounding_draft(args)?),
-            ))
-        }
-        "plan.propose_todos" => {
-            if tool.name != finalize_tool {
-                return Err(RunnerError::Llm(format!(
-                    "planner called `{}` while expecting `{}`",
-                    tool.name, finalize_tool
-                )));
-            }
-            let args: TodoToolArgs =
-                serde_json::from_value(tool.arguments.clone()).map_err(|error| {
-                    RunnerError::Llm(format!("invalid {} args: {error}", tool.name))
-                })?;
-            Ok(DecodedSegmentedToolCall::Final(
-                PlannerToolOutput::TodoDraft(parse_todo_draft(args)?),
-            ))
-        }
-        "plan.propose_segment" | "plan.revise_segment" => {
-            if tool.name != finalize_tool {
-                return Err(RunnerError::Llm(format!(
-                    "planner called `{}` while expecting `{}`",
-                    tool.name, finalize_tool
-                )));
-            }
-            let args: SegmentToolArgs =
-                serde_json::from_value(tool.arguments.clone()).map_err(|error| {
-                    RunnerError::Llm(format!("invalid {} args: {error}", tool.name))
-                })?;
-            Ok(DecodedSegmentedToolCall::Final(
-                PlannerToolOutput::SegmentDraft(parse_segment_draft(args)?),
-            ))
-        }
-        other => Err(RunnerError::Llm(format!(
-            "unsupported segmented planner tool `{other}`"
-        ))),
-    }
+    super::tools::dispatch::decode_segmented_tool_call_with_memory(
+        tool,
+        finalize_tool,
+        phase,
+        candidate_context,
+        segment_check_context,
+        memory,
+        projection_budget_tokens,
+    )
 }
 
-fn phase_from_finalize_tool(finalize_tool: &str) -> Result<PlannerRoundPhase, RunnerError> {
-    match finalize_tool {
-        "plan.begin" => Ok(PlannerRoundPhase::Begin),
-        "plan.ground_intent" => Ok(PlannerRoundPhase::GroundIntent),
-        "plan.propose_todos" => Ok(PlannerRoundPhase::ProposeTodos),
-        "plan.propose_segment" => Ok(PlannerRoundPhase::ProposeSegment),
-        "plan.revise_segment" => Ok(PlannerRoundPhase::ReviseSegment),
-        other => Err(RunnerError::Llm(format!(
-            "unsupported segmented planner finalize tool `{other}`"
-        ))),
-    }
+#[derive(Debug, Clone, Serialize)]
+struct MissingFactQueryCandidate {
+    query_ref: String,
+    score: u16,
+    matched_return_fields: Vec<String>,
 }
 
-fn tool_cache_key(tool_name: &str, arguments: &Value) -> Option<String> {
-    match tool_name {
-        "list_candidates"
-        | "get_candidate_detail"
-        | "catalog.search"
-        | "guide.get"
-        | "plan.check_segment" => {
-            let normalized = normalize_tool_arguments(tool_name, arguments);
-            let hash = stable_hash_hex(&normalized, &StableJsonOptions::default())
-                .unwrap_or_else(|_| serde_json::to_string(&normalized).unwrap_or_default());
-            Some(format!("{tool_name}:{hash}"))
-        }
-        _ => None,
-    }
+#[derive(Debug, Clone, Serialize)]
+struct MissingFactResolution {
+    missing_ref: String,
+    query_candidates: Vec<MissingFactQueryCandidate>,
+    truncated: bool,
 }
 
-fn normalize_tool_arguments(tool_name: &str, arguments: &Value) -> Value {
-    match tool_name {
-        "list_candidates" => json!({}),
-        "get_candidate_detail" => {
-            let mut refs = arguments
-                .get("refs")
-                .and_then(Value::as_array)
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_string)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            refs.sort();
-            refs.dedup();
-            json!({ "refs": refs })
-        }
-        "catalog.search" => {
-            let query = arguments
-                .get("query")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .and_then(normalize_catalog_search_query_for_cache)
-                .map(Value::String)
-                .unwrap_or(Value::Null);
-            let kind = arguments
-                .get("kind")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(|value| Value::String(value.to_ascii_lowercase()))
-                .unwrap_or(Value::Null);
-            let chain = arguments
-                .get("chain")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(|value| Value::String(value.to_ascii_lowercase()))
-                .unwrap_or(Value::Null);
-            json!({
-                "query": query,
-                "kind": kind,
-                "chain": chain,
-                "min_risk_level": arguments.get("min_risk_level").cloned().unwrap_or(Value::Null),
-                "max_risk_level": arguments.get("max_risk_level").cloned().unwrap_or(Value::Null),
-                "limit": arguments.get("limit").cloned().unwrap_or(Value::Null),
-            })
-        }
-        "guide.get" => {
-            let schema = arguments
-                .get("schema")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(|value| Value::String(value.to_string()))
-                .unwrap_or(Value::Null);
-            let topic = arguments
-                .get("topic")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(|value| Value::String(value.to_ascii_lowercase()))
-                .unwrap_or(Value::Null);
-            json!({
-                "schema": schema,
-                "topic": topic,
-            })
-        }
-        "plan.check_segment" => json!({
-            "segment": arguments.get("segment").cloned().unwrap_or(Value::Null),
-        }),
-        _ => arguments.clone(),
-    }
+#[derive(Debug, Clone, Serialize)]
+struct ResolveMissingFactsPayload {
+    schema: String,
+    requested_missing_refs: usize,
+    normalized_missing_refs: Vec<String>,
+    limit_per_ref: usize,
+    resolved: Vec<MissingFactResolution>,
+    unresolved_refs: Vec<String>,
 }
 
-fn normalize_catalog_search_query_for_cache(query: &str) -> Option<String> {
-    let stop_words = ["a", "an", "the", "for", "on", "to", "my", "me", "please"];
-    let lowered = query
-        .to_ascii_lowercase()
-        .replace("erc-20", "erc20")
-        .replace("erc 20", "erc20")
-        .replace("balanceof", "balance");
-    let mut tokens = lowered
-        .split(|ch: char| !ch.is_ascii_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .map(|token| match token {
-            "erc20" | "token" | "tokens" => "token".to_string(),
-            "native" | "eth" => "native".to_string(),
-            "balanceof" | "balance" | "balances" => "balance".to_string(),
-            "transfer" | "send" | "payment" => "transfer".to_string(),
-            other => other.to_string(),
-        })
-        .filter(|token| !stop_words.contains(&token.as_str()))
+pub(super) fn resolve_missing_facts_payload(
+    context: &CandidateContext,
+    args: &ResolveMissingFactsArgs,
+) -> Value {
+    let mut normalized_missing_refs = args
+        .missing_refs
+        .iter()
+        .filter_map(|raw| normalize_missing_fact_ref(raw.as_str()))
         .collect::<Vec<_>>();
-    if tokens.is_empty() {
+    normalized_missing_refs.sort();
+    normalized_missing_refs.dedup();
+    let limit_per_ref = args.limit_per_ref.unwrap_or(3).clamp(1, 8);
+
+    let mut resolved = Vec::<MissingFactResolution>::new();
+    let mut unresolved_refs = Vec::<String>::new();
+    for missing_ref in &normalized_missing_refs {
+        let (query_candidates, truncated) =
+            resolve_query_candidates_for_missing_ref(context, missing_ref.as_str(), limit_per_ref);
+        if query_candidates.is_empty() {
+            unresolved_refs.push(missing_ref.clone());
+            continue;
+        }
+        resolved.push(MissingFactResolution {
+            missing_ref: missing_ref.clone(),
+            query_candidates,
+            truncated,
+        });
+    }
+
+    serde_json::to_value(ResolveMissingFactsPayload {
+        schema: "ais-catalog-missing-fact-resolution/0.0.1".to_string(),
+        requested_missing_refs: args.missing_refs.len(),
+        normalized_missing_refs,
+        limit_per_ref,
+        resolved,
+        unresolved_refs,
+    })
+    .unwrap_or_else(|_| json!({ "schema": "ais-catalog-missing-fact-resolution/0.0.1" }))
+}
+
+pub(crate) fn resolve_missing_facts_for_refs(
+    candidate_context: &CandidateContext,
+    missing_refs: &[String],
+    limit_per_ref: usize,
+) -> Value {
+    let args = ResolveMissingFactsArgs {
+        missing_refs: missing_refs.to_vec(),
+        limit_per_ref: Some(limit_per_ref),
+    };
+    resolve_missing_facts_payload(candidate_context, &args)
+}
+
+fn resolve_query_candidates_for_missing_ref(
+    context: &CandidateContext,
+    missing_ref: &str,
+    limit: usize,
+) -> (Vec<MissingFactQueryCandidate>, bool) {
+    let missing_key = missing_ref.strip_prefix("inputs.").unwrap_or(missing_ref);
+    let missing_tokens = normalized_tokens(missing_key);
+    let Some(leaf_token) = missing_tokens.last().cloned() else {
+        return (Vec::new(), false);
+    };
+
+    let mut matches = Vec::<MissingFactQueryCandidate>::new();
+    for query_card in &context.executable_candidates.queries {
+        let Some(query_ref) = query_card.get("ref").and_then(Value::as_str) else {
+            continue;
+        };
+        let query_tokens = normalized_tokens(query_ref);
+        let return_names = context
+            .detail_by_ref
+            .get(query_ref)
+            .map(query_return_field_names)
+            .unwrap_or_default();
+
+        let mut matched_return_fields = Vec::<String>::new();
+        let mut score = 0u16;
+
+        if query_tokens.contains(&leaf_token) {
+            score = score.saturating_add(20);
+        }
+        for token in missing_tokens
+            .iter()
+            .take(missing_tokens.len().saturating_sub(1))
+        {
+            if query_tokens.contains(token) {
+                score = score.saturating_add(4);
+            }
+        }
+
+        for return_name in &return_names {
+            let normalized_name = normalized_identifier(return_name);
+            if normalized_name.is_empty() {
+                continue;
+            }
+            if normalized_name == leaf_token {
+                score = score.saturating_add(100);
+                matched_return_fields.push(return_name.clone());
+            } else if normalized_name.contains(leaf_token.as_str())
+                || leaf_token.contains(normalized_name.as_str())
+            {
+                score = score.saturating_add(40);
+                matched_return_fields.push(return_name.clone());
+            }
+            for token in missing_tokens
+                .iter()
+                .take(missing_tokens.len().saturating_sub(1))
+            {
+                if normalized_name.contains(token.as_str())
+                    || token.contains(normalized_name.as_str())
+                {
+                    score = score.saturating_add(6);
+                }
+            }
+        }
+
+        if score == 0 {
+            continue;
+        }
+        matched_return_fields.sort();
+        matched_return_fields.dedup();
+        matches.push(MissingFactQueryCandidate {
+            query_ref: query_ref.to_string(),
+            score,
+            matched_return_fields,
+        });
+    }
+
+    matches.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.query_ref.cmp(&right.query_ref))
+    });
+    let truncated = matches.len() > limit;
+    matches.truncate(limit);
+    (matches, truncated)
+}
+
+fn query_return_field_names(detail: &Value) -> Vec<String> {
+    detail
+        .get("returns")
+        .and_then(Value::as_array)
+        .map(|returns| {
+            returns
+                .iter()
+                .filter_map(|entry| entry.get("name").and_then(Value::as_str))
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn normalize_missing_fact_ref(raw: &str) -> Option<String> {
+    let trimmed = raw.trim_matches(|ch: char| {
+        ch.is_whitespace() || matches!(ch, '`' | '"' | '\'' | ',' | ';' | '.' | ')' | '(')
+    });
+    let right_of_equals = trimmed
+        .rsplit_once('=')
+        .map(|(_, value)| value)
+        .unwrap_or(trimmed);
+    let normalized = right_of_equals
+        .strip_prefix("runtime.")
+        .unwrap_or(right_of_equals);
+    let key = if let Some(key) = normalized.strip_prefix("inputs.") {
+        key
+    } else if let Some(key) = normalized.strip_prefix("input.") {
+        key
+    } else {
+        normalized
+    };
+    let key = key.strip_suffix(".value").unwrap_or(key).trim_matches('.');
+    if key.is_empty() {
         return None;
     }
-    tokens.sort();
-    tokens.dedup();
-    Some(tokens.join(" "))
+    Some(format!("inputs.{key}"))
 }
 
-fn guide_get_requires_full_schema(tool_name: &str, arguments: &Value) -> bool {
-    if tool_name != "guide.get" {
-        return false;
-    }
-    let full_requested = arguments
-        .get("full")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    if !full_requested {
-        return false;
-    }
-    arguments
-        .get("schema")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .is_some_and(|schema| !schema.is_empty())
+fn normalized_tokens(raw: &str) -> Vec<String> {
+    raw.split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter_map(|token| {
+            let normalized = normalized_identifier(token);
+            (!normalized.is_empty()).then_some(normalized)
+        })
+        .collect::<Vec<_>>()
 }
 
-fn guide_get_payload_contains_full_schema(content: &str) -> bool {
-    serde_json::from_str::<Value>(content)
-        .ok()
-        .and_then(|payload| payload.pointer("/schema/json").cloned())
-        .is_some()
-}
-
-fn ensure_tool_allowed_for_phase(
-    tool_name: &str,
-    phase: PlannerRoundPhase,
-) -> Result<(), RunnerError> {
-    let allowed = match phase {
-        PlannerRoundPhase::Begin => matches!(tool_name, "plan.begin"),
-        PlannerRoundPhase::GroundIntent => matches!(
-            tool_name,
-            "list_candidates"
-                | "catalog.search"
-                | "get_candidate_detail"
-                | "guide.get"
-                | "plan.ground_intent"
-        ),
-        PlannerRoundPhase::ProposeTodos => matches!(
-            tool_name,
-            "list_candidates"
-                | "catalog.search"
-                | "get_candidate_detail"
-                | "guide.get"
-                | "plan.propose_todos"
-        ),
-        PlannerRoundPhase::ProposeSegment => matches!(
-            tool_name,
-            "list_candidates"
-                | "catalog.search"
-                | "get_candidate_detail"
-                | "guide.get"
-                | "plan.check_segment"
-                | "plan.propose_segment"
-        ),
-        PlannerRoundPhase::ReviseSegment => matches!(
-            tool_name,
-            "list_candidates"
-                | "catalog.search"
-                | "get_candidate_detail"
-                | "guide.get"
-                | "plan.check_segment"
-                | "plan.revise_segment"
-        ),
-    };
-    if allowed {
-        Ok(())
-    } else {
-        Err(RunnerError::Llm(format!(
-            "tool `{tool_name}` is not allowed in planner phase `{}`",
-            phase_name(phase)
-        )))
-    }
-}
-
-fn validate_tool_calls_for_phase(
-    tool_calls: &[ToolCall],
-    phase: PlannerRoundPhase,
-) -> Result<(), RunnerError> {
-    for call in tool_calls {
-        ensure_tool_allowed_for_phase(call.name.as_str(), phase)?;
-    }
-    let finalize_tool = match phase {
-        PlannerRoundPhase::Begin => "plan.begin",
-        PlannerRoundPhase::GroundIntent => "plan.ground_intent",
-        PlannerRoundPhase::ProposeTodos => "plan.propose_todos",
-        PlannerRoundPhase::ProposeSegment => "plan.propose_segment",
-        PlannerRoundPhase::ReviseSegment => "plan.revise_segment",
-    };
-    let finalize_indexes = tool_calls
-        .iter()
-        .enumerate()
-        .filter_map(|(index, call)| (call.name == finalize_tool).then_some(index))
-        .collect::<Vec<_>>();
-
-    if phase == PlannerRoundPhase::Begin {
-        if tool_calls.len() != 1 || finalize_indexes.len() != 1 {
-            return Err(RunnerError::Llm(format!(
-                "{} phase requires exactly one tool call: `{finalize_tool}`",
-                phase_name(phase)
-            )));
-        }
-        return Ok(());
-    }
-
-    if finalize_indexes.len() > 1 {
-        return Err(RunnerError::Llm(format!(
-            "planner phase `{}` allows at most one finalize tool `{finalize_tool}` per round",
-            phase_name(phase)
-        )));
-    }
-    if let Some(index) = finalize_indexes.first() {
-        if *index != tool_calls.len().saturating_sub(1) {
-            return Err(RunnerError::Llm(format!(
-                "finalize tool `{finalize_tool}` must be the last tool call in this round"
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn phase_name(phase: PlannerRoundPhase) -> &'static str {
-    match phase {
-        PlannerRoundPhase::Begin => "begin",
-        PlannerRoundPhase::GroundIntent => "ground_intent",
-        PlannerRoundPhase::ProposeTodos => "propose_todos",
-        PlannerRoundPhase::ProposeSegment => "propose_segment",
-        PlannerRoundPhase::ReviseSegment => "revise_segment",
-    }
+fn normalized_identifier(raw: &str) -> String {
+    raw.chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase()
 }
 
 fn requires_successful_check_before_finalize(
     phase: PlannerRoundPhase,
     segment_check_context: Option<&SegmentCheckContext>,
 ) -> bool {
-    segment_check_context.is_some()
-        && matches!(
-            phase,
-            PlannerRoundPhase::ProposeSegment | PlannerRoundPhase::ReviseSegment
-        )
+    super::tools::check_segment::requires_successful_check_before_finalize(
+        phase,
+        segment_check_context.is_some(),
+    )
 }
 
 fn missing_pre_finalize_check_payload(finalize_tool: &str) -> Value {
-    json!({
-        "error": {
-            "code": "missing_pre_finalize_check_segment",
-            "message": format!("call plan.check_segment and wait for ok=true before `{finalize_tool}`"),
-            "required_tool": "plan.check_segment",
-            "required_ok": true,
-            "blocked_finalize": finalize_tool
-        }
-    })
+    super::tools::check_segment::missing_pre_finalize_check_payload(finalize_tool)
+}
+
+fn pre_finalize_segment_mismatch_payload(
+    finalize_tool: &str,
+    checked_signature: Option<&str>,
+    finalized_signature: Option<&str>,
+) -> Value {
+    super::tools::check_segment::pre_finalize_segment_mismatch_payload(
+        finalize_tool,
+        checked_signature,
+        finalized_signature,
+    )
+}
+
+struct FinalizeSchemaRepairPayload {
+    payload: Value,
+    sub_reason_code: &'static str,
+}
+
+fn finalize_schema_repair_payload(
+    error: &RunnerError,
+    finalize_tool: &str,
+    round: u8,
+    attempt: u8,
+    max_attempts: u8,
+) -> Option<FinalizeSchemaRepairPayload> {
+    let RunnerError::Llm(message) = error else {
+        return None;
+    };
+    if !message.contains(format!("invalid {finalize_tool} args").as_str()) {
+        return None;
+    }
+
+    if message.contains("missing field `status`") {
+        return Some(FinalizeSchemaRepairPayload {
+            sub_reason_code: "missing_status",
+            payload: json!({
+                "error": {
+                    "code": "finalize_schema_error",
+                    "reason_code": "schema_missing_required_field",
+                    "sub_reason_code": "missing_status",
+                    "phase_reason_code": "planning.schema_missing_required_field",
+                    "message": format!("`{finalize_tool}` output is missing required field `status`"),
+                    "tool": finalize_tool,
+                    "round": round,
+                    "repair_attempt": attempt,
+                    "max_repair_attempts": max_attempts,
+                    "required_fields": ["status", "done"],
+                    "allowed_status": ["proposed", "invalid", "unavailable"],
+                    "contract": {
+                        "proposed": {"required": ["status", "done", "segment"]},
+                        "invalid_or_unavailable": {"required": ["status", "done", "error.reason_code"]}
+                    }
+                }
+            }),
+        });
+    }
+
+    if message.contains(
+        "status=proposed with ready_for_todos=false requires non-empty `questions` or `missing_refs`",
+    ) {
+        return Some(FinalizeSchemaRepairPayload {
+            sub_reason_code: "grounding_not_ready_non_actionable",
+            payload: json!({
+                "error": {
+                    "code": "finalize_schema_error",
+                    "reason_code": "schema_missing_required_field",
+                    "sub_reason_code": "grounding_not_ready_non_actionable",
+                    "phase_reason_code": "planning.grounding_not_ready_non_actionable",
+                    "message": "`plan.ground_intent` with status=proposed and ready_for_todos=false must include non-empty `questions` or `missing_refs`",
+                    "tool": finalize_tool,
+                    "round": round,
+                    "repair_attempt": attempt,
+                    "max_repair_attempts": max_attempts,
+                    "required_any_of": [
+                        {"questions": "non-empty array"},
+                        {"missing_refs": "non-empty array"}
+                    ],
+                    "examples": {
+                        "good": [
+                            {"status":"proposed","ready_for_todos":false,"questions":[{"id":"inputs.owner","question":"What owner address should be used?"}]},
+                            {"status":"proposed","ready_for_todos":false,"missing_refs":["inputs.token.decimals"]}
+                        ],
+                        "bad": [
+                            {"status":"proposed","ready_for_todos":false},
+                            {"status":"proposed","ready_for_todos":false,"questions":[],"missing_refs":[]}
+                        ]
+                    }
+                }
+            }),
+        });
+    }
+
+    if message.contains("invalid type:") {
+        let expected_bool = message.contains("expected a boolean")
+            || message.contains("expected boolean")
+            || message.contains("expected `bool`");
+        let (sub_reason_code, message_text, expected_type) = if expected_bool {
+            (
+                "invalid_boolean_type",
+                format!(
+                    "`{finalize_tool}` output has a boolean type mismatch; ensure `done` is a JSON boolean (true/false), not a string"
+                ),
+                "boolean",
+            )
+        } else {
+            (
+                "invalid_type",
+                format!(
+                    "`{finalize_tool}` output has one or more schema type mismatches; ensure all finalize fields match JSON schema types"
+                ),
+                "schema-defined",
+            )
+        };
+        return Some(FinalizeSchemaRepairPayload {
+            sub_reason_code,
+            payload: json!({
+                "error": {
+                    "code": "finalize_schema_error",
+                    "reason_code": "schema_invalid_type",
+                    "sub_reason_code": sub_reason_code,
+                    "phase_reason_code": format!("planning.{sub_reason_code}"),
+                    "message": message_text,
+                    "raw_error": message,
+                    "tool": finalize_tool,
+                    "round": round,
+                    "repair_attempt": attempt,
+                    "max_repair_attempts": max_attempts,
+                    "expected_type": expected_type,
+                    "typing_examples": {
+                        "good": [{"done": false}, {"done": true}],
+                        "bad": [{"done": "false"}, {"done": "true"}]
+                    },
+                    "required_fields": ["status", "done"],
+                    "allowed_status": ["proposed", "invalid", "unavailable"]
+                }
+            }),
+        });
+    }
+
+    None
 }
 
 fn plan_check_result_ok(content: &str) -> bool {
@@ -2256,27 +2560,123 @@ fn plan_check_result_ok(content: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn plan_check_has_control_step_candidate_not_found(content: &str) -> bool {
-    let Ok(value) = serde_json::from_str::<Value>(content) else {
-        return false;
+fn plan_check_segment_signature_from_tool_args(arguments: &Value) -> Option<String> {
+    let segment = arguments.get("segment")?;
+    let decoded = decode_plan_sketch_segment_arg(segment).ok()?;
+    plan_sketch_segment_signature(&decoded)
+}
+
+fn finalized_segment_signature(result: &PlannerToolOutput) -> Option<String> {
+    let PlannerToolOutput::SegmentDraft(SegmentDraft::Proposed { segment, .. }) = result else {
+        return None;
     };
+    plan_sketch_segment_signature(segment)
+}
+
+fn plan_sketch_segment_signature(segment: &PlanSketchSegment) -> Option<String> {
+    let value = serde_json::to_value(segment).ok()?;
+    stable_hash_hex(&value, &StableJsonOptions::default()).ok()
+}
+
+fn plan_check_failure_signature(content: &str) -> Option<String> {
+    let value = serde_json::from_str::<Value>(content).ok()?;
+    if value.get("ok").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+    let reason_code = value
+        .get("reason_code")
+        .and_then(Value::as_str)
+        .or_else(|| value.pointer("/error/reason_code").and_then(Value::as_str))
+        .unwrap_or("compile_error");
+    let mut issue_keys = plan_check_issue_summaries(&value)
+        .into_iter()
+        .map(|issue| format!("{}@{}", issue.reason_code, issue.step_id))
+        .collect::<Vec<_>>();
+    issue_keys.sort();
+    issue_keys.dedup();
+    Some(format!("{reason_code}|{}", issue_keys.join(",")))
+}
+
+fn repeated_plan_check_failure_payload(
+    content: &str,
+    streak: u64,
+    threshold: u64,
+    finalize_tool: &str,
+) -> Value {
+    super::tools::check_segment::repeated_plan_check_failure_payload(
+        content,
+        streak,
+        threshold,
+        finalize_tool,
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlanCheckIssueSummary {
+    reason_code: String,
+    step_id: String,
+    message: String,
+    reference: String,
+    path: String,
+    suggested_ref: Option<String>,
+    candidates: Vec<String>,
+}
+
+fn plan_check_issue_summaries(value: &Value) -> Vec<PlanCheckIssueSummary> {
     let issues = value
         .get("issues")
         .and_then(Value::as_array)
+        .or_else(|| value.pointer("/error/issues").and_then(Value::as_array))
         .cloned()
         .unwrap_or_default();
-    issues.iter().any(|issue| {
-        let reference = issue
-            .get("reference")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let message = issue
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        reference == "candidate_not_found"
-            && message.contains("candidate not found for control step")
-    })
+    issues
+        .iter()
+        .map(|item| PlanCheckIssueSummary {
+            reason_code: item
+                .get("gate_reason_code")
+                .and_then(Value::as_str)
+                .or_else(|| item.get("reason_code").and_then(Value::as_str))
+                .unwrap_or("unknown")
+                .to_string(),
+            step_id: item
+                .get("step_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            message: item
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            reference: item
+                .get("reference")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            path: item
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            suggested_ref: item
+                .get("suggested_ref")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            candidates: item
+                .get("candidates")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flat_map(|items| items.iter())
+                .filter_map(Value::as_str)
+                .take(3)
+                .map(str::to_string)
+                .collect::<Vec<_>>(),
+        })
+        .collect::<Vec<_>>()
+}
+
+fn plan_check_has_control_step_candidate_not_found(content: &str) -> bool {
+    super::tools::check_segment::plan_check_has_control_step_candidate_not_found(content)
 }
 
 fn finalized_segment_is_proposed(result: &PlannerToolOutput) -> bool {
@@ -2359,7 +2759,10 @@ fn non_empty_rules(lines: Option<Vec<String>>) -> Option<Vec<String>> {
     (!lines.is_empty()).then_some(lines)
 }
 
-fn coerce_required_scalar_string(field: &str, value: &Value) -> Result<String, RunnerError> {
+pub(super) fn coerce_required_scalar_string(
+    field: &str,
+    value: &Value,
+) -> Result<String, RunnerError> {
     let parsed = match value {
         Value::String(text) => text.trim().to_string(),
         Value::Number(number) => number.to_string(),
@@ -2378,50 +2781,59 @@ fn coerce_required_scalar_string(field: &str, value: &Value) -> Result<String, R
     Ok(parsed)
 }
 
-fn parse_segment_draft(args: SegmentToolArgs) -> Result<SegmentDraft, RunnerError> {
-    match args.status.as_str() {
+pub(super) fn parse_segment_draft(args: SegmentToolArgs) -> Result<SegmentDraft, RunnerError> {
+    let SegmentToolArgs {
+        status,
+        done,
+        segment,
+        summary,
+        cursor_next,
+        issues,
+        error,
+        questions,
+    } = args;
+    match status.as_str() {
         "proposed" => {
-            let segment_raw = args.segment.ok_or_else(|| {
+            let segment_raw = segment.ok_or_else(|| {
                 RunnerError::Llm("proposed segment draft requires `segment`".to_string())
             })?;
             let segment = decode_plan_sketch_segment_arg(&segment_raw)?;
-            let cursor_next = match args.cursor_next {
+            let cursor_next = match cursor_next {
                 Some(cursor_next_raw) => {
                     coerce_required_scalar_string("cursor_next", &cursor_next_raw)?
                 }
                 None => segment.cursor_out.clone(),
             };
             Ok(SegmentDraft::Proposed {
-                summary: args.summary,
+                summary,
                 segment,
                 cursor_next,
-                done: args.done,
-                issues: args.issues,
+                done,
+                issues: issues.into_values(),
             })
         }
         "unavailable" => {
-            let error = args.error.ok_or_else(|| {
+            let error = error.ok_or_else(|| {
                 RunnerError::Llm("unavailable segment draft requires `error`".to_string())
             })?;
-            let questions =
-                extract_missing_input_questions(error.details.as_ref(), args.questions.as_slice());
+            let questions = extract_missing_input_questions(error.details.as_ref(), &questions);
             Ok(SegmentDraft::Unavailable {
                 reason_code: error.reason_code,
                 message: error.message,
-                done: args.done,
-                issues: args.issues,
+                done,
+                issues: issues.into_values(),
                 questions,
             })
         }
         "invalid" => {
-            let error = args.error.ok_or_else(|| {
+            let error = error.ok_or_else(|| {
                 RunnerError::Llm("invalid segment draft requires `error`".to_string())
             })?;
             Ok(SegmentDraft::Invalid {
                 reason_code: error.reason_code,
                 message: error.message,
-                done: args.done,
-                issues: args.issues,
+                done,
+                issues: issues.into_values(),
             })
         }
         other => Err(RunnerError::Llm(format!(
@@ -2430,41 +2842,48 @@ fn parse_segment_draft(args: SegmentToolArgs) -> Result<SegmentDraft, RunnerErro
     }
 }
 
-fn parse_todo_draft(args: TodoToolArgs) -> Result<TodoDraft, RunnerError> {
-    match args.status.as_str() {
+pub(super) fn parse_todo_draft(args: TodoToolArgs) -> Result<TodoDraft, RunnerError> {
+    let TodoToolArgs {
+        status,
+        todos,
+        summary,
+        issues,
+        error,
+        questions,
+    } = args;
+    match status.as_str() {
         "proposed" => {
-            if args.todos.is_empty() {
+            if todos.is_empty() {
                 return Err(RunnerError::Llm(
                     "proposed todo draft requires non-empty `todos`".to_string(),
                 ));
             }
             Ok(TodoDraft::Proposed {
-                summary: args.summary,
-                todos: args.todos,
-                issues: args.issues,
+                summary,
+                todos,
+                issues: issues.into_values(),
             })
         }
         "unavailable" => {
-            let error = args.error.ok_or_else(|| {
+            let error = error.ok_or_else(|| {
                 RunnerError::Llm("unavailable todo draft requires `error`".to_string())
             })?;
-            let questions =
-                extract_missing_input_questions(error.details.as_ref(), args.questions.as_slice());
+            let questions = extract_missing_input_questions(error.details.as_ref(), &questions);
             Ok(TodoDraft::Unavailable {
                 reason_code: error.reason_code,
                 message: error.message,
-                issues: args.issues,
+                issues: issues.into_values(),
                 questions,
             })
         }
         "invalid" => {
-            let error = args.error.ok_or_else(|| {
+            let error = error.ok_or_else(|| {
                 RunnerError::Llm("invalid todo draft requires `error`".to_string())
             })?;
             Ok(TodoDraft::Invalid {
                 reason_code: error.reason_code,
                 message: error.message,
-                issues: args.issues,
+                issues: issues.into_values(),
             })
         }
         other => Err(RunnerError::Llm(format!(
@@ -2473,43 +2892,68 @@ fn parse_todo_draft(args: TodoToolArgs) -> Result<TodoDraft, RunnerError> {
     }
 }
 
-fn parse_grounding_draft(args: GroundingToolArgs) -> Result<IntentGroundingDraft, RunnerError> {
-    match args.status.as_str() {
+pub(super) fn parse_grounding_draft(
+    args: GroundingToolArgs,
+) -> Result<IntentGroundingDraft, RunnerError> {
+    let GroundingToolArgs {
+        status,
+        summary,
+        ready_for_todos,
+        resolved_inputs,
+        intent_facts,
+        confidence,
+        issues,
+        error,
+        questions,
+        missing_refs,
+    } = args;
+    match status.as_str() {
         "proposed" => {
-            let inferred_ready = args
-                .ready_for_todos
-                .unwrap_or_else(|| args.questions.is_empty() && !args.resolved_inputs.is_empty());
+            let issues = issues.into_values();
+            let questions = questions.into_values();
+            let has_actionable_missing_refs = missing_refs
+                .iter()
+                .any(|missing_ref| !missing_ref.trim().is_empty());
+            if ready_for_todos == Some(false)
+                && questions.is_empty()
+                && !has_actionable_missing_refs
+            {
+                return Err(RunnerError::Llm(
+                    "invalid plan.ground_intent args: status=proposed with ready_for_todos=false requires non-empty `questions` or `missing_refs`".to_string(),
+                ));
+            }
+            let inferred_ready = ready_for_todos
+                .unwrap_or_else(|| questions.is_empty() && !resolved_inputs.is_empty());
             Ok(IntentGroundingDraft::Proposed {
-                summary: args.summary,
+                summary,
                 ready_for_todos: inferred_ready,
-                resolved_inputs: args.resolved_inputs,
-                intent_facts: args.intent_facts,
-                confidence: args.confidence,
-                issues: args.issues,
-                questions: args.questions,
+                resolved_inputs,
+                intent_facts,
+                confidence,
+                issues,
+                questions,
             })
         }
         "unavailable" => {
-            let error = args.error.ok_or_else(|| {
+            let error = error.ok_or_else(|| {
                 RunnerError::Llm("unavailable grounding draft requires `error`".to_string())
             })?;
-            let questions =
-                extract_missing_input_questions(error.details.as_ref(), args.questions.as_slice());
+            let questions = extract_missing_input_questions(error.details.as_ref(), &questions);
             Ok(IntentGroundingDraft::Unavailable {
                 reason_code: error.reason_code,
                 message: error.message,
-                issues: args.issues,
+                issues: issues.into_values(),
                 questions,
             })
         }
         "invalid" => {
-            let error = args.error.ok_or_else(|| {
+            let error = error.ok_or_else(|| {
                 RunnerError::Llm("invalid grounding draft requires `error`".to_string())
             })?;
             Ok(IntentGroundingDraft::Invalid {
                 reason_code: error.reason_code,
                 message: error.message,
-                issues: args.issues,
+                issues: issues.into_values(),
             })
         }
         other => Err(RunnerError::Llm(format!(
@@ -2518,44 +2962,189 @@ fn parse_grounding_draft(args: GroundingToolArgs) -> Result<IntentGroundingDraft
     }
 }
 
-fn extract_missing_input_questions(details: Option<&Value>, fallback: &[Value]) -> Vec<Value> {
-    if !fallback.is_empty() {
-        return fallback.to_vec();
-    }
-    let Some(raw_questions) = details
-        .and_then(|value| value.get("questions"))
-        .and_then(Value::as_array)
-    else {
-        return Vec::new();
+pub(super) fn decode_grounding_tool_args(
+    raw_arguments: Value,
+    tool_name: &str,
+) -> Result<GroundingToolArgs, RunnerError> {
+    let normalized = normalize_grounding_tool_arguments(raw_arguments);
+    decode_planner_finalize_tool_args(normalized, tool_name)
+}
+
+pub(super) fn decode_segment_tool_args(
+    raw_arguments: Value,
+    tool_name: &str,
+) -> Result<SegmentToolArgs, RunnerError> {
+    decode_planner_finalize_tool_args(raw_arguments, tool_name)
+}
+
+pub(super) fn decode_todo_tool_args(
+    raw_arguments: Value,
+    tool_name: &str,
+) -> Result<TodoToolArgs, RunnerError> {
+    decode_planner_finalize_tool_args(raw_arguments, tool_name)
+}
+
+fn decode_planner_finalize_tool_args<T>(
+    raw_arguments: Value,
+    tool_name: &str,
+) -> Result<T, RunnerError>
+where
+    T: DeserializeOwned,
+{
+    serde_json::from_value(raw_arguments)
+        .map_err(|error| RunnerError::Llm(format!("invalid {tool_name} args: {error}")))
+}
+
+fn normalize_grounding_tool_arguments(raw_arguments: Value) -> Value {
+    let Some(object) = raw_arguments.as_object() else {
+        return raw_arguments;
     };
-    raw_questions
+    let mut out = object.clone();
+
+    // Some providers/models collapse the whole payload into a JSON string under
+    // `intent_facts`; unpack it when that string looks like a full grounding payload.
+    if let Some(parsed_intent_facts) = out
+        .get("intent_facts")
+        .and_then(parse_stringified_json_value)
+    {
+        if let Some(payload) = parsed_intent_facts.as_object() {
+            let looks_like_payload = payload.contains_key("status")
+                || payload.contains_key("ready_for_todos")
+                || payload.contains_key("resolved_inputs")
+                || payload.contains_key("intent_facts");
+            if looks_like_payload {
+                for key in [
+                    "status",
+                    "summary",
+                    "ready_for_todos",
+                    "resolved_inputs",
+                    "intent_facts",
+                    "confidence",
+                    "issues",
+                    "error",
+                    "questions",
+                ] {
+                    if !out.contains_key(key) {
+                        if let Some(value) = payload.get(key) {
+                            out.insert(key.to_string(), value.clone());
+                        }
+                    }
+                }
+                if let Some(intent_facts) = payload.get("intent_facts") {
+                    out.insert("intent_facts".to_string(), intent_facts.clone());
+                }
+            } else {
+                out.insert("intent_facts".to_string(), parsed_intent_facts);
+            }
+        } else {
+            out.insert("intent_facts".to_string(), parsed_intent_facts);
+        }
+    }
+
+    coerce_json_string_field(&mut out, "resolved_inputs");
+    coerce_json_string_field(&mut out, "intent_facts");
+    coerce_json_string_field(&mut out, "confidence");
+    coerce_json_string_field(&mut out, "issues");
+    coerce_json_string_field(&mut out, "questions");
+    coerce_json_string_field(&mut out, "error");
+    coerce_bool_string_field(&mut out, "ready_for_todos");
+
+    Value::Object(out)
+}
+
+fn parse_stringified_json_value(raw: &Value) -> Option<Value> {
+    raw.as_str()
+        .and_then(|text| serde_json::from_str::<Value>(text).ok())
+}
+
+fn coerce_json_string_field(target: &mut serde_json::Map<String, Value>, key: &str) {
+    let Some(raw) = target.get(key).cloned() else {
+        return;
+    };
+    let Some(parsed) = parse_stringified_json_value(&raw) else {
+        return;
+    };
+    target.insert(key.to_string(), parsed);
+}
+
+fn coerce_bool_string_field(target: &mut serde_json::Map<String, Value>, key: &str) {
+    let Some(Value::String(raw)) = target.get(key) else {
+        return;
+    };
+    let normalized = raw.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "true" | "1" => {
+            target.insert(key.to_string(), Value::Bool(true));
+        }
+        "false" | "0" => {
+            target.insert(key.to_string(), Value::Bool(false));
+        }
+        _ => {}
+    }
+}
+
+fn extract_missing_input_questions(
+    details: Option<&PlannerErrorDetails>,
+    fallback: &PlannerQuestionList,
+) -> Vec<Value> {
+    if !fallback.is_empty() {
+        return fallback.to_values();
+    }
+    details
+        .map(PlannerErrorDetails::missing_input_questions)
+        .unwrap_or_default()
         .iter()
-        .filter_map(|item| {
-            serde_json::from_value::<MissingInputQuestion>(item.clone())
-                .ok()
-                .and_then(|question| serde_json::to_value(question).ok())
-        })
+        .filter_map(|question| serde_json::to_value(question).ok())
         .collect::<Vec<_>>()
 }
 
-fn decode_plan_sketch_segment_arg(raw: &Value) -> Result<PlanSketchSegment, RunnerError> {
-    if raw.is_string() {
-        return Err(RunnerError::Llm(
-            "proposed segment draft `segment` must be a JSON object (stringified JSON is not allowed)"
-                .to_string(),
-        ));
-    }
-    if let Some(details) = missing_step_candidate_ref_diagnostics(raw) {
+pub(super) fn decode_plan_sketch_segment_arg(
+    raw: &Value,
+) -> Result<PlanSketchSegment, RunnerError> {
+    let mut value = if let Some(raw_text) = raw.as_str() {
+        let parsed: Value = serde_json::from_str(raw_text).map_err(|error| {
+            RunnerError::Llm(format!(
+                "proposed segment draft `segment` string must be valid JSON object text: {error}"
+            ))
+        })?;
+        if !parsed.is_object() {
+            return Err(RunnerError::Llm(
+                "proposed segment draft `segment` must decode to a JSON object".to_string(),
+            ));
+        }
+        parsed
+    } else {
+        raw.clone()
+    };
+    if let Some(details) = missing_step_candidate_ref_diagnostics(&value) {
         return Err(RunnerError::Llm(format!(
             "proposed segment draft `segment` is invalid: steps missing required `candidate_ref`: {details}. Only query/action steps require candidate_ref."
         )));
     }
-    let value = raw.clone();
+    ensure_step_inputs_field(&mut value);
     serde_json::from_value::<PlanSketchSegment>(value).map_err(|error| {
         RunnerError::Llm(format!(
             "proposed segment draft `segment` must be a valid PlanSketchSegment: {error}"
         ))
     })
+}
+
+fn ensure_step_inputs_field(raw: &mut Value) {
+    let Some(steps) = raw
+        .as_object_mut()
+        .and_then(|segment| segment.get_mut("steps"))
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    for step in steps {
+        let Some(step_obj) = step.as_object_mut() else {
+            continue;
+        };
+        if !step_obj.contains_key("inputs") {
+            step_obj.insert("inputs".to_string(), Value::Object(serde_json::Map::new()));
+        }
+    }
 }
 
 fn missing_step_candidate_ref_diagnostics(raw: &Value) -> Option<String> {
@@ -2612,7 +3201,18 @@ fn segmented_planner_tools() -> Vec<ToolSpec> {
                 .to_string(),
             input_schema: json!({
               "type":"object",
-              "properties":{},
+              "properties":{
+                "chain":{"type":"string"},
+                "protocol":{"type":"string"},
+                "filter":{
+                  "type":"object",
+                  "properties":{
+                    "chain":{"type":"string"},
+                    "protocol":{"type":"string"}
+                  },
+                  "additionalProperties":false
+                }
+              },
               "additionalProperties":false
             }),
         },
@@ -2642,6 +3242,12 @@ fn segmented_planner_tools() -> Vec<ToolSpec> {
               },
               "additionalProperties":false
             }),
+        },
+        ToolSpec {
+            name: "catalog.resolve_missing_facts".to_string(),
+            description: "Resolve missing input facts to query candidates by protocol query returns."
+                .to_string(),
+            input_schema: catalog_resolve_missing_facts_tool_schema(),
         },
         ToolSpec {
             name: "guide.get".to_string(),
@@ -2740,6 +3346,22 @@ fn plan_propose_todos_tool_schema() -> Value {
     agent_planning_tools_payload_schema("todos_payload")
 }
 
+fn catalog_resolve_missing_facts_tool_schema() -> Value {
+    json!({
+      "type":"object",
+      "properties":{
+        "missing_refs":{
+          "type":"array",
+          "items":{"type":"string","minLength":1},
+          "minItems":1
+        },
+        "limit_per_ref":{"type":"integer","minimum":1,"maximum":8}
+      },
+      "required":["missing_refs"],
+      "additionalProperties":false
+    })
+}
+
 fn plan_ground_intent_tool_schema() -> Value {
     json!({
       "type":"object",
@@ -2758,12 +3380,22 @@ fn plan_ground_intent_tool_schema() -> Value {
         "confidence":{"type":"object","additionalProperties":{"type":"integer","minimum":0,"maximum":100}},
         "issues":{"type":"array","items":{"type":"object"}},
         "questions":{"type":"array","items":{"$ref":"#/definitions/missing_input_question"}},
+        "missing_refs":{"type":"array","items":{"type":"string","minLength":1},"minItems":1},
         "error":{"$ref":"#/definitions/error"}
       },
       "allOf":[
         {
           "if":{"properties":{"status":{"const":"proposed"}},"required":["status"]},
           "then":{"required":["ready_for_todos"]}
+        },
+        {
+          "if":{"properties":{"status":{"const":"proposed"},"ready_for_todos":{"const":false}},"required":["status","ready_for_todos"]},
+          "then":{
+            "anyOf":[
+              {"required":["questions"],"properties":{"questions":{"minItems":1}}},
+              {"required":["missing_refs"],"properties":{"missing_refs":{"minItems":1}}}
+            ]
+          }
         },
         {
           "if":{"properties":{"status":{"enum":["unavailable","invalid"]}},"required":["status"]},
@@ -2861,8 +3493,10 @@ fn render_begin_prompt_with_patch(request: &SegmentBeginRequest, patch: Option<&
         "begin_contract": {
             "required_fields": ["session_id", "snapshot_hash", "cursor", "limits.max_rounds", "limits.max_segments"],
             "cursor_type": "string_or_number",
+            "snapshot_hash_rule": "must echo the provided snapshot_hash exactly",
             "note": "cursor will be normalized to string by runner"
         },
+        "snapshot_hash": request.snapshot_hash,
         "pack_snapshot_hash": request.pack_snapshot_hash,
         "catalog_hash": request.catalog_hash,
         "chain_scope": request.chain_scope,
@@ -2917,8 +3551,35 @@ fn render_grounding_prompt_with_patch(
                 "Extract deterministic initial inputs/facts for downstream planning.",
                 "Use high confidence only for direct grounding into resolved_inputs.",
                 "For low-confidence or conflicting fields, provide questions and set ready_for_todos=false.",
+                "When status=proposed and ready_for_todos=false, output must include non-empty questions or missing_refs.",
                 "When required data is missing, use unavailable + missing_required_input + questions."
-            ]
+            ],
+            "actionability_examples": {
+                "good": [
+                    {
+                        "status":"proposed",
+                        "ready_for_todos":false,
+                        "questions":[{"id":"inputs.owner","question":"What owner address should be used?"}]
+                    },
+                    {
+                        "status":"proposed",
+                        "ready_for_todos":false,
+                        "missing_refs":["inputs.token.decimals"]
+                    }
+                ],
+                "bad": [
+                    {
+                        "status":"proposed",
+                        "ready_for_todos":false
+                    },
+                    {
+                        "status":"proposed",
+                        "ready_for_todos":false,
+                        "questions":[],
+                        "missing_refs":[]
+                    }
+                ]
+            }
         },
         "session_id": request.session.session_id,
         "snapshot_hash": request.session.snapshot_hash,
@@ -2951,10 +3612,11 @@ fn render_segment_prompt_with_patch(
             "order": ["shape", "ref", "slot", "semantic"],
             "rules": [
                 "Return exactly one finalize tool call matching the tool.",
-                "Use status=proposed and include a valid segment object (do not stringify segment JSON).",
+                "Use status=proposed and include a valid segment object; stringified JSON object text is tolerated but object form is preferred.",
                 "Keep segment_id/cursor_in/cursor_out and steps as close as possible to your last attempt; only fix missing/wrong fields and types.",
                 "If previous_error.last_failed_finalize exists, treat it as baseline draft and patch minimally to satisfy schema/refs/slots.",
                 "Fix unknown_input_ref and missing_required_input slot wiring before semantic rewrites.",
+                "For unknown_input_ref repair, token/address params should map to address-like refs (for example *.address); *.decimals refs cannot substitute token/address slots.",
                 "Never output legacy branch-tree keys (if_true/if_false/then/else/children); branch is encoded by normal flat steps + when/depends_on."
             ]
         },
@@ -2988,9 +3650,15 @@ fn render_segment_prompt_with_patch(
             "required_pattern": "query -> assert|branch -> action",
             "requirements": [
                 "action.depends_on must include at least one assert|branch gate step",
+                "gate(assert|branch).depends_on must include query step ids in the same segment (directly or via gate->gate chain)",
                 "gate step must be backed by query facts in the same segment",
-                "if token decimals are missing, add decimals query (erc20/decimals or equivalent) before write, or return missing_required_input"
-            ]
+                "if facts are missing, call catalog.resolve_missing_facts with missing_refs and add matched query steps (e.g. decimals query) before write; if none available return missing_required_input"
+            ],
+            "minimal_template": {
+                "query_step": {"id":"q_balance","kind":"query","candidate_ref":"...","inputs":{}},
+                "gate_step": {"id":"g_balance_ok","kind":"assert","depends_on":["q_balance"],"inputs":{},"when":{"cel":"nodes.q_balance.outputs.balance > inputs.threshold"}},
+                "action_step": {"id":"a_transfer","kind":"action","candidate_ref":"...","depends_on":["g_balance_ok"],"inputs":{}}
+            }
         },
         "schema_lookup_contract": {
             "rule": "If you are unsure about schema fields or CEL/ValueRef usage, call guide.get before finalizing.",
@@ -2999,14 +3667,53 @@ fn render_segment_prompt_with_patch(
                 {"schema":"ais-agent-intent/0.0.1"},
                 {"topic":"cel"},
                 {"topic":"valueref"}
+            ],
+            "typing_examples": {
+                "good": [
+                    {"schema":"ais-plan-sketch/0.1.0"},
+                    {"schema":"ais-plan-sketch/0.1.0","full":true},
+                    {"topic":"cel"}
+                ],
+                "bad": [
+                    {"schema":{"id":"ais-plan-sketch/0.1.0"}},
+                    {"topic":{"name":"cel"}},
+                    {"schema":"ais-plan-sketch/0.1.0","full":"true"}
+                ]
+            }
+        },
+        "tool_call_typing_contract": {
+            "rule": "All tool arguments/finalize payloads must use strict JSON schema types; do not quote booleans or numbers.",
+            "examples": {
+                "good": [{"full": true}, {"done": false}, {"limit": 5}, {"cursor": "0"}],
+                "bad": [{"full": "true"}, {"done": "false"}, {"limit": "5"}]
+            }
+        },
+        "self_check_before_tool_or_finalize": {
+            "checklist": [
+                "Tool is allowed in current phase and finalize tool (if any) is last.",
+                "Arguments include required fields and avoid unsupported keys.",
+                "JSON types exactly match schema (bool/number are not quoted strings).",
+                "guide.get uses canonical single-kind shape: either {schema:\"...\"} or {topic:\"...\"}.",
+                "For schema lookups, use full:true only when digest is insufficient."
             ]
         },
         "check_segment_contract": {
-            "rule": "Before finalizing proposed/revised segment, you must call plan.check_segment and only finalize when result.ok=true."
+            "rule": "Before finalizing proposed/revised segment, you must call plan.check_segment and only finalize when result.ok=true.",
+            "segment_binding_rule": "If you change the segment after a successful check, you must run plan.check_segment again for the updated segment."
         },
         "depends_on_contract": {
             "rule": "depends_on items must reference known step ids in the same segment",
             "examples": ["q_native_balance", "q_token_balance"]
+        },
+        "input_ref_semantic_contract": {
+            "rule": "For unknown_input_ref repair, preserve slot semantics: token/address params map to address-like refs (for example *.address); *.decimals refs are only for decimal slots.",
+            "negative_examples": [
+                {
+                    "param": "token",
+                    "expected_ref_like": "*.address",
+                    "invalid_ref": "inputs.token.decimals"
+                }
+            ]
         },
         "failure_contract": {
             "unavailable_or_invalid": {
@@ -3091,10 +3798,13 @@ fn merge_json_patch(base: &mut Value, patch: &Value) {
     }
 }
 
-fn candidate_snapshot(candidate_context: Option<&CandidateContext>) -> Value {
+pub(super) fn candidate_snapshot(
+    candidate_context: Option<&CandidateContext>,
+    filter: Option<ListCandidatesFilterArgs>,
+) -> Value {
     candidate_context
         .map(|context| {
-            let grouped = grouped_candidate_snapshot(context);
+            let grouped = grouped_candidate_snapshot(context, filter.as_ref());
             let sanitized = sanitize_for_llm_payload(&grouped);
             compact_json_with_options(
                 &sanitized,
@@ -3113,7 +3823,10 @@ fn candidate_snapshot(candidate_context: Option<&CandidateContext>) -> Value {
         })
 }
 
-fn grouped_candidate_snapshot(context: &CandidateContext) -> Value {
+fn grouped_candidate_snapshot(
+    context: &CandidateContext,
+    filter: Option<&ListCandidatesFilterArgs>,
+) -> Value {
     let actions = context
         .index_candidates
         .get("actions")
@@ -3194,12 +3907,28 @@ fn grouped_candidate_snapshot(context: &CandidateContext) -> Value {
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| reference.split('/').next().unwrap_or_default())
             .to_string();
+        if let Some(protocol_filter) = filter.and_then(|item| item.protocol.as_ref()) {
+            if !protocol
+                .to_ascii_lowercase()
+                .contains(protocol_filter.as_str())
+            {
+                return;
+            }
+        }
         let chains = ref_chains
             .get(reference)
             .cloned()
             .unwrap_or_default()
             .into_iter()
             .collect::<Vec<_>>();
+        if let Some(chain_filter) = filter.and_then(|item| item.chain.as_ref()) {
+            let matches_chain = chains
+                .iter()
+                .any(|chain| list_chain_filter_matches(chain_filter, chain));
+            if !matches_chain {
+                return;
+            }
+        }
 
         let entry = grouped.entry(protocol.clone()).or_insert_with(|| {
             json!({
@@ -3254,12 +3983,37 @@ fn grouped_candidate_snapshot(context: &CandidateContext) -> Value {
         "hash": context.index_candidates.get("hash").cloned(),
         "catalog_schema": context.index_candidates.get("catalog_schema").cloned(),
         "catalog_hash": context.index_candidates.get("catalog_hash").cloned(),
+        "filters": {
+            "chain": filter.and_then(|item| item.chain.clone()),
+            "protocol": filter.and_then(|item| item.protocol.clone()),
+        },
         "protocols": grouped.into_values().collect::<Vec<_>>(),
         "execution_plugins": execution_plugins,
     })
 }
 
-fn is_control_semantics_query(query: Option<&str>) -> bool {
+fn list_chain_filter_matches(filter: &str, candidate_chain: &str) -> bool {
+    let normalized_filter = filter.trim().to_ascii_lowercase();
+    let normalized_candidate = candidate_chain.trim().to_ascii_lowercase();
+    if normalized_filter.is_empty() {
+        return true;
+    }
+    if normalized_filter == "*" || normalized_candidate == "*" {
+        return true;
+    }
+    if normalized_filter == normalized_candidate {
+        return true;
+    }
+    if let Some(prefix) = normalized_filter.strip_suffix('*') {
+        return normalized_candidate.starts_with(prefix);
+    }
+    if let Some(prefix) = normalized_candidate.strip_suffix('*') {
+        return normalized_filter.starts_with(prefix);
+    }
+    false
+}
+
+pub(super) fn is_control_semantics_query(query: Option<&str>) -> bool {
     let Some(raw_query) = query.map(str::trim).filter(|value| !value.is_empty()) else {
         return false;
     };
@@ -3285,7 +4039,7 @@ fn is_control_semantics_query(query: Option<&str>) -> bool {
         .any(|term| tokens.iter().any(|token| token == term))
 }
 
-fn control_semantics_search_hint_payload(
+pub(super) fn control_semantics_search_hint_payload(
     query: Option<String>,
     kind: Option<String>,
     chain: Option<String>,
@@ -3479,6 +4233,34 @@ fn summarize_tool_message(tool_name: &str, content: &str) -> String {
                 format!("summary(total={total},returned={returned},hint={hint})")
             }
         }
+        ("catalog.resolve_missing_facts", Some(value)) => {
+            let resolved = value
+                .get("resolved")
+                .and_then(Value::as_array)
+                .map(|items| items.len())
+                .unwrap_or(0);
+            let unresolved = value
+                .get("unresolved_refs")
+                .and_then(Value::as_array)
+                .map(|items| items.len())
+                .unwrap_or(0);
+            let candidates = value
+                .get("resolved")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .map(|item| {
+                            item.get("query_candidates")
+                                .and_then(Value::as_array)
+                                .map(|candidates| candidates.len())
+                                .unwrap_or(0)
+                        })
+                        .sum::<usize>()
+                })
+                .unwrap_or(0);
+            format!("summary(resolved={resolved},unresolved={unresolved},candidates={candidates})")
+        }
         ("guide.get", Some(value)) => {
             let kind = value.get("kind").and_then(Value::as_str).unwrap_or("-");
             let has_error = value.get("error").is_some();
@@ -3527,2070 +4309,5 @@ fn estimate_tokens_from_json<T: Serialize>(value: &T) -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use ais_llm::{CompleteWithToolsResponse, ScriptedLlmProvider};
-    use std::collections::BTreeMap;
-    use std::collections::BTreeSet;
-
-    fn large_catalog_candidate_context(
-        action_count: usize,
-        query_count: usize,
-    ) -> CandidateContext {
-        let mut detail_by_ref = BTreeMap::<String, Value>::new();
-        let mut actions = Vec::<Value>::with_capacity(action_count);
-        let mut queries = Vec::<Value>::with_capacity(query_count);
-        let long_desc = "y".repeat(700);
-
-        for index in 0..action_count {
-            let reference = format!("demo@0.0.1/action-{index}");
-            let action = json!({
-                "ref": reference,
-                "id": format!("action-{index}"),
-                "description": long_desc.as_str(),
-                "params": [{"name":"amount","type":"token_amount","required":true}],
-                "execution_types": ["evm_call"],
-                "execution_chains": ["eip155:*"]
-            });
-            detail_by_ref.insert(reference.clone(), action.clone());
-            actions.push(action);
-        }
-        for index in 0..query_count {
-            let reference = format!("demo@0.0.1/query-{index}");
-            let query = json!({
-                "ref": reference,
-                "id": format!("query-{index}"),
-                "description": long_desc.as_str(),
-                "params": [{"name":"owner","type":"address","required":true}],
-                "returns": [{"name":"balance","type":"uint256"}],
-                "execution_types": ["evm_read"],
-                "execution_chains": ["eip155:*"]
-            });
-            detail_by_ref.insert(reference.clone(), query.clone());
-            queries.push(query);
-        }
-
-        let index_actions = actions
-            .iter()
-            .map(|action| {
-                json!({
-                    "kind":"action",
-                    "schema_name":"demo@0.0.1",
-                    "name": action.get("id").and_then(Value::as_str).unwrap_or_default(),
-                    "ref": action.get("ref").and_then(Value::as_str).unwrap_or_default()
-                })
-            })
-            .collect::<Vec<_>>();
-        let index_queries = queries
-            .iter()
-            .map(|query| {
-                json!({
-                    "kind":"query",
-                    "schema_name":"demo@0.0.1",
-                    "name": query.get("id").and_then(Value::as_str).unwrap_or_default(),
-                    "ref": query.get("ref").and_then(Value::as_str).unwrap_or_default()
-                })
-            })
-            .collect::<Vec<_>>();
-        let executable_actions = actions.clone();
-        let executable_queries = queries.clone();
-
-        CandidateContext {
-            index_candidates: json!({
-                "schema":"ais-executable-candidates/0.0.1",
-                "level":"name_only",
-                "hash":"x",
-                "catalog_schema":"ais-catalog/0.0.1",
-                "catalog_hash":"y",
-                "actions": index_actions,
-                "queries": index_queries,
-                "execution_plugins":[{"type":"evm_call","chain":"eip155:1"}]
-            }),
-            detail_by_ref,
-            executable_candidates: ais_sdk::ExecutableCandidates {
-                schema: "ais-executable-candidates/0.0.1".to_string(),
-                created_at: None,
-                hash: "x".to_string(),
-                catalog_schema: "ais-catalog/0.0.1".to_string(),
-                catalog_hash: "y".to_string(),
-                pack: None,
-                chain_scope: None,
-                actions: executable_actions,
-                queries: executable_queries,
-                execution_plugins: vec![],
-            },
-            protocols: vec![],
-        }
-    }
-
-    #[test]
-    fn segmented_planner_begin_session_decodes_tool_payload() {
-        let provider = ScriptedLlmProvider::from_responses(vec![Ok(CompleteWithToolsResponse {
-            assistant_content: Some("begin".to_string()),
-            tool_calls: vec![ToolCall {
-                id: "tool-1".to_string(),
-                name: "plan.begin".to_string(),
-                arguments: json!({
-                    "session_id":"sess-1",
-                    "snapshot_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                    "cursor":"cursor-0",
-                    "limits":{"max_rounds":4,"max_segments":3}
-                }),
-            }],
-        })]);
-        let mut planner = LlmSegmentedIntentPlanner::new(provider);
-        let session = planner
-            .begin_session(SegmentBeginRequest {
-                intent: "check and transfer".to_string(),
-                pack_snapshot_hash:
-                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
-                catalog_hash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-                    .to_string(),
-                chain_scope: vec!["eip155:1".to_string()],
-            })
-            .expect("must decode begin session");
-        assert_eq!(session.session_id, "sess-1");
-        assert_eq!(session.cursor, "cursor-0");
-        assert_eq!(session.max_rounds, 4);
-        assert_eq!(session.max_segments, 3);
-    }
-
-    #[test]
-    fn segmented_planner_begin_session_coerces_numeric_cursor() {
-        let provider = ScriptedLlmProvider::from_responses(vec![Ok(CompleteWithToolsResponse {
-            assistant_content: Some("begin".to_string()),
-            tool_calls: vec![ToolCall {
-                id: "tool-1".to_string(),
-                name: "plan.begin".to_string(),
-                arguments: json!({
-                    "session_id":"sess-1",
-                    "snapshot_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                    "cursor":0,
-                    "limits":{"max_rounds":4,"max_segments":3}
-                }),
-            }],
-        })]);
-        let mut planner = LlmSegmentedIntentPlanner::new(provider);
-        let session = planner
-            .begin_session(SegmentBeginRequest {
-                intent: "check and transfer".to_string(),
-                pack_snapshot_hash:
-                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
-                catalog_hash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-                    .to_string(),
-                chain_scope: vec!["eip155:1".to_string()],
-            })
-            .expect("must decode begin session");
-        assert_eq!(session.cursor, "0");
-    }
-
-    #[test]
-    fn segmented_planner_propose_segment_roundtrip() {
-        let provider = ScriptedLlmProvider::from_responses(vec![
-            Ok(CompleteWithToolsResponse {
-                assistant_content: Some("list".to_string()),
-                tool_calls: vec![ToolCall {
-                    id: "tool-1".to_string(),
-                    name: "list_candidates".to_string(),
-                    arguments: json!({}),
-                }],
-            }),
-            Ok(CompleteWithToolsResponse {
-                assistant_content: Some("propose".to_string()),
-                tool_calls: vec![ToolCall {
-                    id: "tool-2".to_string(),
-                    name: "plan.propose_segment".to_string(),
-                    arguments: json!({
-                        "status":"proposed",
-                        "done":false,
-                        "cursor_next":"cursor-1",
-                        "segment":{
-                            "segment_id":"seg-1",
-                            "cursor_in":"cursor-0",
-                            "cursor_out":"cursor-1",
-                            "done":false,
-                            "steps":[{
-                                "id":"q1",
-                                "kind":"query",
-                                "candidate_ref":"evm-native-utils@0.0.1/native-balance",
-                                "inputs":{"addr":"0x1111111111111111111111111111111111111111"}
-                            }]
-                        }
-                    }),
-                }],
-            }),
-        ]);
-        let mut planner = LlmSegmentedIntentPlanner::new(provider)
-            .with_candidate_context(Some(CandidateContext::default()));
-        let draft = planner
-            .propose_segment(SegmentPlanningRequest {
-                intent: "read balance".to_string(),
-                session: SegmentPlanningSession {
-                    session_id: "sess-1".to_string(),
-                    snapshot_hash:
-                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                            .to_string(),
-                    cursor: "cursor-0".to_string(),
-                    max_rounds: 4,
-                    max_segments: 3,
-                },
-                state_summary: None,
-                previous_error: None,
-                last_segment: None,
-            })
-            .expect("must decode proposed segment");
-        match draft {
-            SegmentDraft::Proposed {
-                segment,
-                cursor_next,
-                done,
-                ..
-            } => {
-                assert_eq!(segment.segment_id, "seg-1");
-                assert_eq!(cursor_next, "cursor-1");
-                assert!(!done);
-            }
-            _ => panic!("expected proposed draft"),
-        }
-    }
-
-    #[test]
-    fn segmented_planner_propose_segment_rejects_stringified_segment_json() {
-        let provider = ScriptedLlmProvider::from_responses(vec![Ok(CompleteWithToolsResponse {
-            assistant_content: Some("propose".to_string()),
-            tool_calls: vec![ToolCall {
-                id: "tool-2".to_string(),
-                name: "plan.propose_segment".to_string(),
-                arguments: json!({
-                    "status":"proposed",
-                    "done":false,
-                    "cursor_next":1,
-                    "segment": serde_json::to_string(&json!({
-                        "segment_id":"seg-1",
-                        "cursor_in":"cursor-0",
-                        "cursor_out":"cursor-1",
-                        "done":false,
-                        "steps":[{
-                            "id":"q1",
-                            "kind":"query",
-                            "candidate_ref":"evm-native-utils@0.0.1/native-balance",
-                            "inputs":{"addr":"0x1111111111111111111111111111111111111111"}
-                        }]
-                    }))
-                    .expect("segment json string")
-                }),
-            }],
-        })]);
-        let mut planner = LlmSegmentedIntentPlanner::new(provider)
-            .with_candidate_context(Some(CandidateContext::default()));
-        let error = planner
-            .propose_segment(SegmentPlanningRequest {
-                intent: "read balance".to_string(),
-                session: SegmentPlanningSession {
-                    session_id: "sess-1".to_string(),
-                    snapshot_hash:
-                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                            .to_string(),
-                    cursor: "cursor-0".to_string(),
-                    max_rounds: 4,
-                    max_segments: 3,
-                },
-                state_summary: None,
-                previous_error: None,
-                last_segment: None,
-            })
-            .expect_err("stringified segment must be rejected");
-        assert!(error
-            .to_string()
-            .contains("must be a JSON object (stringified JSON is not allowed)"));
-    }
-
-    #[test]
-    fn segmented_planner_propose_segment_uses_cursor_out_when_cursor_next_missing() {
-        let provider = ScriptedLlmProvider::from_responses(vec![Ok(CompleteWithToolsResponse {
-            assistant_content: Some("propose".to_string()),
-            tool_calls: vec![ToolCall {
-                id: "tool-2".to_string(),
-                name: "plan.propose_segment".to_string(),
-                arguments: json!({
-                    "status":"proposed",
-                    "done":false,
-                    "segment":{
-                        "segment_id":"seg-1",
-                        "cursor_in":"cursor-0",
-                        "cursor_out":"cursor-2",
-                        "done":false,
-                        "steps":[{
-                            "id":"q1",
-                            "kind":"query",
-                            "candidate_ref":"evm-native-utils@0.0.1/native-balance",
-                            "inputs":{"addr":"0x1111111111111111111111111111111111111111"}
-                        }]
-                    }
-                }),
-            }],
-        })]);
-        let mut planner = LlmSegmentedIntentPlanner::new(provider)
-            .with_candidate_context(Some(CandidateContext::default()));
-        let draft = planner
-            .propose_segment(SegmentPlanningRequest {
-                intent: "read balance".to_string(),
-                session: SegmentPlanningSession {
-                    session_id: "sess-1".to_string(),
-                    snapshot_hash:
-                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                            .to_string(),
-                    cursor: "cursor-0".to_string(),
-                    max_rounds: 4,
-                    max_segments: 3,
-                },
-                state_summary: None,
-                previous_error: None,
-                last_segment: None,
-            })
-            .expect("must decode proposed segment");
-        match draft {
-            SegmentDraft::Proposed {
-                cursor_next, done, ..
-            } => {
-                assert_eq!(cursor_next, "cursor-2");
-                assert!(!done);
-            }
-            _ => panic!("expected proposed draft"),
-        }
-    }
-
-    #[test]
-    fn segmented_planner_blocks_finalize_until_check_segment_ok() {
-        let provider = ScriptedLlmProvider::from_responses(vec![
-            Ok(CompleteWithToolsResponse {
-                assistant_content: Some("begin".to_string()),
-                tool_calls: vec![ToolCall {
-                    id: "tool-begin".to_string(),
-                    name: "plan.begin".to_string(),
-                    arguments: json!({
-                        "session_id":"sess-1",
-                        "snapshot_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                        "cursor":"cursor-0",
-                        "limits":{"max_rounds":4,"max_segments":3}
-                    }),
-                }],
-            }),
-            Ok(CompleteWithToolsResponse {
-                assistant_content: Some("finalize without check".to_string()),
-                tool_calls: vec![ToolCall {
-                    id: "tool-finalize-before-check".to_string(),
-                    name: "plan.propose_segment".to_string(),
-                    arguments: json!({
-                        "status":"proposed",
-                        "done":false,
-                        "cursor_next":"cursor-1",
-                        "segment":{
-                            "segment_id":"seg-1",
-                            "cursor_in":"cursor-0",
-                            "cursor_out":"cursor-1",
-                            "done":false,
-                            "steps":[]
-                        }
-                    }),
-                }],
-            }),
-            Ok(CompleteWithToolsResponse {
-                assistant_content: Some("check".to_string()),
-                tool_calls: vec![ToolCall {
-                    id: "tool-check".to_string(),
-                    name: "plan.check_segment".to_string(),
-                    arguments: json!({
-                        "segment":{
-                            "segment_id":"seg-1",
-                            "cursor_in":"cursor-0",
-                            "cursor_out":"cursor-1",
-                            "done":false,
-                            "steps":[]
-                        }
-                    }),
-                }],
-            }),
-            Ok(CompleteWithToolsResponse {
-                assistant_content: Some("finalize after check".to_string()),
-                tool_calls: vec![ToolCall {
-                    id: "tool-finalize-after-check".to_string(),
-                    name: "plan.propose_segment".to_string(),
-                    arguments: json!({
-                        "status":"proposed",
-                        "done":false,
-                        "cursor_next":"cursor-1",
-                        "segment":{
-                            "segment_id":"seg-1",
-                            "cursor_in":"cursor-0",
-                            "cursor_out":"cursor-1",
-                            "done":false,
-                            "steps":[]
-                        }
-                    }),
-                }],
-            }),
-        ]);
-        let mut planner = LlmSegmentedIntentPlanner::new(provider)
-            .with_candidate_context(Some(CandidateContext::default()));
-        let session = planner
-            .begin_session(SegmentBeginRequest {
-                intent: "read balance".to_string(),
-                pack_snapshot_hash:
-                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
-                catalog_hash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-                    .to_string(),
-                chain_scope: vec!["eip155:1".to_string()],
-            })
-            .expect("begin session");
-        let draft = planner
-            .propose_segment(SegmentPlanningRequest {
-                intent: "read balance".to_string(),
-                session,
-                state_summary: None,
-                previous_error: None,
-                last_segment: None,
-            })
-            .expect("must finalize after check_segment ok");
-        match draft {
-            SegmentDraft::Proposed {
-                segment,
-                cursor_next,
-                done,
-                ..
-            } => {
-                assert_eq!(segment.segment_id, "seg-1");
-                assert_eq!(cursor_next, "cursor-1");
-                assert!(!done);
-            }
-            _ => panic!("expected proposed draft"),
-        }
-    }
-
-    #[test]
-    fn decode_segmented_tool_call_large_catalog_stays_compact_and_budgeted() {
-        let context = large_catalog_candidate_context(260, 260);
-        let list_call = ToolCall {
-            id: "tool-list".to_string(),
-            name: "list_candidates".to_string(),
-            arguments: json!({}),
-        };
-        let list_result = decode_segmented_tool_call(
-            &list_call,
-            "plan.propose_segment",
-            PlannerRoundPhase::ProposeSegment,
-            Some(&context),
-        )
-        .expect("list call");
-        let list_content = match list_result {
-            DecodedSegmentedToolCall::ToolMessage { content, .. } => content,
-            _ => panic!("list must return tool message"),
-        };
-        let list_json: Value = serde_json::from_str(list_content.as_str()).expect("valid json");
-        assert_eq!(
-            list_json
-                .pointer("/protocols/0/actions/24")
-                .and_then(Value::as_str)
-                .map(|value| value.starts_with("[TRUNCATED_ARRAY_ITEMS:")),
-            Some(true)
-        );
-        assert_eq!(
-            list_json
-                .pointer("/protocols/0/queries/24")
-                .and_then(Value::as_str)
-                .map(|value| value.starts_with("[TRUNCATED_ARRAY_ITEMS:")),
-            Some(true)
-        );
-        assert_eq!(
-            list_json
-                .pointer("/protocols/0/actions/0/ref")
-                .and_then(Value::as_str),
-            Some("demo@0.0.1/action-0")
-        );
-        assert!(
-            list_json
-                .pointer("/protocols/0/actions/0/description")
-                .is_none(),
-            "name-only index cards must not include description"
-        );
-        let raw_list_content =
-            serde_json::to_string(&context.index_candidates).expect("raw index candidates");
-        assert!(list_content.len() < raw_list_content.len());
-
-        let search_call = ToolCall {
-            id: "tool-search".to_string(),
-            name: "catalog.search".to_string(),
-            arguments: json!({
-                "query":"query-1",
-                "kind":"query",
-                "chain":"eip155:1",
-                "limit":5
-            }),
-        };
-        let search_result = decode_segmented_tool_call(
-            &search_call,
-            "plan.propose_segment",
-            PlannerRoundPhase::ProposeSegment,
-            Some(&context),
-        )
-        .expect("search call");
-        let search_content = match search_result {
-            DecodedSegmentedToolCall::ToolMessage { content, .. } => content,
-            _ => panic!("search must return tool message"),
-        };
-        let search_json: Value =
-            serde_json::from_str(search_content.as_str()).expect("valid search json");
-        assert_eq!(
-            search_json.get("returned_matches").and_then(Value::as_u64),
-            Some(5)
-        );
-        assert_eq!(
-            search_json.get("truncated").and_then(Value::as_bool),
-            Some(true)
-        );
-
-        let detail_refs = (0..48)
-            .map(|index| format!("demo@0.0.1/query-{index}"))
-            .collect::<Vec<_>>();
-        let detail_call = ToolCall {
-            id: "tool-detail".to_string(),
-            name: "get_candidate_detail".to_string(),
-            arguments: json!({ "refs": detail_refs }),
-        };
-        let detail_result = decode_segmented_tool_call(
-            &detail_call,
-            "plan.propose_segment",
-            PlannerRoundPhase::ProposeSegment,
-            Some(&context),
-        )
-        .expect("detail call");
-        let detail_content = match detail_result {
-            DecodedSegmentedToolCall::ToolMessage { content, .. } => content,
-            _ => panic!("detail must return tool message"),
-        };
-        let detail_json: Value =
-            serde_json::from_str(detail_content.as_str()).expect("valid detail json");
-        assert_eq!(
-            detail_json.get("requested_refs").and_then(Value::as_u64),
-            Some(48)
-        );
-        assert_eq!(
-            detail_json.get("returned_refs").and_then(Value::as_u64),
-            Some(super::super::candidates::DEFAULT_MAX_DETAIL_REFS as u64)
-        );
-        assert_eq!(
-            detail_json.get("truncated").and_then(Value::as_bool),
-            Some(true)
-        );
-        assert_eq!(
-            detail_json.pointer("/details/0/params/0/name"),
-            Some(&json!("owner"))
-        );
-        assert_eq!(
-            detail_json.pointer("/details/0/params/0/type"),
-            Some(&json!("address"))
-        );
-        assert_eq!(
-            detail_json.pointer("/details/0/params/0/required"),
-            Some(&json!(true))
-        );
-        assert_eq!(
-            detail_json.pointer("/details/0/returns/0/name"),
-            Some(&json!("balance"))
-        );
-        assert_eq!(
-            detail_json.pointer("/details/0/returns/0/type"),
-            Some(&json!("uint256"))
-        );
-        let raw_detail_content =
-            serde_json::to_string(&context.get_details_for_refs(&detail_refs)).expect("raw detail");
-        assert!(detail_content.len() < raw_detail_content.len());
-    }
-
-    #[test]
-    fn catalog_search_control_semantics_query_returns_guide_hint() {
-        let context = large_catalog_candidate_context(8, 8);
-        let call = ToolCall {
-            id: "tool-search-control".to_string(),
-            name: "catalog.search".to_string(),
-            arguments: json!({
-                "query":"assert",
-                "limit":12
-            }),
-        };
-        let result = decode_segmented_tool_call(
-            &call,
-            "plan.propose_segment",
-            PlannerRoundPhase::ProposeSegment,
-            Some(&context),
-        )
-        .expect("search call");
-        let content = match result {
-            DecodedSegmentedToolCall::ToolMessage { content, .. } => content,
-            _ => panic!("search must return tool message"),
-        };
-        let value: Value = serde_json::from_str(content.as_str()).expect("valid search json");
-        assert_eq!(value.pointer("/query"), Some(&json!("assert")));
-        assert_eq!(value.pointer("/returned_matches"), Some(&json!(0)));
-        assert_eq!(
-            value.pointer("/hint/reason_code"),
-            Some(&json!("control_semantics_not_catalog_candidate"))
-        );
-        assert_eq!(value.pointer("/hint/next_tool"), Some(&json!("guide.get")));
-        assert_eq!(
-            value.pointer("/hint/guide_requests/0/schema"),
-            Some(&json!("ais-plan-sketch/0.1.0"))
-        );
-        assert_eq!(
-            value.pointer("/hint/guide_requests/1/topic"),
-            Some(&json!("cel"))
-        );
-    }
-
-    #[test]
-    fn list_candidates_cards_include_minimum_ref_metadata() {
-        let context = large_catalog_candidate_context(2, 2);
-        let list_call = ToolCall {
-            id: "tool-list-meta".to_string(),
-            name: "list_candidates".to_string(),
-            arguments: json!({}),
-        };
-        let list_result = decode_segmented_tool_call(
-            &list_call,
-            "plan.propose_segment",
-            PlannerRoundPhase::ProposeSegment,
-            Some(&context),
-        )
-        .expect("list call");
-        let list_content = match list_result {
-            DecodedSegmentedToolCall::ToolMessage { content, .. } => content,
-            _ => panic!("list must return tool message"),
-        };
-        let list_json: Value = serde_json::from_str(list_content.as_str()).expect("valid json");
-        assert_eq!(
-            list_json.pointer("/protocols/0/actions/0/ref"),
-            Some(&json!("demo@0.0.1/action-0"))
-        );
-        assert_eq!(
-            list_json.pointer("/protocols/0/actions/0/chains/0"),
-            Some(&json!("eip155:*"))
-        );
-        assert_eq!(
-            list_json.pointer("/protocols/0/actions/0/required_inputs/0"),
-            Some(&json!("amount"))
-        );
-        assert!(
-            list_json.pointer("/protocols/0/actions/0/name").is_none(),
-            "compact list cards should not duplicate action name when ref already encodes it"
-        );
-    }
-
-    #[test]
-    fn planning_memory_caches_list_candidates_per_snapshot_scope() {
-        let context = large_catalog_candidate_context(8, 8);
-        let call = ToolCall {
-            id: "tool-list".to_string(),
-            name: "list_candidates".to_string(),
-            arguments: json!({}),
-        };
-        let mut memory = PlanningMemory::default();
-        memory.ensure_scope("session-1", "snapshot-1");
-
-        let first = decode_segmented_tool_call_with_memory(
-            &call,
-            "plan.propose_segment",
-            PlannerRoundPhase::ProposeSegment,
-            Some(&context),
-            None,
-            Some(&mut memory),
-        )
-        .expect("first list");
-        let second = decode_segmented_tool_call_with_memory(
-            &call,
-            "plan.propose_segment",
-            PlannerRoundPhase::ProposeSegment,
-            Some(&context),
-            None,
-            Some(&mut memory),
-        )
-        .expect("second list");
-
-        let (first_content, first_cached) = match first {
-            DecodedSegmentedToolCall::ToolMessage {
-                content, cached, ..
-            } => (content, cached),
-            _ => panic!("must return tool message"),
-        };
-        let (second_content, second_cached) = match second {
-            DecodedSegmentedToolCall::ToolMessage {
-                content, cached, ..
-            } => (content, cached),
-            _ => panic!("must return tool message"),
-        };
-        assert!(!first_cached);
-        assert!(second_cached);
-        assert_eq!(first_content, second_content);
-
-        memory.ensure_scope("session-2", "snapshot-1");
-        let third_same_snapshot = decode_segmented_tool_call_with_memory(
-            &call,
-            "plan.propose_segment",
-            PlannerRoundPhase::ProposeSegment,
-            Some(&context),
-            None,
-            Some(&mut memory),
-        )
-        .expect("third list in same snapshot");
-        match third_same_snapshot {
-            DecodedSegmentedToolCall::ToolMessage { cached, .. } => assert!(cached),
-            _ => panic!("must return tool message"),
-        }
-
-        memory.ensure_scope("session-3", "snapshot-2");
-        let fourth_new_snapshot = decode_segmented_tool_call_with_memory(
-            &call,
-            "plan.propose_segment",
-            PlannerRoundPhase::ProposeSegment,
-            Some(&context),
-            None,
-            Some(&mut memory),
-        )
-        .expect("fourth list after snapshot reset");
-        match fourth_new_snapshot {
-            DecodedSegmentedToolCall::ToolMessage { cached, .. } => assert!(!cached),
-            _ => panic!("must return tool message"),
-        }
-    }
-
-    #[test]
-    fn planning_memory_normalizes_detail_ref_order_for_cache_key() {
-        let context = large_catalog_candidate_context(2, 6);
-        let mut memory = PlanningMemory::default();
-        memory.ensure_scope("session-1", "snapshot-1");
-        let call_first = ToolCall {
-            id: "tool-detail-1".to_string(),
-            name: "get_candidate_detail".to_string(),
-            arguments: json!({
-                "refs": ["demo@0.0.1/query-3", "demo@0.0.1/query-1"]
-            }),
-        };
-        let call_second = ToolCall {
-            id: "tool-detail-2".to_string(),
-            name: "get_candidate_detail".to_string(),
-            arguments: json!({
-                "refs": ["demo@0.0.1/query-1", "demo@0.0.1/query-3"]
-            }),
-        };
-
-        let first = decode_segmented_tool_call_with_memory(
-            &call_first,
-            "plan.propose_segment",
-            PlannerRoundPhase::ProposeSegment,
-            Some(&context),
-            None,
-            Some(&mut memory),
-        )
-        .expect("first detail");
-        let second = decode_segmented_tool_call_with_memory(
-            &call_second,
-            "plan.propose_segment",
-            PlannerRoundPhase::ProposeSegment,
-            Some(&context),
-            None,
-            Some(&mut memory),
-        )
-        .expect("second detail");
-
-        let (first_content, first_cached) = match first {
-            DecodedSegmentedToolCall::ToolMessage {
-                content, cached, ..
-            } => (content, cached),
-            _ => panic!("must return tool message"),
-        };
-        let (second_content, second_cached) = match second {
-            DecodedSegmentedToolCall::ToolMessage {
-                content, cached, ..
-            } => (content, cached),
-            _ => panic!("must return tool message"),
-        };
-        assert!(!first_cached);
-        assert!(second_cached);
-        assert_eq!(first_content, second_content);
-    }
-
-    #[test]
-    fn planning_memory_guide_get_full_request_refreshes_digest_cache_entry() {
-        let mut memory = PlanningMemory::default();
-        memory.ensure_scope("session-1", "snapshot-1");
-        let digest_call = ToolCall {
-            id: "tool-guide-digest".to_string(),
-            name: "guide.get".to_string(),
-            arguments: json!({
-                "schema": "ais-plan-sketch/0.1.0"
-            }),
-        };
-        let full_call = ToolCall {
-            id: "tool-guide-full".to_string(),
-            name: "guide.get".to_string(),
-            arguments: json!({
-                "schema": "ais-plan-sketch/0.1.0",
-                "full": true
-            }),
-        };
-
-        let first = decode_segmented_tool_call_with_memory(
-            &digest_call,
-            "plan.propose_segment",
-            PlannerRoundPhase::ProposeSegment,
-            None,
-            None,
-            Some(&mut memory),
-        )
-        .expect("digest schema lookup");
-        let second = decode_segmented_tool_call_with_memory(
-            &full_call,
-            "plan.propose_segment",
-            PlannerRoundPhase::ProposeSegment,
-            None,
-            None,
-            Some(&mut memory),
-        )
-        .expect("full schema lookup");
-        let third = decode_segmented_tool_call_with_memory(
-            &full_call,
-            "plan.propose_segment",
-            PlannerRoundPhase::ProposeSegment,
-            None,
-            None,
-            Some(&mut memory),
-        )
-        .expect("cached full schema lookup");
-
-        let (first_content, first_cached) = match first {
-            DecodedSegmentedToolCall::ToolMessage {
-                content, cached, ..
-            } => (content, cached),
-            _ => panic!("must return tool message"),
-        };
-        let (second_content, second_cached) = match second {
-            DecodedSegmentedToolCall::ToolMessage {
-                content, cached, ..
-            } => (content, cached),
-            _ => panic!("must return tool message"),
-        };
-        let (third_content, third_cached) = match third {
-            DecodedSegmentedToolCall::ToolMessage {
-                content, cached, ..
-            } => (content, cached),
-            _ => panic!("must return tool message"),
-        };
-
-        let first_json = serde_json::from_str::<Value>(first_content.as_str()).expect("json");
-        let second_json = serde_json::from_str::<Value>(second_content.as_str()).expect("json");
-        let third_json = serde_json::from_str::<Value>(third_content.as_str()).expect("json");
-
-        assert!(!first_cached);
-        assert_eq!(first_json.pointer("/schema/mode"), Some(&json!("digest")));
-        assert!(first_json.pointer("/schema/json").is_none());
-
-        assert!(!second_cached);
-        assert_eq!(second_json.pointer("/schema/mode"), Some(&json!("full")));
-        assert!(second_json.pointer("/schema/json").is_some());
-
-        assert!(third_cached);
-        assert_eq!(third_json.pointer("/schema/mode"), Some(&json!("full")));
-        assert!(third_json.pointer("/schema/json").is_some());
-    }
-
-    #[test]
-    fn phase_tools_are_scoped_by_round() {
-        let begin_tools = segmented_planner_tools_for_phase(PlannerRoundPhase::Begin)
-            .into_iter()
-            .map(|tool| tool.name)
-            .collect::<BTreeSet<_>>();
-        assert_eq!(begin_tools, BTreeSet::from_iter(["plan.begin".to_string()]));
-
-        let grounding_tools = segmented_planner_tools_for_phase(PlannerRoundPhase::GroundIntent)
-            .into_iter()
-            .map(|tool| tool.name)
-            .collect::<BTreeSet<_>>();
-        assert!(grounding_tools.contains("list_candidates"));
-        assert!(grounding_tools.contains("catalog.search"));
-        assert!(grounding_tools.contains("get_candidate_detail"));
-        assert!(grounding_tools.contains("guide.get"));
-        assert!(grounding_tools.contains("plan.ground_intent"));
-        assert!(!grounding_tools.contains("plan.begin"));
-        assert!(!grounding_tools.contains("plan.propose_todos"));
-        assert!(!grounding_tools.contains("plan.propose_segment"));
-        assert!(!grounding_tools.contains("plan.revise_segment"));
-
-        let todos_tools = segmented_planner_tools_for_phase(PlannerRoundPhase::ProposeTodos)
-            .into_iter()
-            .map(|tool| tool.name)
-            .collect::<BTreeSet<_>>();
-        assert!(todos_tools.contains("list_candidates"));
-        assert!(todos_tools.contains("catalog.search"));
-        assert!(todos_tools.contains("get_candidate_detail"));
-        assert!(todos_tools.contains("guide.get"));
-        assert!(todos_tools.contains("plan.propose_todos"));
-        assert!(!todos_tools.contains("plan.begin"));
-        assert!(!todos_tools.contains("plan.propose_segment"));
-        assert!(!todos_tools.contains("plan.revise_segment"));
-
-        let propose_tools = segmented_planner_tools_for_phase(PlannerRoundPhase::ProposeSegment)
-            .into_iter()
-            .map(|tool| tool.name)
-            .collect::<BTreeSet<_>>();
-        assert!(propose_tools.contains("list_candidates"));
-        assert!(propose_tools.contains("catalog.search"));
-        assert!(propose_tools.contains("get_candidate_detail"));
-        assert!(propose_tools.contains("guide.get"));
-        assert!(propose_tools.contains("plan.check_segment"));
-        assert!(propose_tools.contains("plan.propose_segment"));
-        assert!(!propose_tools.contains("plan.propose_todos"));
-        assert!(!propose_tools.contains("plan.begin"));
-        assert!(!propose_tools.contains("plan.revise_segment"));
-
-        let revise_tools = segmented_planner_tools_for_phase(PlannerRoundPhase::ReviseSegment)
-            .into_iter()
-            .map(|tool| tool.name)
-            .collect::<BTreeSet<_>>();
-        assert!(revise_tools.contains("list_candidates"));
-        assert!(revise_tools.contains("catalog.search"));
-        assert!(revise_tools.contains("get_candidate_detail"));
-        assert!(revise_tools.contains("guide.get"));
-        assert!(revise_tools.contains("plan.check_segment"));
-        assert!(revise_tools.contains("plan.revise_segment"));
-        assert!(!revise_tools.contains("plan.propose_todos"));
-        assert!(!revise_tools.contains("plan.begin"));
-        assert!(!revise_tools.contains("plan.propose_segment"));
-    }
-
-    #[test]
-    fn plan_propose_todos_tool_schema_requires_todo_title() {
-        let tools = segmented_planner_tools_for_phase(PlannerRoundPhase::ProposeTodos);
-        let schema = tools
-            .into_iter()
-            .find(|tool| tool.name == "plan.propose_todos")
-            .map(|tool| tool.input_schema)
-            .expect("plan.propose_todos schema");
-        assert_eq!(
-            schema.pointer("/properties/status/enum/0"),
-            Some(&json!("proposed"))
-        );
-        assert_eq!(
-            schema.pointer("/properties/todos/items/$ref"),
-            Some(&json!("#/$defs/todo_item"))
-        );
-        assert_eq!(
-            schema.pointer("/$defs/todo_item/required/0"),
-            Some(&json!("title"))
-        );
-    }
-
-    #[test]
-    fn propose_todo_draft_roundtrip_decodes_todos() {
-        let call = ToolCall {
-            id: "tool-todos-final".to_string(),
-            name: "plan.propose_todos".to_string(),
-            arguments: json!({
-                "status": "proposed",
-                "summary": "split into 2 todos",
-                "todos": [
-                    {
-                        "title": "Query token decimals",
-                        "required_facts": ["token.address"],
-                        "produced_facts": ["token.decimals"]
-                    },
-                    {
-                        "title": "Execute transfer",
-                        "required_facts": ["token.decimals", "amount.human"],
-                        "produced_facts": ["tx_hash"]
-                    }
-                ]
-            }),
-        };
-        let result = decode_segmented_tool_call(
-            &call,
-            "plan.propose_todos",
-            PlannerRoundPhase::ProposeTodos,
-            None,
-        )
-        .expect("todo finalize call");
-        match result {
-            DecodedSegmentedToolCall::Final(PlannerToolOutput::TodoDraft(
-                TodoDraft::Proposed { summary, todos, .. },
-            )) => {
-                assert_eq!(summary.as_deref(), Some("split into 2 todos"));
-                assert_eq!(todos.len(), 2);
-                assert_eq!(todos[0].title, "Query token decimals");
-                assert_eq!(todos[1].produced_facts, vec!["tx_hash".to_string()]);
-            }
-            _ => panic!("expected proposed todo draft"),
-        }
-    }
-
-    #[test]
-    fn ground_intent_tool_schema_requires_ready_for_todos() {
-        let tools = segmented_planner_tools_for_phase(PlannerRoundPhase::GroundIntent);
-        let schema = tools
-            .into_iter()
-            .find(|tool| tool.name == "plan.ground_intent")
-            .map(|tool| tool.input_schema)
-            .expect("plan.ground_intent schema");
-        assert_eq!(
-            schema.pointer("/properties/status/enum/0"),
-            Some(&json!("proposed"))
-        );
-        assert_eq!(
-            schema.pointer("/allOf/0/then/required/0"),
-            Some(&json!("ready_for_todos"))
-        );
-    }
-
-    #[test]
-    fn grounding_draft_roundtrip_decodes_proposed_payload() {
-        let call = ToolCall {
-            id: "tool-grounding-final".to_string(),
-            name: "plan.ground_intent".to_string(),
-            arguments: json!({
-                "status": "proposed",
-                "summary": "extracted transfer fields",
-                "ready_for_todos": true,
-                "resolved_inputs": {
-                    "owner": "0x1111",
-                    "recipient": "0x2222",
-                    "amount": "1.25"
-                },
-                "intent_facts": {
-                    "intent.action": "transfer"
-                },
-                "confidence": {
-                    "owner": 95,
-                    "recipient": 93
-                }
-            }),
-        };
-        let result = decode_segmented_tool_call(
-            &call,
-            "plan.ground_intent",
-            PlannerRoundPhase::GroundIntent,
-            None,
-        )
-        .expect("grounding finalize call");
-        match result {
-            DecodedSegmentedToolCall::Final(PlannerToolOutput::IntentGrounding(
-                IntentGroundingDraft::Proposed {
-                    ready_for_todos,
-                    resolved_inputs,
-                    intent_facts,
-                    ..
-                },
-            )) => {
-                assert!(ready_for_todos);
-                assert_eq!(
-                    resolved_inputs.get("recipient").and_then(Value::as_str),
-                    Some("0x2222")
-                );
-                assert_eq!(
-                    intent_facts.get("intent.action").and_then(Value::as_str),
-                    Some("transfer")
-                );
-            }
-            _ => panic!("expected proposed grounding draft"),
-        }
-    }
-
-    #[test]
-    fn grounding_draft_infers_ready_when_flag_missing_and_no_questions() {
-        let call = ToolCall {
-            id: "tool-grounding-final".to_string(),
-            name: "plan.ground_intent".to_string(),
-            arguments: json!({
-                "status": "proposed",
-                "summary": "extracted transfer fields",
-                "resolved_inputs": {
-                    "owner": "0x1111",
-                    "recipient": "0x2222"
-                },
-                "intent_facts": {},
-                "confidence": {
-                    "owner": 95,
-                    "recipient": 93
-                }
-            }),
-        };
-        let result = decode_segmented_tool_call(
-            &call,
-            "plan.ground_intent",
-            PlannerRoundPhase::GroundIntent,
-            None,
-        )
-        .expect("grounding finalize call");
-        match result {
-            DecodedSegmentedToolCall::Final(PlannerToolOutput::IntentGrounding(
-                IntentGroundingDraft::Proposed {
-                    ready_for_todos, ..
-                },
-            )) => {
-                assert!(ready_for_todos);
-            }
-            _ => panic!("expected proposed grounding draft"),
-        }
-    }
-
-    #[test]
-    fn grounding_draft_keeps_not_ready_when_flag_missing_and_questions_exist() {
-        let call = ToolCall {
-            id: "tool-grounding-final".to_string(),
-            name: "plan.ground_intent".to_string(),
-            arguments: json!({
-                "status": "proposed",
-                "summary": "need more inputs",
-                "resolved_inputs": {
-                    "owner": "0x1111"
-                },
-                "questions": [
-                    {"id":"recipient","question":"recipient?"}
-                ],
-                "confidence": {
-                    "owner": 95
-                }
-            }),
-        };
-        let result = decode_segmented_tool_call(
-            &call,
-            "plan.ground_intent",
-            PlannerRoundPhase::GroundIntent,
-            None,
-        )
-        .expect("grounding finalize call");
-        match result {
-            DecodedSegmentedToolCall::Final(PlannerToolOutput::IntentGrounding(
-                IntentGroundingDraft::Proposed {
-                    ready_for_todos, ..
-                },
-            )) => {
-                assert!(!ready_for_todos);
-            }
-            _ => panic!("expected proposed grounding draft"),
-        }
-    }
-
-    #[test]
-    fn segment_draft_tool_schema_requires_step_id() {
-        let step_schema = propose_segment_step_schema();
-        let required = step_schema
-            .get("required")
-            .and_then(Value::as_array)
-            .expect("required fields");
-        let required_set = required
-            .iter()
-            .filter_map(Value::as_str)
-            .collect::<BTreeSet<_>>();
-        assert!(required_set.contains("id"));
-        assert!(required_set.contains("kind"));
-        assert!(required_set.contains("inputs"));
-    }
-
-    #[test]
-    fn segment_draft_tool_schema_includes_runtime_controls() {
-        let step_schema = propose_segment_step_schema();
-        let step_props = step_schema
-            .get("properties")
-            .and_then(Value::as_object)
-            .expect("step properties");
-        assert!(step_props.contains_key("until"));
-        assert!(step_props.contains_key("retry"));
-        assert!(step_props.contains_key("timeout_ms"));
-    }
-
-    #[test]
-    fn segment_draft_tool_schema_accepts_control_step_kinds() {
-        let step_schema = propose_segment_step_schema();
-        let kind_enum = step_schema
-            .pointer("/properties/kind/enum")
-            .and_then(Value::as_array)
-            .expect("kind enum");
-        let kind_set = kind_enum
-            .iter()
-            .filter_map(Value::as_str)
-            .collect::<BTreeSet<_>>();
-        assert!(kind_set.contains("action"));
-        assert!(kind_set.contains("query"));
-        assert!(kind_set.contains("assert"));
-        assert!(kind_set.contains("branch"));
-    }
-
-    #[test]
-    fn plan_check_segment_tool_returns_compile_issues_without_candidate_match() {
-        let call = ToolCall {
-            id: "tool-check-segment".to_string(),
-            name: "plan.check_segment".to_string(),
-            arguments: json!({
-                "segment": {
-                    "segment_id": "seg-check",
-                    "cursor_in": "c0",
-                    "cursor_out": "c1",
-                    "done": false,
-                    "steps": [{
-                        "id": "q1",
-                        "kind": "query",
-                        "candidate_ref": "missing@0.0.1/query",
-                        "inputs": {}
-                    }]
-                }
-            }),
-        };
-        let check_context = SegmentCheckContext {
-            intent: "check segment".to_string(),
-            session_id: "s-1".to_string(),
-            cursor: "0".to_string(),
-            pack_snapshot_hash: "a".repeat(64),
-            chain_scope: vec!["eip155:1".to_string()],
-        };
-        let result = decode_segmented_tool_call_with_memory(
-            &call,
-            "plan.propose_segment",
-            PlannerRoundPhase::ProposeSegment,
-            Some(&CandidateContext::default()),
-            Some(&check_context),
-            None,
-        )
-        .expect("check call");
-        let content = match result {
-            DecodedSegmentedToolCall::ToolMessage { content, .. } => content,
-            _ => panic!("check must return tool message"),
-        };
-        let value: Value = serde_json::from_str(content.as_str()).expect("json payload");
-        assert_eq!(value.pointer("/ok"), Some(&json!(false)));
-        assert_eq!(value.pointer("/reason_code"), Some(&json!("compile_error")));
-        let issues = value
-            .pointer("/issues")
-            .and_then(Value::as_array)
-            .expect("issues array");
-        assert!(!issues.is_empty());
-    }
-
-    fn propose_segment_step_schema() -> Value {
-        let tools = segmented_planner_tools_for_phase(PlannerRoundPhase::ProposeSegment);
-        let schema = tools
-            .into_iter()
-            .find(|tool| tool.name == "plan.propose_segment")
-            .map(|tool| tool.input_schema)
-            .expect("plan.propose_segment schema");
-        let segment_ref = schema
-            .pointer("/properties/segment/$ref")
-            .and_then(Value::as_str)
-            .expect("segment ref");
-        let segment_schema = schema
-            .pointer(segment_ref.trim_start_matches('#'))
-            .cloned()
-            .expect("segment schema");
-        let step_ref = segment_schema
-            .pointer("/properties/steps/items/$ref")
-            .and_then(Value::as_str)
-            .expect("steps item ref");
-        schema
-            .pointer(step_ref.trim_start_matches('#'))
-            .cloned()
-            .expect("segment step schema")
-    }
-
-    #[test]
-    fn guide_get_tool_returns_topic_guide() {
-        let call = ToolCall {
-            id: "tool-schema-topic".to_string(),
-            name: "guide.get".to_string(),
-            arguments: json!({"topic":"cel"}),
-        };
-        let result = decode_segmented_tool_call(
-            &call,
-            "plan.propose_segment",
-            PlannerRoundPhase::ProposeSegment,
-            None,
-        )
-        .expect("guide.get topic call");
-        let content = match result {
-            DecodedSegmentedToolCall::ToolMessage { content, .. } => content,
-            _ => panic!("guide.get must return tool message"),
-        };
-        let value: Value = serde_json::from_str(content.as_str()).expect("json payload");
-        assert_eq!(value.get("kind"), Some(&json!("topic")));
-        assert_eq!(value.pointer("/topic/topic"), Some(&json!("cel")));
-        assert_eq!(
-            value.pointer("/topic/allowed_namespaces/0"),
-            Some(&json!("inputs"))
-        );
-    }
-
-    #[test]
-    fn guide_get_tool_returns_embedded_schema() {
-        let call = ToolCall {
-            id: "tool-schema-id".to_string(),
-            name: "guide.get".to_string(),
-            arguments: json!({"schema":"ais-plan-sketch/0.1.0"}),
-        };
-        let result = decode_segmented_tool_call(
-            &call,
-            "plan.propose_segment",
-            PlannerRoundPhase::ProposeSegment,
-            None,
-        )
-        .expect("guide.get schema_id call");
-        let content = match result {
-            DecodedSegmentedToolCall::ToolMessage { content, .. } => content,
-            _ => panic!("guide.get must return tool message"),
-        };
-        let value: Value = serde_json::from_str(content.as_str()).expect("json payload");
-        assert_eq!(value.get("kind"), Some(&json!("schema")));
-        assert_eq!(
-            value.pointer("/schema/id"),
-            Some(&json!("ais-plan-sketch/0.1.0"))
-        );
-        assert_eq!(value.pointer("/schema/mode"), Some(&json!("digest")));
-        assert!(value.pointer("/schema/digest").is_some());
-        assert!(value.pointer("/schema/json").is_none());
-    }
-
-    #[test]
-    fn guide_get_tool_returns_full_schema_when_requested() {
-        let call = ToolCall {
-            id: "tool-schema-id-full".to_string(),
-            name: "guide.get".to_string(),
-            arguments: json!({"schema":"ais-plan-sketch/0.1.0","full":true}),
-        };
-        let result = decode_segmented_tool_call(
-            &call,
-            "plan.propose_segment",
-            PlannerRoundPhase::ProposeSegment,
-            None,
-        )
-        .expect("guide.get full schema call");
-        let content = match result {
-            DecodedSegmentedToolCall::ToolMessage { content, .. } => content,
-            _ => panic!("guide.get must return tool message"),
-        };
-        let value: Value = serde_json::from_str(content.as_str()).expect("json payload");
-        assert_eq!(value.get("kind"), Some(&json!("schema")));
-        assert_eq!(value.pointer("/schema/mode"), Some(&json!("full")));
-        assert!(value.pointer("/schema/digest").is_some());
-        assert!(value.pointer("/schema/json").is_some());
-    }
-
-    #[test]
-    fn guide_get_tool_rejects_object_schema_arg() {
-        let call = ToolCall {
-            id: "tool-guide-schema-object".to_string(),
-            name: "guide.get".to_string(),
-            arguments: json!({
-                "schema": {"id":"ais-plan-sketch/0.1.0"}
-            }),
-        };
-        let error = decode_segmented_tool_call(
-            &call,
-            "plan.propose_segment",
-            PlannerRoundPhase::ProposeSegment,
-            None,
-        )
-        .expect_err("object schema arg must be rejected");
-        assert!(error.to_string().contains("invalid guide.get args"));
-    }
-
-    #[test]
-    fn guide_get_tool_rejects_object_topic_arg() {
-        let call = ToolCall {
-            id: "tool-guide-topic-object".to_string(),
-            name: "guide.get".to_string(),
-            arguments: json!({
-                "topic": {"name":"cel"}
-            }),
-        };
-        let error = decode_segmented_tool_call(
-            &call,
-            "plan.propose_segment",
-            PlannerRoundPhase::ProposeSegment,
-            None,
-        )
-        .expect_err("object topic arg must be rejected");
-        assert!(error.to_string().contains("invalid guide.get args"));
-    }
-
-    #[test]
-    fn guide_get_tool_rejects_stringified_schema_object_arg() {
-        let call = ToolCall {
-            id: "tool-guide-schema-stringified-object".to_string(),
-            name: "guide.get".to_string(),
-            arguments: json!({
-                "schema": "{\"id\":\"ais-plan-sketch/0.1.0\"}"
-            }),
-        };
-        let result = decode_segmented_tool_call(
-            &call,
-            "plan.propose_segment",
-            PlannerRoundPhase::ProposeSegment,
-            None,
-        )
-        .expect("guide.get stringified object schema call");
-        let content = match result {
-            DecodedSegmentedToolCall::ToolMessage { content, .. } => content,
-            _ => panic!("guide.get must return tool message"),
-        };
-        let value: Value = serde_json::from_str(content.as_str()).expect("json payload");
-        assert_eq!(value.pointer("/kind"), Some(&json!("schema")));
-        assert_eq!(
-            value.pointer("/error/code"),
-            Some(&json!("schema_not_found"))
-        );
-    }
-
-    #[test]
-    fn guide_get_tool_schema_prefers_canonical_string_request_shape() {
-        let schema = segmented_planner_tools()
-            .into_iter()
-            .find(|tool| tool.name == "guide.get")
-            .map(|tool| tool.input_schema)
-            .expect("guide.get schema");
-        assert_eq!(
-            schema.pointer("/oneOf/0/properties/schema/type"),
-            Some(&json!("string"))
-        );
-        assert_eq!(
-            schema.pointer("/oneOf/0/properties/full/type"),
-            Some(&json!("boolean"))
-        );
-        assert_eq!(
-            schema.pointer("/oneOf/1/properties/topic/enum/0"),
-            Some(&json!("cel"))
-        );
-        assert_eq!(
-            schema.pointer("/oneOf/1/properties/topic/enum/1"),
-            Some(&json!("valueref"))
-        );
-        assert!(
-            schema.pointer("/oneOf/1/properties/topic/enum/2").is_none(),
-            "guide topic enum should not expose constraint_templates"
-        );
-    }
-
-    #[test]
-    fn guide_get_cache_key_uses_canonical_string_shapes_only() {
-        let schema_from_canonical =
-            tool_cache_key("guide.get", &json!({"schema":"ais-plan-sketch/0.1.0"}))
-                .expect("canonical schema cache key");
-        let schema_from_object = tool_cache_key(
-            "guide.get",
-            &json!({"schema":{"id":"ais-plan-sketch/0.1.0"}}),
-        )
-        .expect("object schema cache key");
-        assert_ne!(schema_from_canonical, schema_from_object);
-
-        let topic_from_canonical = tool_cache_key("guide.get", &json!({"topic":"cel"}))
-            .expect("canonical topic cache key");
-        let topic_from_object = tool_cache_key("guide.get", &json!({"topic":{"name":"cel"}}))
-            .expect("object topic cache key");
-        assert_ne!(topic_from_canonical, topic_from_object);
-    }
-
-    #[test]
-    fn catalog_search_cache_key_normalizes_synonyms_and_token_order() {
-        let first = tool_cache_key(
-            "catalog.search",
-            &json!({"kind":"query","query":"erc20 balance"}),
-        )
-        .expect("first cache key");
-        let second = tool_cache_key(
-            "catalog.search",
-            &json!({"kind":"query","query":"token   balance"}),
-        )
-        .expect("second cache key");
-        let third = tool_cache_key(
-            "catalog.search",
-            &json!({"kind":"query","query":"balance token"}),
-        )
-        .expect("third cache key");
-        assert_eq!(first, second);
-        assert_eq!(second, third);
-    }
-
-    #[test]
-    fn requires_successful_check_only_for_segment_finalize_with_context() {
-        assert!(!requires_successful_check_before_finalize(
-            PlannerRoundPhase::Begin,
-            None
-        ));
-        assert!(!requires_successful_check_before_finalize(
-            PlannerRoundPhase::ProposeSegment,
-            None
-        ));
-        let context = SegmentCheckContext {
-            intent: "i".to_string(),
-            session_id: "s".to_string(),
-            cursor: "0".to_string(),
-            pack_snapshot_hash: "a".repeat(64),
-            chain_scope: vec!["eip155:1".to_string()],
-        };
-        assert!(requires_successful_check_before_finalize(
-            PlannerRoundPhase::ProposeSegment,
-            Some(&context)
-        ));
-        assert!(requires_successful_check_before_finalize(
-            PlannerRoundPhase::ReviseSegment,
-            Some(&context)
-        ));
-        assert!(!requires_successful_check_before_finalize(
-            PlannerRoundPhase::ProposeTodos,
-            Some(&context)
-        ));
-    }
-
-    #[test]
-    fn unavailable_draft_extracts_missing_input_questions_from_error_details() {
-        let draft = parse_segment_draft(SegmentToolArgs {
-            status: "unavailable".to_string(),
-            done: false,
-            segment: None,
-            summary: None,
-            cursor_next: None,
-            issues: Vec::new(),
-            error: Some(SegmentError {
-                reason_code: "missing_required_input".to_string(),
-                message: Some("missing owner".to_string()),
-                details: Some(json!({
-                    "questions": [
-                        {
-                            "id": "owner",
-                            "question": "who is the owner",
-                            "options": [
-                                {"label": "wallet-1", "value": "0xabc"}
-                            ]
-                        }
-                    ]
-                })),
-            }),
-            questions: Vec::new(),
-        })
-        .expect("parse unavailable draft");
-        match draft {
-            SegmentDraft::Unavailable {
-                reason_code,
-                questions,
-                ..
-            } => {
-                assert_eq!(reason_code, "missing_required_input");
-                assert_eq!(questions.len(), 1);
-                assert_eq!(questions[0].pointer("/id"), Some(&json!("owner")));
-                assert_eq!(
-                    questions[0].pointer("/options/0/label"),
-                    Some(&json!("wallet-1"))
-                );
-            }
-            _ => panic!("draft must be unavailable"),
-        }
-    }
-
-    #[test]
-    fn render_segment_prompt_uses_detect_free_valueref_and_contracts() {
-        let prompt = render_segment_prompt(
-            "plan.propose_segment",
-            &SegmentPlanningRequest {
-                intent: "transfer token".to_string(),
-                session: SegmentPlanningSession {
-                    session_id: "s".to_string(),
-                    snapshot_hash: "h".to_string(),
-                    cursor: "0".to_string(),
-                    max_rounds: 6,
-                    max_segments: 8,
-                },
-                state_summary: None,
-                previous_error: None,
-                last_segment: None,
-            },
-        );
-        let value: Value = serde_json::from_str(prompt.as_str()).expect("prompt json");
-        let allowed = value
-            .pointer("/value_ref_contract/allowed")
-            .and_then(Value::as_array)
-            .expect("allowed ValueRef kinds");
-        assert!(!allowed.iter().any(|item| item == "detect"));
-        assert_eq!(
-            value.pointer("/asset_param_contract/rule"),
-            Some(&json!(
-                "for param type=asset, input must resolve to object with address"
-            ))
-        );
-        assert_eq!(
-            value.pointer("/segment_contract/optional_runtime_controls/0"),
-            Some(&json!("until"))
-        );
-        assert_eq!(
-            value.pointer("/segment_contract/candidate_ref_rule"),
-            Some(&json!(
-                "required for query/action; optional for assert/branch control steps"
-            ))
-        );
-        assert_eq!(
-            value.pointer("/segment_contract/kind_enum/2"),
-            Some(&json!("assert"))
-        );
-        assert_eq!(
-            value.pointer("/segment_contract/kind_enum/3"),
-            Some(&json!("branch"))
-        );
-        assert_eq!(
-            value.pointer("/depends_on_contract/rule"),
-            Some(&json!(
-                "depends_on items must reference known step ids in the same segment"
-            ))
-        );
-        assert_eq!(
-            value.pointer("/depends_on_contract/examples/1"),
-            Some(&json!("q_token_balance"))
-        );
-        assert_eq!(
-            value.pointer("/schema_lookup_contract/examples/0/schema"),
-            Some(&json!("ais-plan-sketch/0.1.0"))
-        );
-        assert_eq!(
-            value.pointer("/schema_lookup_contract/examples/2/topic"),
-            Some(&json!("cel"))
-        );
-        assert_eq!(
-            value.pointer("/failure_contract/missing_required_input/required_fields/0"),
-            Some(&json!("error.details.questions"))
-        );
-        assert_eq!(
-            value
-                .pointer("/failure_contract/missing_required_input/question_shape/options/0/label"),
-            Some(&json!("string"))
-        );
-        assert!(
-            value
-                .pointer("/schema_lookup_contract/examples/0/schema/id")
-                .is_none(),
-            "schema lookup examples must use canonical string shape"
-        );
-        assert!(
-            !prompt.contains("seg_1/"),
-            "prompt must not encourage cross-segment depends_on references"
-        );
-    }
-
-    #[test]
-    fn decode_plan_sketch_segment_arg_reports_missing_candidate_ref_with_step_context() {
-        let error = decode_plan_sketch_segment_arg(&json!({
-            "segment_id":"seg_1",
-            "cursor_in":"0",
-            "cursor_out":"1",
-            "done":false,
-            "steps":[
-                {"id":"q_balance","kind":"query","inputs":{}},
-                {"id":"a_guard","kind":"assert","inputs":{}},
-                {"id":"a_tx","kind":"action","candidate_ref":"erc20@0.0.2/transfer","inputs":{}}
-            ]
-        }))
-        .expect_err("missing candidate_ref must fail");
-        let message = error.to_string();
-        assert!(message.contains("missing required `candidate_ref`"));
-        assert!(message.contains("q_balance(query)"));
-        assert!(!message.contains("a_guard(assert)"));
-    }
-
-    #[test]
-    fn render_segment_prompt_with_patch_overrides_nested_fields() {
-        let request = SegmentPlanningRequest {
-            intent: "transfer token".to_string(),
-            session: SegmentPlanningSession {
-                session_id: "s".to_string(),
-                snapshot_hash: "h".to_string(),
-                cursor: "0".to_string(),
-                max_rounds: 6,
-                max_segments: 8,
-            },
-            state_summary: None,
-            previous_error: None,
-            last_segment: None,
-        };
-        let patch = json!({
-            "segment_contract": {
-                "notes": "patched-note"
-            },
-            "custom_hint": "x"
-        });
-        let prompt =
-            render_segment_prompt_with_patch("plan.propose_segment", &request, Some(&patch));
-        let value: Value = serde_json::from_str(prompt.as_str()).expect("prompt json");
-        assert_eq!(
-            value.pointer("/segment_contract/notes"),
-            Some(&json!("patched-note"))
-        );
-        assert_eq!(value.pointer("/custom_hint"), Some(&json!("x")));
-    }
-
-    #[test]
-    fn system_prompt_builder_emits_stable_version_and_hash() {
-        let builder = SegmentedPromptContextBuilder::default();
-        let rendered_a = builder.render(PlannerRoundPhase::ProposeSegment, None);
-        let rendered_b = builder.render(PlannerRoundPhase::ProposeSegment, None);
-        assert_eq!(rendered_a.version, SEGMENTED_PROMPT_VERSION);
-        assert_eq!(rendered_a.hash, rendered_b.hash);
-        assert!(rendered_a
-            .prompt
-            .contains("Prompt-Version: aisrs-segmented-planner-v2"));
-        assert!(rendered_a.prompt.contains("Prompt-Hash: "));
-    }
-
-    #[test]
-    fn usage_tracker_records_estimated_tokens() {
-        let request = CompleteWithToolsRequest {
-            messages: vec![LlmMessage {
-                role: MessageRole::User,
-                content: Some("hello".to_string()),
-                tool_name: None,
-                tool_call_id: None,
-                tool_calls: vec![],
-            }],
-            tools: vec![],
-        };
-        let response = ais_llm::CompleteWithToolsResponse {
-            assistant_content: Some("world".to_string()),
-            tool_calls: vec![],
-        };
-        let mut tracker = PlannerLlmUsageTracker::default().with_context_limit_tokens(Some(1000));
-        let usage = tracker.record_estimated(&request, &response);
-        assert!(usage.input_tokens > 0);
-        assert!(usage.output_tokens > 0);
-        assert!(usage.total_tokens >= usage.input_tokens);
-        assert!(usage.estimated);
-        assert_eq!(usage.context_limit_tokens, Some(1000));
-        assert_eq!(usage.context_soft_limit_tokens, Some(900));
-        assert_eq!(
-            usage.context_remaining_tokens,
-            Some(900_u64.saturating_sub(usage.input_tokens))
-        );
-        let value = tracker.to_value();
-        assert_eq!(value.pointer("/calls"), Some(&json!(1)));
-        assert_eq!(
-            value.pointer("/source"),
-            Some(&json!("estimated(chars_div_4)"))
-        );
-        assert_eq!(value.pointer("/context_limit_tokens"), Some(&json!(1000)));
-        assert_eq!(
-            value.pointer("/context_soft_limit_tokens"),
-            Some(&json!(900))
-        );
-        assert_eq!(
-            value.pointer("/context_window_input_tokens"),
-            Some(&json!(usage.input_tokens))
-        );
-        assert_eq!(
-            value.pointer("/context_window_total_tokens"),
-            Some(&json!(usage.total_tokens))
-        );
-        assert_eq!(
-            value.pointer("/context_remaining_tokens"),
-            Some(&json!(900_u64.saturating_sub(usage.input_tokens)))
-        );
-    }
-
-    #[test]
-    fn extract_round_context_signal_reads_pressure_and_compression_flags() {
-        let signal = extract_round_context_signal(
-            json!({
-                "state_summary": {
-                    "context_budget": {
-                        "pressure_mode": "critical",
-                        "pressure_actions": ["compress_tool_memory_projection"]
-                    }
-                }
-            })
-            .to_string()
-            .as_str(),
-        );
-        assert_eq!(signal.pressure_mode.as_deref(), Some("critical"));
-        assert!(signal.compressed);
-    }
-
-    #[test]
-    fn diagnostics_tracker_reports_duplicate_and_empty_search_streak_metrics() {
-        let context = large_catalog_candidate_context(2, 2);
-        let provider = ScriptedLlmProvider::from_responses(vec![
-            Ok(CompleteWithToolsResponse {
-                assistant_content: Some("search-1".to_string()),
-                tool_calls: vec![ToolCall {
-                    id: "tool-search-1".to_string(),
-                    name: "catalog.search".to_string(),
-                    arguments: json!({"query":"unknown-thing","kind":"query"}),
-                }],
-            }),
-            Ok(CompleteWithToolsResponse {
-                assistant_content: Some("search-2".to_string()),
-                tool_calls: vec![ToolCall {
-                    id: "tool-search-2".to_string(),
-                    name: "catalog.search".to_string(),
-                    arguments: json!({"query":"unknown-thing","kind":"query"}),
-                }],
-            }),
-            Ok(CompleteWithToolsResponse {
-                assistant_content: Some("finalize".to_string()),
-                tool_calls: vec![ToolCall {
-                    id: "tool-final".to_string(),
-                    name: "plan.propose_todos".to_string(),
-                    arguments: json!({
-                        "status":"proposed",
-                        "summary":"done",
-                        "todos":[{"title":"t1"}]
-                    }),
-                }],
-            }),
-        ]);
-
-        let mut planner =
-            LlmSegmentedIntentPlanner::new(provider).with_candidate_context(Some(context));
-        let draft = planner.propose_todos(TodoPlanningRequest {
-            intent: "plan todos".to_string(),
-            session: SegmentPlanningSession {
-                session_id: "sess-1".to_string(),
-                snapshot_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                    .to_string(),
-                cursor: "0".to_string(),
-                max_rounds: 8,
-                max_segments: 8,
-            },
-            state_summary: Some(json!({
-                "context_budget": {
-                    "pressure_mode": "light",
-                    "pressure_actions": []
-                }
-            })),
-        });
-        assert!(matches!(draft, Ok(TodoDraft::Proposed { .. })));
-
-        let usage = planner.llm_usage_value();
-        assert_eq!(
-            usage.pointer("/diagnostics/tool_calls_total"),
-            Some(&json!(3))
-        );
-        assert_eq!(
-            usage.pointer("/diagnostics/tool_call_count_by_tool/catalog.search"),
-            Some(&json!(2))
-        );
-        assert_eq!(
-            usage.pointer("/diagnostics/tool_calls_duplicate"),
-            Some(&json!(1))
-        );
-        assert_eq!(
-            usage.pointer("/diagnostics/empty_search_streak_max"),
-            Some(&json!(2))
-        );
-        assert_eq!(
-            usage.pointer("/diagnostics/memory_hit_rate_by_tool/catalog.search/hits"),
-            Some(&json!(1))
-        );
-        assert_eq!(
-            usage.pointer("/diagnostics/phase_round_count/propose_todos"),
-            Some(&json!(3))
-        );
-        assert_eq!(
-            usage.pointer("/diagnostics/discovery_tool_call_ratio_bps"),
-            Some(&json!(6666))
-        );
-    }
-
-    #[test]
-    fn catalog_search_loop_guard_emits_hint_once_per_streak() {
-        let mut guard = CatalogSearchLoopGuard::default();
-        assert!(!guard.observe_empty(Some("query|q".to_string())));
-        assert!(guard.observe_empty(Some("query|q".to_string())));
-        assert!(!guard.observe_empty(Some("query|q".to_string())));
-        assert_eq!(guard.max_streak(), 3);
-        guard.observe_non_empty();
-        assert!(!guard.observe_empty(Some("query|q".to_string())));
-        assert!(guard.observe_empty(Some("query|q".to_string())));
-    }
-
-    #[test]
-    fn begin_session_resets_usage_and_diagnostics_trackers() {
-        let begin_payload = || {
-            Ok(CompleteWithToolsResponse {
-                assistant_content: Some("begin".to_string()),
-                tool_calls: vec![ToolCall {
-                    id: "tool-begin".to_string(),
-                    name: "plan.begin".to_string(),
-                    arguments: json!({
-                        "session_id":"sess",
-                        "snapshot_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                        "cursor":"0",
-                        "limits":{"max_rounds":4,"max_segments":3}
-                    }),
-                }],
-            })
-        };
-        let provider = ScriptedLlmProvider::from_responses(vec![begin_payload(), begin_payload()]);
-        let mut planner =
-            LlmSegmentedIntentPlanner::new(provider).with_context_limit_tokens(Some(1000));
-
-        planner
-            .begin_session(SegmentBeginRequest {
-                intent: "a".to_string(),
-                pack_snapshot_hash:
-                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
-                catalog_hash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-                    .to_string(),
-                chain_scope: vec!["eip155:1".to_string()],
-            })
-            .expect("first begin");
-        let first_usage = planner.llm_usage_value();
-        assert_eq!(first_usage.pointer("/calls"), Some(&json!(1)));
-
-        planner
-            .begin_session(SegmentBeginRequest {
-                intent: "b".to_string(),
-                pack_snapshot_hash:
-                    "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".to_string(),
-                catalog_hash: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
-                    .to_string(),
-                chain_scope: vec!["eip155:1".to_string()],
-            })
-            .expect("second begin");
-        let second_usage = planner.llm_usage_value();
-        assert_eq!(second_usage.pointer("/calls"), Some(&json!(1)));
-        assert_eq!(
-            second_usage.pointer("/diagnostics/tool_calls_total"),
-            Some(&json!(1))
-        );
-    }
-
-    #[test]
-    fn begin_phase_rejects_discovery_tools() {
-        let calls = vec![ToolCall {
-            id: "tool-1".to_string(),
-            name: "list_candidates".to_string(),
-            arguments: json!({}),
-        }];
-        let error = validate_tool_calls_for_phase(&calls, PlannerRoundPhase::Begin)
-            .expect_err("begin phase should reject discovery tools");
-        assert!(error.to_string().contains("not allowed"));
-    }
-
-    #[test]
-    fn propose_phase_rejects_revise_tool() {
-        let calls = vec![ToolCall {
-            id: "tool-1".to_string(),
-            name: "plan.revise_segment".to_string(),
-            arguments: json!({
-                "status":"invalid",
-                "done":false,
-                "error":{"reason_code":"x"}
-            }),
-        }];
-        let error = validate_tool_calls_for_phase(&calls, PlannerRoundPhase::ProposeSegment)
-            .expect_err("propose phase should reject revise tool");
-        assert!(error.to_string().contains("not allowed"));
-    }
-
-    #[test]
-    fn todo_phase_rejects_segment_finalize_tool() {
-        let calls = vec![ToolCall {
-            id: "tool-1".to_string(),
-            name: "plan.propose_segment".to_string(),
-            arguments: json!({
-                "status":"invalid",
-                "done":false,
-                "error":{"reason_code":"x"}
-            }),
-        }];
-        let error = validate_tool_calls_for_phase(&calls, PlannerRoundPhase::ProposeTodos)
-            .expect_err("todo phase should reject segment finalize tool");
-        assert!(error.to_string().contains("not allowed"));
-    }
-
-    #[test]
-    fn todo_phase_allows_discovery_then_finalize() {
-        let calls = vec![
-            ToolCall {
-                id: "tool-1".to_string(),
-                name: "list_candidates".to_string(),
-                arguments: json!({}),
-            },
-            ToolCall {
-                id: "tool-2".to_string(),
-                name: "plan.propose_todos".to_string(),
-                arguments: json!({
-                    "status":"proposed",
-                    "todos":[{"title":"t1"}]
-                }),
-            },
-        ];
-        validate_tool_calls_for_phase(&calls, PlannerRoundPhase::ProposeTodos)
-            .expect("todo phase should allow discovery + finalize");
-    }
-
-    #[test]
-    fn revise_phase_rejects_propose_tool() {
-        let calls = vec![ToolCall {
-            id: "tool-1".to_string(),
-            name: "plan.propose_segment".to_string(),
-            arguments: json!({
-                "status":"invalid",
-                "done":false,
-                "error":{"reason_code":"x"}
-            }),
-        }];
-        let error = validate_tool_calls_for_phase(&calls, PlannerRoundPhase::ReviseSegment)
-            .expect_err("revise phase should reject propose tool");
-        assert!(error.to_string().contains("not allowed"));
-    }
-
-    #[test]
-    fn finalize_tool_must_be_last_in_round() {
-        let calls = vec![
-            ToolCall {
-                id: "tool-1".to_string(),
-                name: "plan.propose_segment".to_string(),
-                arguments: json!({
-                    "status":"invalid",
-                    "done":false,
-                    "error":{"reason_code":"x"}
-                }),
-            },
-            ToolCall {
-                id: "tool-2".to_string(),
-                name: "get_candidate_detail".to_string(),
-                arguments: json!({
-                    "refs":["demo@0.0.1/action-1"]
-                }),
-            },
-        ];
-        let error = validate_tool_calls_for_phase(&calls, PlannerRoundPhase::ProposeSegment)
-            .expect_err("finalize tool should be last");
-        assert!(error.to_string().contains("must be the last tool call"));
-    }
-
-    #[test]
-    fn finalize_tool_at_most_once_per_round() {
-        let calls = vec![
-            ToolCall {
-                id: "tool-1".to_string(),
-                name: "plan.propose_segment".to_string(),
-                arguments: json!({
-                    "status":"invalid",
-                    "done":false,
-                    "error":{"reason_code":"x"}
-                }),
-            },
-            ToolCall {
-                id: "tool-2".to_string(),
-                name: "plan.propose_segment".to_string(),
-                arguments: json!({
-                    "status":"invalid",
-                    "done":false,
-                    "error":{"reason_code":"x"}
-                }),
-            },
-        ];
-        let error = validate_tool_calls_for_phase(&calls, PlannerRoundPhase::ProposeSegment)
-            .expect_err("finalize tool should appear at most once");
-        assert!(error.to_string().contains("at most one finalize tool"));
-    }
-}
+#[path = "tests/intent_segmented_module.rs"]
+mod tests;

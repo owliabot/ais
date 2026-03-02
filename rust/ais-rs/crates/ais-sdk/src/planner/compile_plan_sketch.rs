@@ -167,6 +167,8 @@ struct CandidateMeta {
     kind: CandidateKind,
     execution_types: Vec<String>,
     execution_chains: Vec<String>,
+    risk_level: Option<u64>,
+    risk_tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -191,6 +193,8 @@ fn build_candidate_index(
                     kind: CandidateKind::Action,
                     execution_types: string_array_field(card, "execution_types"),
                     execution_chains: string_array_field(card, "execution_chains"),
+                    risk_level: risk_level_field(card),
+                    risk_tags: risk_tags_field(card),
                 },
             );
         }
@@ -203,6 +207,8 @@ fn build_candidate_index(
                     kind: CandidateKind::Query,
                     execution_types: string_array_field(card, "execution_types"),
                     execution_chains: string_array_field(card, "execution_chains"),
+                    risk_level: risk_level_field(card),
+                    risk_tags: risk_tags_field(card),
                 },
             );
         }
@@ -437,15 +443,16 @@ fn compile_step(
     if matches!(step.kind.as_str(), "assert" | "branch") {
         plan_sketch_extension["step_kind"] = Value::String(step.kind.clone());
     }
-    node.insert(
-        "extensions".to_string(),
-        json!({
-            "plan_sketch": plan_sketch_extension,
-            "policy": {
-                "constraint_templates": step.constraint_templates
-            },
-        }),
-    );
+    let mut extensions = json!({
+        "plan_sketch": plan_sketch_extension,
+        "policy": {
+            "constraint_templates": step.constraint_templates
+        },
+    });
+    if let Some(meta) = candidate_index.get(candidate_ref.as_str()) {
+        copy_risk_metadata_from_candidate(meta, &mut extensions);
+    }
+    node.insert("extensions".to_string(), extensions);
     if let Some(when) = &step.when {
         let cel = when.cel.as_str();
         let cel = rewrite_node_refs_in_cel(cel, segment_step_to_node_id);
@@ -938,6 +945,36 @@ fn string_array_field(value: &Value, key: &str) -> Vec<String> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default()
+}
+
+fn risk_level_field(value: &Value) -> Option<u64> {
+    value
+        .get("risk_level")
+        .and_then(Value::as_u64)
+        .filter(|risk_level| (1..=5).contains(risk_level))
+}
+
+fn risk_tags_field(value: &Value) -> Vec<String> {
+    string_array_field(value, "risk_tags")
+        .into_iter()
+        .map(|tag| tag.trim().to_string())
+        .filter(|tag| !tag.is_empty())
+        .collect::<Vec<_>>()
+}
+
+fn copy_risk_metadata_from_candidate(meta: &CandidateMeta, extensions: &mut Value) {
+    if let Some(risk_level) = meta.risk_level {
+        extensions["risk_level"] = Value::Number(risk_level.into());
+    }
+    if !meta.risk_tags.is_empty() {
+        extensions["risk_tags"] = Value::Array(
+            meta.risk_tags
+                .iter()
+                .cloned()
+                .map(Value::String)
+                .collect::<Vec<_>>(),
+        );
+    }
 }
 
 fn issue(

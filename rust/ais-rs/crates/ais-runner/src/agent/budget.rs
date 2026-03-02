@@ -76,31 +76,5 @@ fn compact_inner(value: &Value, options: &JsonBudgetOptions, depth: usize) -> Va
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn compact_json_limits_depth_arrays_and_strings() {
-        let input = json!({
-            "a":[1,2,3,4,5],
-            "b":{"c":{"d":{"e":{"f":"abcdefghijklmnopqrstuvwxyz"}}}},
-            "text":"abcdefghijklmnopqrstuvwxyz",
-        });
-        let out = compact_json_with_options(
-            &input,
-            &JsonBudgetOptions {
-                max_depth: 4,
-                max_object_entries: 10,
-                max_array_items: 2,
-                max_string_chars: 5,
-            },
-        );
-        assert_eq!(
-            out.pointer("/a/2"),
-            Some(&json!("[TRUNCATED_ARRAY_ITEMS:3]"))
-        );
-        assert_eq!(out.pointer("/b/c/d/e"), Some(&json!("[TRUNCATED_DEPTH]")));
-        assert_eq!(out.pointer("/text"), Some(&json!("abcde...")));
-    }
-}
+#[path = "tests/budget.rs"]
+mod tests;

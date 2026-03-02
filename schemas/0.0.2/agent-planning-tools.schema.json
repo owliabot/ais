@@ -157,7 +157,37 @@
         "suggestion": {
           "type": "string"
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "schema_error"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "field_path"
+            ],
+            "properties": {
+              "reason_code": {
+                "type": "string",
+                "enum": [
+                  "missing_required_field",
+                  "invalid_type",
+                  "invalid_enum",
+                  "additional_property_not_allowed"
+                ]
+              }
+            }
+          }
+        }
+      ]
     },
     "error": {
       "type": "object",
@@ -237,8 +267,29 @@
       "required": [
         "id",
         "kind",
-        "candidate_ref",
         "inputs"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "query",
+                  "action"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "candidate_ref"
+            ]
+          }
+        }
       ],
       "properties": {
         "id": {
@@ -804,6 +855,7 @@
         },
         "status": {
           "type": "string",
+          "description": "Required planner finalize state. Missing this field is a schema error.",
           "enum": [
             "proposed",
             "unavailable",
@@ -897,6 +949,7 @@
         },
         "status": {
           "type": "string",
+          "description": "Required planner finalize state. Missing this field is a schema error.",
           "enum": [
             "proposed",
             "unavailable",
@@ -1018,6 +1071,7 @@
         },
         "status": {
           "type": "string",
+          "description": "Required planner finalize state. Missing this field is a schema error.",
           "enum": [
             "proposed",
             "unavailable",

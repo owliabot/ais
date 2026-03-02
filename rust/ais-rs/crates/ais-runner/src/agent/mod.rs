@@ -2,17 +2,26 @@ mod brain;
 mod budget;
 mod candidates;
 mod checkpoint_ext;
+mod checkpoint_flow;
+mod context;
 mod context_view;
 mod error_state;
-mod facts;
+mod input_normalize;
+mod input_store;
+mod intent_context;
 mod intent_segmented;
 mod r#loop;
+mod missing_input;
 mod orchestrator;
+mod phase_machine;
 mod planning_memory;
 mod prompts;
+mod runtime_store;
 mod sanitize;
 mod summary;
 mod todos;
+mod tools;
+mod trace;
 mod write_gates;
 
 use crate::checkpoint_ledger::RunnerCheckpointLedger;
@@ -27,6 +36,7 @@ use crate::policy::{
 };
 use crate::run::process_replace_plan_commands;
 use ais_core::{stable_hash_hex, StableJsonOptions};
+use ais_engine::events::wall_clock_timestamp_rfc3339;
 use ais_engine::{
     create_checkpoint_document, encode_event_jsonl_line, encode_trace_jsonl_line,
     load_checkpoint_from_path, save_checkpoint_to_path, CheckpointEngineState, DefaultSolver,
@@ -52,6 +62,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashSet};
+use std::env;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -62,7 +73,9 @@ use budget::compact_json_for_llm;
 use candidates::{
     build_candidate_context_for_agent, CandidateContext, DEFAULT_MAX_INDEX_CANDIDATES,
 };
-use facts::{FactLayer, FactSource, FactStore};
+use input_store::{
+    InputStore, InputStoreUpsertResult, InputValueLayer, InputValueMeta, InputValueStability,
+};
 use intent_segmented::{
     IntentGroundingDraft, IntentGroundingRequest, LlmSegmentedIntentPlanner, SegmentBeginRequest,
     SegmentDraft, SegmentPlanningRequest, SegmentedIntentPlanner, SegmentedPromptOverrides,
@@ -91,8 +104,161 @@ struct MissingInputQuestionPrompt {
     required: Option<bool>,
 }
 
+const AIS_INPUT_STORE_MIGRATION_MODE_ENV: &str = "AIS_RUNNER_INPUT_STORE_MIGRATION_MODE";
+
+/// Input source migration toggle used during P3 rollout.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum InputStoreMigrationMode {
+    /// Historical behavior: use legacy runtime.inputs reads/writes.
+    Legacy,
+    /// New writes go to InputStore first, but keep runtime.inputs as writable mirror.
+    ShadowWrites,
+    /// Read path prefers InputStore and falls back to runtime projection.
+    ReadThrough,
+    /// Single source: InputStore is canonical and runtime.inputs is projection-only.
+    SingleSource,
+    /// Hard failure on legacy-only behavior to ensure no mixed sources in production.
+    EnforcedSingleSource,
+}
+
+impl InputStoreMigrationMode {
+    fn from_env() -> Self {
+        let raw = match env::var(AIS_INPUT_STORE_MIGRATION_MODE_ENV) {
+            Ok(value) => value,
+            Err(_) => return Self::SingleSource,
+        };
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "legacy" => Self::Legacy,
+            "shadow" | "shadow_writes" | "writes" | "shadowwrites" => Self::ShadowWrites,
+            "read" | "readthrough" | "read_through" => Self::ReadThrough,
+            "single" | "single_source" | "single-source" => Self::SingleSource,
+            "enforce" | "strict" | "enforced" | "enforced_single_source" => {
+                Self::EnforcedSingleSource
+            }
+            _ => Self::SingleSource,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::ShadowWrites => "shadow_writes",
+            Self::ReadThrough => "read_through",
+            Self::SingleSource => "single_source",
+            Self::EnforcedSingleSource => "enforced_single_source",
+        }
+    }
+}
+
+fn report_input_store_migration_mode_if_verbose(command: &AgentCommand) {
+    if !command.verbose {
+        return;
+    }
+    let mode = InputStoreMigrationMode::from_env();
+    eprintln!(
+        "[agent][input_store] migration_mode={} input_read_source=InputStoreOnly runtime_inputs_role=projection_only",
+        mode.name(),
+    );
+}
+
+fn upsert_input_value(
+    runtime: &mut Value,
+    key: &str,
+    value: Value,
+    source: impl Into<String>,
+    source_priority: u32,
+    provenance: impl Into<String>,
+) -> InputStoreUpsertResult {
+    let Some(canonical_key) = input_normalize::normalize_input_slot_key(key) else {
+        return InputStoreUpsertResult::Rejected;
+    };
+
+    let source = source.into();
+    let provenance = provenance.into();
+    let mut input_store = InputStore::default();
+    let result = if source_priority >= 100 || source == "user" {
+        input_store.upsert_user(canonical_key.as_str(), value, provenance)
+    } else {
+        input_store.upsert_seed(canonical_key.as_str(), value, provenance)
+    };
+    if matches!(
+        result,
+        InputStoreUpsertResult::Inserted | InputStoreUpsertResult::Replaced
+    ) && input_store.has(canonical_key.as_str())
+    {
+        if let Some(entry) = input_store.get(canonical_key.as_str()) {
+            input_normalize::set_runtime_input_value(
+                runtime,
+                canonical_key.as_str(),
+                entry.value.clone(),
+            );
+        }
+    }
+    result
+}
+
+fn upsert_seed_input_value(
+    runtime: &mut Value,
+    key: &str,
+    value: Value,
+    provenance: impl Into<String>,
+) -> InputStoreUpsertResult {
+    upsert_input_value(runtime, key, value, "seed", 10, provenance)
+}
+
+fn upsert_user_input_value(
+    runtime: &mut Value,
+    key: &str,
+    value: Value,
+    provenance: impl Into<String>,
+) -> InputStoreUpsertResult {
+    upsert_input_value(runtime, key, value, "user", 100, provenance)
+}
+
+pub(super) fn upsert_store_value_with_source(
+    store: &mut InputStore,
+    key: impl AsRef<str>,
+    value: Value,
+    layer: InputValueLayer,
+    source: &str,
+    source_priority: u32,
+    provenance: impl Into<String>,
+) -> InputStoreUpsertResult {
+    let key_ref = key.as_ref();
+    let stability = if key_ref.to_ascii_lowercase().contains("decimal") {
+        InputValueStability::Stable
+    } else if source.eq_ignore_ascii_case("query")
+        && (key_ref.to_ascii_lowercase().contains("balance")
+            || key_ref.to_ascii_lowercase().contains("allowance"))
+    {
+        InputValueStability::Volatile
+    } else {
+        InputValueStability::Unknown
+    };
+    let observed_at_ms = source.eq_ignore_ascii_case("query").then_some(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+    );
+    store.upsert(
+        key_ref,
+        value,
+        InputValueMeta {
+            source: source.to_string(),
+            source_priority,
+            provenance: Some(provenance.into()),
+            confidence: None,
+            layer,
+            stability,
+            observed_at_ms,
+        },
+    )
+}
+
 pub fn execute_agent(command: &AgentCommand) -> Result<String, RunnerError> {
     validate_agent_profile(command)?;
+    report_input_store_migration_mode_if_verbose(command);
     let config = load_runner_config(command.config.as_path())
         .map_err(|error| RunnerError::ConfigLoad(error.to_string()))?;
     let pack = match &command.pack {
@@ -231,8 +397,10 @@ pub fn execute_agent(command: &AgentCommand) -> Result<String, RunnerError> {
                 total_events += events.len();
                 write_event_sinks(command, events)?;
                 checkpoint_ledger.absorb_events(events);
-                checkpoint_ledger
-                    .mark_approved_nodes(&state.approved_node_ids, "1970-01-01T00:00:00Z");
+                checkpoint_ledger.mark_approved_nodes(
+                    &state.approved_node_ids,
+                    wall_clock_timestamp_rfc3339().as_str(),
+                );
                 maybe_save_checkpoint(
                     command,
                     run_id.as_str(),
@@ -344,7 +512,7 @@ fn plan_sketch_segment_id(node: &Value) -> Option<&str> {
         .filter(|value| !value.is_empty())
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn compile_segment_plan(
     intent: &str,
     session: &intent_segmented::SegmentPlanningSession,
@@ -353,25 +521,25 @@ fn compile_segment_plan(
     pack: Option<&ais_sdk::PackDocument>,
     chain_scope: &[String],
 ) -> Result<PlanDocument, Value> {
-    compile_segment_plan_with_facts(
+    compile_segment_plan_with_inputs(
         intent,
         session,
         segment,
         candidate_context,
         pack,
         chain_scope,
-        None,
+        &[],
     )
 }
 
-fn compile_segment_plan_with_facts(
+fn compile_segment_plan_with_inputs(
     intent: &str,
     session: &intent_segmented::SegmentPlanningSession,
     segment: &PlanSketchSegment,
     candidate_context: &CandidateContext,
     pack: Option<&ais_sdk::PackDocument>,
     chain_scope: &[String],
-    fact_store: Option<&FactStore>,
+    known_input_refs: &[String],
 ) -> Result<PlanDocument, Value> {
     let pack_snapshot_hash = derive_pack_snapshot_hash(pack).map_err(|error| {
         serde_json::json!({
@@ -379,7 +547,7 @@ fn compile_segment_plan_with_facts(
             "message": error.to_string(),
         })
     })?;
-    compile_segment_plan_with_snapshot_hash_and_facts(
+    compile_segment_plan_with_snapshot_hash_and_inputs(
         intent,
         session.session_id.as_str(),
         session.cursor.as_str(),
@@ -387,7 +555,7 @@ fn compile_segment_plan_with_facts(
         candidate_context,
         pack_snapshot_hash.as_str(),
         chain_scope,
-        fact_store,
+        known_input_refs,
     )
 }
 
@@ -400,7 +568,7 @@ pub(super) fn compile_segment_plan_with_snapshot_hash(
     pack_snapshot_hash: &str,
     chain_scope: &[String],
 ) -> Result<PlanDocument, Value> {
-    compile_segment_plan_with_snapshot_hash_and_facts(
+    compile_segment_plan_with_snapshot_hash_and_inputs(
         intent,
         session_id,
         cursor,
@@ -408,11 +576,11 @@ pub(super) fn compile_segment_plan_with_snapshot_hash(
         candidate_context,
         pack_snapshot_hash,
         chain_scope,
-        None,
+        &[],
     )
 }
 
-fn compile_segment_plan_with_snapshot_hash_and_facts(
+fn compile_segment_plan_with_snapshot_hash_and_inputs(
     intent: &str,
     session_id: &str,
     cursor: &str,
@@ -420,9 +588,9 @@ fn compile_segment_plan_with_snapshot_hash_and_facts(
     candidate_context: &CandidateContext,
     pack_snapshot_hash: &str,
     chain_scope: &[String],
-    fact_store: Option<&FactStore>,
+    known_input_refs: &[String],
 ) -> Result<PlanDocument, Value> {
-    validate_segment_write_gates(segment, candidate_context, fact_store)?;
+    validate_segment_write_gates(segment, candidate_context, None)?;
 
     let mut resolver = ResolverContext::new();
     for protocol in &candidate_context.protocols {
@@ -460,7 +628,7 @@ fn compile_segment_plan_with_snapshot_hash_and_facts(
         Some(&candidate_context.executable_candidates),
         &CompilePlanSketchOptions {
             default_chain: chain_scope.first().cloned(),
-            known_input_refs: build_known_input_refs(fact_store),
+            known_input_refs: build_known_input_refs(known_input_refs),
         },
     ) {
         CompilePlanSketchResult::Ok { plan } => Ok(plan),
@@ -472,44 +640,547 @@ fn compile_segment_plan_with_snapshot_hash_and_facts(
     }
 }
 
-fn build_known_input_refs(fact_store: Option<&FactStore>) -> Vec<String> {
-    let mut refs = std::collections::BTreeSet::<String>::new();
-    let Some(store) = fact_store else {
-        return Vec::new();
-    };
-    for key in store.keys() {
-        let key = key.trim();
-        if key.is_empty() {
-            continue;
+#[cfg(test)]
+fn compile_segment_plan_with_snapshot_hash_and_facts(
+    intent: &str,
+    session_id: &str,
+    cursor: &str,
+    segment: &PlanSketchSegment,
+    candidate_context: &CandidateContext,
+    pack_snapshot_hash: &str,
+    chain_scope: &[String],
+    input_store: Option<&InputStore>,
+) -> Result<PlanDocument, Value> {
+    let known_input_refs = input_store
+        .map(collect_known_input_refs_from_input_store_semantics)
+        .unwrap_or_default()
+        .into_iter()
+        .collect::<Vec<_>>();
+    compile_segment_plan_with_snapshot_hash_and_inputs(
+        intent,
+        session_id,
+        cursor,
+        segment,
+        candidate_context,
+        pack_snapshot_hash,
+        chain_scope,
+        known_input_refs.as_slice(),
+    )
+}
+
+fn build_known_input_refs(known_input_refs: &[String]) -> Vec<String> {
+    known_input_refs
+        .iter()
+        .filter_map(|raw_ref| {
+            input_normalize::normalize_input_slot_key(raw_ref)
+                .map(|canonical_slot| format!("inputs.{canonical_slot}"))
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+}
+
+pub(super) fn known_input_refs_from_state_summary(state_summary: Option<&Value>) -> Vec<String> {
+    let mut refs = BTreeSet::<String>::new();
+    for raw_ref in state_summary
+        .and_then(|summary| summary.pointer("/input_registry/known_refs"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flat_map(|items| items.iter())
+        .filter_map(Value::as_str)
+    {
+        if let Some(canonical_slot) = input_normalize::normalize_input_slot_key(raw_ref) {
+            refs.insert(format!("inputs.{canonical_slot}"));
         }
-        if let Some(reference) = to_canonical_input_ref_from_fact_key(key) {
-            refs.insert(reference);
+    }
+    for raw_ref in state_summary
+        .and_then(|summary| summary.pointer("/input_slots/canonical_refs"))
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|entries| entries.values())
+        .filter_map(Value::as_str)
+    {
+        if let Some(canonical_slot) = input_normalize::normalize_input_slot_key(raw_ref) {
+            refs.insert(format!("inputs.{canonical_slot}"));
+        }
+    }
+    for raw_ref in state_summary
+        .and_then(|summary| summary.pointer("/intent_slots/resolved_input_refs"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flat_map(|items| items.iter())
+        .filter_map(Value::as_str)
+    {
+        if let Some(canonical_slot) = input_normalize::normalize_input_slot_key(raw_ref) {
+            refs.insert(format!("inputs.{canonical_slot}"));
         }
     }
     refs.into_iter().collect::<Vec<_>>()
 }
 
-fn to_canonical_input_ref_from_fact_key(key: &str) -> Option<String> {
-    if key.starts_with("inputs.") {
-        return Some(key.to_string());
+pub(super) fn grounding_fact_keys_from_state_summary(state_summary: Option<&Value>) -> Vec<String> {
+    let mut keys = BTreeSet::<String>::new();
+    for raw_key in intent_context::grounding_fact_keys_from_state_summary(state_summary) {
+        if let Some(normalized) = normalize_fact_hint_key(raw_key.as_str()) {
+            keys.insert(normalized);
+        }
     }
-    if key.starts_with("facts.")
-        || key.starts_with("nodes.")
-        || key.starts_with("query.")
-        || key.starts_with("tx.")
-        || key.starts_with("owner_by_chain.")
-    {
+    keys.into_iter().collect::<Vec<_>>()
+}
+
+pub(super) fn canonicalize_segment_input_refs(
+    segment: &PlanSketchSegment,
+    known_refs: &[String],
+    grounding_fact_keys: &[String],
+) -> Result<PlanSketchSegment, Value> {
+    let allowed_refs = known_refs
+        .iter()
+        .filter_map(|raw_ref| {
+            input_normalize::normalize_input_slot_key(raw_ref)
+                .map(|canonical_slot| format!("inputs.{canonical_slot}"))
+        })
+        .collect::<BTreeSet<_>>();
+    let grounding_fact_keys = grounding_fact_keys
+        .iter()
+        .filter_map(|key| normalize_fact_hint_key(key))
+        .collect::<BTreeSet<_>>();
+    let mut value = serde_json::to_value(segment).map_err(|error| {
+        serde_json::json!({
+            "reason_code": "compile_error",
+            "message": format!("segment input-ref guard failed to encode segment: {error}"),
+            "issues": []
+        })
+    })?;
+    let mut issues = Vec::<Value>::new();
+    canonicalize_segment_input_refs_value(
+        &mut value,
+        "",
+        &allowed_refs,
+        &grounding_fact_keys,
+        &mut issues,
+    );
+    if !issues.is_empty() {
+        return Err(serde_json::json!({
+            "reason_code": "compile_error",
+            "message": "segment compile blocked by input ref guard",
+            "issues": issues,
+        }));
+    }
+    serde_json::from_value(value).map_err(|error| {
+        serde_json::json!({
+            "reason_code": "compile_error",
+            "message": format!("segment input-ref guard failed to decode segment: {error}"),
+            "issues": []
+        })
+    })
+}
+
+fn canonicalize_segment_input_refs_value(
+    value: &mut Value,
+    path: &str,
+    allowed_refs: &BTreeSet<String>,
+    grounding_fact_keys: &BTreeSet<String>,
+    issues: &mut Vec<Value>,
+) {
+    match value {
+        Value::Object(map) => {
+            if let Some(raw_ref) = map.get("ref").and_then(Value::as_str) {
+                let ref_path = append_ref_guard_path(path, "ref");
+                if let Some(result) =
+                    resolve_canonical_input_ref(raw_ref, allowed_refs, grounding_fact_keys)
+                {
+                    match result {
+                        CanonicalInputRefResolution::Resolved(canonical_ref) => {
+                            if canonical_ref != raw_ref {
+                                map.insert("ref".to_string(), Value::String(canonical_ref));
+                            }
+                        }
+                        CanonicalInputRefResolution::Unknown {
+                            normalized_ref,
+                            candidates,
+                        } => {
+                            issues.push(serde_json::json!({
+                                "kind": "validation",
+                                "reference": "unknown_input_ref",
+                                "path": ref_path,
+                                "raw_ref": raw_ref,
+                                "normalized_ref": normalized_ref,
+                                "suggested_ref": candidates.first().cloned().unwrap_or_else(|| normalized_ref.clone()),
+                                "candidates": candidates,
+                                "message": format!("unknown input ref `{raw_ref}`; allowed refs must come from state_summary.input_registry.known_refs"),
+                                "guard": "input_ref_canonicalization",
+                            }));
+                        }
+                    }
+                }
+            }
+            let keys = map.keys().cloned().collect::<Vec<_>>();
+            for key in keys {
+                let child_path = append_ref_guard_path(path, &key);
+                if let Some(child) = map.get_mut(&key) {
+                    canonicalize_segment_input_refs_value(
+                        child,
+                        child_path.as_str(),
+                        allowed_refs,
+                        grounding_fact_keys,
+                        issues,
+                    );
+                }
+            }
+        }
+        Value::Array(items) => {
+            for (index, item) in items.iter_mut().enumerate() {
+                let child_path = if path.is_empty() {
+                    format!("[{index}]")
+                } else {
+                    format!("{path}[{index}]")
+                };
+                canonicalize_segment_input_refs_value(
+                    item,
+                    child_path.as_str(),
+                    allowed_refs,
+                    grounding_fact_keys,
+                    issues,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+enum CanonicalInputRefResolution {
+    Resolved(String),
+    Unknown {
+        normalized_ref: String,
+        candidates: Vec<String>,
+    },
+}
+
+fn resolve_canonical_input_ref(
+    raw_ref: &str,
+    allowed_refs: &BTreeSet<String>,
+    grounding_fact_keys: &BTreeSet<String>,
+) -> Option<CanonicalInputRefResolution> {
+    if !looks_like_input_ref(raw_ref) {
         return None;
     }
-    Some(format!("inputs.{key}"))
+    let normalized_ref = canonicalize_input_ref_alias(raw_ref)
+        .unwrap_or_else(|| coarse_input_ref_alias(raw_ref).unwrap_or_else(|| raw_ref.to_string()));
+    if allowed_refs.contains(&normalized_ref) {
+        return Some(CanonicalInputRefResolution::Resolved(normalized_ref));
+    }
+    Some(CanonicalInputRefResolution::Unknown {
+        normalized_ref: normalized_ref.clone(),
+        candidates: ranked_input_ref_candidates(
+            raw_ref,
+            normalized_ref.as_str(),
+            allowed_refs,
+            grounding_fact_keys,
+            5,
+        ),
+    })
+}
+
+fn looks_like_input_ref(raw_ref: &str) -> bool {
+    let trimmed = raw_ref.trim();
+    trimmed.starts_with("inputs.")
+        || trimmed.starts_with("runtime.inputs.")
+        || trimmed.starts_with("input.")
+}
+
+fn canonicalize_input_ref_alias(raw_ref: &str) -> Option<String> {
+    let trimmed = raw_ref.trim().trim_matches(|ch: char| {
+        ch.is_whitespace() || matches!(ch, '`' | '"' | '\'' | ',' | ';' | ')' | '(')
+    });
+    let without_prefix = if let Some(suffix) = trimmed.strip_prefix("runtime.inputs.") {
+        suffix
+    } else if let Some(suffix) = trimmed.strip_prefix("inputs.") {
+        suffix
+    } else if let Some(suffix) = trimmed.strip_prefix("input.") {
+        suffix
+    } else {
+        return None;
+    };
+    let normalized = without_prefix
+        .strip_suffix(".value")
+        .unwrap_or(without_prefix)
+        .replace(':', ".");
+    let canonical_slot = input_normalize::normalize_input_slot_key(normalized.as_str())?;
+    Some(format!("inputs.{canonical_slot}"))
+}
+
+fn coarse_input_ref_alias(raw_ref: &str) -> Option<String> {
+    let trimmed = raw_ref.trim();
+    let without_prefix = if let Some(suffix) = trimmed.strip_prefix("runtime.inputs.") {
+        suffix
+    } else if let Some(suffix) = trimmed.strip_prefix("inputs.") {
+        suffix
+    } else if let Some(suffix) = trimmed.strip_prefix("input.") {
+        suffix
+    } else {
+        return None;
+    };
+    let slot = without_prefix
+        .strip_suffix(".value")
+        .unwrap_or(without_prefix)
+        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '.')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join(".");
+    (!slot.is_empty()).then_some(format!("inputs.{slot}"))
+}
+
+fn ranked_input_ref_candidates(
+    raw_ref: &str,
+    normalized_ref: &str,
+    allowed_refs: &BTreeSet<String>,
+    grounding_fact_keys: &BTreeSet<String>,
+    limit: usize,
+) -> Vec<String> {
+    let mut ranked = Vec::<String>::new();
+    for exact in exact_input_ref_candidates(raw_ref, normalized_ref) {
+        if allowed_refs.contains(&exact) {
+            ranked.push(exact);
+        }
+    }
+    for alias in deterministic_alias_input_ref_candidates(
+        raw_ref,
+        normalized_ref,
+        allowed_refs,
+        grounding_fact_keys,
+        limit,
+    ) {
+        if !ranked.contains(&alias) {
+            ranked.push(alias);
+        }
+    }
+    for candidate in semantic_input_ref_candidates(normalized_ref, allowed_refs, limit) {
+        if !ranked.contains(&candidate) {
+            ranked.push(candidate);
+        }
+    }
+    ranked.truncate(limit.max(1));
+    ranked
+}
+
+fn exact_input_ref_candidates(raw_ref: &str, normalized_ref: &str) -> Vec<String> {
+    let mut out = Vec::<String>::new();
+    for candidate in [
+        Some(normalized_ref.to_string()),
+        canonicalize_input_ref_alias(raw_ref),
+        coarse_input_ref_alias(raw_ref),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !out.contains(&candidate) {
+            out.push(candidate);
+        }
+    }
+    out
+}
+
+fn deterministic_alias_input_ref_candidates(
+    raw_ref: &str,
+    normalized_ref: &str,
+    allowed_refs: &BTreeSet<String>,
+    grounding_fact_keys: &BTreeSet<String>,
+    limit: usize,
+) -> Vec<String> {
+    let alias_keys = alias_keys_for_unknown_ref(raw_ref, normalized_ref, grounding_fact_keys);
+    if alias_keys.is_empty() {
+        return Vec::new();
+    }
+
+    let mut ranked = allowed_refs
+        .iter()
+        .filter_map(|candidate| {
+            let candidate_slot = candidate
+                .strip_prefix("inputs.")
+                .unwrap_or(candidate.as_str());
+            let score = alias_keys
+                .iter()
+                .map(|alias_key| {
+                    deterministic_alias_score(
+                        alias_key,
+                        candidate_slot,
+                        grounding_fact_keys.contains(alias_key),
+                    )
+                })
+                .max()
+                .unwrap_or(0);
+            (score > 0).then_some((score, candidate.clone()))
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+    ranked.truncate(limit.max(1));
+    ranked.into_iter().map(|(_, candidate)| candidate).collect()
+}
+
+fn alias_keys_for_unknown_ref(
+    raw_ref: &str,
+    normalized_ref: &str,
+    grounding_fact_keys: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    let slot = normalized_ref
+        .strip_prefix("inputs.")
+        .unwrap_or(normalized_ref)
+        .to_ascii_lowercase();
+    let mut keys = BTreeSet::<String>::new();
+    if let Some(suffix) = slot.strip_prefix("fact.") {
+        if let Some(normalized) = normalize_fact_hint_key(suffix) {
+            keys.insert(normalized);
+        }
+    }
+    if let Some(suffix) = slot.strip_prefix("facts.") {
+        if let Some(normalized) = normalize_fact_hint_key(suffix) {
+            keys.insert(normalized);
+        }
+    }
+    if raw_ref.contains("fact:") || raw_ref.contains("facts:") {
+        for marker in ["fact:", "facts:"] {
+            if let Some((_, suffix)) = raw_ref.split_once(marker) {
+                if let Some(token) = suffix.split(['.', ':', '/', ' ']).next() {
+                    if let Some(normalized) = normalize_fact_hint_key(token) {
+                        keys.insert(normalized);
+                    }
+                }
+            }
+        }
+    }
+    for fact_key in grounding_fact_keys {
+        if slot.contains(fact_key) {
+            keys.insert(fact_key.clone());
+        }
+    }
+    keys
+}
+
+fn deterministic_alias_score(alias_key: &str, candidate_slot: &str, grounded: bool) -> i32 {
+    let candidate_slot = candidate_slot.to_ascii_lowercase();
+    let alias_key = alias_key.to_ascii_lowercase();
+    let alias_tokens = input_ref_tokens(alias_key.as_str());
+    let candidate_tokens = input_ref_tokens(candidate_slot.as_str());
+    let mut score = 0;
+    if candidate_slot == alias_key {
+        score += 600;
+    } else if candidate_slot.starts_with(format!("{alias_key}.").as_str()) {
+        score += 520;
+    } else if candidate_slot.starts_with(format!("{alias_key}_").as_str()) {
+        score += 500;
+    } else if candidate_slot.ends_with(format!(".{alias_key}").as_str()) {
+        score += 420;
+    } else if candidate_slot.contains(alias_key.as_str()) {
+        score += 260;
+    }
+    if !alias_tokens.is_empty()
+        && alias_tokens
+            .iter()
+            .all(|token| candidate_tokens.contains(token))
+    {
+        score += 220;
+    }
+    if grounded && alias_key == "token" {
+        if candidate_tokens.contains(&"address".to_string()) {
+            score += 320;
+        }
+        if candidate_tokens.contains(&"symbol".to_string()) {
+            score += 20;
+        }
+        if candidate_tokens.contains(&"decimals".to_string()) {
+            score += 20;
+        }
+    }
+    score
+}
+
+fn semantic_input_ref_candidates(
+    normalized_ref: &str,
+    allowed_refs: &BTreeSet<String>,
+    limit: usize,
+) -> Vec<String> {
+    let target_slot = normalized_ref
+        .strip_prefix("inputs.")
+        .unwrap_or(normalized_ref);
+    let target_tokens = input_ref_tokens(target_slot);
+    let target_leaf = target_tokens.last().cloned().unwrap_or_default();
+    let mut ranked = allowed_refs
+        .iter()
+        .filter_map(|candidate| {
+            let candidate_slot = candidate
+                .strip_prefix("inputs.")
+                .unwrap_or(candidate.as_str());
+            let candidate_tokens = input_ref_tokens(candidate_slot);
+            let candidate_leaf = candidate_tokens.last().cloned().unwrap_or_default();
+            let shared_tokens = target_tokens
+                .iter()
+                .filter(|token| candidate_tokens.contains(token))
+                .count() as i32;
+            let mut score = shared_tokens * 10;
+            if !target_leaf.is_empty() && target_leaf == candidate_leaf {
+                score += 12;
+            }
+            if candidate_slot.starts_with(target_slot) || target_slot.starts_with(candidate_slot) {
+                score += 8;
+            }
+            if candidate_slot.contains(target_slot) || target_slot.contains(candidate_slot) {
+                score += 4;
+            }
+            (score > 0).then_some((score, candidate.clone()))
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+    ranked.truncate(limit.max(1));
+    ranked.into_iter().map(|(_, candidate)| candidate).collect()
+}
+
+fn input_ref_tokens(raw: &str) -> Vec<String> {
+    raw.split(|ch: char| !ch.is_ascii_alphanumeric())
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(|token| token.to_ascii_lowercase())
+        .collect::<Vec<_>>()
+}
+
+fn normalize_fact_hint_key(raw: &str) -> Option<String> {
+    let normalized = raw
+        .trim()
+        .to_ascii_lowercase()
+        .replace(':', ".")
+        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '.')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join(".");
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+fn append_ref_guard_path(path: &str, key: &str) -> String {
+    if path.is_empty() {
+        key.to_string()
+    } else if key.starts_with('[') {
+        format!("{path}{key}")
+    } else {
+        format!("{path}.{key}")
+    }
+}
+
+#[cfg(test)]
+fn collect_known_input_refs_from_input_store_semantics(
+    store: &InputStore,
+) -> std::collections::BTreeSet<String> {
+    let mut refs = std::collections::BTreeSet::<String>::new();
+    for slot in store.list_ref_strings() {
+        refs.insert(format!("inputs.{slot}"));
+    }
+    refs
 }
 
 fn validate_segment_write_gates(
     segment: &PlanSketchSegment,
     candidate_context: &CandidateContext,
-    fact_store: Option<&FactStore>,
+    input_store: Option<&InputStore>,
 ) -> Result<(), Value> {
-    write_gates::validate_segment_write_gates(segment, candidate_context, fact_store)
+    write_gates::validate_segment_write_gates(segment, candidate_context, input_store)
 }
 
 fn derive_pack_snapshot_hash(pack: Option<&ais_sdk::PackDocument>) -> Result<String, RunnerError> {
@@ -591,12 +1262,12 @@ fn resolve_llm_context_limit_tokens(config: &RunnerConfig) -> Option<usize> {
         .filter(|value| *value > 0)
 }
 
-fn build_initial_fact_store(
+fn build_initial_input_store(
     runtime: &Value,
     config: &RunnerConfig,
     chain_scope: &[String],
-) -> Result<FactStore, RunnerError> {
-    let mut store = FactStore::default();
+) -> Result<InputStore, RunnerError> {
+    let mut store = InputStore::default();
     seed_runtime_input_facts(runtime, &mut store);
     seed_runtime_owner_facts(runtime, &mut store);
     seed_signer_owner_facts(config, chain_scope, &mut store)?;
@@ -631,8 +1302,8 @@ fn decode_agent_checkpoint_extensions(
     }
     if verbose_llm {
         eprintln!(
-            "[checkpoint] fact_store restored={}",
-            extensions.fact_store().is_some()
+            "[checkpoint] input_store projection restored={}",
+            extensions.input_store().is_some()
         );
         eprintln!(
             "[checkpoint] todo_progress restored={}",
@@ -646,43 +1317,84 @@ fn decode_agent_checkpoint_extensions(
     extensions
 }
 
-fn seed_runtime_owner_facts(runtime: &Value, store: &mut FactStore) {
-    let candidates = [
-        ("runtime.inputs.owner", runtime.pointer("/inputs/owner")),
-        ("runtime.inputs.wallet", runtime.pointer("/inputs/wallet")),
-        (
-            "runtime.ctx.wallet_address",
-            runtime.pointer("/ctx/wallet_address"),
-        ),
-        ("runtime.owner", runtime.pointer("/owner")),
-        ("runtime.wallet", runtime.pointer("/wallet")),
-    ];
-    for (provenance, value) in candidates {
-        let Some(owner) = value.and_then(Value::as_str).map(str::trim) else {
+fn seed_runtime_owner_facts(runtime: &Value, store: &mut InputStore) {
+    let mut candidates = Vec::<(String, String)>::new();
+    for key in ["inputs.owner", "inputs.wallet"] {
+        let Some(entry) = store.get(key) else {
+            continue;
+        };
+        let Some(owner) = entry.value.as_str().map(str::trim) else {
             continue;
         };
         if owner.is_empty() {
             continue;
         }
-        let owner_value = Value::String(owner.to_string());
-        store.upsert(
+        candidates.push((
+            entry
+                .meta
+                .provenance
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+            owner.to_string(),
+        ));
+    }
+    for (provenance, value) in [
+        (
+            "runtime.ctx.wallet_address".to_string(),
+            runtime
+                .pointer("/ctx/wallet_address")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+        ),
+        (
+            "runtime.owner".to_string(),
+            runtime
+                .pointer("/owner")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+        ),
+        (
+            "runtime.wallet".to_string(),
+            runtime
+                .pointer("/wallet")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+        ),
+    ] {
+        if let Some(owner) = value {
+            candidates.push((provenance, owner));
+        }
+    }
+    for (provenance, owner) in candidates {
+        let owner_value = Value::String(owner);
+        upsert_store_value_with_source(
+            store,
             "owner",
             owner_value.clone(),
-            FactLayer::Seed,
-            FactSource::RuntimeProvided,
-            provenance,
+            InputValueLayer::Seed,
+            "runtime",
+            70,
+            provenance.clone(),
         );
-        store.upsert(
+        upsert_store_value_with_source(
+            store,
             "wallet.default",
             owner_value,
-            FactLayer::Seed,
-            FactSource::RuntimeProvided,
+            InputValueLayer::Seed,
+            "runtime",
+            70,
             provenance,
         );
     }
 }
 
-fn seed_runtime_input_facts(runtime: &Value, store: &mut FactStore) {
+fn seed_runtime_input_facts(runtime: &Value, store: &mut InputStore) {
     let Some(inputs) = runtime.pointer("/inputs") else {
         return;
     };
@@ -693,25 +1405,22 @@ fn seed_runtime_input_facts(runtime: &Value, store: &mut FactStore) {
 fn seed_runtime_input_facts_recursive(
     value: &Value,
     path: &mut Vec<String>,
-    store: &mut FactStore,
+    store: &mut InputStore,
 ) {
     if !path.is_empty() {
-        let suffix = path.join(".");
-        let provenance = format!("runtime.inputs.{suffix}");
-        store.upsert(
-            suffix.clone(),
-            value.clone(),
-            FactLayer::Seed,
-            FactSource::RuntimeProvided,
-            provenance.clone(),
-        );
-        store.upsert(
-            format!("inputs.{suffix}"),
-            value.clone(),
-            FactLayer::Seed,
-            FactSource::RuntimeProvided,
-            provenance,
-        );
+        let raw_slot = path.join(".");
+        if let Some(slot) = input_normalize::normalize_input_slot_key(raw_slot.as_str()) {
+            let provenance = format!("runtime.inputs.{slot}");
+            let _ = upsert_store_value_with_source(
+                store,
+                slot.as_str(),
+                value.clone(),
+                InputValueLayer::Seed,
+                "runtime",
+                70,
+                provenance,
+            );
+        }
     }
     match value {
         Value::Object(object) => {
@@ -740,7 +1449,7 @@ fn seed_runtime_input_facts_recursive(
 fn seed_signer_owner_facts(
     config: &RunnerConfig,
     chain_scope: &[String],
-    store: &mut FactStore,
+    store: &mut InputStore,
 ) -> Result<(), RunnerError> {
     let mut chains = BTreeSet::<String>::new();
     if chain_scope.is_empty() {
@@ -768,25 +1477,31 @@ fn seed_signer_owner_facts(
         let owner = format!("{:#x}", signer.address());
         let source = format!("runner_config.chains.{chain}.signer");
         let owner_value = Value::String(owner.clone());
-        store.upsert(
+        upsert_store_value_with_source(
+            store,
             format!("owner_by_chain.{chain}"),
             owner_value.clone(),
-            FactLayer::Seed,
-            FactSource::ConfigDerived,
+            InputValueLayer::Seed,
+            "config",
+            80,
             source.clone(),
         );
-        store.upsert(
+        upsert_store_value_with_source(
+            store,
             "owner",
             owner_value.clone(),
-            FactLayer::Seed,
-            FactSource::ConfigDerived,
+            InputValueLayer::Seed,
+            "config",
+            80,
             source.clone(),
         );
-        store.upsert(
+        upsert_store_value_with_source(
+            store,
             "wallet.default",
             owner_value,
-            FactLayer::Seed,
-            FactSource::ConfigDerived,
+            InputValueLayer::Seed,
+            "config",
+            80,
             source,
         );
     }
@@ -800,14 +1515,14 @@ fn build_state_summary(
     completed_segments: usize,
     done: bool,
     previous_error: Option<&Value>,
-    fact_store: Option<&FactStore>,
+    input_store: Option<&InputStore>,
 ) -> Value {
     context_view::build_projected_summary(
         state,
         completed_segments,
         done,
         previous_error,
-        fact_store,
+        input_store,
         None,
     )
 }
@@ -868,77 +1583,68 @@ fn todo_phase_error_payload(
     error_state::todo_phase_error_payload(reason_code, message, issues, questions, round)
 }
 
+#[cfg(test)]
 fn missing_required_input_payload(
     message: Option<&str>,
     questions: &[Value],
     issues: &[Value],
     round: u8,
 ) -> Value {
-    missing_required_input_payload_with_context(message, questions, issues, &[], &[], round)
+    missing_input::payload(message, questions, issues, round)
 }
 
-fn missing_required_input_payload_with_context(
-    message: Option<&str>,
-    questions: &[Value],
-    issues: &[Value],
-    missing_refs: &[String],
-    suggested_paths: &[String],
-    round: u8,
-) -> Value {
-    compact_json_for_llm(&serde_json::json!({
-        "phase": "planning",
-        "reason_code": "missing_required_input",
-        "message": message,
-        "missing_refs": missing_refs,
-        "suggested_paths": suggested_paths,
-        "questions": questions,
-        "issues": issues,
-        "round": round,
-    }))
-}
-
+#[cfg(test)]
 fn record_missing_required_input(runtime: &mut Value, payload: &Value) {
-    record_runtime_agent_field(runtime, "missing_required_input", payload.clone());
+    runtime_store::record_missing_required_input(runtime, payload);
 }
 
+#[cfg(test)]
 fn record_todo_progress(runtime: &mut Value, todo_board: &TodoBoard) {
-    record_runtime_agent_field(runtime, "todo_progress", todo_board.to_runtime_value());
+    runtime_store::record_todo_progress(runtime, todo_board);
 }
 
 fn record_runtime_agent_field(runtime: &mut Value, key: &str, value: Value) {
-    if !runtime.is_object() {
-        *runtime = Value::Object(Map::new());
-    }
-    let Some(root) = runtime.as_object_mut() else {
-        return;
-    };
-    let agent_entry = root
-        .entry("agent".to_string())
-        .or_insert_with(|| Value::Object(Map::new()));
-    if !agent_entry.is_object() {
-        *agent_entry = Value::Object(Map::new());
-    }
-    if let Some(agent) = agent_entry.as_object_mut() {
-        agent.insert(key.to_string(), value);
-    }
+    runtime_store::record_runtime_agent_field(runtime, key, value);
 }
 
 fn maybe_collect_missing_input_answers(
     questions: &[Value],
 ) -> Result<Option<Map<String, Value>>, RunnerError> {
-    if questions.is_empty() || !should_prompt_for_missing_input() {
+    if questions.is_empty() {
         return Ok(None);
     }
     let parsed_questions = parse_missing_input_questions(questions);
     if parsed_questions.is_empty() {
         return Ok(None);
     }
+    let mut answers = Map::<String, Value>::new();
+    let mut pending_questions = Vec::<MissingInputQuestionPrompt>::new();
+    for question in parsed_questions {
+        if let Some(value) = auto_answer_missing_input_question(&question) {
+            eprintln!(
+                "[agent][missing_input] {}: auto-select query option",
+                question.id
+            );
+            answers.insert(question.id.clone(), value);
+            continue;
+        }
+        pending_questions.push(question);
+    }
+    if pending_questions.is_empty() {
+        return Ok(Some(answers));
+    }
+    if !should_prompt_for_missing_input() {
+        return if answers.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(answers))
+        };
+    }
     eprintln!(
         "[agent] planner requires additional inputs ({} question(s))",
-        parsed_questions.len()
+        pending_questions.len()
     );
-    let mut answers = Map::<String, Value>::new();
-    for question in parsed_questions {
+    for question in pending_questions {
         if let Some(value) = prompt_missing_input_question(&question)? {
             answers.insert(question.id, value);
         }
@@ -966,6 +1672,44 @@ fn parse_missing_input_questions(questions: &[Value]) -> Vec<MissingInputQuestio
         .iter()
         .filter_map(|item| serde_json::from_value::<MissingInputQuestionPrompt>(item.clone()).ok())
         .collect::<Vec<_>>()
+}
+
+fn auto_answer_missing_input_question(question: &MissingInputQuestionPrompt) -> Option<Value> {
+    let query_options = question
+        .options
+        .iter()
+        .filter(|option| missing_input_option_is_query(option))
+        .collect::<Vec<_>>();
+    if query_options.len() != 1 {
+        return None;
+    }
+    let selected = query_options[0];
+    Some(
+        selected
+            .value
+            .clone()
+            .unwrap_or_else(|| Value::String(selected.label.clone())),
+    )
+}
+
+fn missing_input_option_is_query(option: &MissingInputOptionPrompt) -> bool {
+    if query_hint(option.label.as_str()) {
+        return true;
+    }
+    option.value.as_ref().is_some_and(value_has_query_hint)
+}
+
+fn value_has_query_hint(value: &Value) -> bool {
+    match value {
+        Value::String(raw) => query_hint(raw),
+        Value::Object(object) => object.values().any(value_has_query_hint),
+        Value::Array(items) => items.iter().any(value_has_query_hint),
+        _ => false,
+    }
+}
+
+fn query_hint(raw: &str) -> bool {
+    raw.trim().to_ascii_lowercase().contains("query")
 }
 
 fn prompt_missing_input_question(
@@ -1036,94 +1780,13 @@ fn parse_user_supplied_answer_value(input: &str) -> Value {
     serde_json::from_str::<Value>(input).unwrap_or_else(|_| Value::String(input.to_string()))
 }
 
+#[cfg(test)]
 fn apply_missing_input_answers(
     state: &mut EngineRunnerState,
-    fact_store: &mut FactStore,
+    input_store: &mut InputStore,
     answers: &Map<String, Value>,
 ) {
-    for (key, value) in answers {
-        set_runtime_input_value(&mut state.runtime, key.as_str(), value.clone());
-        let provenance = format!("user.prompt.{key}");
-        fact_store.upsert(
-            key.clone(),
-            value.clone(),
-            FactLayer::Seed,
-            FactSource::UserInput,
-            provenance.clone(),
-        );
-        fact_store.upsert(
-            format!("inputs.{key}"),
-            value.clone(),
-            FactLayer::Seed,
-            FactSource::UserInput,
-            provenance,
-        );
-        if key == "owner" {
-            fact_store.upsert(
-                "wallet.default",
-                value.clone(),
-                FactLayer::Seed,
-                FactSource::UserInput,
-                "user.prompt.owner",
-            );
-        }
-    }
-}
-
-fn set_runtime_input_value(runtime: &mut Value, key: &str, value: Value) {
-    if !runtime.is_object() {
-        *runtime = Value::Object(Map::new());
-    }
-    let Some(root) = runtime.as_object_mut() else {
-        return;
-    };
-    let inputs = root
-        .entry("inputs".to_string())
-        .or_insert_with(|| Value::Object(Map::new()));
-    if !inputs.is_object() {
-        *inputs = Value::Object(Map::new());
-    }
-    let Some(inputs_obj) = inputs.as_object_mut() else {
-        return;
-    };
-    let segments = key
-        .split('.')
-        .map(str::trim)
-        .filter(|segment| !segment.is_empty())
-        .collect::<Vec<_>>();
-    if segments.is_empty() {
-        return;
-    }
-    set_nested_object_value(inputs_obj, segments.as_slice(), value);
-}
-
-fn set_nested_object_value(root: &mut Map<String, Value>, path: &[&str], value: Value) {
-    if path.is_empty() {
-        return;
-    }
-    if path.len() == 1 {
-        root.insert(path[0].to_string(), value);
-        return;
-    }
-    let entry = root
-        .entry(path[0].to_string())
-        .or_insert_with(|| Value::Object(Map::new()));
-    if !entry.is_object() {
-        *entry = Value::Object(Map::new());
-    }
-    if let Some(child) = entry.as_object_mut() {
-        set_nested_object_value(child, &path[1..], value);
-    }
-}
-
-fn missing_required_input_resolved_payload(answers: &Map<String, Value>, round: u8) -> Value {
-    compact_json_for_llm(&serde_json::json!({
-        "phase": "planning",
-        "reason_code": "missing_required_input",
-        "status": "resolved_by_user_input",
-        "answers": answers,
-        "round": round,
-    }))
+    missing_input::apply_answers(state, input_store, answers);
 }
 
 fn build_replace_plan_command(
@@ -1481,11 +2144,68 @@ fn load_or_init_state(
             let mut completed_node_ids = checkpoint.engine_state.completed_node_ids;
             checkpoint_ledger
                 .reconcile_completed_from_confirmed_side_effects(&mut completed_node_ids);
+            let confirmed_write_reuses = checkpoint_ledger.confirmed_write_reuses();
+            if !confirmed_write_reuses.is_empty() {
+                let node_ids = confirmed_write_reuses
+                    .iter()
+                    .map(|entry| entry.node_id.clone())
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                let confirmation_hashes = confirmed_write_reuses
+                    .iter()
+                    .map(|entry| entry.confirmation_hash.clone())
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                if command.verbose || command.verbose_llm {
+                    trace::emit(
+                        true,
+                        "resume",
+                        "side_effect_reused",
+                        &[
+                            ("count", node_ids.len().to_string()),
+                            ("node_ids", node_ids.join(",")),
+                            ("confirmation_hashes", confirmation_hashes.join(",")),
+                        ],
+                    );
+                    trace::emit(
+                        true,
+                        "resume",
+                        "resume_skip_confirmed_write",
+                        &[
+                            ("count", node_ids.len().to_string()),
+                            ("node_ids", node_ids.join(",")),
+                        ],
+                    );
+                }
+                record_runtime_agent_field(
+                    &mut active_runtime,
+                    "resume_skip_confirmed_write",
+                    serde_json::json!({
+                        "schema": "ais-agent-resume-skip/0.0.1",
+                        "event": "resume_skip_confirmed_write",
+                        "reason": "side_effect_reused",
+                        "count": node_ids.len(),
+                        "node_ids": node_ids,
+                        "confirmation_hashes": confirmation_hashes,
+                    }),
+                );
+            }
+            let completed_node_set = completed_node_ids
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<String>>();
+            let approved_node_ids = checkpoint_ledger
+                .approved_node_ids()
+                .into_iter()
+                .filter(|node_id| !completed_node_set.contains(node_id))
+                .collect::<Vec<_>>();
             Ok((
                 EngineRunnerState {
                     runtime: active_runtime,
                     completed_node_ids,
-                    approved_node_ids: Vec::new(),
+                    approved_node_ids,
                     seen_command_ids: checkpoint.engine_state.seen_command_ids,
                     paused_reason: checkpoint.engine_state.paused_reason,
                     pending_retries: checkpoint.engine_state.pending_retries,

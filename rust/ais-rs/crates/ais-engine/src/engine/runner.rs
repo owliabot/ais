@@ -1,13 +1,16 @@
 use crate::checkpoint::{
     canonical_side_effect_status, CheckpointSideEffectRecord, SIDE_EFFECT_RECORD_SCHEMA_0_1_0,
-    SIDE_EFFECT_STATUS_UNKNOWN,
+    SIDE_EFFECT_STATUS_CONFIRMED, SIDE_EFFECT_STATUS_UNKNOWN,
 };
 use crate::commands::{
     apply_command_with_dedupe, CommandDeduper, DuplicateCommandMode, EngineCommandEnvelope,
     EngineCommandType,
 };
 use crate::engine::apply_patches_from_command;
-use crate::events::{EngineEvent, EngineEventRecord, EngineEventStream, EngineEventType};
+use crate::events::{
+    wall_clock_timestamp_rfc3339, EngineEvent, EngineEventRecord, EngineEventStream,
+    EngineEventType, ENGINE_EVENT_CHECKS_SCHEMA_0_0_1,
+};
 use crate::executor::{RouterExecuteError, RouterExecutor};
 use crate::policy::{
     enforce_policy_gate, enrich_need_user_confirm_output, extract_policy_gate_input,
@@ -143,8 +146,12 @@ pub fn run_plan_once(
     );
 
     for command in commands {
-        let command_event =
-            apply_command_with_dedupe(&mut deduper, &mut stream, "1970-01-01T00:00:00Z", command);
+        let command_event = apply_command_with_dedupe(
+            &mut deduper,
+            &mut stream,
+            wall_clock_timestamp_rfc3339(),
+            command,
+        );
         events.push(command_event.event_record.clone());
         if !command_event.accepted || command_event.duplicate {
             continue;
@@ -156,7 +163,7 @@ pub fn run_plan_once(
                     command,
                     &ais_core::build_runtime_patch_guard_policy(),
                     &mut stream,
-                    "1970-01-01T00:00:00Z",
+                    wall_clock_timestamp_rfc3339(),
                 ) {
                     events.extend(execution.events);
                 }
@@ -187,7 +194,7 @@ pub fn run_plan_once(
                     apply_user_input_command(&mut state.runtime, &command.command.data)
                 {
                     events.push(stream.next_record(
-                        "1970-01-01T00:00:00Z",
+                        wall_clock_timestamp_rfc3339(),
                         need_user_input_event(
                             "invalid_user_input",
                             reason.as_str(),
@@ -195,9 +202,10 @@ pub fn run_plan_once(
                         ),
                     ));
                     state.paused_reason = Some("need_user_input:command".to_string());
-                    events.push(
-                        stream.next_record("1970-01-01T00:00:00Z", paused_event("need_user_input")),
-                    );
+                    events.push(stream.next_record(
+                        wall_clock_timestamp_rfc3339(),
+                        paused_event("need_user_input"),
+                    ));
                     persist_state_from_runtime(state, &mut deduper, &stream);
                     return EngineRunResult {
                         status: EngineRunStatus::Paused,
@@ -213,7 +221,7 @@ pub fn run_plan_once(
                     apply_user_select_command(&mut state.runtime, &command.command.data)
                 {
                     events.push(stream.next_record(
-                        "1970-01-01T00:00:00Z",
+                        wall_clock_timestamp_rfc3339(),
                         need_user_input_event(
                             "invalid_user_select",
                             reason.as_str(),
@@ -221,9 +229,10 @@ pub fn run_plan_once(
                         ),
                     ));
                     state.paused_reason = Some("need_user_input:command".to_string());
-                    events.push(
-                        stream.next_record("1970-01-01T00:00:00Z", paused_event("need_user_input")),
-                    );
+                    events.push(stream.next_record(
+                        wall_clock_timestamp_rfc3339(),
+                        paused_event("need_user_input"),
+                    ));
                     persist_state_from_runtime(state, &mut deduper, &stream);
                     return EngineRunResult {
                         status: EngineRunStatus::Paused,
@@ -236,10 +245,10 @@ pub fn run_plan_once(
             }
             EngineCommandType::Cancel => {
                 state.paused_reason = Some("cancelled_by_command".to_string());
-                events.push(
-                    stream
-                        .next_record("1970-01-01T00:00:00Z", paused_event("cancelled_by_command")),
-                );
+                events.push(stream.next_record(
+                    wall_clock_timestamp_rfc3339(),
+                    paused_event("cancelled_by_command"),
+                ));
                 persist_state_from_runtime(state, &mut deduper, &stream);
                 return EngineRunResult {
                     status: EngineRunStatus::Paused,
@@ -280,12 +289,14 @@ pub fn run_plan_once(
             continue;
         }
 
+        let control_kind = control_step_kind(node_obj);
         match evaluate_node_condition(node_obj, &state.runtime) {
             NodeConditionOutcome::Pass => {}
             NodeConditionOutcome::Skip => {
-                events.push(
-                    stream.next_record("1970-01-01T00:00:00Z", condition_skipped_event(&node_id)),
-                );
+                events.push(stream.next_record(
+                    wall_clock_timestamp_rfc3339(),
+                    condition_skipped_event(&node_id, control_kind),
+                ));
                 clear_retry_state(state, &node_id);
                 completed_set.insert(node_id.clone());
                 approved_set.remove(&node_id);
@@ -294,13 +305,14 @@ pub fn run_plan_once(
             }
             NodeConditionOutcome::Fail { message } => {
                 events.push(stream.next_record(
-                    "1970-01-01T00:00:00Z",
-                    condition_failed_event(&node_id, &message),
+                    wall_clock_timestamp_rfc3339(),
+                    condition_failed_event(&node_id, &message, control_kind),
                 ));
                 state.paused_reason = Some(format!("condition_failed:{node_id}"));
-                events.push(
-                    stream.next_record("1970-01-01T00:00:00Z", paused_event("condition_failed")),
-                );
+                events.push(stream.next_record(
+                    wall_clock_timestamp_rfc3339(),
+                    paused_event("condition_failed"),
+                ));
                 persist_state_from_runtime(state, &mut deduper, &stream);
                 return EngineRunResult {
                     status: EngineRunStatus::Paused,
@@ -313,7 +325,7 @@ pub fn run_plan_once(
         let readiness = get_node_readiness(node, &context, &ValueRefEvalOptions::default());
         if readiness.state != ais_sdk::NodeRunState::Ready {
             events.push(stream.next_record(
-                "1970-01-01T00:00:00Z",
+                wall_clock_timestamp_rfc3339(),
                 node_blocked_event(&node_id, &readiness),
             ));
             let decision = solver.solve(node, &readiness, &options.solver_context);
@@ -322,7 +334,7 @@ pub fn run_plan_once(
                 SolverDecision::NeedUserConfirm { .. } | SolverDecision::NeedUserInput { .. }
             ) {
                 if let Some(event) = build_solver_event(Some(&node_id), &decision) {
-                    events.push(stream.next_record("1970-01-01T00:00:00Z", event));
+                    events.push(stream.next_record(wall_clock_timestamp_rfc3339(), event));
                 }
             }
             match decision {
@@ -342,7 +354,7 @@ pub fn run_plan_once(
                     let (reason_code, event_details) =
                         need_user_input_fields(&node_id, action_ref.as_deref(), &reason, &details);
                     events.push(stream.next_record(
-                        "1970-01-01T00:00:00Z",
+                        wall_clock_timestamp_rfc3339(),
                         need_user_input_event_with_details(
                             Some(&node_id),
                             &reason_code,
@@ -351,9 +363,10 @@ pub fn run_plan_once(
                         ),
                     ));
                     state.paused_reason = Some(format!("need_user_input:{node_id}"));
-                    events.push(
-                        stream.next_record("1970-01-01T00:00:00Z", paused_event("need_user_input")),
-                    );
+                    events.push(stream.next_record(
+                        wall_clock_timestamp_rfc3339(),
+                        paused_event("need_user_input"),
+                    ));
                     persist_state_from_runtime(state, &mut deduper, &stream);
                     return EngineRunResult {
                         status: EngineRunStatus::Paused,
@@ -362,13 +375,13 @@ pub fn run_plan_once(
                 }
                 SolverDecision::NeedUserConfirm { reason, details } => {
                     let action_ref = extract_action_ref_from_node(node_obj);
-                    let risk_level = extract_risk_level_from_node(node_obj);
+                    let risk_observation = observe_risk_level_from_node(node_obj);
                     let risk_tags = extract_risk_tags_from_node(node_obj);
                     let gate_input = extract_policy_gate_input(
                         node,
                         readiness.resolved_params.as_ref(),
                         action_ref.clone(),
-                        risk_level,
+                        risk_observation.risk_level,
                         risk_tags,
                     );
                     let gate_output = PolicyGateOutput::NeedUserConfirm {
@@ -378,30 +391,37 @@ pub fn run_plan_once(
                     };
                     let gate_output = enrich_need_user_confirm_output(&gate_input, &gate_output)
                         .unwrap_or(gate_output);
-                    let (event_reason_code, event_reason, event_details) =
-                        need_user_confirm_fields(&gate_input, &gate_output, action_ref.as_deref());
+                    let (event_reason_code, event_reason, event_details) = need_user_confirm_fields(
+                        &gate_input,
+                        &gate_output,
+                        action_ref.as_deref(),
+                        Some(&risk_observation),
+                        "fallback",
+                    );
                     if should_route_confirm_to_missing_required_input(
                         event_reason_code.as_str(),
                         &event_details,
                     ) {
                         let normalized_details =
                             normalize_missing_required_input_details(&event_details);
-                        events.push(stream.next_record(
-                            "1970-01-01T00:00:00Z",
-                            need_user_input_event_with_details(
-                                Some(&node_id),
-                                "missing_required_input",
-                                "missing_inputs_or_runtime_refs",
-                                &normalized_details,
-                            ),
-                        ));
-                        state.paused_reason = Some(format!("need_user_input:{node_id}"));
-                        events.push(
-                            stream.next_record(
-                                "1970-01-01T00:00:00Z",
-                                paused_event("need_user_input"),
-                            ),
+                        let mut event = need_user_input_event_with_details(
+                            Some(&node_id),
+                            "missing_required_input",
+                            "missing_inputs_or_runtime_refs",
+                            &normalized_details,
                         );
+                        annotate_gate_check(
+                            &mut event,
+                            false,
+                            Some(event_reason_code.as_str()),
+                            control_kind,
+                        );
+                        events.push(stream.next_record(wall_clock_timestamp_rfc3339(), event));
+                        state.paused_reason = Some(format!("need_user_input:{node_id}"));
+                        events.push(stream.next_record(
+                            wall_clock_timestamp_rfc3339(),
+                            paused_event("need_user_input"),
+                        ));
                         persist_state_from_runtime(state, &mut deduper, &stream);
                         return EngineRunResult {
                             status: EngineRunStatus::Paused,
@@ -410,19 +430,20 @@ pub fn run_plan_once(
                     }
 
                     events.push(stream.next_record(
-                        "1970-01-01T00:00:00Z",
+                        wall_clock_timestamp_rfc3339(),
                         need_user_confirm_event(
                             &node_id,
                             &event_reason_code,
                             &event_reason,
                             &event_details,
+                            control_kind,
                         ),
                     ));
                     state.paused_reason = Some(format!("need_user_confirm:{node_id}"));
-                    events.push(
-                        stream
-                            .next_record("1970-01-01T00:00:00Z", paused_event("need_user_confirm")),
-                    );
+                    events.push(stream.next_record(
+                        wall_clock_timestamp_rfc3339(),
+                        paused_event("need_user_confirm"),
+                    ));
                     persist_state_from_runtime(state, &mut deduper, &stream);
                     return EngineRunResult {
                         status: EngineRunStatus::Paused,
@@ -434,7 +455,10 @@ pub fn run_plan_once(
             continue;
         }
 
-        events.push(stream.next_record("1970-01-01T00:00:00Z", node_ready_event(&node_id)));
+        events.push(stream.next_record(
+            wall_clock_timestamp_rfc3339(),
+            node_ready_event(&node_id, node_obj.contains_key("condition"), control_kind),
+        ));
 
         let simulate_mode = should_simulate_node(plan, node_obj, &node_id);
         if simulate_mode {
@@ -443,11 +467,42 @@ pub fn run_plan_once(
                 "node_id": node_id,
             });
             apply_node_writes(node_obj, &simulated_result, &mut state.runtime);
-            events.push(
-                stream.next_record("1970-01-01T00:00:00Z", preflight_simulated_event(&node_id)),
-            );
+            events.push(stream.next_record(
+                wall_clock_timestamp_rfc3339(),
+                preflight_simulated_event(&node_id),
+            ));
             match evaluate_node_assert(plan, node_obj, &node_id, &state.runtime) {
+                NodeAssertOutcome::NotConfigured => {
+                    match handle_node_until(
+                        node_obj,
+                        &node_id,
+                        state,
+                        &mut stream,
+                        &mut events,
+                        &mut deduper,
+                    ) {
+                        NodeUntilHandle::Complete => {
+                            completed_set.insert(node_id.clone());
+                            approved_set.remove(&node_id);
+                        }
+                        NodeUntilHandle::RetryScheduled => {}
+                        NodeUntilHandle::Paused => {
+                            return EngineRunResult {
+                                status: EngineRunStatus::Paused,
+                                events,
+                            };
+                        }
+                    }
+                    progress = true;
+                    continue;
+                }
                 NodeAssertOutcome::Pass => {
+                    set_latest_node_ready_assert_result(
+                        &mut events,
+                        &node_id,
+                        "preflight_simulate",
+                        control_kind,
+                    );
                     match handle_node_until(
                         node_obj,
                         &node_id,
@@ -473,18 +528,19 @@ pub fn run_plan_once(
                 }
                 NodeAssertOutcome::Fail { message, strategy } => {
                     events.push(stream.next_record(
-                        "1970-01-01T00:00:00Z",
+                        wall_clock_timestamp_rfc3339(),
                         assert_failed_event(
                             &node_id,
                             &message,
                             "preflight_simulate",
                             node_obj.get("assert"),
+                            control_kind,
                         ),
                     ));
                     state.paused_reason = Some(format!("assert_failed:{node_id}"));
                     if strategy == AssertFailStrategy::Stop {
                         events.push(stream.next_record(
-                            "1970-01-01T00:00:00Z",
+                            wall_clock_timestamp_rfc3339(),
                             node_paused_event(&node_id, "assert_failed_stop"),
                         ));
                         persist_state_from_runtime(state, &mut deduper, &stream);
@@ -493,9 +549,10 @@ pub fn run_plan_once(
                             events,
                         };
                     }
-                    events.push(
-                        stream.next_record("1970-01-01T00:00:00Z", paused_event("assert_failed")),
-                    );
+                    events.push(stream.next_record(
+                        wall_clock_timestamp_rfc3339(),
+                        paused_event("assert_failed"),
+                    ));
                     persist_state_from_runtime(state, &mut deduper, &stream);
                     return EngineRunResult {
                         status: EngineRunStatus::Paused,
@@ -506,21 +563,21 @@ pub fn run_plan_once(
         }
 
         let action_ref = extract_action_ref_from_node(node_obj);
-        let risk_level = extract_risk_level_from_node(node_obj);
+        let risk_observation = observe_risk_level_from_node(node_obj);
         let risk_tags = extract_risk_tags_from_node(node_obj);
         let gate_input = extract_policy_gate_input(
             node,
             readiness.resolved_params.as_ref(),
             action_ref.clone(),
-            risk_level,
+            risk_observation.risk_level,
             risk_tags,
         );
         let gate_output = enforce_policy_gate(&gate_input, &options.policy);
         let gate_output =
             enrich_need_user_confirm_output(&gate_input, &gate_output).unwrap_or(gate_output);
 
-        match gate_output {
-            PolicyGateOutput::Ok { .. } => {}
+        let gate_passed = match gate_output {
+            PolicyGateOutput::Ok { .. } => true,
             PolicyGateOutput::NeedUserConfirm {
                 reason_code,
                 reason,
@@ -532,30 +589,37 @@ pub fn run_plan_once(
                     details,
                 };
                 if !approved_set.contains(&node_id) {
-                    let (event_reason_code, event_reason, event_details) =
-                        need_user_confirm_fields(&gate_input, &gate_output, action_ref.as_deref());
+                    let (event_reason_code, event_reason, event_details) = need_user_confirm_fields(
+                        &gate_input,
+                        &gate_output,
+                        action_ref.as_deref(),
+                        Some(&risk_observation),
+                        "unknown",
+                    );
                     if should_route_confirm_to_missing_required_input(
                         event_reason_code.as_str(),
                         &event_details,
                     ) {
                         let normalized_details =
                             normalize_missing_required_input_details(&event_details);
-                        events.push(stream.next_record(
-                            "1970-01-01T00:00:00Z",
-                            need_user_input_event_with_details(
-                                Some(&node_id),
-                                "missing_required_input",
-                                "missing_inputs_or_runtime_refs",
-                                &normalized_details,
-                            ),
-                        ));
-                        state.paused_reason = Some(format!("need_user_input:{node_id}"));
-                        events.push(
-                            stream.next_record(
-                                "1970-01-01T00:00:00Z",
-                                paused_event("need_user_input"),
-                            ),
+                        let mut event = need_user_input_event_with_details(
+                            Some(&node_id),
+                            "missing_required_input",
+                            "missing_inputs_or_runtime_refs",
+                            &normalized_details,
                         );
+                        annotate_gate_check(
+                            &mut event,
+                            false,
+                            Some(event_reason_code.as_str()),
+                            control_kind,
+                        );
+                        events.push(stream.next_record(wall_clock_timestamp_rfc3339(), event));
+                        state.paused_reason = Some(format!("need_user_input:{node_id}"));
+                        events.push(stream.next_record(
+                            wall_clock_timestamp_rfc3339(),
+                            paused_event("need_user_input"),
+                        ));
                         persist_state_from_runtime(state, &mut deduper, &stream);
                         return EngineRunResult {
                             status: EngineRunStatus::Paused,
@@ -563,25 +627,27 @@ pub fn run_plan_once(
                         };
                     }
                     events.push(stream.next_record(
-                        "1970-01-01T00:00:00Z",
+                        wall_clock_timestamp_rfc3339(),
                         need_user_confirm_event(
                             &node_id,
                             &event_reason_code,
                             &event_reason,
                             &event_details,
+                            control_kind,
                         ),
                     ));
                     state.paused_reason = Some(format!("need_user_confirm:{node_id}"));
-                    events.push(
-                        stream
-                            .next_record("1970-01-01T00:00:00Z", paused_event("need_user_confirm")),
-                    );
+                    events.push(stream.next_record(
+                        wall_clock_timestamp_rfc3339(),
+                        paused_event("need_user_confirm"),
+                    ));
                     persist_state_from_runtime(state, &mut deduper, &stream);
                     return EngineRunResult {
                         status: EngineRunStatus::Paused,
                         events,
                     };
                 }
+                true
             }
             PolicyGateOutput::HardBlock {
                 reason_code,
@@ -589,17 +655,29 @@ pub fn run_plan_once(
                 details,
             } => {
                 events.push(stream.next_record(
-                    "1970-01-01T00:00:00Z",
-                    hard_block_event(&node_id, reason_code.as_str(), &reason, &details),
+                    wall_clock_timestamp_rfc3339(),
+                    hard_block_event(
+                        &node_id,
+                        reason_code.as_str(),
+                        &reason,
+                        &details,
+                        true,
+                        control_kind,
+                    ),
                 ));
                 state.paused_reason = Some(format!("hard_block:{node_id}"));
-                events.push(stream.next_record("1970-01-01T00:00:00Z", paused_event("hard_block")));
+                events.push(
+                    stream.next_record(wall_clock_timestamp_rfc3339(), paused_event("hard_block")),
+                );
                 persist_state_from_runtime(state, &mut deduper, &stream);
                 return EngineRunResult {
                     status: EngineRunStatus::Paused,
                     events,
                 };
             }
+        };
+        if gate_passed {
+            set_latest_node_ready_gate_result(&mut events, &node_id, control_kind);
         }
 
         let executable_node = match materialize_node_execution(
@@ -615,13 +693,14 @@ pub fn run_plan_once(
                     reason,
                 };
                 events.push(stream.next_record(
-                    "1970-01-01T00:00:00Z",
+                    wall_clock_timestamp_rfc3339(),
                     executor_error_event(&node_id, &error),
                 ));
                 state.paused_reason = Some(format!("executor_error:{node_id}"));
-                events.push(
-                    stream.next_record("1970-01-01T00:00:00Z", paused_event("executor_error")),
-                );
+                events.push(stream.next_record(
+                    wall_clock_timestamp_rfc3339(),
+                    paused_event("executor_error"),
+                ));
                 persist_state_from_runtime(state, &mut deduper, &stream);
                 return EngineRunResult {
                     status: EngineRunStatus::Paused,
@@ -633,11 +712,20 @@ pub fn run_plan_once(
             safety_hook_before_execute(node_obj, &options.safety)
         {
             events.push(stream.next_record(
-                "1970-01-01T00:00:00Z",
-                hard_block_event(&node_id, reason_code.as_str(), reason.as_str(), &details),
+                wall_clock_timestamp_rfc3339(),
+                hard_block_event(
+                    &node_id,
+                    reason_code.as_str(),
+                    reason.as_str(),
+                    &details,
+                    false,
+                    control_kind,
+                ),
             ));
             state.paused_reason = Some(format!("hard_block:{node_id}"));
-            events.push(stream.next_record("1970-01-01T00:00:00Z", paused_event("hard_block")));
+            events.push(
+                stream.next_record(wall_clock_timestamp_rfc3339(), paused_event("hard_block")),
+            );
             persist_state_from_runtime(state, &mut deduper, &stream);
             return EngineRunResult {
                 status: EngineRunStatus::Paused,
@@ -662,17 +750,22 @@ pub fn run_plan_once(
                         ),
                     );
                     events.push(stream.next_record(
-                        "1970-01-01T00:00:00Z",
+                        wall_clock_timestamp_rfc3339(),
                         hard_block_event(
                             &node_id,
                             "safety_output_prompt_injection",
                             "safety layer blocked suspicious executor output",
                             &details,
+                            false,
+                            control_kind,
                         ),
                     ));
                     state.paused_reason = Some(format!("hard_block:{node_id}"));
                     events.push(
-                        stream.next_record("1970-01-01T00:00:00Z", paused_event("hard_block")),
+                        stream.next_record(
+                            wall_clock_timestamp_rfc3339(),
+                            paused_event("hard_block"),
+                        ),
                     );
                     persist_state_from_runtime(state, &mut deduper, &stream);
                     return EngineRunResult {
@@ -697,29 +790,56 @@ pub fn run_plan_once(
                     ) {
                         continue;
                     }
+                    if side_effect.status == SIDE_EFFECT_STATUS_CONFIRMED
+                        && events.iter().any(|record| {
+                            if record.event.event_type != EngineEventType::SideEffectObserved {
+                                return false;
+                            }
+                            record.event.node_id.as_deref() == Some(node_id.as_str())
+                                && record
+                                    .event
+                                    .data
+                                    .get("record")
+                                    .and_then(Value::as_object)
+                                    .and_then(|record| record.get("status"))
+                                    .and_then(Value::as_str)
+                                    == Some(SIDE_EFFECT_STATUS_CONFIRMED)
+                        })
+                    {
+                        continue;
+                    }
                     events.push(stream.next_record(
-                        "1970-01-01T00:00:00Z",
+                        wall_clock_timestamp_rfc3339(),
                         side_effect_observed_event(&node_id, &side_effect),
                     ));
                 }
 
                 apply_node_writes(node_obj, &result.output.result, &mut state.runtime);
                 match evaluate_node_assert(plan, node_obj, &node_id, &state.runtime) {
-                    NodeAssertOutcome::Pass => {}
+                    NodeAssertOutcome::NotConfigured => {}
+                    NodeAssertOutcome::Pass => {
+                        set_latest_node_ready_assert_result(
+                            &mut events,
+                            &node_id,
+                            "execute",
+                            control_kind,
+                        );
+                    }
                     NodeAssertOutcome::Fail { message, strategy } => {
                         events.push(stream.next_record(
-                            "1970-01-01T00:00:00Z",
+                            wall_clock_timestamp_rfc3339(),
                             assert_failed_event(
                                 &node_id,
                                 &message,
                                 "execute",
                                 node_obj.get("assert"),
+                                control_kind,
                             ),
                         ));
                         state.paused_reason = Some(format!("assert_failed:{node_id}"));
                         if strategy == AssertFailStrategy::Stop {
                             events.push(stream.next_record(
-                                "1970-01-01T00:00:00Z",
+                                wall_clock_timestamp_rfc3339(),
                                 node_paused_event(&node_id, "assert_failed_stop"),
                             ));
                             persist_state_from_runtime(state, &mut deduper, &stream);
@@ -728,10 +848,10 @@ pub fn run_plan_once(
                                 events,
                             };
                         }
-                        events.push(
-                            stream
-                                .next_record("1970-01-01T00:00:00Z", paused_event("assert_failed")),
-                        );
+                        events.push(stream.next_record(
+                            wall_clock_timestamp_rfc3339(),
+                            paused_event("assert_failed"),
+                        ));
                         persist_state_from_runtime(state, &mut deduper, &stream);
                         return EngineRunResult {
                             status: EngineRunStatus::Paused,
@@ -763,13 +883,14 @@ pub fn run_plan_once(
             }
             Err(error) => {
                 events.push(stream.next_record(
-                    "1970-01-01T00:00:00Z",
+                    wall_clock_timestamp_rfc3339(),
                     executor_error_event(&node_id, &error),
                 ));
                 state.paused_reason = Some(format!("executor_error:{node_id}"));
-                events.push(
-                    stream.next_record("1970-01-01T00:00:00Z", paused_event("executor_error")),
-                );
+                events.push(stream.next_record(
+                    wall_clock_timestamp_rfc3339(),
+                    paused_event("executor_error"),
+                ));
                 persist_state_from_runtime(state, &mut deduper, &stream);
                 return EngineRunResult {
                     status: EngineRunStatus::Paused,
@@ -793,7 +914,8 @@ pub fn run_plan_once(
 
     if !progress {
         state.paused_reason = Some("no_progress".to_string());
-        events.push(stream.next_record("1970-01-01T00:00:00Z", paused_event("no_progress")));
+        events
+            .push(stream.next_record(wall_clock_timestamp_rfc3339(), paused_event("no_progress")));
         persist_state_from_runtime(state, &mut deduper, &stream);
         return EngineRunResult {
             status: EngineRunStatus::Paused,
@@ -875,6 +997,7 @@ enum AssertFailStrategy {
 }
 
 enum NodeAssertOutcome {
+    NotConfigured,
     Pass,
     Fail {
         message: String,
@@ -1101,93 +1224,102 @@ fn handle_node_until(
             NodeUntilHandle::Complete
         }
         NodeUntilOutcome::Retry => {
-            let retry_config = match parse_retry_config(node_obj) {
-                Ok(value) => value,
-                Err(message) => {
-                    events.push(stream.next_record(
-                        "1970-01-01T00:00:00Z",
-                        until_failed_event(node_id, &message),
-                    ));
-                    state.paused_reason = Some(format!("until_failed:{node_id}"));
-                    events.push(
-                        stream.next_record("1970-01-01T00:00:00Z", paused_event("until_failed")),
-                    );
-                    persist_state_from_runtime(state, deduper, stream);
-                    return NodeUntilHandle::Paused;
-                }
-            };
+            let retry_config =
+                match parse_retry_config(node_obj) {
+                    Ok(value) => value,
+                    Err(message) => {
+                        events.push(stream.next_record(
+                            wall_clock_timestamp_rfc3339(),
+                            until_failed_event(node_id, &message),
+                        ));
+                        state.paused_reason = Some(format!("until_failed:{node_id}"));
+                        events.push(stream.next_record(
+                            wall_clock_timestamp_rfc3339(),
+                            paused_event("until_failed"),
+                        ));
+                        persist_state_from_runtime(state, deduper, stream);
+                        return NodeUntilHandle::Paused;
+                    }
+                };
             let Some(retry_config) = retry_config else {
                 events.push(stream.next_record(
-                    "1970-01-01T00:00:00Z",
+                    wall_clock_timestamp_rfc3339(),
                     until_failed_event(
                         node_id,
                         "until evaluated false and retry is not configured",
                     ),
                 ));
                 state.paused_reason = Some(format!("until_not_met:{node_id}"));
-                events.push(
-                    stream.next_record("1970-01-01T00:00:00Z", paused_event("until_not_met")),
-                );
+                events.push(stream.next_record(
+                    wall_clock_timestamp_rfc3339(),
+                    paused_event("until_not_met"),
+                ));
                 persist_state_from_runtime(state, deduper, stream);
                 return NodeUntilHandle::Paused;
             };
-            let timeout_ms = match parse_timeout_ms(node_obj) {
-                Ok(value) => value,
-                Err(message) => {
-                    events.push(stream.next_record(
-                        "1970-01-01T00:00:00Z",
-                        until_failed_event(node_id, &message),
-                    ));
-                    state.paused_reason = Some(format!("until_failed:{node_id}"));
-                    events.push(
-                        stream.next_record("1970-01-01T00:00:00Z", paused_event("until_failed")),
-                    );
-                    persist_state_from_runtime(state, deduper, stream);
-                    return NodeUntilHandle::Paused;
-                }
-            };
+            let timeout_ms =
+                match parse_timeout_ms(node_obj) {
+                    Ok(value) => value,
+                    Err(message) => {
+                        events.push(stream.next_record(
+                            wall_clock_timestamp_rfc3339(),
+                            until_failed_event(node_id, &message),
+                        ));
+                        state.paused_reason = Some(format!("until_failed:{node_id}"));
+                        events.push(stream.next_record(
+                            wall_clock_timestamp_rfc3339(),
+                            paused_event("until_failed"),
+                        ));
+                        persist_state_from_runtime(state, deduper, stream);
+                        return NodeUntilHandle::Paused;
+                    }
+                };
             let (attempt, waited_ms) = next_retry_attempt(state, node_id, &retry_config);
             if retry_config
                 .max_attempts
                 .is_some_and(|max_attempts| attempt > max_attempts)
             {
                 events.push(stream.next_record(
-                    "1970-01-01T00:00:00Z",
+                    wall_clock_timestamp_rfc3339(),
                     retry_exhausted_event(node_id, attempt, &retry_config),
                 ));
                 state.paused_reason = Some(format!("retry_exhausted:{node_id}"));
-                events.push(
-                    stream.next_record("1970-01-01T00:00:00Z", paused_event("retry_exhausted")),
-                );
+                events.push(stream.next_record(
+                    wall_clock_timestamp_rfc3339(),
+                    paused_event("retry_exhausted"),
+                ));
                 persist_state_from_runtime(state, deduper, stream);
                 return NodeUntilHandle::Paused;
             }
             if timeout_ms.is_some_and(|timeout| waited_ms > timeout) {
                 events.push(stream.next_record(
-                    "1970-01-01T00:00:00Z",
+                    wall_clock_timestamp_rfc3339(),
                     retry_timeout_event(node_id, waited_ms, timeout_ms.unwrap_or_default()),
                 ));
                 state.paused_reason = Some(format!("retry_timeout:{node_id}"));
-                events.push(
-                    stream.next_record("1970-01-01T00:00:00Z", paused_event("retry_timeout")),
-                );
+                events.push(stream.next_record(
+                    wall_clock_timestamp_rfc3339(),
+                    paused_event("retry_timeout"),
+                ));
                 persist_state_from_runtime(state, deduper, stream);
                 return NodeUntilHandle::Paused;
             }
             state.paused_reason = None;
             events.push(stream.next_record(
-                "1970-01-01T00:00:00Z",
+                wall_clock_timestamp_rfc3339(),
                 node_waiting_retry_event(node_id, attempt, waited_ms, timeout_ms, &retry_config),
             ));
             NodeUntilHandle::RetryScheduled
         }
         NodeUntilOutcome::Fail { message } => {
             events.push(stream.next_record(
-                "1970-01-01T00:00:00Z",
+                wall_clock_timestamp_rfc3339(),
                 until_failed_event(node_id, &message),
             ));
             state.paused_reason = Some(format!("until_failed:{node_id}"));
-            events.push(stream.next_record("1970-01-01T00:00:00Z", paused_event("until_failed")));
+            events.push(
+                stream.next_record(wall_clock_timestamp_rfc3339(), paused_event("until_failed")),
+            );
             persist_state_from_runtime(state, deduper, stream);
             NodeUntilHandle::Paused
         }
@@ -1247,7 +1379,7 @@ fn evaluate_node_assert(
 ) -> NodeAssertOutcome {
     let strategy = resolve_assert_fail_strategy(plan, node_obj);
     let Some(assert_raw) = node_obj.get("assert") else {
-        return NodeAssertOutcome::Pass;
+        return NodeAssertOutcome::NotConfigured;
     };
     let assert_value_ref = match serde_json::from_value::<ValueRef>(assert_raw.clone()) {
         Ok(value_ref) => value_ref,
@@ -1695,10 +1827,125 @@ fn node_blocked_event(node_id: &str, readiness: &ais_sdk::NodeReadinessResult) -
     event
 }
 
-fn node_ready_event(node_id: &str) -> EngineEvent {
+fn node_ready_event(node_id: &str, has_condition: bool, control_kind: Option<&str>) -> EngineEvent {
     let mut event = EngineEvent::new(EngineEventType::NodeReady);
     event.node_id = Some(node_id.to_string());
+    if has_condition {
+        annotate_condition_check(&mut event, true, control_kind);
+    }
     event
+}
+
+fn set_latest_node_ready_gate_result(
+    events: &mut [EngineEventRecord],
+    node_id: &str,
+    control_kind: Option<&str>,
+) {
+    if let Some(record) = events.iter_mut().rev().find(|record| {
+        record.event.event_type == EngineEventType::NodeReady
+            && record.event.node_id.as_deref() == Some(node_id)
+    }) {
+        annotate_gate_check(&mut record.event, true, None, control_kind);
+    }
+}
+
+fn set_latest_node_ready_assert_result(
+    events: &mut [EngineEventRecord],
+    node_id: &str,
+    phase: &str,
+    control_kind: Option<&str>,
+) {
+    if let Some(record) = events.iter_mut().rev().find(|record| {
+        record.event.event_type == EngineEventType::NodeReady
+            && record.event.node_id.as_deref() == Some(node_id)
+    }) {
+        annotate_assert_check(&mut record.event, true, phase, control_kind);
+    }
+}
+
+fn control_step_kind(node_obj: &Map<String, Value>) -> Option<&str> {
+    node_obj
+        .get("extensions")
+        .and_then(Value::as_object)
+        .and_then(|extensions| extensions.get("control"))
+        .and_then(Value::as_object)
+        .and_then(|control| control.get("step_kind"))
+        .and_then(Value::as_str)
+}
+
+fn annotate_condition_check(event: &mut EngineEvent, result: bool, control_kind: Option<&str>) {
+    let mut fields = Map::new();
+    fields.insert("result".to_string(), Value::Bool(result));
+    if let Some(control_kind) = control_kind {
+        fields.insert(
+            "control_kind".to_string(),
+            Value::String(control_kind.to_string()),
+        );
+    }
+    insert_event_check_fields(event, "condition", fields);
+}
+
+fn annotate_gate_check(
+    event: &mut EngineEvent,
+    result: bool,
+    reason_code: Option<&str>,
+    control_kind: Option<&str>,
+) {
+    let mut fields = Map::new();
+    fields.insert("result".to_string(), Value::Bool(result));
+    if let Some(reason_code) = reason_code {
+        fields.insert(
+            "reason_code".to_string(),
+            Value::String(reason_code.to_string()),
+        );
+    }
+    if let Some(control_kind) = control_kind {
+        fields.insert(
+            "control_kind".to_string(),
+            Value::String(control_kind.to_string()),
+        );
+    }
+    insert_event_check_fields(event, "gate", fields);
+}
+
+fn annotate_assert_check(
+    event: &mut EngineEvent,
+    result: bool,
+    phase: &str,
+    control_kind: Option<&str>,
+) {
+    let mut fields = Map::new();
+    fields.insert("result".to_string(), Value::Bool(result));
+    fields.insert("phase".to_string(), Value::String(phase.to_string()));
+    if let Some(control_kind) = control_kind {
+        fields.insert(
+            "control_kind".to_string(),
+            Value::String(control_kind.to_string()),
+        );
+    }
+    insert_event_check_fields(event, "assert", fields);
+}
+
+fn insert_event_check_fields(
+    event: &mut EngineEvent,
+    check_name: &str,
+    fields: Map<String, Value>,
+) {
+    let checks = event
+        .data
+        .entry("checks".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !checks.is_object() {
+        *checks = Value::Object(Map::new());
+    }
+    let Some(checks_obj) = checks.as_object_mut() else {
+        return;
+    };
+    checks_obj.insert(
+        "schema".to_string(),
+        Value::String(ENGINE_EVENT_CHECKS_SCHEMA_0_0_1.to_string()),
+    );
+    checks_obj.insert(check_name.to_string(), Value::Object(fields));
 }
 
 fn normalize_side_effect_record(
@@ -1727,7 +1974,7 @@ fn normalize_side_effect_record(
         record.status = SIDE_EFFECT_STATUS_UNKNOWN.to_string();
     }
     if record.observed_at.trim().is_empty() {
-        record.observed_at = "1970-01-01T00:00:00Z".to_string();
+        record.observed_at = wall_clock_timestamp_rfc3339();
     }
 
     record
@@ -1758,6 +2005,7 @@ fn need_user_confirm_event(
     reason_code: &str,
     reason: &str,
     details: &Map<String, Value>,
+    control_kind: Option<&str>,
 ) -> EngineEvent {
     let mut event = EngineEvent::new(EngineEventType::NeedUserConfirm);
     event.node_id = Some(node_id.to_string());
@@ -1771,6 +2019,7 @@ fn need_user_confirm_event(
     event
         .data
         .insert("details".to_string(), Value::Object(details.clone()));
+    annotate_gate_check(&mut event, false, Some(reason_code), control_kind);
     event
 }
 
@@ -1797,16 +2046,66 @@ fn extract_action_ref_from_node(node_obj: &Map<String, Value>) -> Option<String>
     None
 }
 
-fn extract_risk_level_from_node(node_obj: &Map<String, Value>) -> Option<u8> {
-    let value = node_obj
-        .get("extensions")
-        .and_then(Value::as_object)
-        .and_then(|extensions| extensions.get("risk_level"))?
-        .as_u64()?;
-    if !(1..=5).contains(&value) {
-        return None;
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RiskLevelObservation {
+    risk_level: Option<u8>,
+    source: &'static str,
+    unknown_cause_code: Option<&'static str>,
+    unknown_cause: Option<&'static str>,
+}
+
+fn observe_risk_level_from_node(node_obj: &Map<String, Value>) -> RiskLevelObservation {
+    let Some(extensions) = node_obj.get("extensions") else {
+        return RiskLevelObservation {
+            risk_level: None,
+            source: "unknown",
+            unknown_cause_code: Some("risk_level_input_missing"),
+            unknown_cause: Some("node.extensions is missing"),
+        };
+    };
+
+    let Some(extensions_obj) = extensions.as_object() else {
+        return RiskLevelObservation {
+            risk_level: None,
+            source: "unknown",
+            unknown_cause_code: Some("risk_level_parse_failed"),
+            unknown_cause: Some("node.extensions is not an object"),
+        };
+    };
+
+    let Some(risk_level_value) = extensions_obj.get("risk_level") else {
+        return RiskLevelObservation {
+            risk_level: None,
+            source: "unknown",
+            unknown_cause_code: Some("risk_level_input_missing"),
+            unknown_cause: Some("node.extensions.risk_level is missing"),
+        };
+    };
+
+    let Some(raw) = risk_level_value.as_u64() else {
+        return RiskLevelObservation {
+            risk_level: None,
+            source: "unknown",
+            unknown_cause_code: Some("risk_level_parse_failed"),
+            unknown_cause: Some("node.extensions.risk_level must be an integer in [1,5]"),
+        };
+    };
+
+    if !(1..=5).contains(&raw) {
+        return RiskLevelObservation {
+            risk_level: None,
+            source: "unknown",
+            unknown_cause_code: Some("risk_level_parse_failed"),
+            unknown_cause: Some("node.extensions.risk_level is out of allowed range [1,5]"),
+        };
     }
-    u8::try_from(value).ok()
+
+    RiskLevelObservation {
+        risk_level: u8::try_from(raw).ok(),
+        source: "extensions",
+        unknown_cause_code: None,
+        unknown_cause: None,
+    }
 }
 
 fn extract_risk_tags_from_node(node_obj: &Map<String, Value>) -> Vec<String> {
@@ -1829,6 +2128,8 @@ fn need_user_confirm_fields(
     gate_input: &PolicyGateInput,
     gate_output: &PolicyGateOutput,
     fallback_action_ref: Option<&str>,
+    risk_observation: Option<&RiskLevelObservation>,
+    default_risk_source: &str,
 ) -> (String, String, Map<String, Value>) {
     let (reason_code, reason, mut details) = match gate_output {
         PolicyGateOutput::NeedUserConfirm {
@@ -1871,6 +2172,45 @@ fn need_user_confirm_fields(
             Value::Array(vec![Value::String(reason_code.clone())]),
         );
     }
+    if !details.contains_key("risk_source") {
+        let risk_source = if gate_input.risk_level.is_some() {
+            "extensions"
+        } else if let Some(observation) = risk_observation {
+            match observation.source {
+                "extensions" => "extensions",
+                _ => default_risk_source,
+            }
+        } else {
+            default_risk_source
+        };
+        details.insert(
+            "risk_source".to_string(),
+            Value::String(risk_source.to_string()),
+        );
+    }
+    if reason_code == PolicyGateReasonCode::ThresholdRiskLevelUnknown.as_str() {
+        if !details.contains_key("risk_level_unknown_cause_code") {
+            let cause_code = risk_observation
+                .and_then(|observation| observation.unknown_cause_code)
+                .unwrap_or("risk_level_input_missing");
+            details.insert(
+                "risk_level_unknown_cause_code".to_string(),
+                Value::String(cause_code.to_string()),
+            );
+        }
+        if !details.contains_key("risk_level_unknown_cause") {
+            let cause = risk_observation
+                .and_then(|observation| observation.unknown_cause)
+                .unwrap_or("node.extensions.risk_level is missing or invalid");
+            details.insert(
+                "risk_level_unknown_cause".to_string(),
+                Value::String(cause.to_string()),
+            );
+        }
+        details
+            .entry("risk_level_expected_path".to_string())
+            .or_insert_with(|| Value::String("extensions.risk_level".to_string()));
+    }
 
     if !details.contains_key("confirmation_summary") || !details.contains_key("confirmation_hash") {
         if let Ok(enriched) = enrich_need_user_confirm_output(gate_input, gate_output) {
@@ -1896,6 +2236,8 @@ fn hard_block_event(
     reason_code: &str,
     reason: &str,
     details: &Map<String, Value>,
+    is_gate_result: bool,
+    control_kind: Option<&str>,
 ) -> EngineEvent {
     let mut event = EngineEvent::new(EngineEventType::Error);
     event.node_id = Some(node_id.to_string());
@@ -1909,6 +2251,9 @@ fn hard_block_event(
     event
         .data
         .insert("details".to_string(), Value::Object(details.clone()));
+    if is_gate_result {
+        annotate_gate_check(&mut event, false, Some(reason_code), control_kind);
+    }
     event
 }
 
@@ -2176,7 +2521,7 @@ fn preflight_simulated_event(node_id: &str) -> EngineEvent {
     event
 }
 
-fn condition_skipped_event(node_id: &str) -> EngineEvent {
+fn condition_skipped_event(node_id: &str, control_kind: Option<&str>) -> EngineEvent {
     let mut event = EngineEvent::new(EngineEventType::Skipped);
     event.node_id = Some(node_id.to_string());
     event.data.insert(
@@ -2187,10 +2532,11 @@ fn condition_skipped_event(node_id: &str) -> EngineEvent {
         "reason".to_string(),
         Value::String("condition_false".to_string()),
     );
+    annotate_condition_check(&mut event, false, control_kind);
     event
 }
 
-fn condition_failed_event(node_id: &str, message: &str) -> EngineEvent {
+fn condition_failed_event(node_id: &str, message: &str, control_kind: Option<&str>) -> EngineEvent {
     let mut event = EngineEvent::new(EngineEventType::Error);
     event.node_id = Some(node_id.to_string());
     event.data.insert(
@@ -2204,6 +2550,7 @@ fn condition_failed_event(node_id: &str, message: &str) -> EngineEvent {
     event
         .data
         .insert("message".to_string(), Value::String(message.to_string()));
+    annotate_condition_check(&mut event, false, control_kind);
     event
 }
 
@@ -2316,6 +2663,7 @@ fn assert_failed_event(
     message: &str,
     phase: &str,
     assert_expr: Option<&Value>,
+    control_kind: Option<&str>,
 ) -> EngineEvent {
     let mut event = EngineEvent::new(EngineEventType::Error);
     event.node_id = Some(node_id.to_string());
@@ -2336,6 +2684,7 @@ fn assert_failed_event(
     if let Some(assert_expr) = assert_expr {
         event.data.insert("assert".to_string(), assert_expr.clone());
     }
+    annotate_assert_check(&mut event, false, phase, control_kind);
     event
 }
 

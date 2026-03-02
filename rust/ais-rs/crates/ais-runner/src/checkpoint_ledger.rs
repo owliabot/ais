@@ -7,6 +7,13 @@ use ais_engine::{
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfirmedWriteReuse {
+    pub node_id: String,
+    pub confirmation_hash: String,
+    pub idempotency_key: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct RunnerCheckpointLedger {
     approval_index: BTreeMap<String, CheckpointApprovalLedgerEntry>,
@@ -38,8 +45,7 @@ impl RunnerCheckpointLedger {
             if !is_valid_side_effect_record(&normalized) {
                 continue;
             }
-            let key = side_effect_key(&normalized);
-            out.side_effect_index.insert(key, normalized);
+            out.insert_side_effect_record(normalized);
         }
         out
     }
@@ -63,8 +69,11 @@ impl RunnerCheckpointLedger {
                 }
                 normalize_side_effect_status(&mut side_effect);
                 if is_valid_side_effect_record(&side_effect) {
-                    let key = side_effect_key(&side_effect);
-                    self.side_effect_index.insert(key, side_effect);
+                    annotate_side_effect_confirmation_hash_from_approvals(
+                        &self.approval_index,
+                        &mut side_effect,
+                    );
+                    self.insert_side_effect_record(side_effect);
                 }
                 continue;
             }
@@ -129,13 +138,50 @@ impl RunnerCheckpointLedger {
             .iter()
             .cloned()
             .collect::<BTreeSet<String>>();
+        for reuse in self.confirmed_write_reuses() {
+            completed.insert(reuse.node_id);
+        }
         for effect in self.side_effect_index.values() {
             if effect.status != SIDE_EFFECT_STATUS_CONFIRMED {
+                continue;
+            }
+            if node_has_hashed_approval(&self.approval_index, effect.node_id.as_str()) {
                 continue;
             }
             completed.insert(effect.node_id.clone());
         }
         *completed_node_ids = completed.into_iter().collect();
+    }
+
+    pub fn confirmed_write_reuses(&self) -> Vec<ConfirmedWriteReuse> {
+        let mut out = BTreeMap::<String, ConfirmedWriteReuse>::new();
+        for entry in self.approval_index.values() {
+            if entry.decision != "approve" && entry.decision != "requested" {
+                continue;
+            }
+            let Some(confirmation_hash) = entry
+                .confirmation_hash
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            let Some(effect) = find_confirmed_side_effect_for_intent(
+                &self.side_effect_index,
+                entry.node_id.as_str(),
+                confirmation_hash,
+            ) else {
+                continue;
+            };
+            let key = format!("{}:{confirmation_hash}", entry.node_id);
+            out.entry(key).or_insert_with(|| ConfirmedWriteReuse {
+                node_id: entry.node_id.clone(),
+                confirmation_hash: confirmation_hash.to_string(),
+                idempotency_key: effect.idempotency_key.clone(),
+            });
+        }
+        out.into_values().collect()
     }
 
     pub fn pending_side_effects(&self) -> Vec<CheckpointSideEffectRecord> {
@@ -152,8 +198,21 @@ impl RunnerCheckpointLedger {
         if !is_valid_side_effect_record(&normalized) {
             return;
         }
-        let key = side_effect_key(&normalized);
-        self.side_effect_index.insert(key, normalized);
+        annotate_side_effect_confirmation_hash_from_approvals(
+            &self.approval_index,
+            &mut normalized,
+        );
+        self.insert_side_effect_record(normalized);
+    }
+
+    pub fn approved_node_ids(&self) -> Vec<String> {
+        self.approval_index
+            .values()
+            .filter(|entry| entry.decision == "approve")
+            .map(|entry| entry.node_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
     }
 
     pub fn approvals(&self) -> Vec<CheckpointApprovalLedgerEntry> {
@@ -162,6 +221,41 @@ impl RunnerCheckpointLedger {
 
     pub fn side_effects(&self) -> Vec<CheckpointSideEffectRecord> {
         self.side_effect_index.values().cloned().collect()
+    }
+
+    pub fn tx_hashes_for_nodes(&self, node_ids: &[String]) -> Vec<String> {
+        if node_ids.is_empty() {
+            return Vec::new();
+        }
+        let node_set = node_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<&str>>();
+        self.side_effect_index
+            .values()
+            .filter(|effect| node_set.contains(effect.node_id.as_str()))
+            .filter_map(side_effect_tx_hash)
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    pub fn preferred_tx_hash_for_node(&self, node_id: &str) -> Option<String> {
+        self.side_effect_index
+            .values()
+            .filter(|effect| effect.node_id == node_id)
+            .filter_map(|effect| {
+                side_effect_tx_hash(effect).map(|tx_hash| {
+                    (
+                        side_effect_status_rank(effect.status.as_str()),
+                        effect.observed_at.as_str(),
+                        tx_hash,
+                    )
+                })
+            })
+            .max()
+            .map(|(_, _, tx_hash)| tx_hash.to_string())
     }
 
     pub fn side_effect_lifecycle_summary(&self) -> Value {
@@ -202,6 +296,20 @@ impl RunnerCheckpointLedger {
             "by_execution_type": execution_counts,
         })
     }
+
+    fn insert_side_effect_record(&mut self, entry: CheckpointSideEffectRecord) {
+        if entry.status == SIDE_EFFECT_STATUS_CONFIRMED
+            && self.side_effect_index.values().any(|existing| {
+                existing.idempotency_key != entry.idempotency_key
+                    && existing.node_id == entry.node_id
+                    && existing.status == SIDE_EFFECT_STATUS_CONFIRMED
+            })
+        {
+            return;
+        }
+        let key = side_effect_key(&entry);
+        self.side_effect_index.insert(key, entry);
+    }
 }
 
 fn approval_key(entry: &CheckpointApprovalLedgerEntry) -> String {
@@ -238,6 +346,98 @@ fn is_valid_side_effect_record(entry: &CheckpointSideEffectRecord) -> bool {
 
 fn normalize_side_effect_status(entry: &mut CheckpointSideEffectRecord) {
     entry.status = canonical_side_effect_status(entry.status.as_str()).to_string();
+}
+
+fn annotate_side_effect_confirmation_hash_from_approvals(
+    approval_index: &BTreeMap<String, CheckpointApprovalLedgerEntry>,
+    side_effect: &mut CheckpointSideEffectRecord,
+) {
+    if side_effect_confirmation_hash(side_effect).is_some() {
+        return;
+    }
+    let mut hashes = approval_index
+        .values()
+        .filter(|entry| entry.node_id == side_effect.node_id)
+        .filter_map(|entry| {
+            entry
+                .confirmation_hash
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if hashes.len() != 1 {
+        return;
+    }
+    let hash = hashes.remove(0);
+    let details = side_effect
+        .details
+        .get_or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if !details.is_object() {
+        *details = Value::Object(serde_json::Map::new());
+    }
+    if let Some(details_obj) = details.as_object_mut() {
+        details_obj.insert("confirmation_hash".to_string(), Value::String(hash));
+    }
+}
+
+fn node_has_hashed_approval(
+    approval_index: &BTreeMap<String, CheckpointApprovalLedgerEntry>,
+    node_id: &str,
+) -> bool {
+    approval_index.values().any(|entry| {
+        entry.node_id == node_id
+            && entry
+                .confirmation_hash
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty())
+    })
+}
+
+fn find_confirmed_side_effect_for_intent<'a>(
+    side_effect_index: &'a BTreeMap<String, CheckpointSideEffectRecord>,
+    node_id: &str,
+    confirmation_hash: &str,
+) -> Option<&'a CheckpointSideEffectRecord> {
+    side_effect_index.values().find(|effect| {
+        effect.node_id == node_id
+            && effect.status == SIDE_EFFECT_STATUS_CONFIRMED
+            && side_effect_confirmation_hash(effect)
+                .map(str::trim)
+                .is_some_and(|value| value == confirmation_hash)
+    })
+}
+
+fn side_effect_confirmation_hash(effect: &CheckpointSideEffectRecord) -> Option<&str> {
+    effect
+        .details
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|details| details.get("confirmation_hash"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn side_effect_tx_hash(effect: &CheckpointSideEffectRecord) -> Option<&str> {
+    effect
+        .tx_hash
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn side_effect_status_rank(status: &str) -> u8 {
+    match canonical_side_effect_status(status) {
+        SIDE_EFFECT_STATUS_CONFIRMED => 3,
+        SIDE_EFFECT_STATUS_SENT => 2,
+        SIDE_EFFECT_STATUS_REVERTED => 1,
+        _ => 0,
+    }
 }
 
 #[cfg(test)]
@@ -454,6 +654,215 @@ mod tests {
         assert_eq!(
             summary.pointer("/counts/reverted").and_then(Value::as_u64),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn ledger_matches_confirmed_write_reuse_on_confirmation_hash() {
+        let ledger = RunnerCheckpointLedger::from_checkpoint(
+            &[CheckpointApprovalLedgerEntry {
+                node_id: "swap-1".to_string(),
+                confirmation_hash: Some("0xconfirm".to_string()),
+                decision: "approve".to_string(),
+                reason_code: None,
+                decided_at: "2026-02-24T00:00:01Z".to_string(),
+            }],
+            &[CheckpointSideEffectRecord {
+                schema: Some("ais-side-effect-record/0.1.0".to_string()),
+                idempotency_key: "tx:swap-1:0xtx1".to_string(),
+                node_id: "swap-1".to_string(),
+                effect_type: "tx".to_string(),
+                chain: Some("eip155:1".to_string()),
+                execution_type: Some("evm_call".to_string()),
+                tx_hash: Some("0xtx1".to_string()),
+                nonce: None,
+                provider_ref: None,
+                reason_code: None,
+                details: Some(json!({
+                    "confirmation_hash": "0xconfirm"
+                })),
+                status: "confirmed".to_string(),
+                observed_at: "2026-02-24T00:00:02Z".to_string(),
+            }],
+        );
+        let reuses = ledger.confirmed_write_reuses();
+        assert_eq!(reuses.len(), 1);
+        assert_eq!(reuses[0].node_id, "swap-1");
+        assert_eq!(reuses[0].confirmation_hash, "0xconfirm");
+        assert_eq!(reuses[0].idempotency_key, "tx:swap-1:0xtx1");
+    }
+
+    #[test]
+    fn ledger_does_not_reuse_confirmed_write_on_mismatched_confirmation_hash() {
+        let ledger = RunnerCheckpointLedger::from_checkpoint(
+            &[CheckpointApprovalLedgerEntry {
+                node_id: "swap-1".to_string(),
+                confirmation_hash: Some("0xnew".to_string()),
+                decision: "approve".to_string(),
+                reason_code: None,
+                decided_at: "2026-02-24T00:00:01Z".to_string(),
+            }],
+            &[CheckpointSideEffectRecord {
+                schema: Some("ais-side-effect-record/0.1.0".to_string()),
+                idempotency_key: "tx:swap-1:0xtx1".to_string(),
+                node_id: "swap-1".to_string(),
+                effect_type: "tx".to_string(),
+                chain: Some("eip155:1".to_string()),
+                execution_type: Some("evm_call".to_string()),
+                tx_hash: Some("0xtx1".to_string()),
+                nonce: None,
+                provider_ref: None,
+                reason_code: None,
+                details: Some(json!({
+                    "confirmation_hash": "0xold"
+                })),
+                status: "confirmed".to_string(),
+                observed_at: "2026-02-24T00:00:02Z".to_string(),
+            }],
+        );
+        assert!(ledger.confirmed_write_reuses().is_empty());
+
+        let mut completed = Vec::<String>::new();
+        ledger.reconcile_completed_from_confirmed_side_effects(&mut completed);
+        assert!(completed.is_empty());
+    }
+
+    #[test]
+    fn ledger_keeps_single_confirmed_side_effect_per_node() {
+        let mut ledger = RunnerCheckpointLedger::default();
+        ledger.upsert_side_effect(CheckpointSideEffectRecord {
+            schema: Some("ais-side-effect-record/0.1.0".to_string()),
+            idempotency_key: "tx:n1:0xa".to_string(),
+            node_id: "n1".to_string(),
+            effect_type: "tx".to_string(),
+            chain: Some("eip155:1".to_string()),
+            execution_type: Some("evm_call".to_string()),
+            tx_hash: Some("0xa".to_string()),
+            nonce: None,
+            provider_ref: None,
+            reason_code: None,
+            details: None,
+            status: "confirmed".to_string(),
+            observed_at: "2026-02-24T00:00:00Z".to_string(),
+        });
+        ledger.upsert_side_effect(CheckpointSideEffectRecord {
+            schema: Some("ais-side-effect-record/0.1.0".to_string()),
+            idempotency_key: "tx:n1:0xb".to_string(),
+            node_id: "n1".to_string(),
+            effect_type: "tx".to_string(),
+            chain: Some("eip155:1".to_string()),
+            execution_type: Some("evm_call".to_string()),
+            tx_hash: Some("0xb".to_string()),
+            nonce: None,
+            provider_ref: None,
+            reason_code: None,
+            details: None,
+            status: "confirmed".to_string(),
+            observed_at: "2026-02-24T00:01:00Z".to_string(),
+        });
+        let effects = ledger.side_effects();
+        assert_eq!(effects.len(), 1);
+        assert_eq!(effects[0].node_id, "n1");
+        assert_eq!(effects[0].status, SIDE_EFFECT_STATUS_CONFIRMED);
+        assert_eq!(effects[0].idempotency_key, "tx:n1:0xa");
+    }
+
+    #[test]
+    fn ledger_tx_hashes_for_nodes_collects_unique_hashes() {
+        let ledger = RunnerCheckpointLedger::from_checkpoint(
+            &[],
+            &[
+                CheckpointSideEffectRecord {
+                    schema: Some("ais-side-effect-record/0.1.0".to_string()),
+                    idempotency_key: "tx:n1:0xa".to_string(),
+                    node_id: "n1".to_string(),
+                    effect_type: "tx".to_string(),
+                    chain: Some("eip155:1".to_string()),
+                    execution_type: Some("evm_call".to_string()),
+                    tx_hash: Some("0xa".to_string()),
+                    nonce: None,
+                    provider_ref: None,
+                    reason_code: None,
+                    details: None,
+                    status: "sent".to_string(),
+                    observed_at: "2026-02-24T00:00:00Z".to_string(),
+                },
+                CheckpointSideEffectRecord {
+                    schema: Some("ais-side-effect-record/0.1.0".to_string()),
+                    idempotency_key: "tx:n1:0:b".to_string(),
+                    node_id: "n1".to_string(),
+                    effect_type: "tx".to_string(),
+                    chain: Some("eip155:1".to_string()),
+                    execution_type: Some("evm_call".to_string()),
+                    tx_hash: Some("0xb".to_string()),
+                    nonce: None,
+                    provider_ref: None,
+                    reason_code: None,
+                    details: None,
+                    status: "confirmed".to_string(),
+                    observed_at: "2026-02-24T00:01:00Z".to_string(),
+                },
+                CheckpointSideEffectRecord {
+                    schema: Some("ais-side-effect-record/0.1.0".to_string()),
+                    idempotency_key: "tx:n2:0:c".to_string(),
+                    node_id: "n2".to_string(),
+                    effect_type: "tx".to_string(),
+                    chain: Some("eip155:1".to_string()),
+                    execution_type: Some("evm_call".to_string()),
+                    tx_hash: Some("0xc".to_string()),
+                    nonce: None,
+                    provider_ref: None,
+                    reason_code: None,
+                    details: None,
+                    status: "sent".to_string(),
+                    observed_at: "2026-02-24T00:02:00Z".to_string(),
+                },
+            ],
+        );
+        let hashes = ledger.tx_hashes_for_nodes(&["n1".to_string()]);
+        assert_eq!(hashes, vec!["0xa".to_string(), "0xb".to_string()]);
+    }
+
+    #[test]
+    fn ledger_preferred_tx_hash_for_node_prefers_confirmed_record() {
+        let ledger = RunnerCheckpointLedger::from_checkpoint(
+            &[],
+            &[
+                CheckpointSideEffectRecord {
+                    schema: Some("ais-side-effect-record/0.1.0".to_string()),
+                    idempotency_key: "tx:n1:0xa".to_string(),
+                    node_id: "n1".to_string(),
+                    effect_type: "tx".to_string(),
+                    chain: Some("eip155:1".to_string()),
+                    execution_type: Some("evm_call".to_string()),
+                    tx_hash: Some("0xa".to_string()),
+                    nonce: None,
+                    provider_ref: None,
+                    reason_code: None,
+                    details: None,
+                    status: "sent".to_string(),
+                    observed_at: "2026-02-24T00:01:00Z".to_string(),
+                },
+                CheckpointSideEffectRecord {
+                    schema: Some("ais-side-effect-record/0.1.0".to_string()),
+                    idempotency_key: "tx:n1:0xb".to_string(),
+                    node_id: "n1".to_string(),
+                    effect_type: "tx".to_string(),
+                    chain: Some("eip155:1".to_string()),
+                    execution_type: Some("evm_call".to_string()),
+                    tx_hash: Some("0xb".to_string()),
+                    nonce: None,
+                    provider_ref: None,
+                    reason_code: None,
+                    details: None,
+                    status: "confirmed".to_string(),
+                    observed_at: "2026-02-24T00:00:00Z".to_string(),
+                },
+            ],
+        );
+        assert_eq!(
+            ledger.preferred_tx_hash_for_node("n1"),
+            Some("0xb".to_string())
         );
     }
 }

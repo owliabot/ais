@@ -14,6 +14,7 @@ Engine runtime primitives for AIS execution loop.
 - Provide executor trait + exact chain router
 - Provide policy gate extract/enforce (allowlist + risk-threshold + missingness)
 - Provide confirmation summary/hash for `need_user_confirm` and emit schema-compatible confirmation details
+- Emit optional `event.data.checks` (`schema: ais-engine-checks/0.0.1`) for condition/gate/assert observability, including true/false outcomes and control-step kind hints (`assert|branch`) without breaking existing event parsers
 - Provide plan-first execution loop (`readiness -> solver -> policy gate -> materialize -> executor`)
 - Provide workflow condition/assert + preflight.simulate semantics in execution loop
 - Provide deterministic scheduler with global/per-chain limits
@@ -32,6 +33,7 @@ Engine runtime primitives for AIS execution loop.
 - `EngineEventStream`
 - `EngineEventSequenceError`
 - `ensure_monotonic_sequence`
+- `wall_clock_timestamp_rfc3339`
 - `encode_event_jsonl_line`
 - `parse_event_jsonl_line`
 - `TraceRedactMode`
@@ -143,6 +145,7 @@ Engine runtime primitives for AIS execution loop.
   - side-effect status is canonicalized at engine/checkpoint boundary to `prepared|sent|confirmed|reverted|unknown` (legacy `failed` inputs are normalized to `reverted`).
   - `AISNEXT-ARCH-003` (execution type capability registry): centralizes execution-type semantics (`is_write`, `core/plugin`, route presets, side-effect-adapter support metadata), and supports runtime plugin-type registration (for example `offchain_apy_query`) instead of hardcoding plugin types into presets.
   - `AISNEXT-ARCH-004` (event-driven side-effect ledger source): engine execution loop now emits `side_effect_observed` events from executor-provided side-effect records, with required fields normalized before emission.
+  - engine runner now suppresses duplicate `side_effect_observed(status=confirmed)` emissions for the same `node_id` within one `run_plan_once` cycle, keeping confirmed side-effect finalization idempotent when executor outputs contain duplicates.
   - `AISNEXT-ARCH-005` (compat hard-delete): checkpoint side-effect ledger dedup no longer derives fallback keys from `tx_hash`; records missing `idempotency_key` are dropped during checkpoint decode normalization.
   - side-effect producer boundary is now executor-first: engine consumes `ExecutorOutput.side_effects` directly and emits `side_effect_observed`; it no longer infers side-effects from executor `result` payloads.
   - `AISRS-ENG-004` (engine command stdin JSONL + command id dedupe + accepted/rejected events)
@@ -168,6 +171,7 @@ Engine runtime primitives for AIS execution loop.
   - `AISNEXT-RS-005` (safety governance chain): execution loop now includes before-execute safety hook (`blocked_execution_types`), executor-output sanitization (sensitive key redaction + bounded string length), and prompt-injection hard-block for suspicious executor payloads.
   - `AISRS-CMD-001` (`replace_plan` command/event surface): engine command type includes `replace_plan`; event type includes `plan_replaced`; checkpoint state tracks `plan_epoch` and `plan_hash_history`, with optional `plan_snapshot` for deterministic resume after plan replacement.
   - `need_user_confirm` events now always include required `details` fields (`node_id`, `action_ref`, `hit_reasons`, `confirmation_summary`, `confirmation_hash`) for both solver and policy-gate pauses (schema-aligned for agents/runners).
+  - policy-gate/confirm observability now enriches `need_user_confirm.details.risk_source` (`extensions|fallback|unknown`), and `threshold_risk_level_unknown` now includes root-cause locator fields (`risk_level_unknown_cause_code`, `risk_level_unknown_cause`, `risk_level_expected_path`).
   - `AISRS-ENG-011` (deterministic scheduler with reads parallel and writes per-chain serial by default)
   - `AISRS-ENG-020` (plan diff text/json with added/removed/changed and key-field change detection)
   - `AISRS-ENG-021` (replay from trace/checkpoint with until-node stopping behavior)
@@ -175,6 +179,7 @@ Engine runtime primitives for AIS execution loop.
   - `AISRS-ENG-023` (workflow condition pre-check semantics; false => skipped; invalid => paused)
   - `AISRS-ENG-024` (workflow until/retry semantics; until false enters retry loop with max-attempt guard)
   - `AISRS-ENG-025` (workflow timeout_ms semantics; retry lifecycle timeout produces deterministic pause reason/events)
+  - `AGT-P4-100` (events/trace realtime timestamp): engine runner now emits wall-clock UTC RFC3339 timestamps for event `ts` and side-effect `observed_at` fallback instead of fixed epoch placeholder, while keeping envelope schema/field compatibility unchanged.
   - Engine runner now materializes node execution ValueRef (including `bindings.params` root override) before dispatching to chain executors, keeping executor layer transport-focused.
   - For query nodes (identified by `type=query_ref` or `source.query`), default write path `nodes.<id>.outputs` projects `executor_result.outputs` when present, so workflow expressions can consistently use `nodes.<id>.outputs.<field>`.
   - `assert_failed` engine error events now include `message`, `phase`, and original `assert` payload to support runtime troubleshooting in runner verbose logs.

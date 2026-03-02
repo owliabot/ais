@@ -11,6 +11,7 @@ Pure AIS SDK logic: document parsing, typed models, resolver context, and value-
   - plus segmented intent planning IR: `plan-sketch`
 - Resolver context (`runtime` + protocol registry)
 - ValueRef sync/async evaluation (`lit/ref/cel/object/array`) with root overrides
+- Resolver path bridge for asset compatibility: `.address` reads are accepted when the source slot already holds a raw address string (for example `params.token = "0x..."` still satisfies `params.token.address`)
 - Protocol/action/query reference parsing and resolution (`protocol@version/action|query`)
 - Catalog build (`ais-catalog/0.0.1`) with index/detail card levels, spec-aligned card fields, stable sorting and hash
 - Executable candidates projection (`ais-executable-candidates/0.0.1`) with action/query cards + execution plugin candidates
@@ -130,6 +131,9 @@ Pure AIS SDK logic: document parsing, typed models, resolver context, and value-
     - step-level `constraint_templates[]` are copied into `node.extensions.policy.constraint_templates` for downstream policy-gate enforcement
     - step-level `stores` are preserved at `node.extensions.plan_sketch.stores` for runner-side fact backfill/audit mapping
     - segment-level `extensions.todo_id` is propagated into each compiled node at `node.extensions.plan_sketch.todo_id` for stable todo/segment/node traceability
+    - executable-candidate risk metadata is propagated into compiled step nodes when available:
+      - `candidate.{risk_level,risk_tags} -> node.extensions.{risk_level,risk_tags}` for `action`/`query` nodes
+      - missing risk metadata is treated as optional (field omitted; existing extensions shape unchanged)
     - step-level runtime controls are supported and compiled deterministically: `until -> node.until`, `retry -> node.retry`, `timeout_ms -> node.timeout_ms`
     - compiler validates runtime control shapes (`until` ValueRef parse, positive `retry.interval_ms` / `retry.max_attempts` / `timeout_ms`) and emits `input_type_mismatch` on invalid values
     - structured compile issues for core reason codes:

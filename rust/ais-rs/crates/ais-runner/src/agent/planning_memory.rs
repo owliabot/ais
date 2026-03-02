@@ -1,3 +1,4 @@
+use super::context::budget_policy::ToolMemoryBudgetPolicy;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -5,6 +6,20 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PlanningScope {
     snapshot_hash: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PlanningMemoryPruneResult {
+    pub(crate) removed_total: usize,
+    pub(crate) removed_by_tool: BTreeMap<String, usize>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ToolMemoryPruneConfig {
+    pub(crate) active_todo: bool,
+    pub(crate) phase: &'static str,
+    pub(crate) pressure_mode: super::context::budget_policy::ContextPressureMode,
+    pub(crate) projection_budget_tokens: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -24,13 +39,31 @@ impl Default for PlanningMemoryBudget {
     }
 }
 
-const TOOL_MEMORY_MIN_TOKENS: usize = 1200;
-const TOOL_MEMORY_MAX_TOKENS: usize = 6000;
-const TOOL_MEMORY_DEFAULT_TOKENS: usize = 2400;
-const TOOL_MEMORY_MAX_LIST_INVENTORY_ENTRIES: usize = 2;
-const TOOL_MEMORY_MAX_CATALOG_ENTRIES: usize = 6;
-const TOOL_MEMORY_MAX_DETAIL_ENTRIES: usize = 6;
-const TOOL_MEMORY_MAX_GUIDE_ENTRIES: usize = 4;
+impl Default for PlanningMemoryPruneResult {
+    fn default() -> Self {
+        Self {
+            removed_total: 0,
+            removed_by_tool: BTreeMap::new(),
+        }
+    }
+}
+
+impl PlanningMemoryPruneResult {
+    fn record_removed(&mut self, tool_name: &str) {
+        *self
+            .removed_by_tool
+            .entry(tool_name.to_string())
+            .or_default() += 1;
+        self.removed_total = self.removed_total.saturating_add(1);
+    }
+}
+
+fn merge_prune_result(merged: &mut PlanningMemoryPruneResult, incoming: PlanningMemoryPruneResult) {
+    merged.removed_total = merged.removed_total.saturating_add(incoming.removed_total);
+    for (tool_name, count) in incoming.removed_by_tool {
+        *merged.removed_by_tool.entry(tool_name).or_default() += count;
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct GuideProjection {
@@ -90,6 +123,7 @@ pub(crate) struct PlanningMemory {
     scope: Option<PlanningScope>,
     tool_cache: HashMap<String, String>,
     order: VecDeque<String>,
+    budget: PlanningMemoryBudget,
 }
 
 impl PlanningMemory {
@@ -116,7 +150,16 @@ impl PlanningMemory {
     }
 
     pub(crate) fn insert(&mut self, key: String, content: String) {
-        self.insert_with_budget(key, content, PlanningMemoryBudget::default());
+        self.insert_with_budget(key, content, self.budget);
+    }
+
+    pub(crate) fn set_budget(&mut self, budget: PlanningMemoryBudget) {
+        self.budget = budget;
+        self.enforce_budget(budget);
+    }
+
+    pub(crate) fn current_budget(&self) -> PlanningMemoryBudget {
+        self.budget
     }
 
     pub(crate) fn insert_with_budget(
@@ -205,9 +248,59 @@ impl PlanningMemory {
         serde_json::to_value(snapshot).ok()
     }
 
+    pub(crate) fn prune_for_pressure(
+        &mut self,
+        config: ToolMemoryPruneConfig,
+    ) -> PlanningMemoryPruneResult {
+        let mut result = PlanningMemoryPruneResult::default();
+        let _ = (config.active_todo, config.phase);
+        let projection_budget_tokens = config
+            .projection_budget_tokens
+            .unwrap_or(ToolMemoryBudgetPolicy::TOOL_MEMORY_PROJECTION_DEFAULT_TOKENS);
+        let keep_limits = ToolMemoryBudgetPolicy::derive_tool_memory_prune_keep_limits(
+            config.pressure_mode,
+            projection_budget_tokens,
+        );
+        match config.pressure_mode {
+            super::context::budget_policy::ContextPressureMode::Critical => {
+                let removed = prune_tool_memory_for_pressure(
+                    self,
+                    keep_limits.max_list,
+                    keep_limits.max_catalog,
+                    keep_limits.max_detail,
+                    keep_limits.max_guide,
+                );
+                merge_prune_result(&mut result, removed);
+            }
+            super::context::budget_policy::ContextPressureMode::Medium => {
+                let removed = prune_tool_memory_for_pressure(
+                    self,
+                    keep_limits.max_list,
+                    keep_limits.max_catalog,
+                    keep_limits.max_detail,
+                    keep_limits.max_guide,
+                );
+                merge_prune_result(&mut result, removed);
+            }
+            super::context::budget_policy::ContextPressureMode::Light => {
+                let removed = prune_tool_memory_for_pressure(
+                    self,
+                    keep_limits.max_list,
+                    keep_limits.max_catalog,
+                    keep_limits.max_detail,
+                    keep_limits.max_guide,
+                );
+                merge_prune_result(&mut result, removed);
+            }
+            super::context::budget_policy::ContextPressureMode::Normal => {}
+        }
+        result
+    }
+
     pub(crate) fn tool_memory_projection(&self, max_tokens: usize) -> Option<Value> {
         let snapshot_hash = self.scope.as_ref()?.snapshot_hash.clone();
         let token_budget = normalize_tool_memory_token_budget(max_tokens);
+        let caps = ToolMemoryBudgetPolicy::derive_tool_memory_projection_caps(token_budget);
         let mut list_inventory_raw = Vec::<(usize, Value)>::new();
         let mut catalog_search_raw = Vec::<(usize, Value)>::new();
         let mut candidate_detail_raw = Vec::<(usize, Value)>::new();
@@ -243,10 +336,12 @@ impl PlanningMemory {
             }
         }
 
-        let list_inventory = select_list_inventory_entries(list_inventory_raw);
-        let catalog_search = select_catalog_entries(catalog_search_raw);
-        let candidate_detail = select_candidate_detail_entries(candidate_detail_raw);
-        let guide = select_guide_entries(guide_raw);
+        let list_inventory =
+            select_list_inventory_entries(list_inventory_raw, caps.max_list_inventory_entries);
+        let catalog_search = select_catalog_entries(catalog_search_raw, caps.max_catalog_entries);
+        let candidate_detail =
+            select_candidate_detail_entries(candidate_detail_raw, caps.max_detail_entries);
+        let guide = select_guide_entries(guide_raw, caps.max_guide_entries);
 
         if list_inventory.is_empty()
             && catalog_search.is_empty()
@@ -317,11 +412,192 @@ impl PlanningMemory {
 
 fn normalize_tool_memory_token_budget(max_tokens: usize) -> usize {
     let requested = if max_tokens == 0 {
-        TOOL_MEMORY_DEFAULT_TOKENS
+        ToolMemoryBudgetPolicy::TOOL_MEMORY_PROJECTION_DEFAULT_TOKENS
     } else {
         max_tokens
     };
-    requested.clamp(TOOL_MEMORY_MIN_TOKENS, TOOL_MEMORY_MAX_TOKENS)
+    requested.clamp(
+        ToolMemoryBudgetPolicy::TOOL_MEMORY_PROJECTION_ABS_MIN_TOKENS,
+        ToolMemoryBudgetPolicy::TOOL_MEMORY_PROJECTION_ABS_MAX_TOKENS,
+    )
+}
+
+fn prune_tool_memory_for_pressure(
+    memory: &mut PlanningMemory,
+    max_list: usize,
+    max_catalog: usize,
+    max_detail: usize,
+    max_guide: usize,
+) -> PlanningMemoryPruneResult {
+    let mut result = PlanningMemoryPruneResult::default();
+    if memory.tool_cache.is_empty() {
+        return result;
+    }
+
+    let mut to_remove = Vec::<String>::new();
+    let mut list_candidates = Vec::<PruneCandidateEntry>::new();
+    let mut catalog_search = Vec::<PruneCandidateEntry>::new();
+    let mut candidate_detail = Vec::<PruneCandidateEntry>::new();
+    let mut guide_get = Vec::<PruneCandidateEntry>::new();
+
+    for (recency_rank, key) in memory.order.iter().rev().enumerate() {
+        let Some(content) = memory.tool_cache.get(key.as_str()) else {
+            continue;
+        };
+        let tool_name = key.split(':').next().unwrap_or_default();
+        let signature = match tool_name {
+            "catalog.search" => {
+                catalog_search_for_prune_signature(content).and_then(|(signature, is_empty)| {
+                    if is_empty {
+                        to_remove.push(key.clone());
+                    }
+                    Some(signature)
+                })
+            }
+            "list_candidates" => summarize_list_candidates(content)
+                .and_then(|entry| serde_json::to_string(&entry).ok()),
+            "get_candidate_detail" => summarize_candidate_detail(content)
+                .and_then(|entry| serde_json::to_string(&entry).ok()),
+            "guide.get" => summarize_guide_get(content, recency_rank)
+                .map(|entry| format!("{}:{}", entry.kind.as_str(), entry.id)),
+            _ => None,
+        };
+
+        if signature.is_none() {
+            if !tool_name.is_empty() {
+                to_remove.push(key.clone());
+            }
+            continue;
+        }
+
+        let candidate = PruneCandidateEntry {
+            key: key.clone(),
+            recency_rank,
+            signature: signature.unwrap_or_default(),
+        };
+        match tool_name {
+            "list_candidates" => list_candidates.push(candidate),
+            "catalog.search" => catalog_search.push(candidate),
+            "get_candidate_detail" => candidate_detail.push(candidate),
+            "guide.get" => guide_get.push(candidate),
+            _ => {}
+        }
+    }
+
+    if !to_remove.is_empty() {
+        apply_candidate_removals(memory, &to_remove, &mut result);
+    }
+
+    let mut dropped = prune_keep_only_recency_and_signature(&mut list_candidates, max_list);
+    apply_candidate_removals(memory, &dropped, &mut result);
+    dropped = prune_keep_only_recency_and_signature(&mut catalog_search, max_catalog);
+    apply_candidate_removals(memory, &dropped, &mut result);
+    dropped = prune_keep_only_recency_and_signature(&mut candidate_detail, max_detail);
+    apply_candidate_removals(memory, &dropped, &mut result);
+    dropped = prune_keep_priority_guide(&mut guide_get, max_guide);
+    apply_candidate_removals(memory, &dropped, &mut result);
+    result
+}
+
+#[derive(Debug)]
+struct PruneCandidateEntry {
+    key: String,
+    recency_rank: usize,
+    signature: String,
+}
+
+fn prune_keep_only_recency_and_signature(
+    candidates: &mut Vec<PruneCandidateEntry>,
+    max_keep: usize,
+) -> Vec<String> {
+    candidates.sort_by(|left, right| left.recency_rank.cmp(&right.recency_rank));
+    let mut seen = BTreeSet::<String>::new();
+    let mut kept = 0usize;
+    let mut to_remove = Vec::<String>::new();
+    let mut remaining = Vec::<PruneCandidateEntry>::new();
+    for entry in candidates.drain(..) {
+        if seen.contains(&entry.signature) || kept >= max_keep {
+            to_remove.push(entry.key);
+            continue;
+        }
+        seen.insert(entry.signature.clone());
+        kept = kept.saturating_add(1);
+        remaining.push(entry);
+    }
+    *candidates = remaining;
+    to_remove
+}
+
+fn prune_keep_priority_guide(
+    candidates: &mut Vec<PruneCandidateEntry>,
+    max_keep: usize,
+) -> Vec<String> {
+    candidates.sort_by(|left, right| {
+        let left_priority = guide_signature_priority(left.signature.as_str());
+        let right_priority = guide_signature_priority(right.signature.as_str());
+        right_priority
+            .cmp(&left_priority)
+            .then_with(|| left.recency_rank.cmp(&right.recency_rank))
+            .then_with(|| left.signature.cmp(&right.signature))
+    });
+    let mut to_remove = Vec::<String>::new();
+    let mut remaining = Vec::<PruneCandidateEntry>::new();
+    for entry in candidates.drain(..) {
+        if remaining.len() < max_keep {
+            remaining.push(entry);
+            continue;
+        }
+        to_remove.push(entry.key);
+    }
+    *candidates = remaining;
+    to_remove
+}
+
+fn guide_signature_priority(signature: &str) -> i32 {
+    let (kind, id) = signature.split_once(':').unwrap_or((signature, ""));
+    let kind = match kind {
+        "schema" => GuideEntryKind::Schema,
+        "topic" => GuideEntryKind::Topic,
+        _ => return 0,
+    };
+    guide_entry_priority(kind, id)
+}
+
+fn apply_candidate_removals(
+    memory: &mut PlanningMemory,
+    keys: &[String],
+    result: &mut PlanningMemoryPruneResult,
+) {
+    if keys.is_empty() {
+        return;
+    }
+    let remove_set = keys.iter().cloned().collect::<BTreeSet<String>>();
+    memory.order.retain(|key| !remove_set.contains(key));
+    for key in keys {
+        if memory.tool_cache.remove(key.as_str()).is_some() {
+            let tool_name = key.split(':').next().unwrap_or_default();
+            result.record_removed(tool_name);
+        }
+    }
+}
+
+fn catalog_search_for_prune_signature(content: &str) -> Option<(String, bool)> {
+    let payload = serde_json::from_str::<Value>(content).ok()?;
+    let query = payload
+        .get("query")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let returned_matches = payload
+        .get("returned_matches")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let signature = format!(
+        "{}|{}|{}",
+        query.trim().to_ascii_lowercase(),
+        catalog_entry_signature(&payload),
+        returned_matches
+    );
+    Some((signature, returned_matches == 0))
 }
 
 fn summarize_catalog_search(content: &str) -> Option<Value> {
@@ -605,7 +881,7 @@ fn summarize_guide_get(content: &str, recency_rank: usize) -> Option<GuideSummar
     None
 }
 
-fn select_list_inventory_entries(raw: Vec<(usize, Value)>) -> Vec<Value> {
+fn select_list_inventory_entries(raw: Vec<(usize, Value)>, max_entries: usize) -> Vec<Value> {
     let mut output = Vec::<Value>::new();
     let mut seen_signatures = BTreeSet::<String>::new();
     for (_, entry) in raw {
@@ -614,14 +890,14 @@ fn select_list_inventory_entries(raw: Vec<(usize, Value)>) -> Vec<Value> {
             continue;
         }
         output.push(entry);
-        if output.len() >= TOOL_MEMORY_MAX_LIST_INVENTORY_ENTRIES {
+        if output.len() >= max_entries.max(1) {
             break;
         }
     }
     output
 }
 
-fn select_catalog_entries(raw: Vec<(usize, Value)>) -> Vec<Value> {
+fn select_catalog_entries(raw: Vec<(usize, Value)>, max_entries: usize) -> Vec<Value> {
     let mut output = Vec::<Value>::new();
     let mut seen_signatures = BTreeSet::<String>::new();
     let mut seen_refs = BTreeSet::<String>::new();
@@ -644,7 +920,7 @@ fn select_catalog_entries(raw: Vec<(usize, Value)>) -> Vec<Value> {
             continue;
         }
         output.push(entry);
-        if output.len() >= TOOL_MEMORY_MAX_CATALOG_ENTRIES {
+        if output.len() >= max_entries.max(1) {
             break;
         }
     }
@@ -681,7 +957,7 @@ fn dedupe_entry_top_refs(entry: &mut Value, seen_refs: &mut BTreeSet<String>) {
     *items = deduped;
 }
 
-fn select_candidate_detail_entries(raw: Vec<(usize, Value)>) -> Vec<Value> {
+fn select_candidate_detail_entries(raw: Vec<(usize, Value)>, max_entries: usize) -> Vec<Value> {
     let mut output = Vec::<Value>::new();
     let mut seen_refs = BTreeSet::<String>::new();
     for (_, mut entry) in raw {
@@ -694,7 +970,7 @@ fn select_candidate_detail_entries(raw: Vec<(usize, Value)>) -> Vec<Value> {
             continue;
         }
         output.push(entry);
-        if output.len() >= TOOL_MEMORY_MAX_DETAIL_ENTRIES {
+        if output.len() >= max_entries.max(1) {
             break;
         }
     }
@@ -717,7 +993,7 @@ fn dedupe_detail_signatures(entry: &mut Value, seen_refs: &mut BTreeSet<String>)
     *items = deduped;
 }
 
-fn select_guide_entries(raw: Vec<GuideSummaryEntry>) -> GuideProjection {
+fn select_guide_entries(raw: Vec<GuideSummaryEntry>, max_entries: usize) -> GuideProjection {
     let mut deduped = BTreeMap::<String, GuideSummaryEntry>::new();
     for entry in raw {
         let key = format!("{}:{}", entry.kind.as_str(), entry.id);
@@ -741,7 +1017,7 @@ fn select_guide_entries(raw: Vec<GuideSummaryEntry>) -> GuideProjection {
             .cmp(&left_priority)
             .then_with(|| left.recency_rank.cmp(&right.recency_rank))
     });
-    selected.truncate(TOOL_MEMORY_MAX_GUIDE_ENTRIES);
+    selected.truncate(max_entries.max(1));
 
     let mut projection = GuideProjection::default();
     for entry in selected {
@@ -995,381 +1271,5 @@ fn estimate_tokens_json(value: &Value) -> usize {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn planning_memory_scope_is_snapshot_based() {
-        let mut memory = PlanningMemory::default();
-        let budget = PlanningMemoryBudget::default();
-        memory.ensure_scope("session-a", "snapshot-1");
-        memory.insert_with_budget("k".to_string(), "v".to_string(), budget);
-        assert_eq!(memory.get("k"), Some("v"));
-
-        memory.ensure_scope("session-b", "snapshot-1");
-        assert_eq!(memory.get("k"), Some("v"));
-
-        memory.ensure_scope("session-c", "snapshot-2");
-        assert_eq!(memory.get("k"), None);
-    }
-
-    #[test]
-    fn planning_memory_checkpoint_roundtrip_respects_budget() {
-        let mut memory = PlanningMemory::default();
-        let budget = PlanningMemoryBudget {
-            max_entries: 2,
-            max_entry_chars: 4,
-            max_total_chars: 6,
-        };
-        memory.ensure_scope("s", "snap");
-        memory.insert_with_budget("a".to_string(), "1111".to_string(), budget);
-        memory.insert_with_budget("b".to_string(), "2222".to_string(), budget);
-        memory.insert_with_budget("c".to_string(), "3333".to_string(), budget);
-        let value = memory
-            .checkpoint_value(budget)
-            .expect("checkpoint value must exist");
-        let mut restored = PlanningMemory::default();
-        assert!(restored.restore_from_checkpoint(&value, budget));
-        assert!(restored.get("a").is_none());
-        assert!(restored.get("b").is_some() || restored.get("c").is_some());
-        assert_eq!(
-            serde_json::from_value::<PlanningMemorySnapshot>(value)
-                .expect("snapshot")
-                .snapshot_hash,
-            "snap"
-        );
-    }
-
-    #[test]
-    fn restore_ignores_invalid_payload() {
-        let mut memory = PlanningMemory::default();
-        assert!(!memory.restore_from_checkpoint(&json!({"x":1}), PlanningMemoryBudget::default()));
-    }
-
-    #[test]
-    fn tool_memory_projection_contains_recent_high_value_entries() {
-        let mut memory = PlanningMemory::default();
-        memory.ensure_scope("s", "snap-1");
-        memory.insert(
-            "list_candidates:k0".to_string(),
-            json!({
-                "protocols":[
-                    {
-                        "protocol":"erc20@0.0.2",
-                        "chains":["eip155:*"],
-                        "actions":[{"ref":"erc20@0.0.2/transfer"}],
-                        "queries":[{"ref":"erc20@0.0.2/balance-of"}]
-                    }
-                ]
-            })
-            .to_string(),
-        );
-        memory.insert(
-            "catalog.search:k1".to_string(),
-            json!({
-                "query":"transfer",
-                "returned_matches":2,
-                "results":[
-                    {"ref":"erc20@0.0.2/transfer","kind":"action","schema_name":"erc20@0.0.2"},
-                    {"ref":"evm-native-utils@0.0.1/native-transfer","kind":"action","schema_name":"evm-native-utils@0.0.1"}
-                ]
-            })
-            .to_string(),
-        );
-        memory.insert(
-            "get_candidate_detail:k2".to_string(),
-            json!({
-                "details":[
-                    {
-                        "ref":"erc20@0.0.2/transfer",
-                        "kind":"action",
-                        "params":[
-                            {"name":"to","required":true},
-                            {"name":"amount","required":true},
-                            {"name":"token","required":true}
-                        ],
-                        "execution_chains":["eip155:*"]
-                    }
-                ]
-            })
-            .to_string(),
-        );
-        memory.insert(
-            "guide.get:k3".to_string(),
-            json!({
-                "kind":"topic",
-                "topic":{"topic":"cel","summary":"Use deterministic CEL only."}
-            })
-            .to_string(),
-        );
-
-        let projection = memory
-            .tool_memory_projection(1200)
-            .expect("projection should exist");
-        assert_eq!(
-            projection.get("schema").and_then(Value::as_str),
-            Some("ais-agent-tool-memory-projection/0.0.1")
-        );
-        assert_eq!(
-            projection
-                .pointer("/recent/list_inventory/0/protocols/0/protocol")
-                .and_then(Value::as_str),
-            Some("erc20@0.0.2")
-        );
-        assert_eq!(
-            projection
-                .pointer("/recent/catalog_search/0/top_refs/0/ref")
-                .and_then(Value::as_str),
-            Some("erc20@0.0.2/transfer")
-        );
-        assert_eq!(
-            projection
-                .pointer("/recent/candidate_detail/0/signatures/0/ref")
-                .and_then(Value::as_str),
-            Some("erc20@0.0.2/transfer")
-        );
-        assert_eq!(
-            projection
-                .pointer("/recent/guide/topic/cel/summary")
-                .and_then(Value::as_str),
-            Some("Use deterministic CEL only.")
-        );
-    }
-
-    #[test]
-    fn tool_memory_projection_budget_is_clamped_and_trimmed() {
-        let mut memory = PlanningMemory::default();
-        memory.ensure_scope("s", "snap-2");
-        for index in 0..8 {
-            memory.insert(
-                format!("catalog.search:k{index}"),
-                json!({
-                    "query": format!("q{index}"),
-                    "returned_matches": 1,
-                    "results": [{"ref": format!("proto@0.0.1/action-{index}"), "kind":"action"}]
-                })
-                .to_string(),
-            );
-        }
-        let projection = memory
-            .tool_memory_projection(64)
-            .expect("projection should exist");
-        let estimated = projection
-            .get("estimated_tokens")
-            .and_then(Value::as_u64)
-            .expect("estimated tokens");
-        let budget = projection
-            .get("token_budget")
-            .and_then(Value::as_u64)
-            .expect("budget");
-        assert_eq!(budget, TOOL_MEMORY_MIN_TOKENS as u64);
-        assert!(estimated <= budget);
-    }
-
-    #[test]
-    fn tool_memory_projection_dedupes_catalog_and_detail_refs() {
-        let mut memory = PlanningMemory::default();
-        memory.ensure_scope("s", "snap-3");
-        memory.insert(
-            "catalog.search:k1".to_string(),
-            json!({
-                "query":"transfer",
-                "returned_matches":2,
-                "results":[
-                    {"ref":"erc20@0.0.2/transfer","kind":"action"},
-                    {"ref":"evm-native-utils@0.0.1/native-transfer","kind":"action"}
-                ]
-            })
-            .to_string(),
-        );
-        memory.insert(
-            "catalog.search:k2".to_string(),
-            json!({
-                "query":"transfer",
-                "returned_matches":2,
-                "results":[
-                    {"ref":"erc20@0.0.2/transfer","kind":"action"},
-                    {"ref":"erc20@0.0.2/approve","kind":"action"}
-                ]
-            })
-            .to_string(),
-        );
-        memory.insert(
-            "get_candidate_detail:k3".to_string(),
-            json!({
-                "details":[
-                    {"ref":"erc20@0.0.2/transfer","kind":"action","params":[{"name":"to","required":true}]},
-                    {"ref":"erc20@0.0.2/approve","kind":"action","params":[{"name":"spender","required":true}]}
-                ]
-            })
-            .to_string(),
-        );
-        memory.insert(
-            "get_candidate_detail:k4".to_string(),
-            json!({
-                "details":[
-                    {"ref":"erc20@0.0.2/transfer","kind":"action","params":[{"name":"to","required":true}]}
-                ]
-            })
-            .to_string(),
-        );
-
-        let projection = memory
-            .tool_memory_projection(1200)
-            .expect("projection should exist");
-        let top_ref_a = projection
-            .pointer("/recent/catalog_search/0/top_refs/0/ref")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let top_ref_b = projection
-            .pointer("/recent/catalog_search/0/top_refs/1/ref")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        assert_ne!(top_ref_a, top_ref_b);
-        let signatures = projection
-            .pointer("/recent/candidate_detail")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let mut refs = BTreeSet::<String>::new();
-        for entry in signatures {
-            for signature in entry
-                .get("signatures")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default()
-            {
-                if let Some(reference) = signature.get("ref").and_then(Value::as_str) {
-                    refs.insert(reference.to_string());
-                }
-            }
-        }
-        assert!(refs.contains("erc20@0.0.2/transfer"));
-        assert!(refs.contains("erc20@0.0.2/approve"));
-    }
-
-    #[test]
-    fn tool_memory_projection_prioritizes_guide_schema_topic() {
-        let mut memory = PlanningMemory::default();
-        memory.ensure_scope("s", "snap-4");
-        memory.insert(
-            "guide.get:k1".to_string(),
-            json!({
-                "kind":"topic",
-                "topic":{"topic":"valueref","summary":"ValueRef forms"}
-            })
-            .to_string(),
-        );
-        memory.insert(
-            "guide.get:k2".to_string(),
-            json!({
-                "kind":"schema",
-                "schema":{"id":"ais-agent-intent/0.0.1","json":{"$defs":{"x":{}}}}
-            })
-            .to_string(),
-        );
-        memory.insert(
-            "guide.get:k3".to_string(),
-            json!({
-                "kind":"schema",
-                "schema":{"id":"ais-plan-sketch/0.1.0","json":{"$defs":{"segment":{},"step":{}}}}
-            })
-            .to_string(),
-        );
-        memory.insert(
-            "guide.get:k4".to_string(),
-            json!({
-                "kind":"topic",
-                "topic":{"topic":"cel","summary":"CEL guide"}
-            })
-            .to_string(),
-        );
-        // duplicate higher-priority id should be deduped
-        memory.insert(
-            "guide.get:k5".to_string(),
-            json!({
-                "kind":"schema",
-                "schema":{"id":"ais-plan-sketch/0.1.0","json":{"$defs":{"segment":{}}}}
-            })
-            .to_string(),
-        );
-
-        let projection = memory
-            .tool_memory_projection(1200)
-            .expect("projection should exist");
-        assert_eq!(
-            projection
-                .pointer("/recent/guide/schema/ais-plan-sketch~10.1.0/defs/0")
-                .and_then(Value::as_str),
-            Some("segment")
-        );
-        assert_eq!(
-            projection
-                .pointer("/recent/guide/topic/cel/summary")
-                .and_then(Value::as_str),
-            Some("CEL guide")
-        );
-        let schema_keys = projection
-            .pointer("/recent/guide/schema")
-            .and_then(Value::as_object)
-            .map(|items| items.keys().cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
-        assert_eq!(
-            schema_keys
-                .iter()
-                .filter(|id| id.as_str() == "ais-plan-sketch/0.1.0")
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn tool_memory_projection_guide_schema_prefers_full_over_digest() {
-        let mut memory = PlanningMemory::default();
-        memory.ensure_scope("s", "snap-5");
-        memory.insert(
-            "guide.get:k1".to_string(),
-            json!({
-                "kind":"schema",
-                "schema":{
-                    "id":"ais-plan-sketch/0.1.0",
-                    "mode":"digest",
-                    "digest":{"defs":["segment"]}
-                }
-            })
-            .to_string(),
-        );
-        memory.insert(
-            "guide.get:k2".to_string(),
-            json!({
-                "kind":"schema",
-                "schema":{
-                    "id":"ais-plan-sketch/0.1.0",
-                    "mode":"full",
-                    "json":{"$defs":{"segment":{},"step":{}}}
-                }
-            })
-            .to_string(),
-        );
-
-        let projection = memory
-            .tool_memory_projection(1200)
-            .expect("projection should exist");
-        assert_eq!(
-            projection
-                .pointer("/recent/guide/schema/ais-plan-sketch~10.1.0/mode")
-                .and_then(Value::as_str),
-            Some("full")
-        );
-        let defs = projection
-            .pointer("/recent/guide/schema/ais-plan-sketch~10.1.0/defs")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        assert!(defs.iter().any(|item| item.as_str() == Some("segment")));
-        assert!(defs.iter().any(|item| item.as_str() == Some("step")));
-    }
-}
+#[path = "tests/planning_memory_module.rs"]
+mod tests;
