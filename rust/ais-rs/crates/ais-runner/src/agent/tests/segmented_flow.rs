@@ -30,6 +30,8 @@ chains:
         max_tool_rounds: None,
         max_index_candidates: None,
         planner_context_token_budget: None,
+        llm_transcript_path: None,
+        llm_transcript_append: false,
         format: OutputFormat::Text,
     };
     let error = super::execute_agent(&command).expect_err("must reject without workspace");
@@ -66,6 +68,8 @@ fn execute_agent_intent_mode_requires_llm_provider_with_workspace() {
         max_tool_rounds: None,
         max_index_candidates: None,
         planner_context_token_budget: None,
+        llm_transcript_path: None,
+        llm_transcript_append: false,
         format: OutputFormat::Text,
     };
     let error = super::execute_agent(&command).expect_err("must reject without llm provider");
@@ -111,6 +115,8 @@ fn build_segmented_demo_command(
         max_tool_rounds: None,
         max_index_candidates: None,
         planner_context_token_budget: None,
+        llm_transcript_path: None,
+        llm_transcript_append: false,
         format: OutputFormat::Json,
     }
 }
@@ -147,6 +153,8 @@ fn build_segmented_native_erc20_command(llm_script_jsonl: PathBuf) -> AgentComma
         max_tool_rounds: None,
         max_index_candidates: None,
         planner_context_token_budget: None,
+        llm_transcript_path: None,
+        llm_transcript_append: false,
         format: OutputFormat::Json,
     }
 }
@@ -806,6 +814,8 @@ fn execute_agent_segmented_missing_required_input_pauses_instead_of_failing() {
         max_tool_rounds: None,
         max_index_candidates: None,
         planner_context_token_budget: None,
+        llm_transcript_path: None,
+        llm_transcript_append: false,
         format: OutputFormat::Json,
     };
 
@@ -939,6 +949,8 @@ fn execute_agent_segmented_intent_fixture_queries_then_pauses_for_confirm() {
         max_tool_rounds: None,
         max_index_candidates: None,
         planner_context_token_budget: None,
+        llm_transcript_path: None,
+        llm_transcript_append: false,
         format: OutputFormat::Json,
     };
 
@@ -1150,6 +1162,8 @@ fn segmented_intent_fixture_revise_with_until_retry_then_complete() {
         max_tool_rounds: None,
         max_index_candidates: None,
         planner_context_token_budget: None,
+        llm_transcript_path: None,
+        llm_transcript_append: false,
         format: OutputFormat::Json,
     };
 
@@ -1393,6 +1407,8 @@ fn segmented_intent_fixture_repairs_format_then_compiles_assert_branch_segment()
         max_tool_rounds: None,
         max_index_candidates: None,
         planner_context_token_budget: None,
+        llm_transcript_path: None,
+        llm_transcript_append: false,
         format: OutputFormat::Json,
     };
 
@@ -2345,4 +2361,103 @@ fn merge_segment_plan_replaces_nodes_for_same_segment_id() {
         .filter_map(Value::as_str)
         .collect::<Vec<_>>();
     assert_eq!(node_ids, vec!["seg_1__q1", "seg_2__new_q", "seg_2__new_a"]);
+}
+
+#[test]
+fn normalize_segment_asset_inputs_uses_existing_input_ref_without_inventing_token_address() {
+    let segment: ais_sdk::documents::PlanSketchSegment = serde_json::from_value(json!({
+        "segment_id":"seg_asset",
+        "cursor_in":"0",
+        "cursor_out":"1",
+        "done":false,
+        "steps":[
+            {
+                "id":"a1",
+                "kind":"action",
+                "candidate_ref":"erc20@0.0.2/transfer",
+                "inputs":{
+                    "token":{"ref":"inputs.token.tst"},
+                    "amount":{"lit":"1"},
+                    "recipient":{"lit":"0x1111111111111111111111111111111111111111"}
+                }
+            }
+        ]
+    }))
+    .expect("segment");
+    let mut candidate_context = super::CandidateContext::default();
+    candidate_context.detail_by_ref.insert(
+        "erc20@0.0.2/transfer".to_string(),
+        json!({
+            "kind":"action",
+            "params":[
+                {"name":"token","type":"asset","required":true},
+                {"name":"amount","type":"amount","required":true},
+                {"name":"recipient","type":"address","required":true}
+            ]
+        }),
+    );
+
+    let normalized = super::normalize_segment_asset_inputs_for_compile(
+        &segment,
+        &candidate_context,
+        Some("eip155:1"),
+        &["inputs.token.tst".to_string(), "inputs.chain_id".to_string()],
+    );
+    let value = serde_json::to_value(normalized).expect("normalized segment");
+    assert_eq!(
+        value.pointer("/steps/0/inputs/token/object/address/ref"),
+        Some(&json!("inputs.token.tst"))
+    );
+    assert_eq!(
+        value.pointer("/steps/0/inputs/token/object/chain_ref/ref"),
+        Some(&json!("inputs.chain_id"))
+    );
+    assert!(
+        !value.to_string().contains("inputs.token.address"),
+        "normalized segment must not invent token.address: {value}"
+    );
+}
+
+#[test]
+fn validate_segment_todo_scope_blocks_action_when_current_todo_is_query_only() {
+    let segment: ais_sdk::documents::PlanSketchSegment = serde_json::from_value(json!({
+        "segment_id":"seg_scope",
+        "cursor_in":"0",
+        "cursor_out":"1",
+        "done":false,
+        "steps":[
+            {
+                "id":"a1",
+                "kind":"action",
+                "candidate_ref":"demo@0.0.1/transfer",
+                "inputs":{}
+            }
+        ]
+    }))
+    .expect("segment");
+    let mut candidate_context = super::CandidateContext::default();
+    candidate_context.detail_by_ref.insert(
+        "demo@0.0.1/transfer".to_string(),
+        json!({"kind":"action"}),
+    );
+    let current_todo = json!({
+        "id":"todo_1",
+        "title":"Query balances only",
+        "execution_scope":"query_only",
+    });
+
+    let error = super::validate_segment_todo_scope(
+        &segment,
+        &candidate_context,
+        Some(&current_todo),
+    )
+    .expect_err("query_only todo should block action step");
+    assert_eq!(
+        error.pointer("/reason_code").and_then(Value::as_str),
+        Some("todo_scope_violation")
+    );
+    assert_eq!(
+        error.pointer("/issues/0/step_id").and_then(Value::as_str),
+        Some("a1")
+    );
 }

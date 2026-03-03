@@ -567,6 +567,7 @@ pub(super) fn compile_segment_plan_with_snapshot_hash(
     candidate_context: &CandidateContext,
     pack_snapshot_hash: &str,
     chain_scope: &[String],
+    known_input_refs: &[String],
 ) -> Result<PlanDocument, Value> {
     compile_segment_plan_with_snapshot_hash_and_inputs(
         intent,
@@ -576,7 +577,7 @@ pub(super) fn compile_segment_plan_with_snapshot_hash(
         candidate_context,
         pack_snapshot_hash,
         chain_scope,
-        &[],
+        known_input_refs,
     )
 }
 
@@ -590,7 +591,13 @@ fn compile_segment_plan_with_snapshot_hash_and_inputs(
     chain_scope: &[String],
     known_input_refs: &[String],
 ) -> Result<PlanDocument, Value> {
-    validate_segment_write_gates(segment, candidate_context, None)?;
+    let normalized_segment = normalize_segment_asset_inputs_for_compile(
+        segment,
+        candidate_context,
+        chain_scope.first().map(String::as_str),
+        known_input_refs,
+    );
+    validate_segment_write_gates(&normalized_segment, candidate_context, None)?;
 
     let mut resolver = ResolverContext::new();
     for protocol in &candidate_context.protocols {
@@ -617,7 +624,7 @@ fn compile_segment_plan_with_snapshot_hash_and_inputs(
             session_id: session_id.to_string(),
             cursor: cursor.to_string(),
         }),
-        segments: vec![segment.clone()],
+        segments: vec![normalized_segment],
         meta: None,
         extensions: serde_json::Map::new(),
     };
@@ -638,6 +645,81 @@ fn compile_segment_plan_with_snapshot_hash_and_inputs(
             "issues": issues,
         })),
     }
+}
+
+fn normalize_segment_asset_inputs_for_compile(
+    segment: &PlanSketchSegment,
+    candidate_context: &CandidateContext,
+    default_chain: Option<&str>,
+    known_input_refs: &[String],
+) -> PlanSketchSegment {
+    let mut out = segment.clone();
+    let known_chain_ref = known_input_refs
+        .iter()
+        .filter_map(|raw| input_normalize::normalize_input_slot_key(raw))
+        .map(|slot| format!("inputs.{slot}"))
+        .find(|slot| {
+            slot == "inputs.chain" || slot == "inputs.chain_id" || slot == "inputs.chain_ref"
+        });
+    let chain_binding = if let Some(chain_ref) = known_chain_ref {
+        serde_json::json!({"ref": chain_ref})
+    } else {
+        serde_json::json!({"lit": default_chain.unwrap_or("eip155:1")})
+    };
+
+    for step in &mut out.steps {
+        if step.kind != "query" && step.kind != "action" {
+            continue;
+        }
+        let Some(candidate_ref) = step.candidate_ref.as_deref() else {
+            continue;
+        };
+        let Some(detail) = candidate_context.detail_by_ref.get(candidate_ref) else {
+            continue;
+        };
+        let Some(params) = detail.get("params").and_then(Value::as_array) else {
+            continue;
+        };
+        for param in params {
+            let Some(param_name) = param.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            let is_asset = param
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| kind.eq_ignore_ascii_case("asset"));
+            if !is_asset {
+                continue;
+            }
+            let Some(existing) = step.inputs.get(param_name).cloned() else {
+                continue;
+            };
+            if asset_input_already_structured(&existing) {
+                continue;
+            }
+            step.inputs.insert(
+                param_name.to_string(),
+                serde_json::json!({
+                    "object": {
+                        "address": existing,
+                        "chain_ref": chain_binding
+                    }
+                }),
+            );
+        }
+    }
+
+    out
+}
+
+fn asset_input_already_structured(value: &Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    if let Some(asset_object) = object.get("object").and_then(Value::as_object) {
+        return asset_object.get("address").is_some();
+    }
+    object.get("address").is_some()
 }
 
 #[cfg(test)]
@@ -704,17 +786,6 @@ pub(super) fn known_input_refs_from_state_summary(state_summary: Option<&Value>)
             refs.insert(format!("inputs.{canonical_slot}"));
         }
     }
-    for raw_ref in state_summary
-        .and_then(|summary| summary.pointer("/intent_slots/resolved_input_refs"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flat_map(|items| items.iter())
-        .filter_map(Value::as_str)
-    {
-        if let Some(canonical_slot) = input_normalize::normalize_input_slot_key(raw_ref) {
-            refs.insert(format!("inputs.{canonical_slot}"));
-        }
-    }
     refs.into_iter().collect::<Vec<_>>()
 }
 
@@ -773,6 +844,111 @@ pub(super) fn canonicalize_segment_input_refs(
             "issues": []
         })
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TodoExecutionScope {
+    QueryOnly,
+    Mixed,
+    WriteOnly,
+}
+
+pub(super) fn validate_segment_todo_scope(
+    segment: &PlanSketchSegment,
+    candidate_context: &CandidateContext,
+    current_todo: Option<&Value>,
+) -> Result<(), Value> {
+    let scope = infer_todo_execution_scope(current_todo);
+    if scope != TodoExecutionScope::QueryOnly {
+        return Ok(());
+    }
+    let mut issues = Vec::<Value>::new();
+    for step in &segment.steps {
+        let is_write_step = if step.kind == "action" {
+            true
+        } else if let Some(candidate_ref) = step.candidate_ref.as_deref() {
+            candidate_context
+                .detail_by_ref
+                .get(candidate_ref)
+                .is_some_and(candidate_detail_is_write_action)
+        } else {
+            false
+        };
+        if !is_write_step {
+            continue;
+        }
+        issues.push(serde_json::json!({
+            "kind":"todo_scope_violation",
+            "reason_code":"todo_scope_violation",
+            "message":"current todo scope is query_only; write/action steps are not allowed in this segment",
+            "step_id": step.id,
+            "candidate_ref": step.candidate_ref,
+            "segment_id": segment.segment_id,
+        }));
+    }
+    if issues.is_empty() {
+        return Ok(());
+    }
+    Err(serde_json::json!({
+        "reason_code":"todo_scope_violation",
+        "message":"segment violates current todo scope",
+        "issues": issues
+    }))
+}
+
+fn candidate_detail_is_write_action(detail: &Value) -> bool {
+    detail.get("kind").and_then(Value::as_str) == Some("action")
+}
+
+fn infer_todo_execution_scope(current_todo: Option<&Value>) -> TodoExecutionScope {
+    let Some(todo) = current_todo.and_then(Value::as_object) else {
+        return TodoExecutionScope::Mixed;
+    };
+    if let Some(explicit) = todo.get("execution_scope").and_then(Value::as_str) {
+        match explicit.trim().to_ascii_lowercase().as_str() {
+            "query_only" => return TodoExecutionScope::QueryOnly,
+            "write_only" => return TodoExecutionScope::WriteOnly,
+            "mixed" => return TodoExecutionScope::Mixed,
+            _ => {}
+        }
+    }
+    let mut corpus = Vec::<String>::new();
+    if let Some(title) = todo.get("title").and_then(Value::as_str) {
+        corpus.push(title.to_ascii_lowercase());
+    }
+    for field in ["acceptance", "required_facts", "produced_facts"] {
+        for raw in todo
+            .get(field)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flat_map(|items| items.iter())
+            .filter_map(Value::as_str)
+        {
+            corpus.push(raw.to_ascii_lowercase());
+        }
+    }
+    let has_write = corpus.iter().any(|entry| {
+        [
+            "transfer", "swap", "approve", "send", "execute", "write", "withdraw", "deposit",
+            "mint", "burn",
+        ]
+        .iter()
+        .any(|needle| entry.contains(needle))
+    });
+    if has_write {
+        return TodoExecutionScope::Mixed;
+    }
+    let has_query = corpus.iter().any(|entry| {
+        [
+            "balance", "query", "check", "read", "retrieve", "fact", "verify",
+        ]
+        .iter()
+        .any(|needle| entry.contains(needle))
+    });
+    if has_query {
+        return TodoExecutionScope::QueryOnly;
+    }
+    TodoExecutionScope::Mixed
 }
 
 fn canonicalize_segment_input_refs_value(

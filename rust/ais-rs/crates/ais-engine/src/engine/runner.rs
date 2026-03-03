@@ -272,6 +272,7 @@ pub fn run_plan_once(
         .collect::<BTreeSet<_>>();
 
     for node in &plan.nodes {
+        sync_progress_sets_to_state(state, &completed_set, &approved_set);
         let Some(node_obj) = node.as_object() else {
             continue;
         };
@@ -1696,6 +1697,15 @@ fn persist_state_from_runtime(
     state.approved_node_ids.sort();
     state.approved_node_ids.dedup();
     state.next_seq = stream.next_seq();
+}
+
+fn sync_progress_sets_to_state(
+    state: &mut EngineRunnerState,
+    completed_set: &BTreeSet<String>,
+    approved_set: &BTreeSet<String>,
+) {
+    state.completed_node_ids = completed_set.iter().cloned().collect();
+    state.approved_node_ids = approved_set.iter().cloned().collect();
 }
 
 fn apply_node_writes(node_obj: &Map<String, Value>, result: &Value, runtime: &mut Value) {

@@ -37,6 +37,27 @@ impl Executor for CountingExecutor {
     }
 }
 
+struct NodeCountingExecutor {
+    calls: Rc<RefCell<Vec<String>>>,
+}
+
+impl Executor for NodeCountingExecutor {
+    fn execute(&self, node: &Value, _runtime: &mut Value) -> Result<ExecutorOutput, String> {
+        let node_id = node
+            .as_object()
+            .and_then(|object| object.get("id"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        self.calls.borrow_mut().push(node_id.clone());
+        Ok(ExecutorOutput {
+            result: json!({"ok": true, "node_id": node_id}),
+            writes: Map::new(),
+            side_effects: Vec::new(),
+        })
+    }
+}
+
 struct UntilExecutor {
     calls: Rc<RefCell<usize>>,
     succeed_after: usize,
@@ -502,6 +523,17 @@ fn approve_command() -> EngineCommandEnvelope {
     })
 }
 
+fn approve_command_for(node_id: &str) -> EngineCommandEnvelope {
+    EngineCommandEnvelope::new(EngineCommand {
+        id: format!("cmd-approve-{node_id}"),
+        command_type: EngineCommandType::UserConfirm,
+        data: Map::from_iter([
+            ("node_id".to_string(), Value::String(node_id.to_string())),
+            ("decision".to_string(), json!("approve")),
+        ]),
+    })
+}
+
 fn deny_command() -> EngineCommandEnvelope {
     EngineCommandEnvelope::new(EngineCommand {
         id: "cmd-deny".to_string(),
@@ -707,6 +739,105 @@ fn run_plan_minimal_loop_with_apply_patches_and_user_confirm() {
             .and_then(|value| value.get("outputs"))
             .and_then(|value| value.get("ok")),
         Some(&json!(true))
+    );
+}
+
+#[test]
+fn second_confirm_pause_does_not_reexecute_already_completed_write_node() {
+    let plan = PlanDocument {
+        schema: "ais-plan/0.0.3".to_string(),
+        meta: Some(json!({"name": "double-confirm"})),
+        nodes: vec![
+            json!({
+                "id": "swap-1",
+                "kind": "execution",
+                "chain": "eip155:1",
+                "execution": {
+                    "type": "evm_call",
+                    "to": {"lit": "0x0000000000000000000000000000000000000001"},
+                    "abi": {"type": "function", "name": "swap", "inputs": [], "outputs": []},
+                    "method": "swap",
+                    "args": {}
+                },
+                "writes": [{"path":"nodes.swap-1.outputs","mode":"set"}]
+            }),
+            json!({
+                "id": "swap-2",
+                "kind": "execution",
+                "chain": "eip155:1",
+                "execution": {
+                    "type": "evm_call",
+                    "to": {"lit": "0x0000000000000000000000000000000000000002"},
+                    "abi": {"type": "function", "name": "swap", "inputs": [], "outputs": []},
+                    "method": "swap",
+                    "args": {}
+                },
+                "writes": [{"path":"nodes.swap-2.outputs","mode":"set"}]
+            }),
+        ],
+        extensions: Map::new(),
+    };
+    let mut state = EngineRunnerState::default();
+    let mut router = RouterExecutor::new();
+    let calls = Rc::new(RefCell::new(Vec::<String>::new()));
+    router.register(
+        "evm_call",
+        "eip155:1",
+        Box::new(NodeCountingExecutor {
+            calls: calls.clone(),
+        }),
+    );
+    let mut options = EngineRunnerOptions::default();
+    options.policy.thresholds.max_risk_level = Some(0);
+
+    let first = run_plan_once(
+        "run-double-confirm",
+        &plan,
+        &mut state,
+        &router,
+        &DefaultSolver,
+        &[],
+        &options,
+    );
+    assert_eq!(first.status, EngineRunStatus::Paused);
+    assert_eq!(
+        state.paused_reason.as_deref(),
+        Some("need_user_confirm:swap-1")
+    );
+
+    let second = run_plan_once(
+        "run-double-confirm",
+        &plan,
+        &mut state,
+        &router,
+        &DefaultSolver,
+        &[approve_command_for("swap-1")],
+        &options,
+    );
+    assert_eq!(second.status, EngineRunStatus::Paused);
+    assert_eq!(
+        state.paused_reason.as_deref(),
+        Some("need_user_confirm:swap-2")
+    );
+    assert!(state.completed_node_ids.contains(&"swap-1".to_string()));
+
+    let third = run_plan_once(
+        "run-double-confirm",
+        &plan,
+        &mut state,
+        &router,
+        &DefaultSolver,
+        &[approve_command_for("swap-2")],
+        &options,
+    );
+    assert_eq!(third.status, EngineRunStatus::Completed);
+    assert_eq!(
+        state.completed_node_ids,
+        vec!["swap-1".to_string(), "swap-2".to_string()]
+    );
+    assert_eq!(
+        calls.borrow().clone(),
+        vec!["swap-1".to_string(), "swap-2".to_string(),]
     );
 }
 

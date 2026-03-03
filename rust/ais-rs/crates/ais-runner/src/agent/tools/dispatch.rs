@@ -4,7 +4,8 @@ use serde_json::{json, Value};
 
 use super::super::budget::{compact_json_for_llm, compact_json_with_options};
 use super::super::candidates::{CandidateContext, CandidateSearchRequest};
-use super::super::context::budget_policy::ToolMemoryBudgetPolicy;
+use super::super::context::budget_policy::{ToolDispatchKind, ToolMemoryBudgetPolicy};
+use super::super::context::packing::ContextCompressLevel;
 use super::super::intent_segmented::{
     coerce_required_scalar_string, control_semantics_search_hint_payload,
     decode_grounding_tool_args, decode_plan_sketch_segment_arg, decode_segment_tool_args,
@@ -54,6 +55,7 @@ pub(crate) fn decode_segmented_tool_call(
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -65,14 +67,20 @@ pub(crate) fn decode_segmented_tool_call_with_memory(
     segment_check_context: Option<&SegmentCheckContext>,
     memory: Option<&mut PlanningMemory>,
     projection_budget_tokens: Option<usize>,
+    compress_level: Option<ContextCompressLevel>,
 ) -> Result<DecodedSegmentedToolCall, RunnerError> {
     ensure_tool_allowed_for_phase(tool.name.as_str(), phase)?;
 
     let normalized_args = normalize_tool_args_for_validation(tool.name.as_str(), &tool.arguments);
-    let compact_profile = ToolMemoryBudgetPolicy::derive_tool_dispatch_compact_profile(
-        projection_budget_tokens
-            .unwrap_or(ToolMemoryBudgetPolicy::TOOL_MEMORY_PROJECTION_DEFAULT_TOKENS),
-    );
+    let compact_profile = match compress_level {
+        Some(level) => {
+            ToolMemoryBudgetPolicy::derive_tool_dispatch_compact_profile_from_compress_level(level)
+        }
+        None => ToolMemoryBudgetPolicy::derive_tool_dispatch_compact_profile(
+            projection_budget_tokens
+                .unwrap_or(ToolMemoryBudgetPolicy::tool_memory_projection_default_tokens()),
+        ),
+    };
     let cache_key = super::cache::tool_cache_key(tool.name.as_str(), &normalized_args.arguments);
     let require_guide_schema_full =
         guide_get_requires_full_schema(tool.name.as_str(), &normalized_args.arguments);
@@ -127,7 +135,10 @@ pub(crate) fn decode_segmented_tool_call_with_memory(
             let sanitized = sanitize_for_llm_payload(&details);
             let compacted = compact_json_with_options(
                 &sanitized,
-                &ToolMemoryBudgetPolicy::tool_dispatch_candidate_detail_options(compact_profile),
+                &ToolMemoryBudgetPolicy::tool_dispatch_options(
+                    ToolDispatchKind::CandidateDetail,
+                    compact_profile,
+                ),
             );
             let content = serde_json::to_string(&compacted).map_err(RunnerError::from)?;
             if let (Some(memory), Some(cache_key)) = (memory, cache_key) {
@@ -200,7 +211,10 @@ pub(crate) fn decode_segmented_tool_call_with_memory(
             let sanitized = sanitize_for_llm_payload(&payload);
             let compacted = compact_json_with_options(
                 &sanitized,
-                &ToolMemoryBudgetPolicy::tool_dispatch_missing_facts_options(compact_profile),
+                &ToolMemoryBudgetPolicy::tool_dispatch_options(
+                    ToolDispatchKind::MissingFacts,
+                    compact_profile,
+                ),
             );
             let content = serde_json::to_string(&compacted).map_err(RunnerError::from)?;
             if let (Some(memory), Some(cache_key)) = (memory, cache_key) {
@@ -228,14 +242,16 @@ pub(crate) fn decode_segmented_tool_call_with_memory(
                 if schema_has_full_json {
                     compact_json_with_options(
                         &sanitized,
-                        &ToolMemoryBudgetPolicy::tool_dispatch_guide_schema_full_options(
+                        &ToolMemoryBudgetPolicy::tool_dispatch_options(
+                            ToolDispatchKind::GuideSchemaFull,
                             compact_profile,
                         ),
                     )
                 } else {
                     compact_json_with_options(
                         &sanitized,
-                        &ToolMemoryBudgetPolicy::tool_dispatch_guide_schema_digest_options(
+                        &ToolMemoryBudgetPolicy::tool_dispatch_options(
+                            ToolDispatchKind::GuideSchemaDigest,
                             compact_profile,
                         ),
                     )
@@ -243,7 +259,10 @@ pub(crate) fn decode_segmented_tool_call_with_memory(
             } else {
                 compact_json_with_options(
                     &sanitized,
-                    &ToolMemoryBudgetPolicy::tool_dispatch_guide_topic_options(compact_profile),
+                    &ToolMemoryBudgetPolicy::tool_dispatch_options(
+                        ToolDispatchKind::GuideTopic,
+                        compact_profile,
+                    ),
                 )
             };
             let content = serde_json::to_string(&compacted).map_err(RunnerError::from)?;
@@ -286,13 +305,29 @@ pub(crate) fn decode_segmented_tool_call_with_memory(
                     context,
                     check_context.pack_snapshot_hash.as_str(),
                     check_context.chain_scope.as_slice(),
+                    check_context.known_input_refs.as_slice(),
                 ) {
-                    Ok(plan) => json!({
-                        "ok": true,
-                        "segment_id": segment.segment_id,
-                        "node_count": plan.nodes.len(),
-                        "issues": []
-                    }),
+                    Ok(plan) => {
+                        match super::super::validate_segment_todo_scope(
+                            &segment,
+                            context,
+                            check_context.current_todo.as_ref(),
+                        ) {
+                            Ok(()) => json!({
+                                "ok": true,
+                                "segment_id": segment.segment_id,
+                                "node_count": plan.nodes.len(),
+                                "issues": []
+                            }),
+                            Err(error) => json!({
+                                "ok": false,
+                                "segment_id": segment.segment_id,
+                                "reason_code": error.get("reason_code").cloned().unwrap_or_else(|| json!("todo_scope_violation")),
+                                "issues": error.get("issues").cloned().unwrap_or_else(|| Value::Array(vec![])),
+                                "error": error
+                            }),
+                        }
+                    }
                     Err(error) => json!({
                         "ok": false,
                         "segment_id": segment.segment_id,
@@ -312,7 +347,10 @@ pub(crate) fn decode_segmented_tool_call_with_memory(
             let sanitized = sanitize_for_llm_payload(&payload);
             let compacted = compact_json_with_options(
                 &sanitized,
-                &ToolMemoryBudgetPolicy::tool_dispatch_check_segment_options(compact_profile),
+                &ToolMemoryBudgetPolicy::tool_dispatch_options(
+                    ToolDispatchKind::CheckSegment,
+                    compact_profile,
+                ),
             );
             let content = serde_json::to_string(&compacted).map_err(RunnerError::from)?;
             if let (Some(memory), Some(cache_key)) = (memory, cache_key) {

@@ -30,6 +30,8 @@ fn test_agent_command() -> AgentCommand {
         max_tool_rounds: None,
         max_index_candidates: None,
         planner_context_token_budget: None,
+        llm_transcript_path: None,
+        llm_transcript_append: false,
         format: OutputFormat::Json,
     }
 }
@@ -279,7 +281,7 @@ fn planning_memory_store_budget_tightens_under_critical_pressure() {
 }
 
 #[test]
-fn refresh_tool_memory_projection_applies_pressure_prune_before_projection() {
+fn refresh_tool_memory_projection_keeps_planning_memory_entries() {
     let mut planner = LlmSegmentedIntentPlanner::new(ScriptedLlmProvider::from_responses(vec![]));
     let snapshot = super::super::planning_memory::PlanningMemorySnapshot {
             snapshot_hash: "snap-prune".to_string(),
@@ -388,19 +390,14 @@ fn refresh_tool_memory_projection_applies_pressure_prune_before_projection() {
     .expect("snapshot decode")
     .tool_cache
     .len();
-    assert!(after < before);
+    assert_eq!(after, before);
     let diagnostics = planner.llm_usage_value();
-    assert_eq!(
-        diagnostics.pointer("/diagnostics/memory_prune_runs"),
-        Some(&json!(1))
-    );
-    assert!(
-        diagnostics
-            .pointer("/diagnostics/memory_pruned_by_tool/catalog.search")
-            .and_then(Value::as_u64)
-            .unwrap_or(0)
-            >= 1
-    );
+    assert!(diagnostics
+        .pointer("/diagnostics/memory_prune_runs")
+        .is_none());
+    assert!(diagnostics
+        .pointer("/diagnostics/memory_pruned_by_tool")
+        .is_none());
     assert!(
         diagnostics
             .pointer("/diagnostics/memory_projection_budget_tokens")
@@ -409,13 +406,16 @@ fn refresh_tool_memory_projection_applies_pressure_prune_before_projection() {
             > 0
     );
     let projection = context.tool_memory_projection.clone().expect("projection");
-    assert!(projection.get("recent").is_some());
+    assert!(
+        projection.get("recent").is_some() || projection.get("cached_refs").is_some(),
+        "expected projection to include either full/summary recent entries or skeleton cached_refs; projection={projection:?}"
+    );
     assert!(projection.get("estimated_tokens").is_some());
     assert!(projection.get("token_budget").is_some());
 }
 
 #[test]
-fn refresh_tool_memory_projection_records_empty_projection_pressure_metric() {
+fn refresh_tool_memory_projection_records_empty_projection_estimate() {
     let mut planner = LlmSegmentedIntentPlanner::new(ScriptedLlmProvider::from_responses(vec![]));
     let snapshot = super::super::planning_memory::PlanningMemorySnapshot {
         snapshot_hash: "snap-empty-pressure".to_string(),
@@ -443,10 +443,9 @@ fn refresh_tool_memory_projection_records_empty_projection_pressure_metric() {
 
     refresh_tool_memory_projection(&mut context, &mut planner, &EngineRunnerState::default());
     let usage = planner.llm_usage_value();
-    assert_eq!(
-        usage.pointer("/diagnostics/memory_projection_empty_due_to_pressure_total"),
-        Some(&json!(1))
-    );
+    assert!(usage
+        .pointer("/diagnostics/memory_projection_empty_due_to_pressure_total")
+        .is_none());
     assert_eq!(
         usage.pointer("/diagnostics/memory_projection_estimated_tokens"),
         Some(&json!(0))
@@ -1833,6 +1832,65 @@ fn missing_input_query_autofill_round_schedules_from_question_options() {
             .runtime
             .pointer("/agent/missing_input_autofill/reason"),
         Some(&json!("retry_limited"))
+    );
+}
+
+#[test]
+fn missing_input_query_autofill_round_applies_static_refill_before_query() {
+    let command = test_agent_command();
+    let mut state = EngineRunnerState {
+        runtime: json!({
+            "agent": {
+                "intent_grounding": {
+                    "status":"proposed",
+                    "ready_for_todos": true,
+                    "intent_facts": {
+                        "native_amount": 5
+                    }
+                }
+            }
+        }),
+        ..EngineRunnerState::default()
+    };
+    let mut context = test_segmented_context();
+    context.refresh_state_summary(&state, false);
+    let candidate_context = CandidateContext::default();
+    let missing_payload = json!({
+        "questions":[
+            {
+                "id":"inputs.native_transfer_amount",
+                "question":"Provide transfer amount",
+                "required":true,
+                "options":[]
+            }
+        ]
+    });
+
+    let scheduled = try_schedule_missing_input_query_autofill_round(
+        &command,
+        &mut state,
+        &mut context,
+        &missing_payload,
+        &candidate_context,
+        "grounding",
+        false,
+        "grounding",
+    );
+    assert!(scheduled);
+    assert_eq!(
+        context
+            .previous_error
+            .as_ref()
+            .and_then(|value| value.pointer("/autofill/mode")),
+        Some(&json!("host_static_refill_round"))
+    );
+    assert_eq!(
+        state.runtime.pointer("/inputs/native_transfer_amount"),
+        Some(&json!(5))
+    );
+    assert_eq!(
+        state.runtime.pointer("/agent/missing_ref_refill/attempt"),
+        Some(&json!("static_intent_config"))
     );
 }
 

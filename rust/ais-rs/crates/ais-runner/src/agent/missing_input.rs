@@ -23,6 +23,7 @@ pub(super) fn payload_with_context(
     compact_json_for_llm(&serde_json::json!({
         "phase": "planning",
         "reason_code": "missing_required_input",
+        "consumed": false,
         "message": message,
         "missing_refs": missing_refs,
         "suggested_paths": suggested_paths,
@@ -40,6 +41,19 @@ pub(super) fn resolved_payload(answers: &Map<String, Value>, round: u8) -> Value
         "answers": answers,
         "round": round,
     }))
+}
+
+pub(super) fn mark_consumed(runtime: &mut Value) {
+    let Some(agent) = runtime.get_mut("agent").and_then(Value::as_object_mut) else {
+        return;
+    };
+    let Some(payload) = agent
+        .get_mut("missing_required_input")
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    payload.insert("consumed".to_string(), Value::Bool(true));
 }
 
 pub(super) fn apply_answers(

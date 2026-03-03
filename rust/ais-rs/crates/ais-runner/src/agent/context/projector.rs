@@ -7,8 +7,6 @@ use super::collector::{
 use ais_engine::EngineRunnerState;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
-
-const MAX_FACT_ENTRIES_IN_SUMMARY: usize = 24;
 const INPUT_BINDABLE_REFS_SOURCE_PATH: &str = "state_summary.input_registry.known_refs";
 const INPUT_BINDING_SCHEMA: &str = "ais-agent-input-binding-contract/0.0.1";
 
@@ -29,7 +27,7 @@ pub(in super::super) fn build_projected_summary_base(
         "paused_reason": state.paused_reason,
         "done": done,
         "previous_error": previous_error,
-        "input_store": input_store.map(|store| store.to_projected_planning_value(MAX_FACT_ENTRIES_IN_SUMMARY)),
+        "input_store": input_store.map(InputStore::to_projected_planning_value),
         "input_binding": input_binding,
         "input_slots": input_slots.value,
         "input_registry": build_input_registry_projection(&input_slots.resolved, input_slots.missing.as_slice()),
@@ -93,9 +91,9 @@ fn build_intent_slots_projection(state: &EngineRunnerState) -> Value {
     out.insert(
         "input_binding".to_string(),
         json!({
-            "bindable_refs_source": INPUT_BINDABLE_REFS_SOURCE_PATH,
-            "known_refs_only": true,
-            "facts_bindable": false,
+            "role": "grounding_intermediate",
+            "bindable": false,
+            "source_of_truth": "state_summary.input_store",
         }),
     );
     Value::Object(out)

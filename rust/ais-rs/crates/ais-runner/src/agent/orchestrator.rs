@@ -190,6 +190,10 @@ fn execute_segmented_intent_agent_main(
         .with_prompt_overrides(segmented_prompt_overrides)
         .with_max_tool_rounds(segmented_max_tool_rounds)
         .with_context_limit_tokens(llm_context_limit_tokens)
+        .with_llm_transcript(
+            command.llm_transcript_path.clone(),
+            command.llm_transcript_append,
+        )
         .with_verbose_llm(command.verbose_llm);
     if command.verbose_llm {
         eprintln!("[agent] segmented_max_tool_rounds={segmented_max_tool_rounds}");
@@ -1270,31 +1274,14 @@ pub(super) fn refresh_tool_memory_projection<P>(
     let token_budget =
         resolve_tool_memory_projection_token_budget(Some(&planner_usage), runtime_usage);
     let pressure_mode = resolve_tool_pressure_mode(context, runtime_usage);
-    let active_todo = context.todo_board.current_todo_id().is_some();
-    let pressure_result = if matches!(pressure_mode, ContextPressureMode::Normal) {
-        None
-    } else {
-        let prune_result = planner.prune_tool_memory_for_pressure(
-            pressure_mode,
-            active_todo,
-            "projection_refresh",
-            Some(token_budget),
-        );
-        planner.observe_tool_memory_prune(&prune_result);
-        Some(prune_result)
-    };
-    let projection = planner.tool_memory_projection_value(token_budget);
+    let compress_level = ToolMemoryBudgetPolicy::derive_global_compress_level(pressure_mode);
+    let candidates = planner.tool_memory_projection_candidates_value(token_budget);
+    let projection = candidates.select_for_level(compress_level);
     let estimated_tokens = projection
         .as_ref()
         .and_then(|value| value.pointer("/estimated_tokens"))
         .and_then(Value::as_u64);
     planner.observe_tool_memory_projection(token_budget, estimated_tokens);
-    if !matches!(pressure_mode, ContextPressureMode::Normal)
-        && estimated_tokens.is_none()
-        && pressure_result.is_some_and(|result| result.removed_total > 0)
-    {
-        planner.observe_tool_memory_projection_empty_due_to_pressure();
-    }
     context.update_tool_memory_projection(projection);
 }
 
@@ -1453,6 +1440,14 @@ fn compile_guard(
         &planned.segment,
         &known_refs,
         &grounding_fact_keys,
+    )?;
+    super::validate_segment_todo_scope(
+        &planned.segment,
+        candidate_context,
+        context
+            .state_summary
+            .as_ref()
+            .and_then(|summary| summary.pointer("/todo_state/current_todo")),
     )?;
     super::compile_segment_plan_with_inputs(
         context.intent.as_str(),
@@ -1623,10 +1618,55 @@ pub(crate) fn try_schedule_missing_input_query_autofill_round(
     if missing_refs.is_empty() {
         missing_refs = payload_question_input_refs(missing_input_payload);
     }
+    let static_resolved = apply_static_missing_ref_refill(
+        state,
+        context,
+        missing_refs.as_slice(),
+        phase_hint,
+        scope_id,
+    );
     missing_refs = missing_refs
         .into_iter()
         .filter(|path| !runtime_has_input_ref(context.state_summary.as_ref(), path))
         .collect::<Vec<_>>();
+    if !static_resolved.is_empty() {
+        let mut previous_error = missing_input_payload.clone();
+        if let Some(object) = previous_error.as_object_mut() {
+            object.insert(
+                "autofill".to_string(),
+                serde_json::json!({
+                    "mode": "host_static_refill_round",
+                    "phase_hint": phase_hint,
+                    "scope_id": scope_id,
+                    "resolved_refs": static_resolved,
+                    "unresolved_refs": missing_refs.clone(),
+                }),
+            );
+        }
+        context.set_previous_error_and_refresh(state, done, previous_error);
+        super::runtime_store::record_runtime_agent_field(
+            &mut state.runtime,
+            "missing_ref_refill",
+            serde_json::json!({
+                "status": if missing_refs.is_empty() { "resolved" } else { "resolved_partial" },
+                "phase_hint": phase_hint,
+                "scope_id": scope_id,
+                "resolved_refs": static_resolved,
+                "unresolved_refs": missing_refs.clone(),
+                "attempt": "static_intent_config",
+            }),
+        );
+        super::trace::emit(
+            trace_enabled,
+            phase_hint,
+            "autofill_attempt_resolved",
+            &[
+                ("scope_id", scope_id.to_string()),
+                ("selected_query_refs", "static_refill".to_string()),
+            ],
+        );
+        return true;
+    }
     if !has_query_option || missing_refs.is_empty() {
         emit_missing_input_autofill_unresolved(
             trace_enabled,
@@ -1724,6 +1764,18 @@ pub(crate) fn try_schedule_missing_input_query_autofill_round(
             "selected_query_refs": selected_query_refs,
         }),
     );
+    super::runtime_store::record_runtime_agent_field(
+        &mut state.runtime,
+        "missing_ref_refill",
+        serde_json::json!({
+            "status": "scheduled",
+            "phase_hint": phase_hint,
+            "scope_id": scope_id,
+            "attempt": "dynamic_query",
+            "missing_refs": missing_refs,
+            "selected_query_refs": selected_query_refs,
+        }),
+    );
     super::trace::emit(
         trace_enabled,
         phase_hint,
@@ -1748,10 +1800,48 @@ fn try_schedule_compile_autofill_round(
 ) -> bool {
     let trace_enabled = command.verbose || command.verbose_llm;
     emit_unknown_input_ref_repair_suggested(trace_enabled, compile_error_payload, todo_id);
-    let missing_refs = missing_required_input_refs(missing_input_payload)
+    let initial_missing_refs = missing_required_input_refs(missing_input_payload);
+    let static_resolved = apply_static_missing_ref_refill(
+        state,
+        context,
+        initial_missing_refs.as_slice(),
+        "compile_autofill",
+        todo_id,
+    );
+    let missing_refs = initial_missing_refs
         .into_iter()
         .filter(|path| !runtime_has_input_ref(context.state_summary.as_ref(), path))
         .collect::<Vec<_>>();
+    if !static_resolved.is_empty() {
+        let mut previous_error = super::compile_error_state_payload(
+            compile_error_payload,
+            context.completed_segments_u8(),
+        );
+        if let Some(object) = previous_error.as_object_mut() {
+            object.insert(
+                "autofill".to_string(),
+                serde_json::json!({
+                    "mode": "host_static_refill_round",
+                    "todo_id": todo_id,
+                    "resolved_refs": static_resolved,
+                    "unresolved_refs": missing_refs.clone(),
+                }),
+            );
+        }
+        context.set_previous_error_and_refresh(state, done, previous_error);
+        super::runtime_store::record_runtime_agent_field(
+            &mut state.runtime,
+            "missing_ref_refill",
+            serde_json::json!({
+                "status": if missing_refs.is_empty() { "resolved" } else { "resolved_partial" },
+                "todo_id": todo_id,
+                "attempt": "static_intent_config",
+                "resolved_refs": static_resolved,
+                "unresolved_refs": missing_refs.clone(),
+            }),
+        );
+        return true;
+    }
     if missing_refs.is_empty() {
         emit_compile_autofill_unresolved(trace_enabled, state, todo_id, &[], "already_resolved");
         return false;
@@ -1830,6 +1920,17 @@ fn try_schedule_compile_autofill_round(
             "status": "scheduled",
             "todo_id": todo_id,
             "missing_refs": missing_required_input_refs(missing_input_payload),
+            "selected_query_refs": selected_query_refs,
+        }),
+    );
+    super::runtime_store::record_runtime_agent_field(
+        &mut state.runtime,
+        "missing_ref_refill",
+        serde_json::json!({
+            "status": "scheduled",
+            "todo_id": todo_id,
+            "attempt": "dynamic_query",
+            "missing_refs": missing_refs,
             "selected_query_refs": selected_query_refs,
         }),
     );
@@ -2228,7 +2329,12 @@ fn runtime_has_input_ref(state_summary: Option<&Value>, input_ref: &str) -> bool
     }
     if state_summary
         .and_then(|summary| summary.pointer("/intent_context/facts"))
-        .and_then(|facts| value_at_dotted_path(facts, canonical_slot.as_str()))
+        .and_then(|facts| {
+            facts
+                .as_object()
+                .and_then(|object| object.get(canonical_slot.as_str()))
+                .or_else(|| value_at_dotted_path(facts, canonical_slot.as_str()))
+        })
         .is_some()
     {
         return true;
@@ -2237,6 +2343,142 @@ fn runtime_has_input_ref(state_summary: Option<&Value>, input_ref: &str) -> bool
         && state_summary
             .and_then(|summary| summary.pointer("/intent_context/facts/owner"))
             .is_some()
+}
+
+fn apply_static_missing_ref_refill(
+    state: &mut EngineRunnerState,
+    context: &mut SegmentedAgentContext,
+    missing_refs: &[String],
+    phase_hint: &str,
+    scope_id: &str,
+) -> Vec<String> {
+    let summary_snapshot = context.state_summary.clone();
+    let mut resolved = BTreeSet::<String>::new();
+    for raw_ref in missing_refs {
+        let Some(slot) = super::input_normalize::normalize_input_slot_key(raw_ref) else {
+            continue;
+        };
+        let canonical_ref = format!("inputs.{slot}");
+        if runtime_has_input_ref(summary_snapshot.as_ref(), canonical_ref.as_str()) {
+            resolved.insert(canonical_ref);
+            continue;
+        }
+        let Some(value) = resolve_static_input_value(summary_snapshot.as_ref(), slot.as_str())
+        else {
+            continue;
+        };
+        let provenance = format!("autofill.static.{phase_hint}.{scope_id}.{slot}");
+        super::input_normalize::set_runtime_input_value(
+            &mut state.runtime,
+            slot.as_str(),
+            value.clone(),
+        );
+        let _ = super::upsert_store_value_with_source(
+            context.input_store_mut(),
+            slot.as_str(),
+            value,
+            super::input_store::InputValueLayer::Derived,
+            "autofill_static",
+            85,
+            provenance,
+        );
+        resolved.insert(canonical_ref);
+    }
+    if !resolved.is_empty() {
+        context.refresh_state_summary(state, false);
+    }
+    resolved.into_iter().collect::<Vec<_>>()
+}
+
+fn resolve_static_input_value(state_summary: Option<&Value>, slot: &str) -> Option<Value> {
+    let summary = state_summary?;
+    let mut candidates = vec![slot.to_string()];
+    for alias in static_alias_slots(slot) {
+        if !candidates.contains(&alias) {
+            candidates.push(alias);
+        }
+    }
+    for candidate in candidates {
+        if let Some(value) = summary
+            .pointer("/input_store/facts")
+            .and_then(|facts| {
+                facts
+                    .as_object()
+                    .and_then(|object| object.get(candidate.as_str()))
+                    .or_else(|| value_at_dotted_path(facts, candidate.as_str()))
+            })
+            .cloned()
+            .map(|value| unwrap_input_value(&value))
+        {
+            return Some(value);
+        }
+        if let Some(value) = summary
+            .pointer("/intent_context/facts")
+            .and_then(|facts| {
+                facts
+                    .as_object()
+                    .and_then(|object| object.get(candidate.as_str()))
+                    .or_else(|| value_at_dotted_path(facts, candidate.as_str()))
+            })
+            .cloned()
+            .map(|value| unwrap_input_value(&value))
+        {
+            return Some(value);
+        }
+        if let Some(value) = summary
+            .pointer("/intent_slots/resolved_inputs")
+            .and_then(Value::as_object)
+            .and_then(|resolved_inputs| resolved_inputs.get(candidate.as_str()))
+            .cloned()
+            .map(|value| unwrap_input_value(&value))
+        {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn unwrap_input_value(value: &Value) -> Value {
+    value
+        .as_object()
+        .and_then(|object| object.get("value"))
+        .cloned()
+        .unwrap_or_else(|| value.clone())
+}
+
+fn static_alias_slots(slot: &str) -> Vec<String> {
+    let mut aliases = Vec::<String>::new();
+    match slot {
+        "native_transfer_amount" => aliases.push("native_amount".to_string()),
+        "token_transfer_amount" => aliases.push("token_amount".to_string()),
+        "recipient" => aliases.push("recipient_address".to_string()),
+        "recipient_address" => aliases.push("recipient".to_string()),
+        "token.address" => {
+            aliases.push("token_address".to_string());
+            aliases.push("token".to_string());
+        }
+        "token_address" => aliases.push("token.address".to_string()),
+        "chain_ref" => {
+            aliases.push("chain".to_string());
+            aliases.push("chain_id".to_string());
+        }
+        "chain_id" => {
+            aliases.push("chain".to_string());
+            aliases.push("chain_ref".to_string());
+        }
+        "chain" => {
+            aliases.push("chain_id".to_string());
+            aliases.push("chain_ref".to_string());
+        }
+        _ => {}
+    }
+    if slot.ends_with(".address") {
+        aliases.push(slot.replace(".address", "_address"));
+    }
+    if slot.ends_with("_address") {
+        aliases.push(slot.replace("_address", ".address"));
+    }
+    aliases
 }
 
 fn value_at_dotted_path<'a>(root: &'a Value, dotted: &str) -> Option<&'a Value> {

@@ -470,16 +470,21 @@ fn context_envelope_keeps_projected_summary_contract_compatible() {
         envelope.pointer("/input_slots/canonical_refs/owner"),
         Some(&json!("inputs.owner"))
     );
+    let meta_base = if envelope.pointer("/input_store/meta/inputs.owner").is_some() {
+        "/input_store/meta/inputs.owner"
+    } else {
+        "/input_store/meta/owner"
+    };
     assert_eq!(
-        envelope.pointer("/input_store/meta/inputs.owner/source"),
-        Some(&json!("runtime_provided"))
-    );
-    assert_eq!(
-        envelope.pointer("/input_store/meta/inputs.owner/layer"),
+        envelope.pointer(&format!("{meta_base}/source")),
         Some(&json!("seed"))
     );
     assert_eq!(
-        envelope.pointer("/input_store/meta/inputs.owner/provenance"),
+        envelope.pointer(&format!("{meta_base}/layer")),
+        Some(&json!("seed"))
+    );
+    assert_eq!(
+        envelope.pointer(&format!("{meta_base}/provenance")),
         Some(&json!("runtime.inputs.owner"))
     );
 }

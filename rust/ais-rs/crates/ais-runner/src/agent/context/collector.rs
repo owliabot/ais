@@ -40,10 +40,6 @@ pub(super) fn build_input_slots_projection(
         collect_input_store_input_slots(store, &mut resolved);
     }
 
-    if let Some(inputs) = state.runtime.pointer("/inputs") {
-        collect_runtime_input_slots(inputs, &mut Vec::new(), &mut resolved);
-    }
-
     let mut missing = BTreeSet::<String>::new();
     if let Some(required_facts) = state
         .runtime
@@ -228,7 +224,6 @@ pub(super) fn build_input_registry_projection(
     }
     for slot in missing {
         let reference = format!("inputs.{slot}");
-        known_refs.insert(reference.clone());
         entries.push(json!({
             "id": slot,
             "ref": reference,
@@ -313,6 +308,7 @@ pub(super) fn build_node_output_refs_projection(state: &EngineRunnerState) -> Va
     })
 }
 
+#[allow(dead_code)]
 pub(super) fn prioritize_keys(mut keys: Vec<String>, max_entries: usize) -> Vec<String> {
     keys.sort_by(|left, right| {
         slot_sort_key(left.as_str())
@@ -324,6 +320,7 @@ pub(super) fn prioritize_keys(mut keys: Vec<String>, max_entries: usize) -> Vec<
     keys
 }
 
+#[allow(dead_code)]
 pub(super) fn registry_order_key(entry: &Value) -> (u8, u8, String) {
     let status_rank = match entry.get("status").and_then(Value::as_str) {
         Some("missing") => 0,
@@ -488,39 +485,6 @@ fn value_type_hint(value: &Value) -> &'static str {
         Value::String(_) => "string",
         Value::Array(_) => "array",
         Value::Object(_) => "object",
-    }
-}
-
-fn collect_runtime_input_slots(
-    value: &Value,
-    path: &mut Vec<String>,
-    out: &mut BTreeMap<String, Value>,
-) {
-    if !path.is_empty() {
-        let slot = path.join(".");
-        out.entry(slot).or_insert_with(|| value.clone());
-    }
-    match value {
-        Value::Object(object) => {
-            let mut keys = object.keys().cloned().collect::<Vec<_>>();
-            keys.sort();
-            for key in keys {
-                let Some(child) = object.get(key.as_str()) else {
-                    continue;
-                };
-                path.push(key);
-                collect_runtime_input_slots(child, path, out);
-                path.pop();
-            }
-        }
-        Value::Array(items) => {
-            for (index, child) in items.iter().enumerate() {
-                path.push(index.to_string());
-                collect_runtime_input_slots(child, path, out);
-                path.pop();
-            }
-        }
-        _ => {}
     }
 }
 

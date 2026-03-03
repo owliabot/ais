@@ -40,25 +40,18 @@ fn planning_context_envelope_payload_projection_is_compatible() {
 
     let payload = envelope::payload_from_summary(&summary);
     assert_eq!(
-        payload.pointer("/context_budget/token_limit"),
-        summary.pointer("/context_budget/token_limit")
+        payload.pointer("/context_budget/pressure_mode"),
+        summary.pointer("/context_budget/pressure_mode")
     );
     assert!(
         payload.pointer("/context_envelope").is_none(),
         "payload projection must exclude envelope metadata"
     );
-    let payload_tokens = summary
-        .pointer("/context_budget/estimated_payload_tokens")
-        .and_then(Value::as_u64)
-        .expect("payload tokens");
-    let emitted_tokens = summary
-        .pointer("/context_budget/estimated_emitted_tokens")
-        .and_then(Value::as_u64)
-        .expect("emitted tokens");
-    assert!(emitted_tokens >= payload_tokens);
-    assert_eq!(
-        summary.pointer("/context_budget/token_limit_scope"),
-        Some(&json!("payload_core"))
+    assert!(
+        summary
+            .pointer("/context_budget/pack_diagnostics")
+            .is_some(),
+        "context budget must expose pack diagnostics"
     );
 }
 
@@ -84,6 +77,36 @@ fn projected_summary_includes_tool_memory_projection() {
     assert_eq!(
         summary.pointer("/tool_memory_projection/recent/guide/topic/cel"),
         Some(&json!({}))
+    );
+}
+
+#[test]
+fn projected_summary_emits_prompt_compact_without_pack_trace() {
+    let state = EngineRunnerState::default();
+    let mut manager = PlanningContextManager::default();
+    let summary = manager.next_summary(&state, 0, false, None, None, None);
+    assert_eq!(
+        summary.pointer("/prompt_compact/schema"),
+        Some(&json!("ais-agent-state-summary-prompt-compact/0.0.1"))
+    );
+    assert!(
+        summary
+            .pointer("/prompt_compact/context_budget/pack_trace")
+            .is_none(),
+        "prompt_compact must not include pack_trace"
+    );
+    assert!(
+        summary
+            .pointer("/prompt_compact/context_budget/pack_diagnostics/packed_blocks_total")
+            .is_some(),
+        "prompt_compact must keep compact diagnostics summary"
+    );
+    assert!(
+        summary
+            .pointer("/prompt_compact/summary_text")
+            .and_then(Value::as_str)
+            .is_some(),
+        "prompt_compact must include summary_text"
     );
 }
 
@@ -128,7 +151,7 @@ fn projected_summary_includes_node_output_refs() {
 }
 
 #[test]
-fn projected_summary_limits_fact_entries() {
+fn projected_summary_keeps_full_input_store_facts_before_pack_loop() {
     let mut store = InputStore::default();
     for index in 0..40 {
         store.upsert_seed(format!("k.{index}"), json!(index), "runtime.inputs");
@@ -141,11 +164,8 @@ fn projected_summary_limits_fact_entries() {
         Some(&json!("0xabc"))
     );
     assert!(
-        summary
-            .pointer("/input_store/meta/_truncated_entries")
-            .and_then(Value::as_u64)
-            .unwrap_or(0)
-            > 0
+        summary.pointer("/input_store/facts/k.39").is_some(),
+        "projector should not pre-truncate input_store facts"
     );
 }
 
@@ -153,6 +173,11 @@ fn projected_summary_limits_fact_entries() {
 fn projected_summary_includes_input_slots_and_missing_refs() {
     let mut store = InputStore::default();
     store.upsert_seed("inputs.owner", json!("0xabc"), "runtime.inputs.owner");
+    store.upsert_seed(
+        "inputs.token.address",
+        json!("0xdef"),
+        "runtime.inputs.token.address",
+    );
     let state = EngineRunnerState {
         runtime: json!({
             "inputs": {
@@ -184,11 +209,11 @@ fn projected_summary_includes_input_slots_and_missing_refs() {
     );
     assert_eq!(
         summary.pointer("/input_registry/known_refs/0"),
-        Some(&json!("inputs.amount"))
+        Some(&json!("inputs.owner"))
     );
     assert_eq!(
         summary.pointer("/input_registry/known_refs/1"),
-        Some(&json!("inputs.owner"))
+        Some(&json!("inputs.token.address"))
     );
     assert_eq!(
         summary.pointer("/input_registry/entries/0/status"),
@@ -236,8 +261,16 @@ fn projected_summary_intent_slots_separates_bindable_inputs_from_semantic_facts(
 
     let summary = build_projected_summary(&state, 0, false, None, None, None);
     assert_eq!(
-        summary.pointer("/intent_slots/input_binding/bindable_refs_source"),
-        Some(&json!("state_summary.input_registry.known_refs"))
+        summary.pointer("/intent_slots/input_binding/role"),
+        Some(&json!("grounding_intermediate"))
+    );
+    assert_eq!(
+        summary.pointer("/intent_slots/input_binding/bindable"),
+        Some(&json!(false))
+    );
+    assert_eq!(
+        summary.pointer("/intent_slots/input_binding/source_of_truth"),
+        Some(&json!("state_summary.input_store"))
     );
     assert_eq!(
         summary.pointer("/intent_slots/resolved_input_refs/0"),
@@ -265,6 +298,56 @@ fn projected_summary_intent_slots_separates_bindable_inputs_from_semantic_facts(
     assert_eq!(
         summary.pointer("/intent_context/confidence/facts/token"),
         Some(&json!(88))
+    );
+}
+
+#[test]
+fn projected_summary_selects_minimal_stage_when_token_budget_is_tiny() {
+    let mut store = InputStore::default();
+    for index in 0..120 {
+        store.upsert_seed(
+            format!("k.{index}"),
+            json!("x".repeat(64)),
+            "runtime.inputs",
+        );
+    }
+    store.upsert_seed("owner", json!("0xabc"), "runtime.inputs.owner");
+
+    let state = EngineRunnerState::default();
+    let mut manager = PlanningContextManager::with_token_budget(200);
+    let summary = manager.next_summary(&state, 0, false, None, Some(&store), None);
+    assert_eq!(
+        summary.pointer("/context_budget/pressure_mode"),
+        Some(&json!("normal"))
+    );
+    assert_eq!(
+        summary.pointer("/context_budget/pack_overflow_reason"),
+        Some(&json!("must_keep_only_exceeds_budget"))
+    );
+    assert_eq!(
+        summary.pointer("/context_budget/final_compact_applied"),
+        Some(&Value::Bool(true))
+    );
+}
+
+#[test]
+fn projected_summary_records_pressure_mode_from_runtime_usage() {
+    let state = EngineRunnerState {
+        runtime: json!({
+            "agent": {
+                "llm_usage": {
+                    "context_soft_limit_tokens": 100_000,
+                    "context_remaining_tokens": 2_000
+                }
+            }
+        }),
+        ..EngineRunnerState::default()
+    };
+
+    let summary = build_projected_summary(&state, 6_000, false, None, None, None);
+    assert_eq!(
+        summary.pointer("/context_budget/pressure_mode"),
+        Some(&json!("critical"))
     );
 }
 
@@ -353,6 +436,36 @@ fn projected_summary_prefers_input_store_values_for_overlap_with_runtime() {
 
 #[test]
 fn projected_summary_includes_chain_account_asset_and_amount_refs() {
+    let mut store = InputStore::default();
+    store.upsert_seed("inputs.chain_id", json!("eip155:31338"), "test.seed");
+    store.upsert_seed(
+        "inputs.owner",
+        json!("0x1111111111111111111111111111111111111111"),
+        "test.seed",
+    );
+    store.upsert_seed(
+        "inputs.recipient",
+        json!("0x2222222222222222222222222222222222222222"),
+        "test.seed",
+    );
+    store.upsert_seed(
+        "inputs.token",
+        json!({
+            "address":"0x8464135c8F25Da09e49BC8782676a84730C318bC",
+            "chain_id":"eip155:31338",
+            "decimals": 18,
+            "symbol": "TKN"
+        }),
+        "test.seed",
+    );
+    store.upsert_seed(
+        "inputs.amount",
+        json!({
+            "human":"1.25",
+            "atomic":"1250000000000000000"
+        }),
+        "test.seed",
+    );
     let state = EngineRunnerState {
         runtime: json!({
             "inputs": {
@@ -373,7 +486,7 @@ fn projected_summary_includes_chain_account_asset_and_amount_refs() {
         }),
         ..EngineRunnerState::default()
     };
-    let summary = build_projected_summary(&state, 0, false, None, None, None);
+    let summary = build_projected_summary(&state, 0, false, None, Some(&store), None);
     assert_eq!(
         summary.pointer("/canonical_context/chain_refs/0/chain_ref"),
         Some(&json!("eip155:31338"))
@@ -456,23 +569,14 @@ fn projected_summary_applies_budget_and_keeps_priority_slots() {
         Some(&json!("0xabc"))
     );
     assert_eq!(
-        summary.pointer("/context_budget/token_limit"),
-        Some(&json!(DEFAULT_PLANNER_CONTEXT_TOKEN_BUDGET))
-    );
-    assert_eq!(
-        summary.pointer("/context_budget/adaptive_mode"),
-        Some(&json!("default"))
-    );
-    assert_eq!(
-        summary.pointer("/context_budget/estimator"),
-        Some(&json!("chars_div_4"))
+        summary.pointer("/context_budget/pressure_mode"),
+        Some(&json!("normal"))
     );
     assert!(
         summary
-            .pointer("/context_budget/truncated")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        "large context should be marked truncated"
+            .pointer("/context_budget/pack_diagnostics")
+            .is_some(),
+        "context budget should expose pack diagnostics"
     );
 }
 
@@ -496,18 +600,9 @@ fn projected_summary_relaxes_budget_when_context_remaining_is_high() {
         ..EngineRunnerState::default()
     };
     let summary = build_projected_summary(&state, 0, false, None, None, None);
-    let token_limit = summary
-        .pointer("/context_budget/token_limit")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    assert!(token_limit > DEFAULT_PLANNER_CONTEXT_TOKEN_BUDGET as u64);
     assert_eq!(
-        summary.pointer("/context_budget/adaptive_mode"),
-        Some(&json!("relaxed"))
-    );
-    assert_eq!(
-        summary.pointer("/context_budget/adaptive/remaining_ratio_bps"),
-        Some(&json!(9000))
+        summary.pointer("/context_budget/pressure_mode"),
+        Some(&json!("normal"))
     );
 }
 
@@ -592,15 +687,344 @@ fn projected_summary_uses_critical_pressure_strategy_when_usage_exceeds_ninety_p
         summary.pointer("/previous_error/last_failed_finalize/assistant_content"),
         Some(&Value::Null)
     );
-    let actions = summary
-        .pointer("/context_budget/pressure_actions")
+    assert!(
+        summary
+            .pointer("/context_budget/pack_trace")
+            .and_then(Value::as_array)
+            .is_some(),
+        "context_budget.pack_trace must be present for observability"
+    );
+}
+
+#[test]
+fn pack_blocks_compresses_low_priority_blocks_before_stale_or_drop() {
+    let huge_projection = json!({
+        "schema": "ais-agent-tool-memory-projection/0.0.1",
+        "recent": {
+            "catalog_search": [
+                {
+                    "query": "transfer",
+                    "returned_matches": 2,
+                    "results": [
+                        {
+                            "ref": "erc20@0.0.2/transfer",
+                            "kind": "action",
+                            "schema_name": "erc20@0.0.2",
+                            "notes": "x".repeat(4000)
+                        }
+                    ]
+                }
+            ],
+            "candidate_detail": [{"signatures":[{"ref":"erc20@0.0.2/transfer","kind":"action","params":[{"name":"to","required":true},{"name":"amount","required":true}]}]}],
+            "guide": {"schema": {}, "topic": {"cel": {"summary": "y".repeat(2000)}}}
+        }
+    });
+    let state = EngineRunnerState {
+        runtime: json!({
+            "agent": {
+                "llm_usage": {
+                    "context_soft_limit_tokens": 100_000,
+                    "context_remaining_tokens": 1_000
+                }
+            }
+        }),
+        ..EngineRunnerState::default()
+    };
+    let previous_error = json!({
+        "phase": "planning",
+        "reason_code": "planner_invalid_tool_output",
+        "last_failed_finalize": {
+            "tool": "plan.revise_segment",
+            "arguments": {"status":"proposed","segment":{"segment_id":"seg_1","steps":[]}},
+            "assistant_content": "z".repeat(8000)
+        }
+    });
+
+    let mut manager = PlanningContextManager::with_token_budget(900);
+    let summary = manager.next_summary(
+        &state,
+        0,
+        false,
+        Some(&previous_error),
+        None,
+        Some(&huge_projection),
+    );
+
+    let trace = summary
+        .pointer("/context_budget/pack_trace")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    assert!(actions
-        .iter()
-        .any(|item| item.as_str() == Some("drop_capability_protocols")));
-    assert!(actions
-        .iter()
-        .any(|item| item.as_str() == Some("compress_tool_memory_projection")));
+    assert!(
+        !trace.is_empty(),
+        "pack_trace must record at least one decision when over budget"
+    );
+    assert_eq!(
+        trace
+            .first()
+            .and_then(|item| item.get("block_id"))
+            .and_then(Value::as_str),
+        Some("tool_memory_projection"),
+        "expected pack loop to compress low-priority tool_memory_projection first; trace={trace:?}"
+    );
+    assert_eq!(
+        trace
+            .first()
+            .and_then(|item| item.get("action"))
+            .and_then(Value::as_str),
+        Some("compress"),
+        "expected first decision to be a compression step; trace={trace:?}"
+    );
+}
+
+#[test]
+fn pack_diagnostics_are_zero_when_window_is_sufficient_for_full_context() {
+    let state = EngineRunnerState::default();
+    let tool_memory_projection = json!({
+        "schema": "ais-agent-tool-memory-projection/0.0.1",
+        "recent": {
+            "catalog_search": [{"query":"transfer","results": [{"ref":"erc20@0.0.2/transfer","notes":"x".repeat(2000)}]}],
+            "candidate_detail": [{"signatures": [{"ref":"erc20@0.0.2/transfer","params": [{"name":"to"},{"name":"amount"}]}]}],
+            "guide": {"topic": {"cel": {"summary": "y".repeat(1500)}}}
+        }
+    });
+
+    // Large budget should avoid any pack-loop compression/eviction decisions.
+    let mut manager = PlanningContextManager::with_token_budget(50_000);
+    let summary = manager.next_summary(&state, 0, false, None, None, Some(&tool_memory_projection));
+    assert_eq!(
+        summary.pointer("/context_budget/pack_overflow_reason"),
+        Some(&Value::Null)
+    );
+    assert_eq!(
+        summary.pointer("/context_budget/final_compact_applied"),
+        Some(&Value::Bool(false))
+    );
+
+    let diagnostics = summary
+        .pointer("/context_budget/pack_diagnostics")
+        .cloned()
+        .unwrap_or(Value::Null);
+    assert_eq!(
+        diagnostics.pointer("/compressed_blocks_total"),
+        Some(&json!(0))
+    );
+    assert_eq!(
+        diagnostics.pointer("/packed_blocks_evicted"),
+        Some(&json!(0))
+    );
+}
+
+#[test]
+fn pack_diagnostics_record_progressive_compress_then_evict_under_pressure() {
+    let huge_projection = json!({
+        "schema": "ais-agent-tool-memory-projection/0.0.1",
+        "recent": {
+            "catalog_search": [
+                {
+                    "query": "transfer",
+                    "returned_matches": 2,
+                    "results": [
+                        {
+                            "ref": "erc20@0.0.2/transfer",
+                            "kind": "action",
+                            "schema_name": "erc20@0.0.2",
+                            "notes": "x".repeat(8000)
+                        }
+                    ]
+                }
+            ],
+            "candidate_detail": [{"signatures":[{"ref":"erc20@0.0.2/transfer","kind":"action","params":[{"name":"to","required":true},{"name":"amount","required":true}]}]}],
+            "guide": {"schema": {}, "topic": {"cel": {"summary": "y".repeat(6000)}}}
+        }
+    });
+    let state = EngineRunnerState {
+        runtime: json!({
+            "agent": {
+                "llm_usage": {
+                    "context_soft_limit_tokens": 100_000,
+                    "context_remaining_tokens": 1_000
+                }
+            }
+        }),
+        ..EngineRunnerState::default()
+    };
+    let previous_error = json!({
+        "phase": "planning",
+        "reason_code": "planner_invalid_tool_output",
+        "last_failed_finalize": {
+            "tool": "plan.revise_segment",
+            "arguments": {"status":"proposed","segment":{"segment_id":"seg_1","steps":[]}},
+            "assistant_content": "z".repeat(9000)
+        }
+    });
+
+    // Extremely tiny budget + critical pressure: expect compress decisions first, then evictions,
+    // and an explicit overflow signal when only must-keep core remains.
+    let mut manager = PlanningContextManager::with_token_budget(200);
+    let summary = manager.next_summary(
+        &state,
+        0,
+        false,
+        Some(&previous_error),
+        None,
+        Some(&huge_projection),
+    );
+    assert_eq!(
+        summary.pointer("/context_budget/pack_overflow_reason"),
+        Some(&json!("must_keep_only_exceeds_budget"))
+    );
+    assert_eq!(
+        summary.pointer("/context_budget/final_compact_applied"),
+        Some(&Value::Bool(true))
+    );
+    let diagnostics = summary
+        .pointer("/context_budget/pack_diagnostics")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let compressed = diagnostics
+        .pointer("/compressed_blocks_total")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let evicted = diagnostics
+        .pointer("/packed_blocks_evicted")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    assert!(
+        compressed > 0,
+        "expected compressions recorded; diagnostics={diagnostics:?}"
+    );
+    assert!(
+        evicted > 0,
+        "expected evictions recorded; diagnostics={diagnostics:?}"
+    );
+
+    let compressed_reasons = diagnostics
+        .pointer("/compressed_by_reason")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        compressed_reasons.contains_key("pack_compress"),
+        "expected pack_compress reason; reasons={compressed_reasons:?}"
+    );
+    let evicted_reasons = diagnostics
+        .pointer("/evicted_by_reason")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        evicted_reasons.contains_key("pack_drop"),
+        "expected pack_drop reason; reasons={evicted_reasons:?}"
+    );
+}
+
+#[test]
+fn pack_blocks_handles_medium_priority_blocks_after_low_and_stale() {
+    let mut store = InputStore::default();
+    // Make /input_store/facts large enough to pressure budgets.
+    store.upsert_seed("owner", json!("0xabc"), "runtime.inputs.owner");
+    for index in 0..80 {
+        store.upsert_seed(
+            format!("k.{index}"),
+            json!("x".repeat(256)),
+            "runtime.inputs",
+        );
+    }
+
+    // Make /node_output_refs/entries large.
+    let mut nodes = serde_json::Map::<String, Value>::new();
+    for step in 0..24 {
+        nodes.insert(
+            format!("seg_{step:02}__q"),
+            json!({
+                "outputs": {
+                    "a": "x",
+                    "b": "y",
+                    "c": {"nested": {"value": step}}
+                }
+            }),
+        );
+    }
+
+    // Make a low-priority block huge so the pack loop must act.
+    let huge_projection = json!({
+        "schema": "ais-agent-tool-memory-projection/0.0.1",
+        "recent": {
+            "catalog_search": [{"query":"transfer","results":[{"ref":"erc20@0.0.2/transfer","notes":"z".repeat(6000)}]}],
+            "candidate_detail": [{"signatures":[{"ref":"erc20@0.0.2/transfer","params":[{"name":"to"},{"name":"amount"}]}]}],
+            "guide": {"topic": {"cel": {"summary": "y".repeat(4000)}}}
+        }
+    });
+
+    let state = EngineRunnerState {
+        runtime: json!({
+            "nodes": Value::Object(nodes),
+            "agent": {
+                "llm_usage": {
+                    "context_soft_limit_tokens": 100_000,
+                    "context_remaining_tokens": 1_000
+                }
+            }
+        }),
+        ..EngineRunnerState::default()
+    };
+
+    let mut manager = PlanningContextManager::with_token_budget(700);
+    let summary =
+        manager.next_summary(&state, 0, false, None, Some(&store), Some(&huge_projection));
+
+    let trace = summary
+        .pointer("/context_budget/pack_trace")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !trace.is_empty(),
+        "pack_trace must record decisions when over budget"
+    );
+
+    assert!(
+        trace.iter().any(|decision| {
+            decision.pointer("/block_id").and_then(Value::as_str) == Some("input_store.facts")
+        }),
+        "pack loop should manage input_store.facts as an optional candidate; trace={trace:?}"
+    );
+    let fact_keys = summary
+        .pointer("/input_store/facts")
+        .and_then(Value::as_object)
+        .map(|object| {
+            object
+                .keys()
+                .filter(|key| !key.starts_with('_'))
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    let meta_keys = summary
+        .pointer("/input_store/meta")
+        .and_then(Value::as_object)
+        .map(|object| {
+            object
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    assert!(
+        meta_keys.len() <= fact_keys.len(),
+        "meta should not exceed packed fact cardinality: facts={fact_keys:?} meta={meta_keys:?}"
+    );
+    assert!(
+        meta_keys.iter().all(|meta_key| {
+            fact_keys.contains(meta_key)
+                || meta_key
+                    .strip_prefix("inputs.")
+                    .is_some_and(|stripped| fact_keys.contains(stripped))
+                || fact_keys
+                    .iter()
+                    .any(|fact_key| format!("inputs.{fact_key}") == *meta_key)
+        }),
+        "input_store.meta must remain coherent with packed input_store.facts: facts={fact_keys:?} meta={meta_keys:?}"
+    );
 }

@@ -84,7 +84,7 @@ fn resolve_execution_pause_backflow_normalizes_missing_required_input_pause() {
 }
 
 #[test]
-fn missing_required_input_payload_from_pause_prefers_runtime_payload() {
+fn missing_required_input_payload_from_pause_prefers_latest_event_payload() {
     let state = EngineRunnerState {
         paused_reason: Some("need_user_input:seg_1/q_owner".to_string()),
         runtime: json!({
@@ -115,6 +115,32 @@ fn missing_required_input_payload_from_pause_prefers_runtime_payload() {
     let payload =
         missing_required_input_payload_from_pause(&state, std::slice::from_ref(&record), 1)
             .expect("payload");
+    assert_eq!(
+        payload.get("message").and_then(Value::as_str),
+        Some("event-source")
+    );
+    assert_eq!(
+        payload.pointer("/questions/0/id"),
+        Some(&json!("event_owner"))
+    );
+}
+
+#[test]
+fn missing_required_input_payload_from_pause_uses_runtime_payload_when_events_missing() {
+    let state = EngineRunnerState {
+        paused_reason: Some("missing_required_input".to_string()),
+        runtime: json!({
+            "agent": {
+                "missing_required_input": {
+                    "reason_code": "missing_required_input",
+                    "message": "runtime-source",
+                    "questions": [{"id":"owner","question":"owner?"}]
+                }
+            }
+        }),
+        ..EngineRunnerState::default()
+    };
+    let payload = missing_required_input_payload_from_pause(&state, &[], 1).expect("payload");
     assert_eq!(
         payload.get("message").and_then(Value::as_str),
         Some("runtime-source")

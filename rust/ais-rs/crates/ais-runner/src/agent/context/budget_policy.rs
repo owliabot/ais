@@ -1,4 +1,5 @@
 use super::super::budget::JsonBudgetOptions;
+use super::packing::{ContextCompressLevel, ContextPackBlockId};
 use serde_json::Value;
 
 /// Single-source scaffold for tool-memory and context budget policy.
@@ -25,82 +26,169 @@ pub(crate) struct ToolMemoryProjectionCaps {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ToolMemoryPruneKeepLimits {
-    pub(crate) max_list: usize,
-    pub(crate) max_catalog: usize,
-    pub(crate) max_detail: usize,
-    pub(crate) max_guide: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ToolDispatchCompactProfile {
     Tight,
     Balanced,
     Relaxed,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct PlannerContextStageLimits {
-    pub(crate) name: &'static str,
-    pub(crate) max_fact_entries: usize,
-    pub(crate) max_input_slots_resolved: usize,
-    pub(crate) max_input_slots_missing: usize,
-    pub(crate) max_registry_entries: usize,
-    pub(crate) max_known_refs: usize,
-    pub(crate) max_canonical_per_group: usize,
-    pub(crate) max_node_output_entries: usize,
-    pub(crate) max_node_output_refs: usize,
-    pub(crate) max_capability_protocols: usize,
-    pub(crate) max_actions_per_protocol: usize,
-    pub(crate) max_queries_per_protocol: usize,
-    pub(crate) max_required_inputs_per_protocol: usize,
-    pub(crate) max_previous_error_issues: usize,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolDispatchKind {
+    CandidateDetail,
+    MissingFacts,
+    GuideSchemaFull,
+    GuideSchemaDigest,
+    GuideTopic,
+    CheckSegment,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ContextCompactionPolicy {
     pub(crate) final_compact_options: JsonBudgetOptions,
-    pub(crate) drop_input_slot_canonical_refs: bool,
-    pub(crate) drop_capability_protocols: bool,
-    pub(crate) drop_last_failed_assistant_content: bool,
-    pub(crate) tool_memory_compact_options: Option<JsonBudgetOptions>,
-    pub(crate) failed_finalize_compact_options: Option<JsonBudgetOptions>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ContextPackBlockRecipe {
+    pub(crate) summary_compact_options: Option<JsonBudgetOptions>,
+    pub(crate) preferred_level: ContextCompressLevel,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ContextStrategyTable {
+    pub(crate) planner_context_default_token_budget: usize,
+    pub(crate) adaptive_relaxed_max_multiplier: usize,
+    pub(crate) adaptive_medium_numerator: usize,
+    pub(crate) adaptive_medium_denominator: usize,
+    pub(crate) adaptive_critical_numerator: usize,
+    pub(crate) adaptive_critical_denominator: usize,
+    pub(crate) context_usage_light_threshold_bps: u64,
+    pub(crate) context_usage_medium_threshold_bps: u64,
+    pub(crate) context_usage_critical_threshold_bps: u64,
+    pub(crate) context_pressure_tight_remaining_tokens: u64,
+    pub(crate) context_pressure_critical_remaining_tokens: u64,
+    pub(crate) tool_memory_projection_min_tokens: usize,
+    pub(crate) tool_memory_projection_default_tokens: usize,
+    pub(crate) tool_memory_projection_max_tokens: usize,
+    pub(crate) tool_memory_projection_abs_min_tokens: usize,
+    pub(crate) tool_memory_projection_abs_max_tokens: usize,
+    pub(crate) tool_memory_projection_soft_limit_min_ratio_bps: u64,
+    pub(crate) tool_memory_projection_soft_limit_max_ratio_bps: u64,
+    pub(crate) tool_memory_projection_tight_threshold_bps: u64,
+    pub(crate) tool_memory_projection_relaxed_threshold_bps: u64,
+    pub(crate) tool_memory_remaining_abs_min: u64,
+    pub(crate) tool_memory_remaining_abs_max: u64,
+    pub(crate) tool_memory_max_list_inventory_entries: usize,
+    pub(crate) tool_memory_max_catalog_entries: usize,
+    pub(crate) tool_memory_max_detail_entries: usize,
+    pub(crate) tool_memory_max_guide_entries: usize,
+    pub(crate) planning_memory_store_default_max_entries: usize,
+    pub(crate) planning_memory_store_default_max_entry_chars: usize,
+    pub(crate) planning_memory_store_default_max_total_chars: usize,
+}
+
+const CONTEXT_STRATEGY_TABLE: ContextStrategyTable = ContextStrategyTable {
+    planner_context_default_token_budget: 6_000,
+    adaptive_relaxed_max_multiplier: 3,
+    adaptive_medium_numerator: 17,
+    adaptive_medium_denominator: 20,
+    adaptive_critical_numerator: 3,
+    adaptive_critical_denominator: 5,
+    context_usage_light_threshold_bps: 7_000,
+    context_usage_medium_threshold_bps: 8_500,
+    context_usage_critical_threshold_bps: 9_200,
+    context_pressure_tight_remaining_tokens: 8_000,
+    context_pressure_critical_remaining_tokens: 3_000,
+    tool_memory_projection_min_tokens: 1200,
+    tool_memory_projection_default_tokens: 2400,
+    tool_memory_projection_max_tokens: 6000,
+    tool_memory_projection_abs_min_tokens: 1200,
+    tool_memory_projection_abs_max_tokens: 64_000,
+    tool_memory_projection_soft_limit_min_ratio_bps: 2_000,
+    tool_memory_projection_soft_limit_max_ratio_bps: 4_000,
+    tool_memory_projection_tight_threshold_bps: 2000,
+    tool_memory_projection_relaxed_threshold_bps: 6000,
+    tool_memory_remaining_abs_min: 4_000,
+    tool_memory_remaining_abs_max: 24_000,
+    tool_memory_max_list_inventory_entries: 2,
+    tool_memory_max_catalog_entries: 6,
+    tool_memory_max_detail_entries: 6,
+    tool_memory_max_guide_entries: 4,
+    planning_memory_store_default_max_entries: 48,
+    planning_memory_store_default_max_entry_chars: 8_000,
+    planning_memory_store_default_max_total_chars: 120_000,
+};
+
 impl ToolMemoryBudgetPolicy {
-    pub(crate) const ADAPTIVE_RELAXED_MAX_MULTIPLIER: usize = 3;
-    pub(crate) const ADAPTIVE_MEDIUM_NUMERATOR: usize = 17;
-    pub(crate) const ADAPTIVE_MEDIUM_DENOMINATOR: usize = 20;
-    pub(crate) const ADAPTIVE_CRITICAL_NUMERATOR: usize = 3;
-    pub(crate) const ADAPTIVE_CRITICAL_DENOMINATOR: usize = 5;
+    // Legacy aliases while callsites are migrated to strategy-table field access.
+    pub(crate) const PLANNER_CONTEXT_DEFAULT_TOKEN_BUDGET: usize =
+        CONTEXT_STRATEGY_TABLE.planner_context_default_token_budget;
+    pub(crate) const ADAPTIVE_RELAXED_MAX_MULTIPLIER: usize =
+        CONTEXT_STRATEGY_TABLE.adaptive_relaxed_max_multiplier;
+    pub(crate) const ADAPTIVE_MEDIUM_NUMERATOR: usize =
+        CONTEXT_STRATEGY_TABLE.adaptive_medium_numerator;
+    pub(crate) const ADAPTIVE_MEDIUM_DENOMINATOR: usize =
+        CONTEXT_STRATEGY_TABLE.adaptive_medium_denominator;
+    pub(crate) const ADAPTIVE_CRITICAL_NUMERATOR: usize =
+        CONTEXT_STRATEGY_TABLE.adaptive_critical_numerator;
+    pub(crate) const ADAPTIVE_CRITICAL_DENOMINATOR: usize =
+        CONTEXT_STRATEGY_TABLE.adaptive_critical_denominator;
+    pub(crate) const CONTEXT_USAGE_LIGHT_THRESHOLD_BPS: u64 =
+        CONTEXT_STRATEGY_TABLE.context_usage_light_threshold_bps;
+    pub(crate) const CONTEXT_USAGE_MEDIUM_THRESHOLD_BPS: u64 =
+        CONTEXT_STRATEGY_TABLE.context_usage_medium_threshold_bps;
+    pub(crate) const CONTEXT_USAGE_CRITICAL_THRESHOLD_BPS: u64 =
+        CONTEXT_STRATEGY_TABLE.context_usage_critical_threshold_bps;
+    pub(crate) const CONTEXT_PRESSURE_TIGHT_REMAINING_TOKENS: u64 =
+        CONTEXT_STRATEGY_TABLE.context_pressure_tight_remaining_tokens;
+    pub(crate) const CONTEXT_PRESSURE_CRITICAL_REMAINING_TOKENS: u64 =
+        CONTEXT_STRATEGY_TABLE.context_pressure_critical_remaining_tokens;
+    pub(crate) const TOOL_MEMORY_PROJECTION_MIN_TOKENS: usize =
+        CONTEXT_STRATEGY_TABLE.tool_memory_projection_min_tokens;
+    pub(crate) const TOOL_MEMORY_PROJECTION_DEFAULT_TOKENS: usize =
+        CONTEXT_STRATEGY_TABLE.tool_memory_projection_default_tokens;
+    pub(crate) const TOOL_MEMORY_PROJECTION_MAX_TOKENS: usize =
+        CONTEXT_STRATEGY_TABLE.tool_memory_projection_max_tokens;
+    pub(crate) const TOOL_MEMORY_PROJECTION_ABS_MIN_TOKENS: usize =
+        CONTEXT_STRATEGY_TABLE.tool_memory_projection_abs_min_tokens;
+    pub(crate) const TOOL_MEMORY_PROJECTION_ABS_MAX_TOKENS: usize =
+        CONTEXT_STRATEGY_TABLE.tool_memory_projection_abs_max_tokens;
+    pub(crate) const TOOL_MEMORY_PROJECTION_SOFT_LIMIT_MIN_RATIO_BPS: u64 =
+        CONTEXT_STRATEGY_TABLE.tool_memory_projection_soft_limit_min_ratio_bps;
+    pub(crate) const TOOL_MEMORY_PROJECTION_SOFT_LIMIT_MAX_RATIO_BPS: u64 =
+        CONTEXT_STRATEGY_TABLE.tool_memory_projection_soft_limit_max_ratio_bps;
+    pub(crate) const TOOL_MEMORY_PROJECTION_TIGHT_THRESHOLD_BPS: u64 =
+        CONTEXT_STRATEGY_TABLE.tool_memory_projection_tight_threshold_bps;
+    pub(crate) const TOOL_MEMORY_PROJECTION_RELAXED_THRESHOLD_BPS: u64 =
+        CONTEXT_STRATEGY_TABLE.tool_memory_projection_relaxed_threshold_bps;
+    pub(crate) const TOOL_MEMORY_REMAINING_ABS_MIN: u64 =
+        CONTEXT_STRATEGY_TABLE.tool_memory_remaining_abs_min;
+    pub(crate) const TOOL_MEMORY_REMAINING_ABS_MAX: u64 =
+        CONTEXT_STRATEGY_TABLE.tool_memory_remaining_abs_max;
+    pub(crate) const TOOL_MEMORY_MAX_LIST_INVENTORY_ENTRIES: usize =
+        CONTEXT_STRATEGY_TABLE.tool_memory_max_list_inventory_entries;
+    pub(crate) const TOOL_MEMORY_MAX_CATALOG_ENTRIES: usize =
+        CONTEXT_STRATEGY_TABLE.tool_memory_max_catalog_entries;
+    pub(crate) const TOOL_MEMORY_MAX_DETAIL_ENTRIES: usize =
+        CONTEXT_STRATEGY_TABLE.tool_memory_max_detail_entries;
+    pub(crate) const TOOL_MEMORY_MAX_GUIDE_ENTRIES: usize =
+        CONTEXT_STRATEGY_TABLE.tool_memory_max_guide_entries;
+    pub(crate) const PLANNING_MEMORY_STORE_DEFAULT_MAX_ENTRIES: usize =
+        CONTEXT_STRATEGY_TABLE.planning_memory_store_default_max_entries;
+    pub(crate) const PLANNING_MEMORY_STORE_DEFAULT_MAX_ENTRY_CHARS: usize =
+        CONTEXT_STRATEGY_TABLE.planning_memory_store_default_max_entry_chars;
+    pub(crate) const PLANNING_MEMORY_STORE_DEFAULT_MAX_TOTAL_CHARS: usize =
+        CONTEXT_STRATEGY_TABLE.planning_memory_store_default_max_total_chars;
 
-    // Planner context pressure thresholds (used by context/budgeter).
-    pub(crate) const CONTEXT_USAGE_LIGHT_THRESHOLD_BPS: u64 = 7_000;
-    pub(crate) const CONTEXT_USAGE_MEDIUM_THRESHOLD_BPS: u64 = 8_500;
-    pub(crate) const CONTEXT_USAGE_CRITICAL_THRESHOLD_BPS: u64 = 9_200;
-    pub(crate) const CONTEXT_PRESSURE_TIGHT_REMAINING_TOKENS: u64 = 8_000;
-    pub(crate) const CONTEXT_PRESSURE_CRITICAL_REMAINING_TOKENS: u64 = 3_000;
+    pub(crate) const fn tool_memory_projection_default_tokens() -> usize {
+        CONTEXT_STRATEGY_TABLE.tool_memory_projection_default_tokens
+    }
 
-    pub(crate) const TOOL_MEMORY_PROJECTION_MIN_TOKENS: usize = 1200;
-    pub(crate) const TOOL_MEMORY_PROJECTION_DEFAULT_TOKENS: usize = 2400;
-    pub(crate) const TOOL_MEMORY_PROJECTION_MAX_TOKENS: usize = 6000;
-    pub(crate) const TOOL_MEMORY_PROJECTION_ABS_MIN_TOKENS: usize = 1200;
-    pub(crate) const TOOL_MEMORY_PROJECTION_ABS_MAX_TOKENS: usize = 64_000;
-    pub(crate) const TOOL_MEMORY_PROJECTION_SOFT_LIMIT_MIN_RATIO_BPS: u64 = 2_000; // 20%
-    pub(crate) const TOOL_MEMORY_PROJECTION_SOFT_LIMIT_MAX_RATIO_BPS: u64 = 4_000; // 40%
-    pub(crate) const TOOL_MEMORY_PROJECTION_TIGHT_THRESHOLD_BPS: u64 = 2000;
-    pub(crate) const TOOL_MEMORY_PROJECTION_RELAXED_THRESHOLD_BPS: u64 = 6000;
-    pub(crate) const TOOL_MEMORY_REMAINING_ABS_MIN: u64 = 4_000;
-    pub(crate) const TOOL_MEMORY_REMAINING_ABS_MAX: u64 = 24_000;
-
-    pub(crate) const TOOL_MEMORY_MAX_LIST_INVENTORY_ENTRIES: usize = 2;
-    pub(crate) const TOOL_MEMORY_MAX_CATALOG_ENTRIES: usize = 6;
-    pub(crate) const TOOL_MEMORY_MAX_DETAIL_ENTRIES: usize = 6;
-    pub(crate) const TOOL_MEMORY_MAX_GUIDE_ENTRIES: usize = 4;
-
-    pub(crate) const PLANNING_MEMORY_STORE_DEFAULT_MAX_ENTRIES: usize = 48;
-    pub(crate) const PLANNING_MEMORY_STORE_DEFAULT_MAX_ENTRY_CHARS: usize = 8_000;
-    pub(crate) const PLANNING_MEMORY_STORE_DEFAULT_MAX_TOTAL_CHARS: usize = 120_000;
+    pub(crate) const fn tool_memory_projection_abs_bounds() -> (usize, usize) {
+        (
+            CONTEXT_STRATEGY_TABLE.tool_memory_projection_abs_min_tokens,
+            CONTEXT_STRATEGY_TABLE.tool_memory_projection_abs_max_tokens,
+        )
+    }
 
     pub(crate) fn derive_tool_memory_projection_token_budget(
         planner_usage: Option<&Value>,
@@ -246,33 +334,6 @@ impl ToolMemoryBudgetPolicy {
         }
     }
 
-    pub(crate) fn derive_tool_memory_prune_keep_limits(
-        pressure_mode: ContextPressureMode,
-        projection_budget_tokens: usize,
-    ) -> ToolMemoryPruneKeepLimits {
-        let caps = Self::derive_tool_memory_projection_caps(projection_budget_tokens);
-        let divisor = match pressure_mode {
-            ContextPressureMode::Critical => 4,
-            ContextPressureMode::Medium => 2,
-            ContextPressureMode::Light => 1,
-            ContextPressureMode::Normal => 1,
-        };
-        if matches!(pressure_mode, ContextPressureMode::Normal) {
-            return ToolMemoryPruneKeepLimits {
-                max_list: caps.max_list_inventory_entries,
-                max_catalog: caps.max_catalog_entries,
-                max_detail: caps.max_detail_entries,
-                max_guide: caps.max_guide_entries,
-            };
-        }
-        ToolMemoryPruneKeepLimits {
-            max_list: caps.max_list_inventory_entries.saturating_add(divisor - 1) / divisor,
-            max_catalog: caps.max_catalog_entries.saturating_add(divisor - 1) / divisor,
-            max_detail: caps.max_detail_entries.saturating_add(divisor - 1) / divisor,
-            max_guide: caps.max_guide_entries.saturating_add(divisor - 1) / divisor,
-        }
-    }
-
     pub(crate) fn derive_tool_dispatch_compact_profile(
         projection_budget_tokens: usize,
     ) -> ToolDispatchCompactProfile {
@@ -285,158 +346,155 @@ impl ToolMemoryBudgetPolicy {
         ToolDispatchCompactProfile::Tight
     }
 
-    pub(crate) fn tool_dispatch_candidate_detail_options(
-        profile: ToolDispatchCompactProfile,
-    ) -> JsonBudgetOptions {
-        match profile {
-            ToolDispatchCompactProfile::Tight => JsonBudgetOptions {
-                max_depth: 6,
-                max_object_entries: 48,
-                max_array_items: 24,
-                max_string_chars: 1200,
-            },
-            ToolDispatchCompactProfile::Balanced => JsonBudgetOptions {
-                max_depth: 8,
-                max_object_entries: 96,
-                max_array_items: 48,
-                max_string_chars: 2400,
-            },
-            ToolDispatchCompactProfile::Relaxed => JsonBudgetOptions {
-                max_depth: 10,
-                max_object_entries: 192,
-                max_array_items: 96,
-                max_string_chars: 4000,
-            },
+    pub(crate) fn derive_global_compress_level(
+        pressure_mode: ContextPressureMode,
+    ) -> ContextCompressLevel {
+        match pressure_mode {
+            ContextPressureMode::Critical => ContextCompressLevel::Skeleton,
+            ContextPressureMode::Medium => ContextCompressLevel::Summary,
+            ContextPressureMode::Light | ContextPressureMode::Normal => ContextCompressLevel::Full,
         }
     }
 
-    pub(crate) fn tool_dispatch_missing_facts_options(
-        profile: ToolDispatchCompactProfile,
-    ) -> JsonBudgetOptions {
-        match profile {
-            ToolDispatchCompactProfile::Tight => JsonBudgetOptions {
-                max_depth: 7,
-                max_object_entries: 96,
-                max_array_items: 48,
-                max_string_chars: 1600,
-            },
-            ToolDispatchCompactProfile::Balanced => JsonBudgetOptions {
-                max_depth: 8,
-                max_object_entries: 128,
-                max_array_items: 64,
-                max_string_chars: 2400,
-            },
-            ToolDispatchCompactProfile::Relaxed => JsonBudgetOptions {
-                max_depth: 10,
-                max_object_entries: 192,
-                max_array_items: 96,
-                max_string_chars: 3600,
-            },
+    pub(crate) fn derive_tool_dispatch_compact_profile_from_compress_level(
+        level: ContextCompressLevel,
+    ) -> ToolDispatchCompactProfile {
+        match level {
+            ContextCompressLevel::Full => ToolDispatchCompactProfile::Relaxed,
+            ContextCompressLevel::Summary => ToolDispatchCompactProfile::Balanced,
+            ContextCompressLevel::Skeleton => ToolDispatchCompactProfile::Tight,
         }
     }
 
-    pub(crate) fn tool_dispatch_guide_schema_full_options(
+    pub(crate) fn tool_dispatch_options(
+        kind: ToolDispatchKind,
         profile: ToolDispatchCompactProfile,
     ) -> JsonBudgetOptions {
-        match profile {
-            ToolDispatchCompactProfile::Tight => JsonBudgetOptions {
-                max_depth: 32,
-                max_object_entries: 2048,
-                max_array_items: 512,
-                max_string_chars: 8000,
-            },
-            ToolDispatchCompactProfile::Balanced => JsonBudgetOptions {
-                max_depth: 64,
-                max_object_entries: 4096,
-                max_array_items: 1024,
-                max_string_chars: 16_000,
-            },
-            ToolDispatchCompactProfile::Relaxed => JsonBudgetOptions {
-                max_depth: 80,
-                max_object_entries: 8192,
-                max_array_items: 2048,
-                max_string_chars: 24_000,
-            },
-        }
-    }
-
-    pub(crate) fn tool_dispatch_guide_schema_digest_options(
-        profile: ToolDispatchCompactProfile,
-    ) -> JsonBudgetOptions {
-        match profile {
-            ToolDispatchCompactProfile::Tight => JsonBudgetOptions {
-                max_depth: 8,
-                max_object_entries: 96,
-                max_array_items: 48,
-                max_string_chars: 1200,
-            },
-            ToolDispatchCompactProfile::Balanced => JsonBudgetOptions {
-                max_depth: 10,
-                max_object_entries: 128,
-                max_array_items: 64,
-                max_string_chars: 1600,
-            },
-            ToolDispatchCompactProfile::Relaxed => JsonBudgetOptions {
-                max_depth: 12,
-                max_object_entries: 192,
-                max_array_items: 96,
-                max_string_chars: 2400,
-            },
-        }
-    }
-
-    pub(crate) fn tool_dispatch_guide_topic_options(
-        profile: ToolDispatchCompactProfile,
-    ) -> JsonBudgetOptions {
-        match profile {
-            ToolDispatchCompactProfile::Tight => JsonBudgetOptions {
-                max_depth: 7,
-                max_object_entries: 48,
-                max_array_items: 16,
-                max_string_chars: 1600,
-            },
-            ToolDispatchCompactProfile::Balanced => JsonBudgetOptions {
-                max_depth: 8,
-                max_object_entries: 64,
-                max_array_items: 24,
-                max_string_chars: 2400,
-            },
-            ToolDispatchCompactProfile::Relaxed => JsonBudgetOptions {
-                max_depth: 10,
-                max_object_entries: 96,
-                max_array_items: 48,
-                max_string_chars: 3600,
-            },
-        }
-    }
-
-    pub(crate) fn tool_dispatch_check_segment_options(
-        profile: ToolDispatchCompactProfile,
-    ) -> JsonBudgetOptions {
-        match profile {
-            ToolDispatchCompactProfile::Tight => JsonBudgetOptions {
+        match (kind, profile) {
+            (ToolDispatchKind::CandidateDetail, ToolDispatchCompactProfile::Tight) => {
+                JsonBudgetOptions {
+                    max_depth: 6,
+                    max_object_entries: 48,
+                    max_array_items: 24,
+                    max_string_chars: 1200,
+                }
+            }
+            (ToolDispatchKind::CandidateDetail, ToolDispatchCompactProfile::Balanced) => {
+                JsonBudgetOptions {
+                    max_depth: 8,
+                    max_object_entries: 96,
+                    max_array_items: 48,
+                    max_string_chars: 2400,
+                }
+            }
+            (ToolDispatchKind::CandidateDetail, ToolDispatchCompactProfile::Relaxed) => {
+                JsonBudgetOptions {
+                    max_depth: 10,
+                    max_object_entries: 192,
+                    max_array_items: 96,
+                    max_string_chars: 4000,
+                }
+            }
+            (ToolDispatchKind::MissingFacts, ToolDispatchCompactProfile::Tight) => {
+                JsonBudgetOptions {
+                    max_depth: 7,
+                    max_object_entries: 96,
+                    max_array_items: 48,
+                    max_string_chars: 1600,
+                }
+            }
+            (ToolDispatchKind::MissingFacts, ToolDispatchCompactProfile::Balanced) => {
+                JsonBudgetOptions {
+                    max_depth: 8,
+                    max_object_entries: 128,
+                    max_array_items: 64,
+                    max_string_chars: 2400,
+                }
+            }
+            (ToolDispatchKind::MissingFacts, ToolDispatchCompactProfile::Relaxed) => {
+                JsonBudgetOptions {
+                    max_depth: 10,
+                    max_object_entries: 192,
+                    max_array_items: 96,
+                    max_string_chars: 3600,
+                }
+            }
+            (ToolDispatchKind::GuideSchemaFull, ToolDispatchCompactProfile::Tight) => {
+                JsonBudgetOptions {
+                    max_depth: 32,
+                    max_object_entries: 2048,
+                    max_array_items: 512,
+                    max_string_chars: 8000,
+                }
+            }
+            (ToolDispatchKind::GuideSchemaFull, ToolDispatchCompactProfile::Balanced) => {
+                JsonBudgetOptions {
+                    max_depth: 64,
+                    max_object_entries: 4096,
+                    max_array_items: 1024,
+                    max_string_chars: 16_000,
+                }
+            }
+            (ToolDispatchKind::GuideSchemaFull, ToolDispatchCompactProfile::Relaxed) => {
+                JsonBudgetOptions {
+                    max_depth: 80,
+                    max_object_entries: 8192,
+                    max_array_items: 2048,
+                    max_string_chars: 24_000,
+                }
+            }
+            (ToolDispatchKind::GuideSchemaDigest, ToolDispatchCompactProfile::Tight) => {
+                JsonBudgetOptions {
+                    max_depth: 8,
+                    max_object_entries: 96,
+                    max_array_items: 48,
+                    max_string_chars: 1200,
+                }
+            }
+            (ToolDispatchKind::GuideSchemaDigest, ToolDispatchCompactProfile::Balanced) => {
+                JsonBudgetOptions {
+                    max_depth: 10,
+                    max_object_entries: 128,
+                    max_array_items: 64,
+                    max_string_chars: 1600,
+                }
+            }
+            (ToolDispatchKind::GuideSchemaDigest, ToolDispatchCompactProfile::Relaxed) => {
+                JsonBudgetOptions {
+                    max_depth: 12,
+                    max_object_entries: 192,
+                    max_array_items: 96,
+                    max_string_chars: 2400,
+                }
+            }
+            (
+                ToolDispatchKind::GuideTopic | ToolDispatchKind::CheckSegment,
+                ToolDispatchCompactProfile::Tight,
+            ) => JsonBudgetOptions {
                 max_depth: 7,
                 max_object_entries: 48,
                 max_array_items: 16,
                 max_string_chars: 1600,
             },
-            ToolDispatchCompactProfile::Balanced => JsonBudgetOptions {
+            (
+                ToolDispatchKind::GuideTopic | ToolDispatchKind::CheckSegment,
+                ToolDispatchCompactProfile::Balanced,
+            ) => JsonBudgetOptions {
                 max_depth: 8,
                 max_object_entries: 64,
                 max_array_items: 24,
                 max_string_chars: 2400,
             },
-            ToolDispatchCompactProfile::Relaxed => JsonBudgetOptions {
+            (
+                ToolDispatchKind::GuideTopic | ToolDispatchKind::CheckSegment,
+                ToolDispatchCompactProfile::Relaxed,
+            ) => JsonBudgetOptions {
                 max_depth: 10,
                 max_object_entries: 96,
                 max_array_items: 48,
                 max_string_chars: 3600,
             },
         }
-    }
-
-    pub(crate) fn planner_context_stages() -> &'static [PlannerContextStageLimits; 3] {
-        &PLANNER_CONTEXT_STAGES
     }
 
     pub(crate) fn derive_adaptive_effective_token_limit(
@@ -480,21 +538,6 @@ impl ToolMemoryBudgetPolicy {
                     max_array_items: 64,
                     max_string_chars: 1200,
                 },
-                drop_input_slot_canonical_refs: true,
-                drop_capability_protocols: true,
-                drop_last_failed_assistant_content: true,
-                tool_memory_compact_options: Some(JsonBudgetOptions {
-                    max_depth: 5,
-                    max_object_entries: 24,
-                    max_array_items: 12,
-                    max_string_chars: 480,
-                }),
-                failed_finalize_compact_options: Some(JsonBudgetOptions {
-                    max_depth: 5,
-                    max_object_entries: 32,
-                    max_array_items: 12,
-                    max_string_chars: 560,
-                }),
             },
             ContextPressureMode::Medium => ContextCompactionPolicy {
                 final_compact_options: JsonBudgetOptions {
@@ -503,21 +546,6 @@ impl ToolMemoryBudgetPolicy {
                     max_array_items: 96,
                     max_string_chars: 2048,
                 },
-                drop_input_slot_canonical_refs: true,
-                drop_capability_protocols: false,
-                drop_last_failed_assistant_content: false,
-                tool_memory_compact_options: Some(JsonBudgetOptions {
-                    max_depth: 6,
-                    max_object_entries: 36,
-                    max_array_items: 16,
-                    max_string_chars: 800,
-                }),
-                failed_finalize_compact_options: Some(JsonBudgetOptions {
-                    max_depth: 6,
-                    max_object_entries: 48,
-                    max_array_items: 20,
-                    max_string_chars: 900,
-                }),
             },
             ContextPressureMode::Light => ContextCompactionPolicy {
                 final_compact_options: JsonBudgetOptions {
@@ -526,21 +554,6 @@ impl ToolMemoryBudgetPolicy {
                     max_array_items: 120,
                     max_string_chars: 3072,
                 },
-                drop_input_slot_canonical_refs: false,
-                drop_capability_protocols: false,
-                drop_last_failed_assistant_content: false,
-                tool_memory_compact_options: Some(JsonBudgetOptions {
-                    max_depth: 8,
-                    max_object_entries: 96,
-                    max_array_items: 48,
-                    max_string_chars: 1800,
-                }),
-                failed_finalize_compact_options: Some(JsonBudgetOptions {
-                    max_depth: 8,
-                    max_object_entries: 96,
-                    max_array_items: 48,
-                    max_string_chars: 2000,
-                }),
             },
             ContextPressureMode::Normal => ContextCompactionPolicy {
                 final_compact_options: JsonBudgetOptions {
@@ -549,66 +562,129 @@ impl ToolMemoryBudgetPolicy {
                     max_array_items: 128,
                     max_string_chars: 4096,
                 },
-                drop_input_slot_canonical_refs: false,
-                drop_capability_protocols: false,
-                drop_last_failed_assistant_content: false,
-                tool_memory_compact_options: None,
-                failed_finalize_compact_options: None,
+            },
+        }
+    }
+
+    pub(crate) fn context_pack_block_recipe(
+        block_id: ContextPackBlockId,
+        mode: ContextPressureMode,
+    ) -> ContextPackBlockRecipe {
+        match block_id {
+            ContextPackBlockId::ToolMemoryProjection => {
+                let summary_compact_options = match mode {
+                    ContextPressureMode::Critical => Some(JsonBudgetOptions {
+                        max_depth: 5,
+                        max_object_entries: 24,
+                        max_array_items: 12,
+                        max_string_chars: 480,
+                    }),
+                    ContextPressureMode::Medium => Some(JsonBudgetOptions {
+                        max_depth: 6,
+                        max_object_entries: 36,
+                        max_array_items: 16,
+                        max_string_chars: 800,
+                    }),
+                    ContextPressureMode::Light => Some(JsonBudgetOptions {
+                        max_depth: 8,
+                        max_object_entries: 96,
+                        max_array_items: 48,
+                        max_string_chars: 1800,
+                    }),
+                    ContextPressureMode::Normal => None,
+                };
+                ContextPackBlockRecipe {
+                    summary_compact_options,
+                    preferred_level: ContextCompressLevel::Full,
+                }
+            }
+            ContextPackBlockId::InputStoreFacts => {
+                let summary_compact_options = match mode {
+                    ContextPressureMode::Critical => Some(JsonBudgetOptions {
+                        max_depth: 5,
+                        max_object_entries: 16,
+                        max_array_items: 12,
+                        max_string_chars: 480,
+                    }),
+                    ContextPressureMode::Medium => Some(JsonBudgetOptions {
+                        max_depth: 6,
+                        max_object_entries: 24,
+                        max_array_items: 16,
+                        max_string_chars: 720,
+                    }),
+                    ContextPressureMode::Light => Some(JsonBudgetOptions {
+                        max_depth: 8,
+                        max_object_entries: 48,
+                        max_array_items: 24,
+                        max_string_chars: 1200,
+                    }),
+                    ContextPressureMode::Normal => None,
+                };
+                ContextPackBlockRecipe {
+                    summary_compact_options,
+                    preferred_level: if matches!(
+                        mode,
+                        ContextPressureMode::Critical | ContextPressureMode::Medium
+                    ) {
+                        ContextCompressLevel::Summary
+                    } else {
+                        ContextCompressLevel::Full
+                    },
+                }
+            }
+            ContextPackBlockId::PreviousErrorLastFailedFinalize => {
+                let summary_compact_options = match mode {
+                    ContextPressureMode::Critical => Some(JsonBudgetOptions {
+                        max_depth: 5,
+                        max_object_entries: 32,
+                        max_array_items: 12,
+                        max_string_chars: 560,
+                    }),
+                    ContextPressureMode::Medium => Some(JsonBudgetOptions {
+                        max_depth: 6,
+                        max_object_entries: 48,
+                        max_array_items: 20,
+                        max_string_chars: 900,
+                    }),
+                    ContextPressureMode::Light => Some(JsonBudgetOptions {
+                        max_depth: 8,
+                        max_object_entries: 96,
+                        max_array_items: 48,
+                        max_string_chars: 2000,
+                    }),
+                    ContextPressureMode::Normal => None,
+                };
+                ContextPackBlockRecipe {
+                    summary_compact_options,
+                    preferred_level: if matches!(mode, ContextPressureMode::Critical) {
+                        ContextCompressLevel::Skeleton
+                    } else {
+                        ContextCompressLevel::Full
+                    },
+                }
+            }
+            ContextPackBlockId::CapabilityViewProtocols => ContextPackBlockRecipe {
+                summary_compact_options: None,
+                preferred_level: if matches!(mode, ContextPressureMode::Critical) {
+                    ContextCompressLevel::Skeleton
+                } else {
+                    ContextCompressLevel::Full
+                },
+            },
+            ContextPackBlockId::InputSlotsCanonicalRefs => ContextPackBlockRecipe {
+                summary_compact_options: None,
+                preferred_level: if matches!(
+                    mode,
+                    ContextPressureMode::Critical | ContextPressureMode::Medium
+                ) {
+                    ContextCompressLevel::Skeleton
+                } else {
+                    ContextCompressLevel::Full
+                },
             },
         }
     }
 }
-
-const PLANNER_CONTEXT_STAGES: [PlannerContextStageLimits; 3] = [
-    PlannerContextStageLimits {
-        name: "balanced",
-        max_fact_entries: 24,
-        max_input_slots_resolved: 48,
-        max_input_slots_missing: 32,
-        max_registry_entries: 64,
-        max_known_refs: 96,
-        max_canonical_per_group: 32,
-        max_node_output_entries: 24,
-        max_node_output_refs: 16,
-        max_capability_protocols: 24,
-        max_actions_per_protocol: 16,
-        max_queries_per_protocol: 16,
-        max_required_inputs_per_protocol: 24,
-        max_previous_error_issues: 12,
-    },
-    PlannerContextStageLimits {
-        name: "tight",
-        max_fact_entries: 16,
-        max_input_slots_resolved: 24,
-        max_input_slots_missing: 16,
-        max_registry_entries: 32,
-        max_known_refs: 48,
-        max_canonical_per_group: 16,
-        max_node_output_entries: 12,
-        max_node_output_refs: 10,
-        max_capability_protocols: 12,
-        max_actions_per_protocol: 8,
-        max_queries_per_protocol: 8,
-        max_required_inputs_per_protocol: 12,
-        max_previous_error_issues: 8,
-    },
-    PlannerContextStageLimits {
-        name: "minimal",
-        max_fact_entries: 8,
-        max_input_slots_resolved: 12,
-        max_input_slots_missing: 8,
-        max_registry_entries: 16,
-        max_known_refs: 24,
-        max_canonical_per_group: 8,
-        max_node_output_entries: 6,
-        max_node_output_refs: 6,
-        max_capability_protocols: 6,
-        max_actions_per_protocol: 4,
-        max_queries_per_protocol: 4,
-        max_required_inputs_per_protocol: 6,
-        max_previous_error_issues: 4,
-    },
-];
 
 fn usage_field_u64(usage: Option<&Value>, key: &str) -> Option<u64> {
     usage

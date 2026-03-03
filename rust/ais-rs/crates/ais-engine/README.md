@@ -183,3 +183,4 @@ Engine runtime primitives for AIS execution loop.
   - Engine runner now materializes node execution ValueRef (including `bindings.params` root override) before dispatching to chain executors, keeping executor layer transport-focused.
   - For query nodes (identified by `type=query_ref` or `source.query`), default write path `nodes.<id>.outputs` projects `executor_result.outputs` when present, so workflow expressions can consistently use `nodes.<id>.outputs.<field>`.
   - `assert_failed` engine error events now include `message`, `phase`, and original `assert` payload to support runtime troubleshooting in runner verbose logs.
+  - `need_user_confirm` multi-step resume now preserves in-loop completed progress before early pause return, preventing already-confirmed write nodes from being replayed when a later node in the same run requests another confirmation.

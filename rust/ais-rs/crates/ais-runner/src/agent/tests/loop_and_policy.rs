@@ -277,6 +277,8 @@ fn execute_agent_rejects_demo_script_for_standard_profile() {
         max_tool_rounds: None,
         max_index_candidates: None,
         planner_context_token_budget: None,
+        llm_transcript_path: None,
+        llm_transcript_append: false,
         format: OutputFormat::Text,
     };
 
@@ -308,6 +310,8 @@ fn execute_agent_requires_script_for_demo_scripted_profile() {
         max_tool_rounds: None,
         max_index_candidates: None,
         planner_context_token_budget: None,
+        llm_transcript_path: None,
+        llm_transcript_append: false,
         format: OutputFormat::Text,
     };
 

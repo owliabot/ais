@@ -9,11 +9,15 @@ use ais_sdk::documents::PlanSketchSegment;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
+use std::path::PathBuf;
 
 use super::budget::{compact_json_with_options, JsonBudgetOptions};
 use super::candidates::{CandidateContext, DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT};
-use super::context::budget_policy::{ContextPressureMode, ToolMemoryBudgetPolicy};
-use super::planning_memory::{PlanningMemory, PlanningMemoryBudget, ToolMemoryPruneConfig};
+use super::context::budget_policy::ToolMemoryBudgetPolicy;
+use super::planning_memory::{
+    PlanningMemory, PlanningMemoryBudget, ToolMemoryProjectionCandidates,
+};
 use super::sanitize::sanitize_for_llm_payload;
 use super::todos::TodoSpec;
 use super::tools::decode::{normalize_tool_args_for_validation, phase_from_finalize_tool};
@@ -167,12 +171,20 @@ pub struct LlmSegmentedIntentPlanner<P> {
     max_tool_rounds: u8,
     verbose_llm: bool,
     usage_tracker: PlannerLlmUsageTracker,
+    llm_transcript: Option<LlmTranscriptSink>,
 }
 
 #[derive(Debug, Clone)]
 struct PlannerBeginContext {
     pack_snapshot_hash: String,
     chain_scope: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct LlmTranscriptSink {
+    path: PathBuf,
+    append: bool,
+    initialized: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -184,6 +196,7 @@ pub(super) struct SegmentCheckContext {
     pub(super) chain_scope: Vec<String>,
     pub(super) known_input_refs: Vec<String>,
     pub(super) grounding_fact_keys: Vec<String>,
+    pub(super) current_todo: Option<Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -199,6 +212,8 @@ const SEGMENTED_PROMPT_VERSION: &str = "aisrs-segmented-planner-v2";
 pub(crate) const DEFAULT_SEGMENTED_MAX_TOOL_ROUNDS: u8 = 24;
 const REPEATED_PLAN_CHECK_FAILURE_THRESHOLD: u64 = 3;
 const FINALIZE_SCHEMA_REPAIR_ATTEMPT_LIMIT: u8 = 2;
+const NON_FINALIZE_TOOL_SCHEMA_REPAIR_ATTEMPT_LIMIT: u8 = 2;
+const NO_TOOLCALL_RETRY_ATTEMPT_LIMIT: u8 = 2;
 const LLM_CHARS_PER_TOKEN_ESTIMATE: usize = 4;
 const CONTEXT_SOFT_LIMIT_NUMERATOR: u64 = 9;
 const CONTEXT_SOFT_LIMIT_DENOMINATOR: u64 = 10;
@@ -238,15 +253,13 @@ struct PlannerDiagnosticsTracker {
     tool_result_count_by_tool: BTreeMap<String, u64>,
     memory_hits_by_tool: BTreeMap<String, u64>,
     phase_round_count: BTreeMap<String, u64>,
-    memory_prune_runs: u64,
-    memory_pruned_entries_total: u64,
-    memory_pruned_by_tool: BTreeMap<String, u64>,
     memory_projection_budget_tokens: u64,
     memory_projection_estimated_tokens: u64,
-    memory_projection_empty_due_to_pressure_total: u64,
     finalize_schema_repair_attempts_total: u64,
     finalize_schema_repair_exhausted_total: u64,
     finalize_schema_repair_by_sub_reason: BTreeMap<String, u64>,
+    no_toolcall_retries_total: u64,
+    no_toolcall_retries_exhausted_total: u64,
     empty_search_streak_max: u64,
     seen_tool_call_keys: BTreeSet<String>,
 }
@@ -306,23 +319,6 @@ impl PlannerDiagnosticsTracker {
         *entry = entry.saturating_add(1);
     }
 
-    fn observe_tool_memory_prune(
-        &mut self,
-        prune_result: &super::planning_memory::PlanningMemoryPruneResult,
-    ) {
-        self.memory_prune_runs = self.memory_prune_runs.saturating_add(1);
-        self.memory_pruned_entries_total = self
-            .memory_pruned_entries_total
-            .saturating_add(prune_result.removed_total as u64);
-        for (tool_name, count) in &prune_result.removed_by_tool {
-            let entry = self
-                .memory_pruned_by_tool
-                .entry(tool_name.clone())
-                .or_insert(0);
-            *entry = entry.saturating_add(*count as u64);
-        }
-    }
-
     fn observe_tool_memory_projection(
         &mut self,
         budget_tokens: usize,
@@ -332,16 +328,19 @@ impl PlannerDiagnosticsTracker {
         self.memory_projection_estimated_tokens = estimated_tokens.unwrap_or(0);
     }
 
-    fn observe_tool_memory_projection_empty_due_to_pressure(&mut self) {
-        self.memory_projection_empty_due_to_pressure_total = self
-            .memory_projection_empty_due_to_pressure_total
-            .saturating_add(1);
-    }
-
     fn observe_finalize_schema_repair_exhausted(&mut self) {
         self.finalize_schema_repair_exhausted_total = self
             .finalize_schema_repair_exhausted_total
             .saturating_add(1);
+    }
+
+    fn observe_no_toolcall_retry(&mut self) {
+        self.no_toolcall_retries_total = self.no_toolcall_retries_total.saturating_add(1);
+    }
+
+    fn observe_no_toolcall_retry_exhausted(&mut self) {
+        self.no_toolcall_retries_exhausted_total =
+            self.no_toolcall_retries_exhausted_total.saturating_add(1);
     }
 
     fn duplicate_ratio_bps(&self) -> u64 {
@@ -413,12 +412,10 @@ impl PlannerDiagnosticsTracker {
             "finalize_schema_repair_attempts_total": self.finalize_schema_repair_attempts_total,
             "finalize_schema_repair_exhausted_total": self.finalize_schema_repair_exhausted_total,
             "finalize_schema_repair_by_sub_reason": self.finalize_schema_repair_by_sub_reason,
-            "memory_prune_runs": self.memory_prune_runs,
-            "memory_pruned_entries_total": self.memory_pruned_entries_total,
-            "memory_pruned_by_tool": self.memory_pruned_by_tool,
+            "no_toolcall_retries_total": self.no_toolcall_retries_total,
+            "no_toolcall_retries_exhausted_total": self.no_toolcall_retries_exhausted_total,
             "memory_projection_budget_tokens": self.memory_projection_budget_tokens,
             "memory_projection_estimated_tokens": self.memory_projection_estimated_tokens,
-            "memory_projection_empty_due_to_pressure_total": self.memory_projection_empty_due_to_pressure_total,
             "empty_search_streak_max": self.empty_search_streak_max,
         })
     }
@@ -788,6 +785,7 @@ impl<P> LlmSegmentedIntentPlanner<P> {
             max_tool_rounds: DEFAULT_SEGMENTED_MAX_TOOL_ROUNDS,
             verbose_llm: false,
             usage_tracker: PlannerLlmUsageTracker::default(),
+            llm_transcript: None,
         }
     }
 
@@ -809,6 +807,15 @@ impl<P> LlmSegmentedIntentPlanner<P> {
 
     pub fn with_verbose_llm(mut self, verbose_llm: bool) -> Self {
         self.verbose_llm = verbose_llm;
+        self
+    }
+
+    pub fn with_llm_transcript(mut self, path: Option<PathBuf>, append: bool) -> Self {
+        self.llm_transcript = path.map(|path| LlmTranscriptSink {
+            path,
+            append,
+            initialized: false,
+        });
         self
     }
 
@@ -845,36 +852,21 @@ impl<P> LlmSegmentedIntentPlanner<P> {
         usage
     }
 
+    #[allow(dead_code)]
     pub fn tool_memory_projection_value(&self, max_tokens: usize) -> Option<Value> {
         self.planning_memory.tool_memory_projection(max_tokens)
     }
 
-    pub fn prune_tool_memory_for_pressure(
-        &mut self,
-        pressure_mode: ContextPressureMode,
-        active_todo: bool,
-        phase: &'static str,
-        projection_budget_tokens: Option<usize>,
-    ) -> super::planning_memory::PlanningMemoryPruneResult {
+    pub fn tool_memory_projection_candidates_value(
+        &self,
+        max_tokens: usize,
+    ) -> ToolMemoryProjectionCandidates {
         self.planning_memory
-            .prune_for_pressure(ToolMemoryPruneConfig {
-                pressure_mode,
-                active_todo,
-                phase,
-                projection_budget_tokens,
-            })
+            .tool_memory_projection_candidates(max_tokens)
     }
 
     pub(crate) fn set_planning_memory_budget(&mut self, budget: PlanningMemoryBudget) {
         self.planning_memory.set_budget(budget);
-    }
-
-    pub(crate) fn observe_tool_memory_prune(
-        &mut self,
-        prune_result: &super::planning_memory::PlanningMemoryPruneResult,
-    ) {
-        self.diagnostics_tracker
-            .observe_tool_memory_prune(prune_result);
     }
 
     pub(crate) fn observe_tool_memory_projection(
@@ -886,13 +878,57 @@ impl<P> LlmSegmentedIntentPlanner<P> {
             .observe_tool_memory_projection(budget_tokens, estimated_tokens);
     }
 
-    pub(crate) fn observe_tool_memory_projection_empty_due_to_pressure(&mut self) {
-        self.diagnostics_tracker
-            .observe_tool_memory_projection_empty_due_to_pressure();
-    }
-
     pub fn take_last_failed_finalize(&mut self) -> Option<Value> {
         self.last_failed_finalize.take()
+    }
+
+    fn append_llm_transcript_entry(
+        &mut self,
+        phase: PlannerRoundPhase,
+        finalize_tool: &str,
+        round: u8,
+        request: &CompleteWithToolsRequest,
+        response: &ais_llm::CompleteWithToolsResponse,
+    ) -> Result<(), RunnerError> {
+        let Some(sink) = self.llm_transcript.as_mut() else {
+            return Ok(());
+        };
+        if !sink.initialized {
+            if !sink.append {
+                std::fs::write(&sink.path, "").map_err(|source| RunnerError::WriteFile {
+                    path: sink.path.display().to_string(),
+                    source,
+                })?;
+            }
+            sink.initialized = true;
+        }
+
+        let request_text = serde_json::to_string_pretty(&llm_request_to_value(request))
+            .map_err(RunnerError::from)?;
+        let response_text = serde_json::to_string_pretty(&llm_response_to_value(response))
+            .map_err(RunnerError::from)?;
+        let entry = format!(
+            "\n## LLM Round\n- phase: `{}`\n- finalize_tool: `{}`\n- round: `{}`\n\n### Request\n```json\n{}\n```\n\n### Response\n```json\n{}\n```\n",
+            phase_name(phase),
+            finalize_tool,
+            round,
+            request_text,
+            response_text
+        );
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&sink.path)
+            .map_err(|source| RunnerError::WriteFile {
+                path: sink.path.display().to_string(),
+                source,
+            })?;
+        file.write_all(entry.as_bytes())
+            .map_err(|source| RunnerError::WriteFile {
+                path: sink.path.display().to_string(),
+                source,
+            })?;
+        Ok(())
     }
 
     fn run_with_finalize_tool(
@@ -940,6 +976,8 @@ impl<P> LlmSegmentedIntentPlanner<P> {
         let mut plan_check_failure_guard = PlanCheckFailureLoopGuard::default();
         let mut control_step_ref_hint_emitted = false;
         let mut finalize_schema_repair_attempts = 0u8;
+        let mut check_segment_schema_repair_attempts = 0u8;
+        let mut no_toolcall_retry_attempts = 0u8;
         let tools = segmented_planner_tools_for_phase(phase);
         if self.verbose_llm {
             eprintln!(
@@ -978,6 +1016,13 @@ impl<P> LlmSegmentedIntentPlanner<P> {
                 .provider
                 .complete_with_tools(llm_request.clone())
                 .map_err(|error| RunnerError::Llm(error.to_string()))?;
+            self.append_llm_transcript_entry(
+                phase,
+                finalize_tool,
+                round.saturating_add(1),
+                &llm_request,
+                &response,
+            )?;
             let usage = self.usage_tracker.record_estimated(&llm_request, &response);
             if self.verbose_llm {
                 eprintln!(
@@ -1022,9 +1067,61 @@ impl<P> LlmSegmentedIntentPlanner<P> {
             }
 
             if response.tool_calls.is_empty() {
-                return Err(RunnerError::Llm(
-                    "segmented planner provider returned no tool calls".to_string(),
-                ));
+                let payload = no_toolcall_repair_payload(
+                    phase,
+                    finalize_tool,
+                    round.saturating_add(1),
+                    no_toolcall_retry_attempts.saturating_add(1),
+                    NO_TOOLCALL_RETRY_ATTEMPT_LIMIT,
+                    &tools,
+                );
+                if no_toolcall_retry_attempts < NO_TOOLCALL_RETRY_ATTEMPT_LIMIT {
+                    no_toolcall_retry_attempts = no_toolcall_retry_attempts.saturating_add(1);
+                    self.diagnostics_tracker.observe_no_toolcall_retry();
+                    super::trace::emit(
+                        self.verbose_llm,
+                        phase_name(phase),
+                        "no_toolcall_retry",
+                        &[
+                            ("tool", finalize_tool.to_string()),
+                            ("retry", no_toolcall_retry_attempts.to_string()),
+                            ("max_retries", NO_TOOLCALL_RETRY_ATTEMPT_LIMIT.to_string()),
+                        ],
+                    );
+                    messages.push(LlmMessage {
+                        role: MessageRole::Assistant,
+                        content: response.assistant_content.clone(),
+                        tool_name: None,
+                        tool_call_id: None,
+                        tool_calls: vec![],
+                    });
+                    let payload_text =
+                        serde_json::to_string(&payload).map_err(RunnerError::from)?;
+                    messages.push(LlmMessage {
+                        role: MessageRole::User,
+                        content: Some(payload_text),
+                        tool_name: None,
+                        tool_call_id: None,
+                        tool_calls: vec![],
+                    });
+                    continue;
+                }
+                self.diagnostics_tracker
+                    .observe_no_toolcall_retry_exhausted();
+                super::trace::emit(
+                    self.verbose_llm,
+                    phase_name(phase),
+                    "no_toolcall_retry_exhausted",
+                    &[
+                        ("tool", finalize_tool.to_string()),
+                        ("max_retries", NO_TOOLCALL_RETRY_ATTEMPT_LIMIT.to_string()),
+                    ],
+                );
+                let payload_text =
+                    serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+                return Err(RunnerError::Llm(format!(
+                    "segmented planner provider returned no tool calls: no_tool_calls_retries_exhausted payload={payload_text}"
+                )));
             }
             validate_tool_calls_for_phase(&response.tool_calls, phase)?;
 
@@ -1082,11 +1179,33 @@ impl<P> LlmSegmentedIntentPlanner<P> {
                 }
                 let mut effective_call = call.clone();
                 effective_call.arguments = effective_arguments;
+                let planner_usage = self.llm_usage_value();
                 let projection_budget_tokens =
                     ToolMemoryBudgetPolicy::derive_tool_memory_projection_token_budget(
-                        Some(&self.llm_usage_value()),
+                        Some(&planner_usage),
                         None,
                     );
+                let remaining_tokens = planner_usage
+                    .get("context_remaining_tokens")
+                    .and_then(Value::as_u64);
+                let usage_ratio_bps = planner_usage
+                    .get("context_soft_limit_tokens")
+                    .and_then(Value::as_u64)
+                    .and_then(|soft_limit| {
+                        if soft_limit == 0 {
+                            None
+                        } else {
+                            Some(10_000_u64.saturating_sub(
+                                remaining_tokens.unwrap_or(0).saturating_mul(10_000) / soft_limit,
+                            ))
+                        }
+                    });
+                let pressure_mode = ToolMemoryBudgetPolicy::derive_context_pressure_mode(
+                    usage_ratio_bps,
+                    remaining_tokens,
+                );
+                let compress_level =
+                    ToolMemoryBudgetPolicy::derive_global_compress_level(pressure_mode);
                 let decoded = match decode_segmented_tool_call_with_memory(
                     &effective_call,
                     finalize_tool,
@@ -1095,9 +1214,80 @@ impl<P> LlmSegmentedIntentPlanner<P> {
                     segment_check_context,
                     Some(&mut self.planning_memory),
                     Some(projection_budget_tokens),
+                    Some(compress_level),
                 ) {
                     Ok(decoded) => decoded,
                     Err(error) => {
+                        if let Some(repair) = non_finalize_tool_args_repair_payload(
+                            &error,
+                            call.name.as_str(),
+                            round.saturating_add(1),
+                            check_segment_schema_repair_attempts.saturating_add(1),
+                            NON_FINALIZE_TOOL_SCHEMA_REPAIR_ATTEMPT_LIMIT,
+                        ) {
+                            if call.name == "plan.check_segment"
+                                && check_segment_schema_repair_attempts
+                                    < NON_FINALIZE_TOOL_SCHEMA_REPAIR_ATTEMPT_LIMIT
+                            {
+                                check_segment_schema_repair_attempts =
+                                    check_segment_schema_repair_attempts.saturating_add(1);
+                                super::trace::emit(
+                                    self.verbose_llm,
+                                    phase_name(phase),
+                                    "tool_args_schema_repair_retry",
+                                    &[
+                                        ("tool", call.name.clone()),
+                                        ("sub_reason_code", repair.sub_reason_code.to_string()),
+                                        ("retry", check_segment_schema_repair_attempts.to_string()),
+                                        (
+                                            "max_retries",
+                                            NON_FINALIZE_TOOL_SCHEMA_REPAIR_ATTEMPT_LIMIT
+                                                .to_string(),
+                                        ),
+                                    ],
+                                );
+                                let content = serde_json::to_string(&repair.payload)
+                                    .map_err(RunnerError::from)?;
+                                if self.verbose_llm {
+                                    eprintln!(
+                                        "[llm] tool_result tool_call_id={} tool={} cached=false {}",
+                                        call.id,
+                                        call.name,
+                                        summarize_tool_message(
+                                            call.name.as_str(),
+                                            content.as_str()
+                                        )
+                                    );
+                                    eprintln!(
+                                        "[llm] tool_result_prompt tool_call_id={} tool={} content={}",
+                                        call.id,
+                                        call.name,
+                                        truncate_for_log(content.as_str(), 900)
+                                    );
+                                }
+                                tool_results.push(LlmMessage {
+                                    role: MessageRole::Tool,
+                                    content: Some(content),
+                                    tool_name: Some(call.name.clone()),
+                                    tool_call_id: Some(call.id.clone()),
+                                    tool_calls: vec![],
+                                });
+                                continue;
+                            }
+                            super::trace::emit(
+                                self.verbose_llm,
+                                phase_name(phase),
+                                "tool_args_schema_repair_exhausted",
+                                &[
+                                    ("tool", call.name.clone()),
+                                    ("sub_reason_code", repair.sub_reason_code.to_string()),
+                                    (
+                                        "max_retries",
+                                        NON_FINALIZE_TOOL_SCHEMA_REPAIR_ATTEMPT_LIMIT.to_string(),
+                                    ),
+                                ],
+                            );
+                        }
                         if call.name == finalize_tool {
                             self.last_failed_finalize = Some(compact_failed_finalize_payload(
                                 call,
@@ -1569,6 +1759,11 @@ impl<P> LlmSegmentedIntentPlanner<P> {
             grounding_fact_keys: super::grounding_fact_keys_from_state_summary(
                 request.state_summary.as_ref(),
             ),
+            current_todo: request
+                .state_summary
+                .as_ref()
+                .and_then(|summary| summary.pointer("/todo_state/current_todo"))
+                .cloned(),
         })
     }
 }
@@ -2166,6 +2361,7 @@ fn decode_segmented_tool_call_with_memory(
     segment_check_context: Option<&SegmentCheckContext>,
     memory: Option<&mut PlanningMemory>,
     projection_budget_tokens: Option<usize>,
+    compress_level: Option<super::context::packing::ContextCompressLevel>,
 ) -> Result<DecodedSegmentedToolCall, RunnerError> {
     super::tools::dispatch::decode_segmented_tool_call_with_memory(
         tool,
@@ -2175,6 +2371,7 @@ fn decode_segmented_tool_call_with_memory(
         segment_check_context,
         memory,
         projection_budget_tokens,
+        compress_level,
     )
 }
 
@@ -2429,6 +2626,11 @@ struct FinalizeSchemaRepairPayload {
     sub_reason_code: &'static str,
 }
 
+struct NonFinalizeToolArgsRepairPayload {
+    payload: Value,
+    sub_reason_code: &'static str,
+}
+
 fn finalize_schema_repair_payload(
     error: &RunnerError,
     finalize_tool: &str,
@@ -2551,6 +2753,96 @@ fn finalize_schema_repair_payload(
     }
 
     None
+}
+
+fn non_finalize_tool_args_repair_payload(
+    error: &RunnerError,
+    tool_name: &str,
+    round: u8,
+    attempt: u8,
+    max_attempts: u8,
+) -> Option<NonFinalizeToolArgsRepairPayload> {
+    let RunnerError::Llm(message) = error else {
+        return None;
+    };
+    if tool_name != "plan.check_segment" || !message.contains("invalid plan.check_segment args") {
+        return None;
+    }
+
+    if message.contains("missing field `segment`") {
+        return Some(NonFinalizeToolArgsRepairPayload {
+            sub_reason_code: "missing_segment",
+            payload: json!({
+                "error": {
+                    "code": "tool_args_schema_error",
+                    "reason_code": "schema_missing_required_field",
+                    "sub_reason_code": "missing_segment",
+                    "phase_reason_code": "planning.schema_missing_required_field",
+                    "message": "`plan.check_segment` args must include root field `segment` (object)",
+                    "tool": tool_name,
+                    "round": round,
+                    "repair_attempt": attempt,
+                    "max_repair_attempts": max_attempts,
+                    "required_fields": ["segment"],
+                    "shape": {
+                        "required_root": {"segment": "<segment_object>"},
+                        "good": {
+                            "segment": {
+                                "segment_id": "seg_1",
+                                "cursor_in": "0",
+                                "cursor_out": "1",
+                                "done": false,
+                                "steps": []
+                            }
+                        },
+                        "bad": {"raw": "{\"segment\": {...}}"}
+                    }
+                }
+            }),
+        });
+    }
+
+    if message.contains("invalid type:") {
+        return Some(NonFinalizeToolArgsRepairPayload {
+            sub_reason_code: "invalid_segment_type",
+            payload: json!({
+                "error": {
+                    "code": "tool_args_schema_error",
+                    "reason_code": "schema_invalid_type",
+                    "sub_reason_code": "invalid_segment_type",
+                    "phase_reason_code": "planning.schema_invalid_type",
+                    "message": "`plan.check_segment` args type mismatch: `segment` must be a JSON object matching ais-plan-sketch segment schema",
+                    "raw_error": message,
+                    "tool": tool_name,
+                    "round": round,
+                    "repair_attempt": attempt,
+                    "max_repair_attempts": max_attempts,
+                    "typing_examples": {
+                        "good": [{"segment":{"segment_id":"seg_1","cursor_in":"0","cursor_out":"1","done":false,"steps":[]}}],
+                        "bad": [{"segment":"{...}"}, {"segment":123}, {"raw":"{\"segment\":{...}}"}]
+                    }
+                }
+            }),
+        });
+    }
+
+    Some(NonFinalizeToolArgsRepairPayload {
+        sub_reason_code: "invalid_tool_args",
+        payload: json!({
+            "error": {
+                "code": "tool_args_schema_error",
+                "reason_code": "schema_invalid_arguments",
+                "sub_reason_code": "invalid_tool_args",
+                "phase_reason_code": "planning.schema_invalid_arguments",
+                "message": "`plan.check_segment` args are invalid; provide {\"segment\": <object>} and ensure all fields use schema-correct JSON types.",
+                "raw_error": message,
+                "tool": tool_name,
+                "round": round,
+                "repair_attempt": attempt,
+                "max_repair_attempts": max_attempts
+            }
+        }),
+    })
 }
 
 fn plan_check_result_ok(content: &str) -> bool {
@@ -3509,6 +3801,7 @@ fn render_begin_prompt_with_patch(request: &SegmentBeginRequest, patch: Option<&
 }
 
 fn render_todos_prompt_with_patch(request: &TodoPlanningRequest, patch: Option<&Value>) -> String {
+    let prompt_state_summary = state_summary_for_prompt(request.state_summary.as_ref());
     let mut payload = json!({
         "schema": "ais-agent-intent/0.0.1",
         "intent": request.intent,
@@ -3526,7 +3819,7 @@ fn render_todos_prompt_with_patch(request: &TodoPlanningRequest, patch: Option<&
         "session_id": request.session.session_id,
         "snapshot_hash": request.session.snapshot_hash,
         "cursor": request.session.cursor,
-        "state_summary": request.state_summary,
+        "state_summary": prompt_state_summary,
     });
     if let Some(patch) = patch {
         merge_json_patch(&mut payload, patch);
@@ -3538,6 +3831,7 @@ fn render_grounding_prompt_with_patch(
     request: &IntentGroundingRequest,
     patch: Option<&Value>,
 ) -> String {
+    let prompt_state_summary = state_summary_for_prompt(request.state_summary.as_ref());
     let mut payload = json!({
         "schema": "ais-agent-intent/0.0.1",
         "intent": request.intent,
@@ -3584,7 +3878,7 @@ fn render_grounding_prompt_with_patch(
         "session_id": request.session.session_id,
         "snapshot_hash": request.session.snapshot_hash,
         "cursor": request.session.cursor,
-        "state_summary": request.state_summary,
+        "state_summary": prompt_state_summary,
     });
     if let Some(patch) = patch {
         merge_json_patch(&mut payload, patch);
@@ -3602,6 +3896,7 @@ fn render_segment_prompt_with_patch(
     request: &SegmentPlanningRequest,
     patch: Option<&Value>,
 ) -> String {
+    let prompt_state_summary = state_summary_for_prompt(request.state_summary.as_ref());
     let mut payload = json!({
         "schema": "ais-agent-intent/0.0.1",
         "intent": request.intent,
@@ -3747,7 +4042,7 @@ fn render_segment_prompt_with_patch(
         "session_id": request.session.session_id,
         "snapshot_hash": request.session.snapshot_hash,
         "cursor": request.session.cursor,
-        "state_summary": request.state_summary,
+        "state_summary": prompt_state_summary,
         "previous_error": request.previous_error,
         "last_segment": request.last_segment,
     });
@@ -3755,6 +4050,13 @@ fn render_segment_prompt_with_patch(
         merge_json_patch(&mut payload, patch);
     }
     serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
+}
+
+fn state_summary_for_prompt(state_summary: Option<&Value>) -> Value {
+    state_summary
+        .and_then(|summary| summary.pointer("/prompt_compact").cloned())
+        .or_else(|| state_summary.cloned())
+        .unwrap_or(Value::Null)
 }
 
 fn compact_failed_finalize_payload(
@@ -4092,9 +4394,26 @@ fn extract_round_context_signal(user_prompt: &str) -> RoundContextSignal {
         .map(str::to_string);
     let compressed = parsed
         .as_ref()
-        .and_then(|value| value.pointer("/state_summary/context_budget/pressure_actions"))
-        .and_then(Value::as_array)
-        .map(|actions| !actions.is_empty())
+        .map(|value| {
+            let diagnostics = value.pointer("/state_summary/context_budget/pack_diagnostics");
+            let compressed_total = diagnostics
+                .and_then(|item| item.get("compressed_blocks_total"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let evicted_total = diagnostics
+                .and_then(|item| item.get("packed_blocks_evicted"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let trace_non_empty = value
+                .pointer("/state_summary/context_budget/pack_trace")
+                .and_then(Value::as_array)
+                .is_some_and(|items| !items.is_empty());
+            let overflowed = value
+                .pointer("/state_summary/context_budget/pack_overflow_reason")
+                .and_then(Value::as_str)
+                .is_some();
+            compressed_total > 0 || evicted_total > 0 || trace_non_empty || overflowed
+        })
         .unwrap_or(false);
     RoundContextSignal {
         pressure_mode,
@@ -4149,6 +4468,95 @@ fn catalog_search_loop_guard_hint_payload(streak: u64) -> Value {
                 "for control semantics (assert/branch/until/retry), call guide.get with {\"schema\":\"ais-plan-sketch/0.1.0\"} or {\"topic\":\"cel\"}"
             ]
         }
+    })
+}
+
+fn no_toolcall_repair_payload(
+    phase: PlannerRoundPhase,
+    finalize_tool: &str,
+    round: u8,
+    retry_attempt: u8,
+    max_retries: u8,
+    tools: &[ToolSpec],
+) -> Value {
+    let allowed_tools = tools
+        .iter()
+        .map(|tool| Value::String(tool.name.clone()))
+        .collect::<Vec<_>>();
+    json!({
+        "error": {
+            "reason_code": "no_tool_calls",
+            "message": "No tool calls were returned. You must return at least one allowed tool call.",
+            "phase": phase_name(phase),
+            "finalize_tool": finalize_tool,
+            "round": round,
+            "retry_attempt": retry_attempt,
+            "max_retries": max_retries,
+            "allowed_tools": allowed_tools,
+        },
+        "rules": [
+            "Return at least one tool call in this response.",
+            "Use only allowed tools for this phase.",
+            "If finishing this phase, call finalize_tool exactly once and as the last tool call."
+        ]
+    })
+}
+
+fn llm_request_to_value(request: &CompleteWithToolsRequest) -> Value {
+    json!({
+        "messages": request
+            .messages
+            .iter()
+            .map(llm_message_to_value)
+            .collect::<Vec<_>>(),
+        "tools": request
+            .tools
+            .iter()
+            .map(|tool| {
+                json!({
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": tool.input_schema,
+                })
+            })
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn llm_response_to_value(response: &ais_llm::CompleteWithToolsResponse) -> Value {
+    json!({
+        "assistant_content": response.assistant_content,
+        "tool_calls": response
+            .tool_calls
+            .iter()
+            .map(|call| {
+                json!({
+                    "id": call.id,
+                    "name": call.name,
+                    "arguments": call.arguments,
+                })
+            })
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn llm_message_to_value(message: &LlmMessage) -> Value {
+    json!({
+        "role": format!("{:?}", message.role).to_ascii_lowercase(),
+        "content": message.content,
+        "tool_name": message.tool_name,
+        "tool_call_id": message.tool_call_id,
+        "tool_calls": message
+            .tool_calls
+            .iter()
+            .map(|call| {
+                json!({
+                    "id": call.id,
+                    "name": call.name,
+                    "arguments": call.arguments,
+                })
+            })
+            .collect::<Vec<_>>(),
     })
 }
 

@@ -19,6 +19,8 @@ fn render_agent_output_includes_llm_usage_line_when_available() {
         max_tool_rounds: None,
         max_index_candidates: None,
         planner_context_token_budget: None,
+        llm_transcript_path: None,
+        llm_transcript_append: false,
         verbose: false,
         verbose_llm: false,
         format: OutputFormat::Text,
@@ -82,6 +84,8 @@ fn planner_context_budget_resolution_prefers_cli_then_config_then_default() {
         max_tool_rounds: None,
         max_index_candidates: None,
         planner_context_token_budget: None,
+        llm_transcript_path: None,
+        llm_transcript_append: false,
         verbose: false,
         verbose_llm: false,
         format: OutputFormat::Text,
@@ -145,6 +149,8 @@ fn segmented_max_tool_rounds_resolution_prefers_cli_then_config_then_default() {
         max_tool_rounds: None,
         max_index_candidates: None,
         planner_context_token_budget: None,
+        llm_transcript_path: None,
+        llm_transcript_append: false,
         verbose: false,
         verbose_llm: false,
         format: OutputFormat::Text,
@@ -185,5 +191,4 @@ fn segmented_max_tool_rounds_resolution_prefers_cli_then_config_then_default() {
         super::intent_segmented::DEFAULT_SEGMENTED_MAX_TOOL_ROUNDS
     );
 }
-
 

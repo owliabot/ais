@@ -1,4 +1,4 @@
-use super::context::budget_policy::ToolMemoryBudgetPolicy;
+use super::context::budget_policy::{ToolMemoryBudgetPolicy, ToolMemoryProjectionCaps};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -8,18 +8,28 @@ struct PlanningScope {
     snapshot_hash: String,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct PlanningMemoryPruneResult {
-    pub(crate) removed_total: usize,
-    pub(crate) removed_by_tool: BTreeMap<String, usize>,
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ToolMemoryProjectionCandidates {
+    pub(crate) full: Option<Value>,
+    pub(crate) summary: Option<Value>,
+    pub(crate) skeleton: Option<Value>,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ToolMemoryPruneConfig {
-    pub(crate) active_todo: bool,
-    pub(crate) phase: &'static str,
-    pub(crate) pressure_mode: super::context::budget_policy::ContextPressureMode,
-    pub(crate) projection_budget_tokens: Option<usize>,
+impl ToolMemoryProjectionCandidates {
+    pub(crate) fn select_for_level(
+        &self,
+        level: super::context::packing::ContextCompressLevel,
+    ) -> Option<Value> {
+        match level {
+            super::context::packing::ContextCompressLevel::Full => {
+                self.full.clone().or_else(|| self.summary.clone())
+            }
+            super::context::packing::ContextCompressLevel::Summary => {
+                self.summary.clone().or_else(|| self.skeleton.clone())
+            }
+            super::context::packing::ContextCompressLevel::Skeleton => self.skeleton.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -36,32 +46,6 @@ impl Default for PlanningMemoryBudget {
             max_entry_chars: 8_000,
             max_total_chars: 120_000,
         }
-    }
-}
-
-impl Default for PlanningMemoryPruneResult {
-    fn default() -> Self {
-        Self {
-            removed_total: 0,
-            removed_by_tool: BTreeMap::new(),
-        }
-    }
-}
-
-impl PlanningMemoryPruneResult {
-    fn record_removed(&mut self, tool_name: &str) {
-        *self
-            .removed_by_tool
-            .entry(tool_name.to_string())
-            .or_default() += 1;
-        self.removed_total = self.removed_total.saturating_add(1);
-    }
-}
-
-fn merge_prune_result(merged: &mut PlanningMemoryPruneResult, incoming: PlanningMemoryPruneResult) {
-    merged.removed_total = merged.removed_total.saturating_add(incoming.removed_total);
-    for (tool_name, count) in incoming.removed_by_tool {
-        *merged.removed_by_tool.entry(tool_name).or_default() += count;
     }
 }
 
@@ -248,143 +232,38 @@ impl PlanningMemory {
         serde_json::to_value(snapshot).ok()
     }
 
-    pub(crate) fn prune_for_pressure(
-        &mut self,
-        config: ToolMemoryPruneConfig,
-    ) -> PlanningMemoryPruneResult {
-        let mut result = PlanningMemoryPruneResult::default();
-        let _ = (config.active_todo, config.phase);
-        let projection_budget_tokens = config
-            .projection_budget_tokens
-            .unwrap_or(ToolMemoryBudgetPolicy::TOOL_MEMORY_PROJECTION_DEFAULT_TOKENS);
-        let keep_limits = ToolMemoryBudgetPolicy::derive_tool_memory_prune_keep_limits(
-            config.pressure_mode,
-            projection_budget_tokens,
-        );
-        match config.pressure_mode {
-            super::context::budget_policy::ContextPressureMode::Critical => {
-                let removed = prune_tool_memory_for_pressure(
-                    self,
-                    keep_limits.max_list,
-                    keep_limits.max_catalog,
-                    keep_limits.max_detail,
-                    keep_limits.max_guide,
-                );
-                merge_prune_result(&mut result, removed);
-            }
-            super::context::budget_policy::ContextPressureMode::Medium => {
-                let removed = prune_tool_memory_for_pressure(
-                    self,
-                    keep_limits.max_list,
-                    keep_limits.max_catalog,
-                    keep_limits.max_detail,
-                    keep_limits.max_guide,
-                );
-                merge_prune_result(&mut result, removed);
-            }
-            super::context::budget_policy::ContextPressureMode::Light => {
-                let removed = prune_tool_memory_for_pressure(
-                    self,
-                    keep_limits.max_list,
-                    keep_limits.max_catalog,
-                    keep_limits.max_detail,
-                    keep_limits.max_guide,
-                );
-                merge_prune_result(&mut result, removed);
-            }
-            super::context::budget_policy::ContextPressureMode::Normal => {}
-        }
-        result
+    #[allow(dead_code)]
+    pub(crate) fn tool_memory_projection(&self, max_tokens: usize) -> Option<Value> {
+        self.tool_memory_projection_candidates(max_tokens).full
     }
 
-    pub(crate) fn tool_memory_projection(&self, max_tokens: usize) -> Option<Value> {
-        let snapshot_hash = self.scope.as_ref()?.snapshot_hash.clone();
+    pub(crate) fn tool_memory_projection_candidates(
+        &self,
+        max_tokens: usize,
+    ) -> ToolMemoryProjectionCandidates {
+        let Some(scope) = self.scope.as_ref() else {
+            return ToolMemoryProjectionCandidates::default();
+        };
+        let snapshot_hash = scope.snapshot_hash.clone();
         let token_budget = normalize_tool_memory_token_budget(max_tokens);
-        let caps = ToolMemoryBudgetPolicy::derive_tool_memory_projection_caps(token_budget);
-        let mut list_inventory_raw = Vec::<(usize, Value)>::new();
-        let mut catalog_search_raw = Vec::<(usize, Value)>::new();
-        let mut candidate_detail_raw = Vec::<(usize, Value)>::new();
-        let mut guide_raw = Vec::<GuideSummaryEntry>::new();
+        let caps_full = ToolMemoryBudgetPolicy::derive_tool_memory_projection_caps(token_budget);
+        let caps_summary = scale_projection_caps(caps_full, 2);
 
-        for (recency_rank, key) in self.order.iter().rev().enumerate() {
-            let Some(content) = self.tool_cache.get(key) else {
-                continue;
-            };
-            let tool_name = key.split(':').next().unwrap_or_default();
-            match tool_name {
-                "list_candidates" => {
-                    if let Some(entry) = summarize_list_candidates(content.as_str()) {
-                        list_inventory_raw.push((recency_rank, entry));
-                    }
-                }
-                "catalog.search" => {
-                    if let Some(entry) = summarize_catalog_search(content.as_str()) {
-                        catalog_search_raw.push((recency_rank, entry));
-                    }
-                }
-                "get_candidate_detail" => {
-                    if let Some(entry) = summarize_candidate_detail(content.as_str()) {
-                        candidate_detail_raw.push((recency_rank, entry));
-                    }
-                }
-                "guide.get" => {
-                    if let Some(entry) = summarize_guide_get(content.as_str(), recency_rank) {
-                        guide_raw.push(entry);
-                    }
-                }
-                _ => {}
-            }
+        ToolMemoryProjectionCandidates {
+            full: build_tool_memory_projection_with_caps(
+                self,
+                &snapshot_hash,
+                token_budget,
+                caps_full,
+            ),
+            summary: build_tool_memory_projection_with_caps(
+                self,
+                &snapshot_hash,
+                token_budget,
+                caps_summary,
+            ),
+            skeleton: build_tool_memory_projection_skeleton(self, &snapshot_hash, token_budget),
         }
-
-        let list_inventory =
-            select_list_inventory_entries(list_inventory_raw, caps.max_list_inventory_entries);
-        let catalog_search = select_catalog_entries(catalog_search_raw, caps.max_catalog_entries);
-        let candidate_detail =
-            select_candidate_detail_entries(candidate_detail_raw, caps.max_detail_entries);
-        let guide = select_guide_entries(guide_raw, caps.max_guide_entries);
-
-        if list_inventory.is_empty()
-            && catalog_search.is_empty()
-            && candidate_detail.is_empty()
-            && guide.is_empty()
-        {
-            return None;
-        }
-
-        let mut projection = json!({
-            "schema": "ais-agent-tool-memory-projection/0.0.1",
-            "snapshot_hash": snapshot_hash,
-            "recent": {
-                "list_inventory": list_inventory,
-                "catalog_search": catalog_search,
-                "candidate_detail": candidate_detail,
-                "guide": {
-                    "schema": guide.schema,
-                    "topic": guide.topic,
-                },
-            },
-            "hint": "Use this memory first; call discovery/schema tools only when missing or stale."
-        });
-        trim_tool_memory_projection_to_budget(&mut projection, token_budget);
-        if tool_memory_projection_empty(&projection) {
-            return None;
-        }
-        let estimated_tokens = estimate_tokens_json(&projection);
-        if let Some(object) = projection.as_object_mut() {
-            object.insert(
-                "token_budget".to_string(),
-                Value::Number(u64::try_from(token_budget).unwrap_or(0).into()),
-            );
-            object.insert(
-                "estimated_tokens".to_string(),
-                Value::Number(u64::try_from(estimated_tokens).unwrap_or(0).into()),
-            );
-            object.insert(
-                "estimator".to_string(),
-                Value::String("chars_div_4".to_string()),
-            );
-        }
-        Some(projection)
     }
 
     fn enforce_budget(&mut self, budget: PlanningMemoryBudget) {
@@ -410,194 +289,246 @@ impl PlanningMemory {
     }
 }
 
-fn normalize_tool_memory_token_budget(max_tokens: usize) -> usize {
-    let requested = if max_tokens == 0 {
-        ToolMemoryBudgetPolicy::TOOL_MEMORY_PROJECTION_DEFAULT_TOKENS
-    } else {
-        max_tokens
-    };
-    requested.clamp(
-        ToolMemoryBudgetPolicy::TOOL_MEMORY_PROJECTION_ABS_MIN_TOKENS,
-        ToolMemoryBudgetPolicy::TOOL_MEMORY_PROJECTION_ABS_MAX_TOKENS,
-    )
+fn scale_projection_caps(
+    caps: ToolMemoryProjectionCaps,
+    divisor: usize,
+) -> ToolMemoryProjectionCaps {
+    let div = divisor.max(1);
+    ToolMemoryProjectionCaps {
+        max_list_inventory_entries: (caps.max_list_inventory_entries.saturating_add(div - 1) / div)
+            .max(1),
+        max_catalog_entries: (caps.max_catalog_entries.saturating_add(div - 1) / div).max(1),
+        max_detail_entries: (caps.max_detail_entries.saturating_add(div - 1) / div).max(1),
+        max_guide_entries: (caps.max_guide_entries.saturating_add(div - 1) / div).max(1),
+    }
 }
 
-fn prune_tool_memory_for_pressure(
-    memory: &mut PlanningMemory,
-    max_list: usize,
-    max_catalog: usize,
-    max_detail: usize,
-    max_guide: usize,
-) -> PlanningMemoryPruneResult {
-    let mut result = PlanningMemoryPruneResult::default();
-    if memory.tool_cache.is_empty() {
-        return result;
-    }
-
-    let mut to_remove = Vec::<String>::new();
-    let mut list_candidates = Vec::<PruneCandidateEntry>::new();
-    let mut catalog_search = Vec::<PruneCandidateEntry>::new();
-    let mut candidate_detail = Vec::<PruneCandidateEntry>::new();
-    let mut guide_get = Vec::<PruneCandidateEntry>::new();
+fn build_tool_memory_projection_with_caps(
+    memory: &PlanningMemory,
+    snapshot_hash: &str,
+    token_budget: usize,
+    caps: ToolMemoryProjectionCaps,
+) -> Option<Value> {
+    let mut list_inventory_raw = Vec::<(usize, Value)>::new();
+    let mut catalog_search_raw = Vec::<(usize, Value)>::new();
+    let mut candidate_detail_raw = Vec::<(usize, Value)>::new();
+    let mut guide_raw = Vec::<GuideSummaryEntry>::new();
 
     for (recency_rank, key) in memory.order.iter().rev().enumerate() {
-        let Some(content) = memory.tool_cache.get(key.as_str()) else {
+        let Some(content) = memory.tool_cache.get(key) else {
             continue;
         };
         let tool_name = key.split(':').next().unwrap_or_default();
-        let signature = match tool_name {
-            "catalog.search" => {
-                catalog_search_for_prune_signature(content).and_then(|(signature, is_empty)| {
-                    if is_empty {
-                        to_remove.push(key.clone());
-                    }
-                    Some(signature)
-                })
-            }
-            "list_candidates" => summarize_list_candidates(content)
-                .and_then(|entry| serde_json::to_string(&entry).ok()),
-            "get_candidate_detail" => summarize_candidate_detail(content)
-                .and_then(|entry| serde_json::to_string(&entry).ok()),
-            "guide.get" => summarize_guide_get(content, recency_rank)
-                .map(|entry| format!("{}:{}", entry.kind.as_str(), entry.id)),
-            _ => None,
-        };
-
-        if signature.is_none() {
-            if !tool_name.is_empty() {
-                to_remove.push(key.clone());
-            }
-            continue;
-        }
-
-        let candidate = PruneCandidateEntry {
-            key: key.clone(),
-            recency_rank,
-            signature: signature.unwrap_or_default(),
-        };
         match tool_name {
-            "list_candidates" => list_candidates.push(candidate),
-            "catalog.search" => catalog_search.push(candidate),
-            "get_candidate_detail" => candidate_detail.push(candidate),
-            "guide.get" => guide_get.push(candidate),
+            "list_candidates" => {
+                if let Some(entry) = summarize_list_candidates(content.as_str()) {
+                    list_inventory_raw.push((recency_rank, entry));
+                }
+            }
+            "catalog.search" => {
+                if let Some(entry) = summarize_catalog_search(content.as_str()) {
+                    catalog_search_raw.push((recency_rank, entry));
+                }
+            }
+            "get_candidate_detail" => {
+                if let Some(entry) = summarize_candidate_detail(content.as_str()) {
+                    candidate_detail_raw.push((recency_rank, entry));
+                }
+            }
+            "guide.get" => {
+                if let Some(entry) = summarize_guide_get(content.as_str(), recency_rank) {
+                    guide_raw.push(entry);
+                }
+            }
             _ => {}
         }
     }
 
-    if !to_remove.is_empty() {
-        apply_candidate_removals(memory, &to_remove, &mut result);
+    let list_inventory =
+        select_list_inventory_entries(list_inventory_raw, caps.max_list_inventory_entries);
+    let catalog_search = select_catalog_entries(catalog_search_raw, caps.max_catalog_entries);
+    let candidate_detail =
+        select_candidate_detail_entries(candidate_detail_raw, caps.max_detail_entries);
+    let guide = select_guide_entries(guide_raw, caps.max_guide_entries);
+
+    if list_inventory.is_empty()
+        && catalog_search.is_empty()
+        && candidate_detail.is_empty()
+        && guide.is_empty()
+    {
+        return None;
     }
 
-    let mut dropped = prune_keep_only_recency_and_signature(&mut list_candidates, max_list);
-    apply_candidate_removals(memory, &dropped, &mut result);
-    dropped = prune_keep_only_recency_and_signature(&mut catalog_search, max_catalog);
-    apply_candidate_removals(memory, &dropped, &mut result);
-    dropped = prune_keep_only_recency_and_signature(&mut candidate_detail, max_detail);
-    apply_candidate_removals(memory, &dropped, &mut result);
-    dropped = prune_keep_priority_guide(&mut guide_get, max_guide);
-    apply_candidate_removals(memory, &dropped, &mut result);
-    result
-}
-
-#[derive(Debug)]
-struct PruneCandidateEntry {
-    key: String,
-    recency_rank: usize,
-    signature: String,
-}
-
-fn prune_keep_only_recency_and_signature(
-    candidates: &mut Vec<PruneCandidateEntry>,
-    max_keep: usize,
-) -> Vec<String> {
-    candidates.sort_by(|left, right| left.recency_rank.cmp(&right.recency_rank));
-    let mut seen = BTreeSet::<String>::new();
-    let mut kept = 0usize;
-    let mut to_remove = Vec::<String>::new();
-    let mut remaining = Vec::<PruneCandidateEntry>::new();
-    for entry in candidates.drain(..) {
-        if seen.contains(&entry.signature) || kept >= max_keep {
-            to_remove.push(entry.key);
-            continue;
-        }
-        seen.insert(entry.signature.clone());
-        kept = kept.saturating_add(1);
-        remaining.push(entry);
-    }
-    *candidates = remaining;
-    to_remove
-}
-
-fn prune_keep_priority_guide(
-    candidates: &mut Vec<PruneCandidateEntry>,
-    max_keep: usize,
-) -> Vec<String> {
-    candidates.sort_by(|left, right| {
-        let left_priority = guide_signature_priority(left.signature.as_str());
-        let right_priority = guide_signature_priority(right.signature.as_str());
-        right_priority
-            .cmp(&left_priority)
-            .then_with(|| left.recency_rank.cmp(&right.recency_rank))
-            .then_with(|| left.signature.cmp(&right.signature))
+    let mut projection = json!({
+        "schema": "ais-agent-tool-memory-projection/0.0.1",
+        "snapshot_hash": snapshot_hash,
+        "recent": {
+            "list_inventory": list_inventory,
+            "catalog_search": catalog_search,
+            "candidate_detail": candidate_detail,
+            "guide": {
+                "schema": guide.schema,
+                "topic": guide.topic,
+            },
+        },
+        "hint": "Use this memory first; call discovery/schema tools only when missing or stale."
     });
-    let mut to_remove = Vec::<String>::new();
-    let mut remaining = Vec::<PruneCandidateEntry>::new();
-    for entry in candidates.drain(..) {
-        if remaining.len() < max_keep {
-            remaining.push(entry);
+    if tool_memory_projection_empty(&projection) {
+        return None;
+    }
+    let estimated_tokens = estimate_tokens_json(&projection);
+    if let Some(object) = projection.as_object_mut() {
+        object.insert(
+            "token_budget".to_string(),
+            Value::Number(u64::try_from(token_budget).unwrap_or(0).into()),
+        );
+        object.insert(
+            "estimated_tokens".to_string(),
+            Value::Number(u64::try_from(estimated_tokens).unwrap_or(0).into()),
+        );
+        object.insert(
+            "estimator".to_string(),
+            Value::String("chars_div_4".to_string()),
+        );
+    }
+    Some(projection)
+}
+
+fn build_tool_memory_projection_skeleton(
+    memory: &PlanningMemory,
+    _snapshot_hash: &str,
+    token_budget: usize,
+) -> Option<Value> {
+    let mut list_inventory = 0usize;
+    let mut catalog_search = 0usize;
+    let mut candidate_detail = 0usize;
+
+    let mut seen_list = BTreeSet::<String>::new();
+    let mut seen_catalog = BTreeSet::<String>::new();
+    let mut seen_detail = BTreeSet::<String>::new();
+    let mut cached_detail_refs = Vec::<String>::new();
+    let mut cached_catalog_queries = Vec::<String>::new();
+    let mut cached_guide_schema_ids = BTreeSet::<String>::new();
+    let mut cached_guide_topic_ids = BTreeSet::<String>::new();
+
+    for (recency_rank, key) in memory.order.iter().rev().enumerate() {
+        let Some(content) = memory.tool_cache.get(key) else {
             continue;
+        };
+        let tool_name = key.split(':').next().unwrap_or_default();
+        match tool_name {
+            "list_candidates" => {
+                if let Some(entry) = summarize_list_candidates(content.as_str()) {
+                    let signature = serde_json::to_string(&entry).unwrap_or_default();
+                    if seen_list.insert(signature) {
+                        list_inventory = list_inventory.saturating_add(1);
+                    }
+                }
+            }
+            "catalog.search" => {
+                if let Some(entry) = summarize_catalog_search(content.as_str()) {
+                    let signature = catalog_entry_signature(&entry);
+                    if seen_catalog.insert(signature) {
+                        catalog_search = catalog_search.saturating_add(1);
+                        if let Some(query) = entry.get("query").and_then(Value::as_str) {
+                            let q = query.trim();
+                            if !q.is_empty() && cached_catalog_queries.len() < 6 {
+                                cached_catalog_queries.push(q.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            "get_candidate_detail" => {
+                if let Some(entry) = summarize_candidate_detail(content.as_str()) {
+                    let signature = serde_json::to_string(&entry).unwrap_or_default();
+                    if seen_detail.insert(signature) {
+                        candidate_detail = candidate_detail.saturating_add(1);
+                        if let Some(sigs) = entry.get("signatures").and_then(Value::as_array) {
+                            for sig in sigs.iter().take(4) {
+                                if let Some(r) = sig.get("ref").and_then(Value::as_str) {
+                                    if cached_detail_refs.len() < 8 {
+                                        cached_detail_refs.push(r.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            "guide.get" => {
+                if let Some(entry) = summarize_guide_get(content.as_str(), recency_rank) {
+                    match entry.kind {
+                        GuideEntryKind::Schema => {
+                            cached_guide_schema_ids.insert(entry.id);
+                        }
+                        GuideEntryKind::Topic => {
+                            cached_guide_topic_ids.insert(entry.id);
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
-        to_remove.push(entry.key);
     }
-    *candidates = remaining;
-    to_remove
+
+    let guide_schema = cached_guide_schema_ids.len();
+    let guide_topic = cached_guide_topic_ids.len();
+
+    if list_inventory == 0
+        && catalog_search == 0
+        && candidate_detail == 0
+        && guide_schema == 0
+        && guide_topic == 0
+    {
+        return None;
+    }
+
+    let mut projection = json!({
+        "schema": "ais-agent-tool-memory-projection/0.0.1",
+        "hint": "Skeleton: these refs/keys are already cached. Call tools only for refs NOT listed here.",
+        "cached_refs": {
+            "detail_refs": cached_detail_refs,
+            "catalog_queries": cached_catalog_queries,
+            "guide_schema_ids": cached_guide_schema_ids.into_iter().collect::<Vec<_>>(),
+            "guide_topic_ids": cached_guide_topic_ids.into_iter().collect::<Vec<_>>(),
+        },
+        "counts": {
+            "list_inventory": list_inventory,
+            "catalog_search": catalog_search,
+            "candidate_detail": candidate_detail,
+            "guide": {
+                "schema": guide_schema,
+                "topic": guide_topic,
+            },
+        },
+    });
+    let estimated_tokens = estimate_tokens_json(&projection);
+    if let Some(object) = projection.as_object_mut() {
+        object.insert(
+            "token_budget".to_string(),
+            Value::Number(u64::try_from(token_budget).unwrap_or(0).into()),
+        );
+        object.insert(
+            "estimated_tokens".to_string(),
+            Value::Number(u64::try_from(estimated_tokens).unwrap_or(0).into()),
+        );
+        object.insert(
+            "estimator".to_string(),
+            Value::String("chars_div_4".to_string()),
+        );
+    }
+    Some(projection)
 }
 
-fn guide_signature_priority(signature: &str) -> i32 {
-    let (kind, id) = signature.split_once(':').unwrap_or((signature, ""));
-    let kind = match kind {
-        "schema" => GuideEntryKind::Schema,
-        "topic" => GuideEntryKind::Topic,
-        _ => return 0,
+fn normalize_tool_memory_token_budget(max_tokens: usize) -> usize {
+    let requested = if max_tokens == 0 {
+        ToolMemoryBudgetPolicy::tool_memory_projection_default_tokens()
+    } else {
+        max_tokens
     };
-    guide_entry_priority(kind, id)
-}
-
-fn apply_candidate_removals(
-    memory: &mut PlanningMemory,
-    keys: &[String],
-    result: &mut PlanningMemoryPruneResult,
-) {
-    if keys.is_empty() {
-        return;
-    }
-    let remove_set = keys.iter().cloned().collect::<BTreeSet<String>>();
-    memory.order.retain(|key| !remove_set.contains(key));
-    for key in keys {
-        if memory.tool_cache.remove(key.as_str()).is_some() {
-            let tool_name = key.split(':').next().unwrap_or_default();
-            result.record_removed(tool_name);
-        }
-    }
-}
-
-fn catalog_search_for_prune_signature(content: &str) -> Option<(String, bool)> {
-    let payload = serde_json::from_str::<Value>(content).ok()?;
-    let query = payload
-        .get("query")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let returned_matches = payload
-        .get("returned_matches")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let signature = format!(
-        "{}|{}|{}",
-        query.trim().to_ascii_lowercase(),
-        catalog_entry_signature(&payload),
-        returned_matches
-    );
-    Some((signature, returned_matches == 0))
+    let (min_tokens, max_tokens) = ToolMemoryBudgetPolicy::tool_memory_projection_abs_bounds();
+    requested.clamp(min_tokens, max_tokens)
 }
 
 fn summarize_catalog_search(content: &str) -> Option<Value> {
@@ -1103,75 +1034,49 @@ fn clip_string(value: &str, max_chars: usize) -> String {
     clipped
 }
 
-fn trim_tool_memory_projection_to_budget(projection: &mut Value, token_budget: usize) {
-    while estimate_tokens_json(projection) > token_budget {
-        if !trim_tool_memory_projection_once(projection) {
-            break;
-        }
-    }
-}
-
-fn trim_tool_memory_projection_once(projection: &mut Value) -> bool {
-    let Some(recent) = projection.get_mut("recent").and_then(Value::as_object_mut) else {
-        return false;
-    };
-    let mut target: Option<&str> = None;
-    let mut target_len = 0usize;
-    let catalog_len = recent
-        .get("catalog_search")
-        .and_then(Value::as_array)
-        .map(|items| items.len())
-        .unwrap_or(0);
-    if catalog_len > target_len {
-        target_len = catalog_len;
-        target = Some("catalog_search");
-    }
-    let detail_len = recent
-        .get("candidate_detail")
-        .and_then(Value::as_array)
-        .map(|items| items.len())
-        .unwrap_or(0);
-    if detail_len > target_len {
-        target_len = detail_len;
-        target = Some("candidate_detail");
-    }
-    let list_len = recent
-        .get("list_inventory")
-        .and_then(Value::as_array)
-        .map(|items| items.len())
-        .unwrap_or(0);
-    if list_len > target_len {
-        target_len = list_len;
-        target = Some("list_inventory");
-    }
-    let guide_len = recent
-        .get("guide")
-        .and_then(guide_projection_entry_count)
-        .unwrap_or(0);
-    if guide_len > target_len {
-        target_len = guide_len;
-        target = Some("guide");
-    }
-    let Some(target_key) = target else {
-        return false;
-    };
-    if target_len == 0 {
-        return false;
-    }
-    match target_key {
-        "list_inventory" | "catalog_search" | "candidate_detail" => recent
-            .get_mut(target_key)
-            .and_then(Value::as_array_mut)
-            .and_then(|items| items.pop())
-            .is_some(),
-        "guide" => recent
-            .get_mut("guide")
-            .is_some_and(pop_one_guide_projection_entry),
-        _ => false,
-    }
-}
-
 fn tool_memory_projection_empty(projection: &Value) -> bool {
+    if projection
+        .pointer("/counts")
+        .and_then(Value::as_object)
+        .is_some_and(|counts| {
+            if counts
+                .get("list_inventory")
+                .and_then(Value::as_u64)
+                .is_some_and(|len| len > 0)
+            {
+                return true;
+            }
+            if counts
+                .get("catalog_search")
+                .and_then(Value::as_u64)
+                .is_some_and(|len| len > 0)
+            {
+                return true;
+            }
+            if counts
+                .get("candidate_detail")
+                .and_then(Value::as_u64)
+                .is_some_and(|len| len > 0)
+            {
+                return true;
+            }
+            counts
+                .get("guide")
+                .and_then(Value::as_object)
+                .is_some_and(|guide| {
+                    guide
+                        .get("schema")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|len| len > 0)
+                        || guide
+                            .get("topic")
+                            .and_then(Value::as_u64)
+                            .is_some_and(|len| len > 0)
+                })
+        })
+    {
+        return false;
+    }
     let Some(recent) = projection.get("recent").and_then(Value::as_object) else {
         return true;
     };
@@ -1219,45 +1124,6 @@ fn guide_projection_entry_count(value: &Value) -> Option<usize> {
         .map(|items| items.len())
         .unwrap_or(0);
     Some(schema_len.saturating_add(topic_len))
-}
-
-fn pop_one_guide_projection_entry(value: &mut Value) -> bool {
-    let target = {
-        let Some(guide) = value.as_object() else {
-            return false;
-        };
-        let mut candidates = Vec::<(i32, &'static str, String)>::new();
-        if let Some(schema) = guide.get("schema").and_then(Value::as_object) {
-            for id in schema.keys() {
-                candidates.push((
-                    guide_entry_priority(GuideEntryKind::Schema, id),
-                    "schema",
-                    id.clone(),
-                ));
-            }
-        }
-        if let Some(topic) = guide.get("topic").and_then(Value::as_object) {
-            for id in topic.keys() {
-                candidates.push((
-                    guide_entry_priority(GuideEntryKind::Topic, id),
-                    "topic",
-                    id.clone(),
-                ));
-            }
-        }
-        candidates.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.2.cmp(&right.2)));
-        candidates.into_iter().next()
-    };
-
-    let Some((_, bucket, id)) = target else {
-        return false;
-    };
-    value
-        .as_object_mut()
-        .and_then(|guide| guide.get_mut(bucket))
-        .and_then(Value::as_object_mut)
-        .and_then(|entries| entries.remove(id.as_str()))
-        .is_some()
 }
 
 fn estimate_tokens_json(value: &Value) -> usize {

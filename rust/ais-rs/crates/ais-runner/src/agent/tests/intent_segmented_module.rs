@@ -2,6 +2,8 @@ use super::*;
 use ais_llm::{CompleteWithToolsResponse, ScriptedLlmProvider};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::fs;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn large_catalog_candidate_context(action_count: usize, query_count: usize) -> CandidateContext {
     let mut detail_by_ref = BTreeMap::<String, Value>::new();
@@ -658,6 +660,103 @@ fn segmented_planner_ground_intent_repairs_non_actionable_not_ready_in_round() {
 }
 
 #[test]
+fn segmented_planner_retries_no_toolcall_and_recovers() {
+    let provider = ScriptedLlmProvider::from_responses(vec![
+        Ok(CompleteWithToolsResponse {
+            assistant_content: Some("thinking".to_string()),
+            tool_calls: vec![],
+        }),
+        Ok(CompleteWithToolsResponse {
+            assistant_content: Some("fixed".to_string()),
+            tool_calls: vec![ToolCall {
+                id: "tool-fixed".to_string(),
+                name: "plan.propose_todos".to_string(),
+                arguments: json!({
+                    "status":"proposed",
+                    "summary":"ok",
+                    "todos":[{"title":"t1"}]
+                }),
+            }],
+        }),
+    ]);
+    let mut planner = LlmSegmentedIntentPlanner::new(provider).with_max_tool_rounds(4);
+    let draft = planner
+        .propose_todos(TodoPlanningRequest {
+            intent: "plan todos".to_string(),
+            session: SegmentPlanningSession {
+                session_id: "sess-1".to_string(),
+                snapshot_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+                cursor: "0".to_string(),
+                max_rounds: 8,
+                max_segments: 8,
+            },
+            state_summary: Some(json!({})),
+        })
+        .expect("no-toolcall should recover via retry");
+    assert!(matches!(draft, TodoDraft::Proposed { .. }));
+    let usage = planner.llm_usage_value();
+    assert_eq!(usage.pointer("/calls"), Some(&json!(2)));
+    assert_eq!(
+        usage.pointer("/diagnostics/no_toolcall_retries_total"),
+        Some(&json!(1))
+    );
+    assert_eq!(
+        usage.pointer("/diagnostics/no_toolcall_retries_exhausted_total"),
+        Some(&json!(0))
+    );
+}
+
+#[test]
+fn segmented_planner_no_toolcall_retry_is_bounded() {
+    let provider = ScriptedLlmProvider::from_responses(vec![
+        Ok(CompleteWithToolsResponse {
+            assistant_content: Some("thinking-1".to_string()),
+            tool_calls: vec![],
+        }),
+        Ok(CompleteWithToolsResponse {
+            assistant_content: Some("thinking-2".to_string()),
+            tool_calls: vec![],
+        }),
+        Ok(CompleteWithToolsResponse {
+            assistant_content: Some("thinking-3".to_string()),
+            tool_calls: vec![],
+        }),
+    ]);
+    let mut planner = LlmSegmentedIntentPlanner::new(provider).with_max_tool_rounds(6);
+    let error = planner
+        .propose_todos(TodoPlanningRequest {
+            intent: "plan todos".to_string(),
+            session: SegmentPlanningSession {
+                session_id: "sess-1".to_string(),
+                snapshot_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+                cursor: "0".to_string(),
+                max_rounds: 8,
+                max_segments: 8,
+            },
+            state_summary: Some(json!({})),
+        })
+        .expect_err("no-toolcall retries must be bounded");
+    assert!(
+        error
+            .to_string()
+            .contains("no_tool_calls_retries_exhausted"),
+        "unexpected error: {error}"
+    );
+    let usage = planner.llm_usage_value();
+    assert_eq!(usage.pointer("/calls"), Some(&json!(3)));
+    assert_eq!(
+        usage.pointer("/diagnostics/no_toolcall_retries_total"),
+        Some(&json!(2))
+    );
+    assert_eq!(
+        usage.pointer("/diagnostics/no_toolcall_retries_exhausted_total"),
+        Some(&json!(1))
+    );
+}
+
+#[test]
 fn segmented_planner_propose_segment_uses_cursor_out_when_cursor_next_missing() {
     let provider = ScriptedLlmProvider::from_responses(vec![Ok(CompleteWithToolsResponse {
         assistant_content: Some("propose".to_string()),
@@ -818,6 +917,101 @@ fn segmented_planner_blocks_finalize_until_check_segment_ok() {
         }
         _ => panic!("expected proposed draft"),
     }
+}
+
+#[test]
+fn segmented_planner_repairs_check_segment_missing_segment_in_round() {
+    let provider = ScriptedLlmProvider::from_responses(vec![
+        Ok(CompleteWithToolsResponse {
+            assistant_content: Some("begin".to_string()),
+            tool_calls: vec![ToolCall {
+                id: "tool-begin".to_string(),
+                name: "plan.begin".to_string(),
+                arguments: json!({
+                    "session_id":"sess-1",
+                    "snapshot_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "cursor":"cursor-0",
+                    "limits":{"max_rounds":4,"max_segments":3}
+                }),
+            }],
+        }),
+        Ok(CompleteWithToolsResponse {
+            assistant_content: Some("bad check args".to_string()),
+            tool_calls: vec![ToolCall {
+                id: "tool-check-bad".to_string(),
+                name: "plan.check_segment".to_string(),
+                arguments: json!({
+                    "raw":"{\"segment\":{\"segment_id\":\"seg-1\",\"cursor_in\":\"cursor-0\",\"cursor_out\":\"cursor-1\",\"done\":false,\"steps\":[]}}"
+                }),
+            }],
+        }),
+        Ok(CompleteWithToolsResponse {
+            assistant_content: Some("fixed check args".to_string()),
+            tool_calls: vec![ToolCall {
+                id: "tool-check-fixed".to_string(),
+                name: "plan.check_segment".to_string(),
+                arguments: json!({
+                    "segment":{
+                        "segment_id":"seg-1",
+                        "cursor_in":"cursor-0",
+                        "cursor_out":"cursor-1",
+                        "done":false,
+                        "steps":[]
+                    }
+                }),
+            }],
+        }),
+        Ok(CompleteWithToolsResponse {
+            assistant_content: Some("finalize after fixed check".to_string()),
+            tool_calls: vec![ToolCall {
+                id: "tool-finalize".to_string(),
+                name: "plan.propose_segment".to_string(),
+                arguments: json!({
+                    "status":"proposed",
+                    "done":false,
+                    "cursor_next":"cursor-1",
+                    "segment":{
+                        "segment_id":"seg-1",
+                        "cursor_in":"cursor-0",
+                        "cursor_out":"cursor-1",
+                        "done":false,
+                        "steps":[]
+                    }
+                }),
+            }],
+        }),
+    ]);
+    let mut planner = LlmSegmentedIntentPlanner::new(provider)
+        .with_candidate_context(Some(CandidateContext::default()));
+    let session = planner
+        .begin_session(SegmentBeginRequest {
+            intent: "read balance".to_string(),
+            snapshot_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string(),
+            pack_snapshot_hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                .to_string(),
+            catalog_hash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                .to_string(),
+            chain_scope: vec!["eip155:1".to_string()],
+        })
+        .expect("begin session");
+    let draft = planner
+        .propose_segment(SegmentPlanningRequest {
+            intent: "read balance".to_string(),
+            session,
+            state_summary: None,
+            previous_error: None,
+            last_segment: None,
+        })
+        .expect("check-segment args should be repaired in-round");
+    match draft {
+        SegmentDraft::Proposed { segment, .. } => {
+            assert_eq!(segment.segment_id, "seg-1");
+        }
+        _ => panic!("expected proposed draft"),
+    }
+    let usage = planner.llm_usage_value();
+    assert_eq!(usage.pointer("/calls"), Some(&json!(4)));
 }
 
 #[test]
@@ -1374,6 +1568,7 @@ fn planning_memory_caches_list_candidates_per_snapshot_scope() {
         None,
         Some(&mut memory),
         None,
+        None,
     )
     .expect("first list");
     let second = decode_segmented_tool_call_with_memory(
@@ -1383,6 +1578,7 @@ fn planning_memory_caches_list_candidates_per_snapshot_scope() {
         Some(&context),
         None,
         Some(&mut memory),
+        None,
         None,
     )
     .expect("second list");
@@ -1412,6 +1608,7 @@ fn planning_memory_caches_list_candidates_per_snapshot_scope() {
         None,
         Some(&mut memory),
         None,
+        None,
     )
     .expect("third list in same snapshot");
     match third_same_snapshot {
@@ -1427,6 +1624,7 @@ fn planning_memory_caches_list_candidates_per_snapshot_scope() {
         Some(&context),
         None,
         Some(&mut memory),
+        None,
         None,
     )
     .expect("fourth list after snapshot reset");
@@ -1464,6 +1662,7 @@ fn planning_memory_normalizes_detail_ref_order_for_cache_key() {
         None,
         Some(&mut memory),
         None,
+        None,
     )
     .expect("first detail");
     let second = decode_segmented_tool_call_with_memory(
@@ -1473,6 +1672,7 @@ fn planning_memory_normalizes_detail_ref_order_for_cache_key() {
         Some(&context),
         None,
         Some(&mut memory),
+        None,
         None,
     )
     .expect("second detail");
@@ -1522,6 +1722,7 @@ fn planning_memory_guide_get_full_request_refreshes_digest_cache_entry() {
         None,
         Some(&mut memory),
         None,
+        None,
     )
     .expect("digest schema lookup");
     let second = decode_segmented_tool_call_with_memory(
@@ -1532,6 +1733,7 @@ fn planning_memory_guide_get_full_request_refreshes_digest_cache_entry() {
         None,
         Some(&mut memory),
         None,
+        None,
     )
     .expect("full schema lookup");
     let third = decode_segmented_tool_call_with_memory(
@@ -1541,6 +1743,7 @@ fn planning_memory_guide_get_full_request_refreshes_digest_cache_entry() {
         None,
         None,
         Some(&mut memory),
+        None,
         None,
     )
     .expect("cached full schema lookup");
@@ -2244,6 +2447,7 @@ fn plan_check_segment_tool_returns_compile_issues_without_candidate_match() {
         chain_scope: vec!["eip155:1".to_string()],
         known_input_refs: vec![],
         grounding_fact_keys: vec![],
+        current_todo: None,
     };
     let result = decode_segmented_tool_call_with_memory(
         &call,
@@ -2251,6 +2455,7 @@ fn plan_check_segment_tool_returns_compile_issues_without_candidate_match() {
         PlannerRoundPhase::ProposeSegment,
         Some(&CandidateContext::default()),
         Some(&check_context),
+        None,
         None,
         None,
     )
@@ -2659,6 +2864,7 @@ fn requires_successful_check_only_for_segment_finalize_with_context() {
         chain_scope: vec!["eip155:1".to_string()],
         known_input_refs: vec![],
         grounding_fact_keys: vec![],
+        current_todo: None,
     };
     assert!(requires_successful_check_before_finalize(
         PlannerRoundPhase::ProposeSegment,
@@ -3011,6 +3217,101 @@ fn render_grounding_prompt_includes_actionable_not_ready_examples() {
 }
 
 #[test]
+fn prompt_renderers_use_prompt_compact_state_summary_when_available() {
+    let state_summary = json!({
+        "full_only": "must_not_enter_prompt",
+        "context_budget": {
+            "pack_trace": [{"block_id":"tool_memory_projection","action":"compress"}]
+        },
+        "prompt_compact": {
+            "schema": "ais-agent-state-summary-prompt-compact/0.0.1",
+            "compact_marker": true,
+            "context_budget": {
+                "pack_overflow_reason": "budget_exceeded_no_further_actions",
+                "pack_diagnostics": {
+                    "packed_blocks_total": 4
+                }
+            }
+        }
+    });
+    let session = SegmentPlanningSession {
+        session_id: "s".to_string(),
+        snapshot_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            .to_string(),
+        cursor: "0".to_string(),
+        max_rounds: 6,
+        max_segments: 8,
+    };
+
+    let todos_prompt = render_todos_prompt_with_patch(
+        &TodoPlanningRequest {
+            intent: "transfer".to_string(),
+            session: session.clone(),
+            state_summary: Some(state_summary.clone()),
+        },
+        None,
+    );
+    let todos_payload: Value = serde_json::from_str(&todos_prompt).expect("todos prompt");
+    assert_eq!(
+        todos_payload.pointer("/state_summary/compact_marker"),
+        Some(&json!(true))
+    );
+    assert!(
+        todos_payload.pointer("/state_summary/full_only").is_none(),
+        "todos prompt must use compact state_summary"
+    );
+    assert!(
+        todos_payload
+            .pointer("/state_summary/context_budget/pack_trace")
+            .is_none(),
+        "todos prompt must not include pack_trace"
+    );
+
+    let grounding_prompt = render_grounding_prompt_with_patch(
+        &IntentGroundingRequest {
+            intent: "transfer".to_string(),
+            session: session.clone(),
+            state_summary: Some(state_summary.clone()),
+        },
+        None,
+    );
+    let grounding_payload: Value =
+        serde_json::from_str(&grounding_prompt).expect("grounding prompt");
+    assert_eq!(
+        grounding_payload.pointer("/state_summary/compact_marker"),
+        Some(&json!(true))
+    );
+    assert!(
+        grounding_payload
+            .pointer("/state_summary/context_budget/pack_trace")
+            .is_none(),
+        "grounding prompt must not include pack_trace"
+    );
+
+    let segment_prompt = render_segment_prompt(
+        "plan.propose_segment",
+        &SegmentPlanningRequest {
+            intent: "transfer".to_string(),
+            session,
+            state_summary: Some(state_summary),
+            previous_error: None,
+            last_segment: None,
+        },
+    );
+    let segment_payload: Value = serde_json::from_str(&segment_prompt).expect("segment prompt");
+    assert_eq!(
+        segment_payload.pointer("/state_summary/compact_marker"),
+        Some(&json!(true))
+    );
+    assert!(
+        segment_payload
+            .pointer("/state_summary/context_budget/pack_trace")
+            .is_none(),
+        "segment prompt must not include pack_trace"
+    );
+}
+
+#[test]
 fn decode_plan_sketch_segment_arg_reports_missing_candidate_ref_with_step_context() {
     let error = decode_plan_sketch_segment_arg(&json!({
         "segment_id":"seg_1",
@@ -3137,7 +3438,10 @@ fn extract_round_context_signal_reads_pressure_and_compression_flags() {
             "state_summary": {
                 "context_budget": {
                     "pressure_mode": "critical",
-                    "pressure_actions": ["compress_tool_memory_projection"]
+                    "pack_diagnostics": {
+                        "compressed_blocks_total": 1,
+                        "packed_blocks_evicted": 0
+                    }
                 }
             }
         })
@@ -3197,7 +3501,10 @@ fn diagnostics_tracker_reports_duplicate_and_empty_search_streak_metrics() {
         state_summary: Some(json!({
             "context_budget": {
                 "pressure_mode": "light",
-                "pressure_actions": []
+                "pack_diagnostics": {
+                    "compressed_blocks_total": 0,
+                    "packed_blocks_evicted": 0
+                }
             }
         })),
     });
@@ -3647,4 +3954,146 @@ fn finalize_schema_repair_payload_classifies_non_actionable_not_ready_grounding(
             .pointer("/error/required_any_of/1/missing_refs"),
         Some(&json!("non-empty array"))
     );
+}
+
+#[test]
+fn non_finalize_tool_args_repair_payload_classifies_missing_segment() {
+    let repair = non_finalize_tool_args_repair_payload(
+        &RunnerError::Llm("invalid plan.check_segment args: missing field `segment`".to_string()),
+        "plan.check_segment",
+        3,
+        1,
+        2,
+    )
+    .expect("missing segment payload");
+    assert_eq!(repair.sub_reason_code, "missing_segment");
+    assert_eq!(
+        repair.payload.pointer("/error/reason_code"),
+        Some(&json!("schema_missing_required_field"))
+    );
+    assert_eq!(
+        repair.payload.pointer("/error/shape/bad/raw"),
+        Some(&json!("{\"segment\": {...}}"))
+    );
+}
+
+#[test]
+fn no_toolcall_repair_payload_contains_phase_finalize_and_allowed_tools() {
+    let tools = segmented_planner_tools_for_phase(PlannerRoundPhase::ProposeSegment);
+    let payload = no_toolcall_repair_payload(
+        PlannerRoundPhase::ProposeSegment,
+        "plan.propose_segment",
+        1,
+        1,
+        2,
+        &tools,
+    );
+    assert_eq!(
+        payload.pointer("/error/reason_code"),
+        Some(&json!("no_tool_calls"))
+    );
+    assert_eq!(
+        payload.pointer("/error/phase"),
+        Some(&json!("propose_segment"))
+    );
+    assert_eq!(
+        payload.pointer("/error/finalize_tool"),
+        Some(&json!("plan.propose_segment"))
+    );
+    let allowed = payload
+        .pointer("/error/allowed_tools")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        allowed
+            .iter()
+            .any(|tool| tool.as_str() == Some("plan.propose_segment")),
+        "allowed_tools={allowed:?}"
+    );
+}
+
+#[test]
+fn planner_llm_transcript_writes_full_request_and_response() {
+    let provider = ScriptedLlmProvider::from_responses(vec![Ok(CompleteWithToolsResponse {
+        assistant_content: Some("final".to_string()),
+        tool_calls: vec![ToolCall {
+            id: "tool-final".to_string(),
+            name: "plan.propose_todos".to_string(),
+            arguments: json!({
+                "status":"proposed",
+                "summary":"done",
+                "todos":[{"title":"t1"}]
+            }),
+        }],
+    })]);
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("ais-runner-llm-transcript-{stamp}.md"));
+    let mut planner =
+        LlmSegmentedIntentPlanner::new(provider).with_llm_transcript(Some(path.clone()), false);
+    let _ = planner
+        .propose_todos(TodoPlanningRequest {
+            intent: "plan todos".to_string(),
+            session: SegmentPlanningSession {
+                session_id: "sess-1".to_string(),
+                snapshot_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+                cursor: "0".to_string(),
+                max_rounds: 8,
+                max_segments: 8,
+            },
+            state_summary: Some(json!({})),
+        })
+        .expect("planner run");
+    let text = fs::read_to_string(&path).expect("transcript text");
+    assert!(text.contains("### Request"));
+    assert!(text.contains("### Response"));
+    assert!(text.contains("\"plan.propose_todos\""));
+    assert!(text.contains("\"todos\""));
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn planner_llm_transcript_append_mode_keeps_existing_content() {
+    let provider = ScriptedLlmProvider::from_responses(vec![Ok(CompleteWithToolsResponse {
+        assistant_content: Some("final".to_string()),
+        tool_calls: vec![ToolCall {
+            id: "tool-final".to_string(),
+            name: "plan.propose_todos".to_string(),
+            arguments: json!({
+                "status":"proposed",
+                "summary":"done",
+                "todos":[{"title":"t1"}]
+            }),
+        }],
+    })]);
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("ais-runner-llm-transcript-append-{stamp}.md"));
+    fs::write(&path, "# seed\n").expect("seed");
+    let mut planner =
+        LlmSegmentedIntentPlanner::new(provider).with_llm_transcript(Some(path.clone()), true);
+    let _ = planner
+        .propose_todos(TodoPlanningRequest {
+            intent: "plan todos".to_string(),
+            session: SegmentPlanningSession {
+                session_id: "sess-1".to_string(),
+                snapshot_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+                cursor: "0".to_string(),
+                max_rounds: 8,
+                max_segments: 8,
+            },
+            state_summary: Some(json!({})),
+        })
+        .expect("planner run");
+    let text = fs::read_to_string(&path).expect("transcript text");
+    assert!(text.starts_with("# seed\n"));
+    assert!(text.contains("### Request"));
+    let _ = fs::remove_file(path);
 }

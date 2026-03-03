@@ -147,6 +147,9 @@ fn cli_parses_agent_command() {
         "16",
         "--planner-context-token-budget",
         "9000",
+        "--llm-transcript-path",
+        "llm.full.md",
+        "--llm-transcript-append",
         "--approvals-mode",
         "yolo",
     ])
@@ -179,6 +182,11 @@ fn cli_parses_agent_command() {
             assert_eq!(command.max_tool_rounds, Some(24));
             assert_eq!(command.max_index_candidates, Some(16));
             assert_eq!(command.planner_context_token_budget, Some(9000));
+            assert_eq!(
+                command.llm_transcript_path.as_deref(),
+                Some(std::path::Path::new("llm.full.md"))
+            );
+            assert!(command.llm_transcript_append);
             assert!(command.verbose_llm);
         }
         _ => panic!("expected agent command"),

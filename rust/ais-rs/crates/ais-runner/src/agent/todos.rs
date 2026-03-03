@@ -373,7 +373,6 @@ fn acceptance_rule_resolved_from_state_summary(state_summary: Option<&Value>, ru
         }
     }
     value_at_dotted_path(summary.pointer("/intent_context/facts"), rule).is_some()
-        || value_at_dotted_path(summary.pointer("/intent_slots/intent_facts"), rule).is_some()
 }
 
 fn value_at_dotted_path<'a>(root: Option<&'a Value>, dotted: &str) -> Option<&'a Value> {

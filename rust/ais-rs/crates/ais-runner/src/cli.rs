@@ -102,6 +102,10 @@ pub struct AgentCommand {
     pub max_index_candidates: Option<usize>,
     #[arg(long)]
     pub planner_context_token_budget: Option<usize>,
+    #[arg(long)]
+    pub llm_transcript_path: Option<PathBuf>,
+    #[arg(long, default_value_t = false)]
+    pub llm_transcript_append: bool,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     pub format: OutputFormat,
 }

@@ -60,22 +60,18 @@ Mode selection is worst-case: crossing either usage or remaining guard escalates
   - medium: `17/20 * base`
   - tight: `3/5 * base`
 
-2. Stage-based structural trimming:
-- stages: `balanced`, `tight`, `minimal`
-- each stage caps specific sections (`input_store`, `input_slots`, `input_registry`, `canonical_context`, `node_output_refs`, `capability_view`, `previous_error`).
-- first stage whose estimated tokens fit is selected; else fallback to smallest stage.
+2. Single pack loop over optional blocks (`pack_blocks(...)`):
+- default behavior: when budget allows, keep full projected context.
+- under pressure: progressively compress low/stale optional blocks first, then evict them if still over budget.
+- must-keep core is never evicted; if the must-keep-only remainder still exceeds budget, an explicit overflow signal is emitted.
 
-Then pressure actions are applied:
+Context decisions are recorded under `state_summary.context_budget` with a minimal surface:
 
-- critical:
-  - drop `input_slots.canonical_refs`
-  - drop `capability_view.protocols`
-  - compress `tool_memory_projection`
-  - compress/drop heavy finalize error payload fields
-- medium/light:
-  - progressively lighter compaction
-
-All decisions are recorded into `state_summary.context_budget` (`stage`, `pressure_mode`, `pressure_actions`, estimates).
+- `pressure_mode`
+- `pack_trace[]`: ordered decisions (`keep|compress|drop`) with `block_id`, level transitions, and reason codes
+- `pack_diagnostics`: stable counters for `packed/compressed/evicted` with reason breakdowns
+- `pack_overflow_reason` (nullable; present when overflow occurred)
+- `final_compact_applied` (`true` only when overflow fallback compact ran)
 
 ## 4. Tool-Memory Projection Budget
 
@@ -98,7 +94,7 @@ All decisions are recorded into `state_summary.context_budget` (`stage`, `pressu
   - min `1200`
   - max `64000`
 
-Projection content is then structurally trimmed in `planning_memory.rs` to this token budget.
+Projection content is produced as candidates (`full` / `summary` / `skeleton`) under this budget signal, then selected by global compress level.
 
 Projection per-bucket caps are also dynamic now:
 
@@ -163,11 +159,9 @@ In `refresh_tool_memory_projection(...)`:
 1. read usage
 2. derive/apply store budget
 3. resolve pressure mode
-4. if pressure is not normal:
-- run `prune_for_pressure(...)`
-- write prune diagnostics
-5. derive projection budget
-6. build projection
+4. derive projection budget
+5. build projection candidates (`full` / `summary` / `skeleton`)
+6. select projection by global compress level
 7. write projection diagnostics
 8. update `context.tool_memory_projection`
 
@@ -179,16 +173,56 @@ Memory-pressure diagnostics are exposed under:
 
 Current fields:
 
-- `memory_prune_runs`
-- `memory_pruned_entries_total`
-- `memory_pruned_by_tool`
 - `memory_projection_budget_tokens`
 - `memory_projection_estimated_tokens`
-- `memory_projection_empty_due_to_pressure_total`
 
-`state_summary.context_budget` separately records context-level stage/pressure decisions.
+`state_summary.context_budget` is intentionally compact and no longer carries payload/emitted token estimate compatibility aliases.
 
-## 9. Notes / Limits
+Pack-loop diagnostics are exposed under:
 
-- `prune_for_pressure` currently receives `active_todo` and `phase` but does not yet differentiate behavior by them.
-- pressure pruning is class-based and deterministic; semantic ranking is currently strongest for `guide.get` (`ais-plan-sketch`, `cel` highest).
+- `state_summary.context_budget.pack_diagnostics`
+- `state_summary.context_budget.pack_trace[]`
+
+## 9. Prompt Compact View
+
+Planner prompt injection no longer sends full `state_summary` by default.
+
+- `context_view` now emits `state_summary.prompt_compact` (`ais-agent-state-summary-prompt-compact/0.0.1`).
+- `intent_segmented` prompt renderers (`todos` / `grounding` / `segment`) prefer `state_summary.prompt_compact`; they only fall back to full `state_summary` when compact view is absent.
+
+Compact-view rules:
+
+- keep machine-critical sections (`todo_state`, `input_registry`, `input_slots`, `canonical_context`, `intent_*`, `input_store`, `node_output_refs`, `tool_memory_projection`, `previous_error`)
+- keep only minimal context-budget fields for prompt reasoning:
+  - `pressure_mode`
+  - `pack_overflow_reason`
+  - compact `pack_diagnostics` counters
+- drop `pack_trace` from prompt payload (while still keeping it in full `state_summary.context_budget` for observability)
+- add a short `summary_text` line for quick model orientation
+
+Input source-of-truth note:
+
+- `InputStore` is the only input truth source for planning/runtime input refs.
+- `input_slots` / `input_registry` / `canonical_context` are runtime-derived views from `InputStore`.
+- `intent_slots` remains a grounding intermediate projection only (`input_binding.bindable=false`) and is not used as an additional input-ref source.
+
+## 10. No-ToolCall Self-Recovery
+
+In segmented planner rounds, empty `tool_calls` from model/provider is now treated as retryable planner output (bounded):
+
+- runner injects a structured repair payload (`reason_code=no_tool_calls`) containing:
+  - phase
+  - expected finalize tool
+  - allowed tools for current phase
+  - retry attempt metadata
+- retry limit: 2 (`NO_TOOLCALL_RETRY_ATTEMPT_LIMIT`)
+- on exhaustion, runner returns a structured terminal error (`no_tool_calls_retries_exhausted`)
+
+Diagnostics (under `runtime.agent.llm_usage.diagnostics`):
+
+- `no_toolcall_retries_total`
+- `no_toolcall_retries_exhausted_total`
+
+## 11. Notes / Limits
+
+- `planning_memory` no longer performs pressure pre-prune during projection refresh; it only enforces store budget and provides projection candidates.

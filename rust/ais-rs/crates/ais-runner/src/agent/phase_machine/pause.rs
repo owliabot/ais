@@ -1,5 +1,5 @@
 use super::super::*;
-use ais_engine::{EngineEventRecord, EngineRunnerState};
+use ais_engine::{EngineEventRecord, EngineEventType, EngineRunnerState};
 use serde_json::{Map, Value};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +55,7 @@ pub(crate) fn resolve_missing_required_input_payload(
         fact_store,
         questions.as_slice(),
     )? {
+        super::super::missing_input::mark_consumed(&mut state.runtime);
         state.paused_reason = None;
         return Ok(MissingRequiredInputBackflow::ResolvedByUserInput { answers });
     }
@@ -107,17 +108,48 @@ pub(crate) fn missing_required_input_payload_from_pause(
     events: &[EngineEventRecord],
     round: u8,
 ) -> Option<Value> {
-    if let Some(payload) = runtime_missing_required_input_payload(state) {
-        return Some(payload);
+    let from_events = super::super::missing_input::payload_from_pause(state, events, round);
+    if from_events.is_some() {
+        return from_events;
     }
-    super::super::missing_input::payload_from_pause(state, events, round)
+    runtime_missing_required_input_payload(state, events)
 }
 
-fn runtime_missing_required_input_payload(state: &EngineRunnerState) -> Option<Value> {
+fn runtime_missing_required_input_payload(
+    state: &EngineRunnerState,
+    events: &[EngineEventRecord],
+) -> Option<Value> {
+    if classify_pause_reason(state.paused_reason.as_deref())
+        != PauseReasonKind::MissingRequiredInput
+    {
+        return None;
+    }
+    if let Some(latest_need_user_input) = events
+        .iter()
+        .rev()
+        .find(|record| record.event.event_type == EngineEventType::NeedUserInput)
+    {
+        let reason_code = latest_need_user_input
+            .event
+            .data
+            .get("reason_code")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if reason_code != "missing_required_input" {
+            return None;
+        }
+    }
     let payload = state
         .runtime
         .pointer("/agent/missing_required_input")?
         .clone();
+    if payload
+        .get("consumed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return None;
+    }
     let reason_code = payload
         .get("reason_code")
         .and_then(Value::as_str)

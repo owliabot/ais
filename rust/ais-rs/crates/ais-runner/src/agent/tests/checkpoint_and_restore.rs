@@ -38,6 +38,8 @@ fn load_or_init_state_rejects_legacy_checkpoint_node_ids() {
         max_tool_rounds: None,
         max_index_candidates: None,
         planner_context_token_budget: None,
+        llm_transcript_path: None,
+        llm_transcript_append: false,
         format: OutputFormat::Text,
     };
 
@@ -90,6 +92,8 @@ fn load_or_init_state_dedupes_checkpoint_plan_snapshot_nodes() {
         max_tool_rounds: None,
         max_index_candidates: None,
         planner_context_token_budget: None,
+        llm_transcript_path: None,
+        llm_transcript_append: false,
         format: OutputFormat::Text,
     };
 
@@ -424,6 +428,8 @@ fn segmented_checkpoint_resume_keeps_need_user_confirm_pause_in_real_flow() {
         max_tool_rounds: None,
         max_index_candidates: None,
         planner_context_token_budget: None,
+        llm_transcript_path: None,
+        llm_transcript_append: false,
         format: OutputFormat::Text,
     };
     let mut router = RouterExecutor::new();
@@ -520,6 +526,8 @@ fn load_or_init_state_restores_approved_nodes_and_skips_reconfirm_on_resume() {
         max_tool_rounds: None,
         max_index_candidates: None,
         planner_context_token_budget: None,
+        llm_transcript_path: None,
+        llm_transcript_append: false,
         format: OutputFormat::Text,
     };
 
@@ -617,6 +625,8 @@ fn resume_skips_confirmed_write_with_same_confirmation_hash() {
         max_tool_rounds: None,
         max_index_candidates: None,
         planner_context_token_budget: None,
+        llm_transcript_path: None,
+        llm_transcript_append: false,
         format: OutputFormat::Text,
     };
     let plan = plan_requiring_user_confirm("transfer-1");

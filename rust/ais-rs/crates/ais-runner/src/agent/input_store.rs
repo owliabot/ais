@@ -219,30 +219,10 @@ impl InputStore {
         })
     }
 
-    pub fn to_projected_planning_value(&self, max_entries: usize) -> Value {
-        let max_entries = max_entries.max(1);
+    pub fn to_projected_planning_value(&self) -> Value {
         let mut facts = Map::<String, Value>::new();
         let mut meta = Map::<String, Value>::new();
-        let mut selected_keys = Vec::<String>::new();
-        for priority_key in ["owner", "wallet.default"] {
-            if self.entries.contains_key(priority_key) {
-                selected_keys.push(priority_key.to_string());
-            }
-        }
-        for key in self.entries.keys() {
-            if selected_keys.len() >= max_entries {
-                break;
-            }
-            if selected_keys.iter().any(|item| item == key) {
-                continue;
-            }
-            selected_keys.push(key.clone());
-        }
-        let truncated = self.entries.len().saturating_sub(selected_keys.len());
-        for key in selected_keys {
-            let Some(entry) = self.entries.get(key.as_str()) else {
-                continue;
-            };
+        for (key, entry) in &self.entries {
             facts.insert(key.clone(), entry.value.clone());
             meta.insert(
                 key.clone(),
@@ -255,12 +235,6 @@ impl InputStore {
                     "observed_at_ms": entry.meta.observed_at_ms,
                     "confidence": entry.meta.confidence,
                 }),
-            );
-        }
-        if truncated > 0 {
-            meta.insert(
-                "_truncated_entries".to_string(),
-                Value::Number((truncated as u64).into()),
             );
         }
         Value::Object(

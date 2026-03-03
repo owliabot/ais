@@ -21,6 +21,8 @@ fn load_llm_provider_returns_none_when_not_configured() {
         max_tool_rounds: None,
         max_index_candidates: None,
         planner_context_token_budget: None,
+        llm_transcript_path: None,
+        llm_transcript_append: false,
         format: OutputFormat::Text,
     };
     let config = RunnerConfig {
@@ -58,6 +60,8 @@ fn load_llm_provider_rejects_unknown_provider() {
         max_tool_rounds: None,
         max_index_candidates: None,
         planner_context_token_budget: None,
+        llm_transcript_path: None,
+        llm_transcript_append: false,
         format: OutputFormat::Text,
     };
     let config = RunnerConfig {
@@ -108,6 +112,8 @@ fn load_llm_provider_accepts_provider_chain_config() {
         max_tool_rounds: None,
         max_index_candidates: None,
         planner_context_token_budget: None,
+        llm_transcript_path: None,
+        llm_transcript_append: false,
         format: OutputFormat::Text,
     };
     let config = RunnerConfig {
