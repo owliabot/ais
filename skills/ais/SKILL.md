@@ -1,25 +1,12 @@
 ---
 name: ais
-description: Use AIS through the Rust toolchain and `ais-runner`. Use when building AIS Rust crates, running plans/workflows/replay/agent flows, or authoring AIS YAML documents (protocol/pack/workflow/plan/plan-sketch/catalog).
+description: Use AIS through the Rust toolchain and `ais-runner`. Use when running plans/workflows/replay/agent flows, or authoring AIS YAML documents (protocol/pack/workflow/plan/plan-sketch/catalog).
 ---
 
 # AIS (Rust-only)
 
-Use this skill for AIS work in the Rust workspace.
-
-Rust workspace:
+Assumes `ais-runner` is already on PATH. Rust workspace for reference:
 `/home/ocbot/.openclaw/workspace/repos/ais/rust/ais-rs/`
-
-## Build from source
-
-Prerequisite: Rust toolchain via `rustup`.
-
-```bash
-cd /home/ocbot/.openclaw/workspace/repos/ais/rust/ais-rs
-cargo build --release -p ais-runner
-cargo install --path crates/ais-runner
-cargo test --workspace
-```
 
 ## Main CLI: `ais-runner`
 
