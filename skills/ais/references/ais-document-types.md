@@ -1,139 +1,109 @@
-# AIS Document Types Overview
+# AIS Document Types (YAML Inputs)
 
-Source specs directory: `/home/ocbot/.openclaw/workspace/repos/ais/specs/`
+Source specs:
+- `/home/ocbot/.openclaw/workspace/repos/ais/specs/ais-1-protocol.md`
+- `/home/ocbot/.openclaw/workspace/repos/ais/specs/ais-1-pack.md`
+- `/home/ocbot/.openclaw/workspace/repos/ais/specs/ais-1-workflow.md`
+- `/home/ocbot/.openclaw/workspace/repos/ais/specs/ais-2-plan.md`
+- `/home/ocbot/.openclaw/workspace/repos/ais/specs/ais-2-plan-sketch.md`
+- `/home/ocbot/.openclaw/workspace/repos/ais/specs/ais-1-catalog.md`
 
-This summary covers the six AIS document families used by agents and runners.
+All six document families are strict: unknown fields are rejected unless carried in an explicit `extensions` field.
 
-## 1) Protocol (`ais/0.0.2`)
+## 1) Protocol
+- Schema ID: `ais/0.0.2`
+- Purpose: define one protocol's actions, queries, deployments, and metadata.
+- Key fields: `schema`, `meta`, `deployments`, `actions`, optional `queries`, `capabilities_required`, `supported_assets`, `risks`, `tests`.
 
-Spec: `specs/ais-1-protocol.md`
+Example:
+```yaml
+schema: "ais/0.0.2"
+meta: { protocol: "uniswap-v3", version: "0.0.2" }
+actions: { swap_exact_in: { description: "...", execution: { "eip155:*": {} } } }
+```
 
-Purpose:
-- Describe one protocol's actions, queries, deployments, and optional metadata.
+## 2) Pack
+- Schema ID: `ais-pack/0.0.2`
+- Purpose: bundle protocol includes and policy controls.
+- Key fields: `schema`, `meta`, `includes`, `policy`, optional `token_policy`, `providers`, `plugins`, `overrides`.
 
-Key shape:
-- `schema: "ais/0.0.2"`
-- `meta` (protocol id/version and metadata)
-- `deployments[]` (chain + contract addresses)
-- `actions` (required)
-- `queries` (optional)
-- optional `capabilities_required`, `supported_assets`, `risks`, `tests`
+Example:
+```yaml
+schema: "ais-pack/0.0.2"
+meta: { name: "safe-defi-pack", version: "0.0.2" }
+includes:
+  - { protocol: "uniswap-v3", version: "0.0.2", source: "registry" }
+policy:
+  approvals: { mode: "safe", require_approval_min_risk_level: 3 }
+```
 
-Notes:
-- Strict schema; unknown fields are rejected.
-- Extension data must be inside `extensions`.
-- Actions/queries map to AIS-2 execution specs by chain.
+## 3) Workflow
+- Schema ID: `ais-flow/0.0.3`
+- Purpose: DAG orchestration over query/action operations.
+- Key fields: `schema`, `meta`, `nodes`, optional `default_chain`, `imports`, `requires_pack`, `inputs`, `policy`, `preflight`, `outputs`.
+- Node `type`: `query_ref | action_ref | assert | branch`.
 
-## 2) Pack (`ais-pack/0.0.2`)
+Example:
+```yaml
+schema: "ais-flow/0.0.3"
+meta: { name: "swap-with-guard", version: "0.0.1" }
+default_chain: "eip155:1"
+nodes:
+  - id: q_quote
+    type: query_ref
+    protocol: uniswap-v3@0.0.2
+    query: quote
+```
 
-Spec: `specs/ais-1-pack.md`
+## 4) Plan
+- Schema ID: `ais-plan/0.0.3`
+- Purpose: runner/engine execution contract.
+- Key fields: root `schema`, `nodes`, optional `meta`, `extensions`; node essentials `id`, `chain`, `kind`, `execution` plus optional controls (`deps`, `condition`, `assert`, `until`, `retry`, `timeout_ms`).
 
-Purpose:
-- Bundle protocol includes with policy, approvals, constraints, token policy, providers/plugins, and overrides.
+Example:
+```yaml
+schema: "ais-plan/0.0.3"
+nodes:
+  - id: n1
+    chain: eip155:1
+    kind: action_ref
+    execution: { type: evm_call }
+```
 
-Key shape:
-- `schema: "ais-pack/0.0.2"`
-- `meta`
-- `includes[]` (protocol/version/source/chain scope)
-- `policy` (approval and install policy, CEL constraints)
-- optional `token_policy`, `providers`, `plugins`, `overrides`
+## 5) Plan Sketch
+- Schema ID: `ais-plan-sketch/0.1.0`
+- Purpose: LLM-facing segmented planning IR; must be compiled to `ais-plan/0.0.3` before execution.
+- Key fields: `schema`, `intent`, `pack_snapshot`, `catalog_snapshot`, `segments[]`; each segment carries `segment_id`, `cursor_in`, `cursor_out`, `done`, `steps[]`.
 
-Notes:
-- Strict schema; unknown fields rejected.
-- `plugins.execution.enabled` acts as allowlist for plugin execution types.
-- Approval mode (`safe|assist|yolo`) changes confirmation behavior but does not bypass hard blocks or allowlists.
+Example:
+```yaml
+schema: "ais-plan-sketch/0.1.0"
+intent: "swap 1 ETH to USDC"
+pack_snapshot: { name: safe-defi-pack, version: "0.0.2", hash: "..." }
+catalog_snapshot: { hash: "..." }
+segments:
+  - segment_id: s1
+    cursor_in: "0"
+    cursor_out: "1"
+    done: false
+    steps:
+      - { id: step1, kind: query, candidate_ref: "uniswap-v3@0.0.2/quote", inputs: {} }
+```
 
-## 3) Workflow (`ais-flow/0.0.3`)
+## 6) Catalog
+- Schema ID: `ais-catalog/0.0.1`
+- Purpose: index-only discovery cards for actions/queries/packs.
+- Key fields: `schema`, `created_at`, `hash`, optional `documents`, plus `actions[]`, `queries[]`, `packs[]`.
 
-Spec: `specs/ais-1-workflow.md`
-
-Purpose:
-- Define DAG orchestration over query/action operations with dependencies and control checks.
-
-Key shape:
-- `schema: "ais-flow/0.0.3"`
-- `meta`
-- `nodes[]`
-- optional `default_chain`, `imports.protocols[]`, `requires_pack`, `inputs`, `policy`, `preflight`, `outputs`
-
-Node types:
-- `query_ref`
-- `action_ref`
-- `assert`
-- `branch`
-
-Notes:
-- Workflow is strict; use `extensions` for host-specific data.
-- Chain resolution must yield one concrete CAIP-2 chain.
-- Cycles are invalid; engines must reject them.
-- `assert`/`branch` are planner-readable control labels, lowered by compile to executable refs.
-
-## 4) Plan (`ais-plan/0.0.3`)
-
-Spec: `specs/ais-2-plan.md`
-
-Purpose:
-- Runner/engine execution contract (plan-first runtime artifact).
-
-Key shape:
-- `schema: "ais-plan/0.0.3"`
-- `nodes[]`
-- optional `meta`, `extensions`
-
-Execution node essentials:
-- `id`, `chain`, `kind`, `execution`
-- optional lifecycle/control fields (`deps`, `condition`, `assert`, `until`, `retry`, `timeout_ms`)
-- optional runtime fields (`writes`, `bindings`, `source`)
-
-Notes:
-- `execution.type` is routed through registered handlers.
-- Core vs plugin execution types are enforced with runtime registry and pack allowlist.
-- `replace_plan` mutation should maintain auditable plan hash lineage.
-
-## 5) Plan Sketch (`ais-plan-sketch/0.1.0`)
-
-Spec: `specs/ais-2-plan-sketch.md`
-
-Purpose:
-- LLM-facing, segmented planning IR used before deterministic compilation to `ais-plan/0.0.3`.
-
-Key shape:
-- `schema: "ais-plan-sketch/0.1.0"`
-- `intent`
-- `pack_snapshot`, `catalog_snapshot`
-- `segments[]`
-- optional `chain_scope`, `session`, `meta`, `extensions`
-
-Segment and step model:
-- segment: `segment_id`, `cursor_in`, `cursor_out`, `done`, `steps[]`
-- step: `id`, `kind` (`query|action|assert|branch`), `candidate_ref`, `inputs`
-- optional: `depends_on`, `stores`, `when`, `until`, `retry`, `timeout_ms`, `constraint_templates`
-
-Notes:
-- Not directly executable by engine.
-- Host must compile to `ais-plan` deterministically.
-- Unknown fields are rejected at root/segment/step levels.
-
-## 6) Catalog (`ais-catalog/0.0.1`)
-
-Spec: `specs/ais-1-catalog.md`
-
-Purpose:
-- Search/index cards for actions, queries, and packs so agents can discover capabilities without loading full specs.
-
-Key shape:
-- `schema: "ais-catalog/0.0.1"`
-- `created_at`, `hash`
-- optional `documents`
-- `actions[]`, `queries[]`, `packs[]`
-
-Notes:
-- Authority schema is index-only; detail payloads are fetched separately by `ref`.
-- Requires stable sorting and canonical hashing for cache/diff reliability.
-
-## Related Specs
-
-- Core index: `specs/index.md`
-- Overview: `specs/ais-0-overview.md`
-- Types and expressions: `specs/ais-1-types.md`, `specs/ais-1-expressions.md`
-- Execution specifics: `specs/ais-2-*.md`
+Example:
+```yaml
+schema: "ais-catalog/0.0.1"
+created_at: "2026-03-04T00:00:00Z"
+hash: "sha256:..."
+actions:
+  - ref: uniswap-v3@0.0.2/swap_exact_in
+    protocol: uniswap-v3
+    version: 0.0.2
+    id: swap_exact_in
+    risk_level: 3
+```
