@@ -319,4 +319,18 @@ fn execute_agent_requires_script_for_demo_scripted_profile() {
     assert!(matches!(error, RunnerError::AgentProfile(_)));
 }
 
-
+#[test]
+fn command_builder_resumes_after_seen_command_ids() {
+    let mut builder = CommandBuilder::new("run-fixed");
+    let seen = vec![
+        "run-fixed-cmd-000001".to_string(),
+        "run-fixed-cmd-000003".to_string(),
+        "other-run-cmd-000099".to_string(),
+    ];
+    let max_seen = builder.set_next_index_from_seen_ids(&seen);
+    assert_eq!(max_seen, 3);
+    assert_eq!(
+        builder.cancel().command.id,
+        "run-fixed-cmd-000004".to_string()
+    );
+}

@@ -48,7 +48,9 @@ pub struct RunnerLlmConfig {
     #[serde(default)]
     pub rotation: RunnerLlmRotationMode,
     #[serde(default)]
-    pub prompts_dir: Option<String>,
+    pub controller_prompts_dir: Option<String>,
+    #[serde(default)]
+    pub operator_templates_dir: Option<String>,
     #[serde(default)]
     pub planner_context_token_budget: Option<usize>,
     #[serde(default)]
@@ -714,17 +716,31 @@ fn validate_llm_config(config: &RunnerConfig, issues: &mut Vec<StructuredIssue>)
         issues,
     );
     if llm
-        .prompts_dir
+        .controller_prompts_dir
         .as_deref()
         .is_some_and(|path| path.trim().is_empty())
     {
         issues.push(config_issue(
-            "runner.config.llm.prompts_dir",
+            "runner.config.llm.controller_prompts_dir",
             vec![
                 FieldPathSegment::Key("llm".to_string()),
-                FieldPathSegment::Key("prompts_dir".to_string()),
+                FieldPathSegment::Key("controller_prompts_dir".to_string()),
             ],
-            "llm.prompts_dir must be non-empty when provided".to_string(),
+            "llm.controller_prompts_dir must be non-empty when provided".to_string(),
+        ));
+    }
+    if llm
+        .operator_templates_dir
+        .as_deref()
+        .is_some_and(|path| path.trim().is_empty())
+    {
+        issues.push(config_issue(
+            "runner.config.llm.operator_templates_dir",
+            vec![
+                FieldPathSegment::Key("llm".to_string()),
+                FieldPathSegment::Key("operator_templates_dir".to_string()),
+            ],
+            "llm.operator_templates_dir must be non-empty when provided".to_string(),
         ));
     }
     if matches!(llm.planner_context_token_budget, Some(0)) {

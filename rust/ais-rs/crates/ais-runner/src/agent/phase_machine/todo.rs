@@ -8,6 +8,7 @@ pub(crate) fn bootstrap_todos_if_needed<P: LlmProvider>(
     state: &mut EngineRunnerState,
     context: &mut SegmentedAgentContext,
     candidate_context: &CandidateContext,
+    readonly_autofill_router: Option<&ais_engine::RouterExecutor>,
     runtime_has_todo_progress: bool,
 ) -> Result<(), RunnerError> {
     let trace_enabled = command.verbose || command.verbose_llm;
@@ -63,8 +64,16 @@ pub(crate) fn bootstrap_todos_if_needed<P: LlmProvider>(
             let intent = context.intent().to_string();
             {
                 let todo_board = context.todo_board_mut();
-                todo_board.replace_from_specs(intent.as_str(), &todos);
+                let rejected_tail_count = todo_board.replace_from_specs(intent.as_str(), &todos);
                 todo_board.ensure_current();
+                if rejected_tail_count > 0 {
+                    super::super::trace::emit(
+                        trace_enabled,
+                        "todo",
+                        "todo_tail_rejected",
+                        &[("count", rejected_tail_count.to_string())],
+                    );
+                }
             }
             super::super::runtime_store::record_todo_progress(
                 &mut state.runtime,
@@ -110,57 +119,59 @@ pub(crate) fn bootstrap_todos_if_needed<P: LlmProvider>(
                     issues.as_slice(),
                     context.completed_segments_u8(),
                 );
-                if super::super::orchestrator::try_schedule_missing_input_query_autofill_round(
+                match super::super::phase_machine::pause::recover_missing_required_input_payload(
                     command,
                     state,
                     context,
-                    &payload,
                     candidate_context,
+                    readonly_autofill_router,
+                    &payload,
                     "todo",
                     false,
                     "todo",
-                ) {
-                    return Ok(());
-                }
-                if let Some(answers) = super::super::missing_input::maybe_collect_and_apply_answers(
-                    state,
-                    context.input_store_mut(),
-                    questions.as_slice(),
+                    false,
+                    true,
                 )? {
-                    context.clear_previous_error_and_refresh(state, false);
-                    if command.verbose_llm {
-                        eprintln!(
-                            "[agent] todo plan missing_required_input resolved via user answers keys={}",
-                            answers.keys().cloned().collect::<Vec<_>>().join(",")
-                        );
+                    super::super::phase_machine::pause::MissingRequiredInputRecoveryBackflow::RetryScheduled => {
+                        return Ok(());
                     }
-                    super::super::trace::emit(
-                        trace_enabled,
-                        "pause_resolution",
-                        "resolved_by_user_input",
-                        &[("phase_hint", "todo".to_string())],
-                    );
-                    return Ok(());
+                    super::super::phase_machine::pause::MissingRequiredInputRecoveryBackflow::ResolvedByUserInput { answers } => {
+                        context.clear_previous_error_and_refresh(state, false);
+                        if command.verbose_llm {
+                            eprintln!(
+                                "[agent] todo plan missing_required_input resolved via user answers keys={}",
+                                answers.keys().cloned().collect::<Vec<_>>().join(",")
+                            );
+                        }
+                        super::super::trace::emit(
+                            trace_enabled,
+                            "pause_resolution",
+                            "resolved_by_user_input",
+                            &[("phase_hint", "todo".to_string())],
+                        );
+                        return Ok(());
+                    }
+                    super::super::phase_machine::pause::MissingRequiredInputRecoveryBackflow::Paused => {
+                        context.set_previous_error_and_refresh(
+                            state,
+                            false,
+                            super::super::todo_phase_error_payload(
+                                "missing_required_input",
+                                message.as_deref(),
+                                issues.as_slice(),
+                                questions.as_slice(),
+                                context.completed_segments_u8(),
+                            ),
+                        );
+                        super::super::trace::emit(
+                            trace_enabled,
+                            "pause_resolution",
+                            "paused_missing_required_input",
+                            &[("phase_hint", "todo".to_string())],
+                        );
+                        return Ok(());
+                    }
                 }
-                super::super::missing_input::pause_with_payload(state, &payload);
-                context.set_previous_error_and_refresh(
-                    state,
-                    false,
-                    super::super::todo_phase_error_payload(
-                        "missing_required_input",
-                        message.as_deref(),
-                        issues.as_slice(),
-                        questions.as_slice(),
-                        context.completed_segments_u8(),
-                    ),
-                );
-                super::super::trace::emit(
-                    trace_enabled,
-                    "pause_resolution",
-                    "paused_missing_required_input",
-                    &[("phase_hint", "todo".to_string())],
-                );
-                return Ok(());
             }
             context.set_previous_error_and_refresh(
                 state,

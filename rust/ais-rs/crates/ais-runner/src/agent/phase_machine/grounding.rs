@@ -5,7 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const GROUND_INPUT_CONFIDENCE_THRESHOLD: u8 = 80;
 const GROUND_FACT_CONFIDENCE_THRESHOLD: u8 = 65;
-const INPUT_BINDABLE_REFS_SOURCE_PATH: &str = "state_summary.input_registry.known_refs";
+const INPUT_BINDABLE_SOURCE_OF_TRUTH: &str = "state_summary.input_store";
+const INPUT_BINDABLE_REFS_PROJECTION_PATH: &str = "state_summary.input_registry.known_refs";
 
 #[derive(Debug, Default)]
 pub(crate) struct GroundingApplySummary {
@@ -22,6 +23,7 @@ pub(crate) fn bootstrap_intent_grounding_if_needed<P: LlmProvider>(
     state: &mut EngineRunnerState,
     context: &mut SegmentedAgentContext,
     candidate_context: &CandidateContext,
+    readonly_autofill_router: Option<&ais_engine::RouterExecutor>,
     runtime_has_intent_grounding: bool,
 ) -> Result<bool, RunnerError> {
     let trace_enabled = command.verbose || command.verbose_llm;
@@ -44,7 +46,14 @@ pub(crate) fn bootstrap_intent_grounding_if_needed<P: LlmProvider>(
             state_summary: context.state_summary().clone(),
         });
         super::super::orchestrator::refresh_tool_memory_projection(context, planner, state);
-        match handle_grounding_draft(command, state, context, candidate_context, draft_result)? {
+        match handle_grounding_draft(
+            command,
+            state,
+            context,
+            candidate_context,
+            readonly_autofill_router,
+            draft_result,
+        )? {
             GroundingDraftOutcome::Ready(ready) => return Ok(ready),
             GroundingDraftOutcome::RetryAutofill => {
                 if autofill_retry_budget == 0 {
@@ -72,6 +81,7 @@ fn handle_grounding_draft(
     state: &mut EngineRunnerState,
     context: &mut SegmentedAgentContext,
     candidate_context: &CandidateContext,
+    readonly_autofill_router: Option<&ais_engine::RouterExecutor>,
     draft_result: Result<IntentGroundingDraft, RunnerError>,
 ) -> Result<GroundingDraftOutcome, RunnerError> {
     let trace_enabled = command.verbose || command.verbose_llm;
@@ -148,21 +158,33 @@ fn handle_grounding_draft(
                     ],
                 );
             }
-            let answered_questions = if let Some(answers) =
-                super::super::missing_input::maybe_collect_and_apply_answers(
-                    state,
-                    context.input_store_mut(),
-                    questions.as_slice(),
-                )? {
-                answers
-            } else {
-                Map::new()
-            };
-            let remaining_questions = filter_unanswered_questions(
+            let answered_questions = Map::new();
+            let remaining_questions_raw = filter_unanswered_questions(
                 questions.as_slice(),
                 answered_questions.keys().collect::<Vec<_>>().as_slice(),
             );
-            let ready = ready_for_todos && remaining_questions.is_empty();
+            let (query_recoverable_questions, remaining_questions) =
+                super::super::missing_ref_recovery::split_query_recoverable_questions(
+                    candidate_context,
+                    remaining_questions_raw.as_slice(),
+                    2,
+                );
+            if !query_recoverable_questions.is_empty() {
+                super::super::trace::emit(
+                    trace_enabled,
+                    "grounding",
+                    "query_recoverable_questions_filtered",
+                    &[
+                        (
+                            "count",
+                            query_recoverable_questions.len().to_string(),
+                        ),
+                        ("remaining", remaining_questions.len().to_string()),
+                    ],
+                );
+            }
+            let ready = (ready_for_todos && remaining_questions.is_empty())
+                || (!query_recoverable_questions.is_empty() && remaining_questions.is_empty());
             super::super::trace::emit(
                 trace_enabled,
                 "grounding",
@@ -185,6 +207,7 @@ fn handle_grounding_draft(
                     "issues": issues,
                     "questions": remaining_questions,
                     "answers": answered_questions,
+                    "query_recoverable_questions": query_recoverable_questions,
                     "applied": apply_summary.applied,
                     "skipped_low_confidence": apply_summary.skipped_low_confidence,
                     "deterministic_rule_inputs": apply_summary.deterministic_applied,
@@ -203,37 +226,46 @@ fn handle_grounding_draft(
                     &[],
                     context.completed_segments_u8(),
                 );
-                if super::super::orchestrator::try_schedule_missing_input_query_autofill_round(
+                match super::super::phase_machine::pause::recover_missing_required_input_payload(
                     command,
                     state,
                     context,
-                    &payload,
                     candidate_context,
+                    readonly_autofill_router,
+                    &payload,
                     "grounding",
                     false,
                     "grounding",
-                ) {
-                    return Ok(GroundingDraftOutcome::RetryAutofill);
+                    false,
+                    false,
+                )? {
+                    super::super::phase_machine::pause::MissingRequiredInputRecoveryBackflow::RetryScheduled => {
+                        return Ok(GroundingDraftOutcome::RetryAutofill);
+                    }
+                    super::super::phase_machine::pause::MissingRequiredInputRecoveryBackflow::ResolvedByUserInput { .. } => {
+                        return Ok(GroundingDraftOutcome::RetryAutofill);
+                    }
+                    super::super::phase_machine::pause::MissingRequiredInputRecoveryBackflow::Paused => {
+                        context.set_previous_error_and_refresh(
+                            state,
+                            false,
+                            super::super::grounding_phase_error_payload(
+                                "missing_required_input",
+                                Some("intent_grounding_missing_inputs"),
+                                &[],
+                                remaining_questions.as_slice(),
+                                context.completed_segments_u8(),
+                            ),
+                        );
+                        super::super::trace::emit(
+                            trace_enabled,
+                            "pause_resolution",
+                            "paused_missing_required_input",
+                            &[("phase_hint", "grounding".to_string())],
+                        );
+                        return Ok(GroundingDraftOutcome::Ready(false));
+                    }
                 }
-                context.set_previous_error_and_refresh(
-                    state,
-                    false,
-                    super::super::grounding_phase_error_payload(
-                        "missing_required_input",
-                        Some("intent_grounding_missing_inputs"),
-                        &[],
-                        remaining_questions.as_slice(),
-                        context.completed_segments_u8(),
-                    ),
-                );
-                super::super::missing_input::pause_with_payload(state, &payload);
-                super::super::trace::emit(
-                    trace_enabled,
-                    "pause_resolution",
-                    "paused_missing_required_input",
-                    &[("phase_hint", "grounding".to_string())],
-                );
-                return Ok(GroundingDraftOutcome::Ready(false));
             }
             state.paused_reason = None;
             context.clear_previous_error_and_refresh(state, false);
@@ -262,75 +294,77 @@ fn handle_grounding_draft(
                     issues.as_slice(),
                     context.completed_segments_u8(),
                 );
-                if super::super::orchestrator::try_schedule_missing_input_query_autofill_round(
+                match super::super::phase_machine::pause::recover_missing_required_input_payload(
                     command,
                     state,
                     context,
-                    &payload,
                     candidate_context,
+                    readonly_autofill_router,
+                    &payload,
                     "grounding",
                     false,
                     "grounding",
-                ) {
-                    return Ok(GroundingDraftOutcome::RetryAutofill);
-                }
-                if let Some(answers) = super::super::missing_input::maybe_collect_and_apply_answers(
-                    state,
-                    context.input_store_mut(),
-                    questions.as_slice(),
+                    false,
+                    true,
                 )? {
-                    super::super::runtime_store::record_runtime_agent_field(
-                        &mut state.runtime,
-                        "intent_grounding",
-                        json!({
-                            "status":"resolved_by_user_input",
-                            "ready_for_todos": true,
-                            "reason_code": reason_code,
-                            "answers": answers,
-                            "input_binding": grounding_input_binding_metadata(),
-                        }),
-                    );
-                    context.refresh_state_summary(state, false);
-                    super::super::trace::emit(
-                        trace_enabled,
-                        "pause_resolution",
-                        "resolved_by_user_input",
-                        &[("phase_hint", "grounding".to_string())],
-                    );
-                    return Ok(GroundingDraftOutcome::Ready(true));
+                    super::super::phase_machine::pause::MissingRequiredInputRecoveryBackflow::RetryScheduled => {
+                        return Ok(GroundingDraftOutcome::RetryAutofill);
+                    }
+                    super::super::phase_machine::pause::MissingRequiredInputRecoveryBackflow::ResolvedByUserInput { answers } => {
+                        super::super::runtime_store::record_runtime_agent_field(
+                            &mut state.runtime,
+                            "intent_grounding",
+                            json!({
+                                "status":"resolved_by_user_input",
+                                "ready_for_todos": true,
+                                "reason_code": reason_code,
+                                "answers": answers,
+                                "input_binding": grounding_input_binding_metadata(),
+                            }),
+                        );
+                        context.refresh_state_summary(state, false);
+                        super::super::trace::emit(
+                            trace_enabled,
+                            "pause_resolution",
+                            "resolved_by_user_input",
+                            &[("phase_hint", "grounding".to_string())],
+                        );
+                        return Ok(GroundingDraftOutcome::Ready(true));
+                    }
+                    super::super::phase_machine::pause::MissingRequiredInputRecoveryBackflow::Paused => {
+                        super::super::runtime_store::record_runtime_agent_field(
+                            &mut state.runtime,
+                            "intent_grounding",
+                            json!({
+                                "status":"unavailable",
+                                "ready_for_todos": false,
+                                "reason_code": reason_code,
+                                "message": message,
+                                "issues": issues,
+                                "questions": questions,
+                                "input_binding": grounding_input_binding_metadata(),
+                            }),
+                        );
+                        context.set_previous_error_and_refresh(
+                            state,
+                            false,
+                            super::super::grounding_phase_error_payload(
+                                "missing_required_input",
+                                message.as_deref(),
+                                issues.as_slice(),
+                                questions.as_slice(),
+                                context.completed_segments_u8(),
+                            ),
+                        );
+                        super::super::trace::emit(
+                            trace_enabled,
+                            "pause_resolution",
+                            "paused_missing_required_input",
+                            &[("phase_hint", "grounding".to_string())],
+                        );
+                        return Ok(GroundingDraftOutcome::Ready(false));
+                    }
                 }
-                super::super::missing_input::pause_with_payload(state, &payload);
-                super::super::runtime_store::record_runtime_agent_field(
-                    &mut state.runtime,
-                    "intent_grounding",
-                    json!({
-                        "status":"unavailable",
-                        "ready_for_todos": false,
-                        "reason_code": reason_code,
-                        "message": message,
-                        "issues": issues,
-                        "questions": questions,
-                        "input_binding": grounding_input_binding_metadata(),
-                    }),
-                );
-                context.set_previous_error_and_refresh(
-                    state,
-                    false,
-                    super::super::grounding_phase_error_payload(
-                        "missing_required_input",
-                        message.as_deref(),
-                        issues.as_slice(),
-                        questions.as_slice(),
-                        context.completed_segments_u8(),
-                    ),
-                );
-                super::super::trace::emit(
-                    trace_enabled,
-                    "pause_resolution",
-                    "paused_missing_required_input",
-                    &[("phase_hint", "grounding".to_string())],
-                );
-                return Ok(GroundingDraftOutcome::Ready(false));
             }
             context.set_previous_error_and_refresh(
                 state,
@@ -803,7 +837,8 @@ fn filter_unanswered_questions(questions: &[Value], answered_ids: &[&String]) ->
 fn grounding_input_binding_metadata() -> Value {
     json!({
         "bindable_namespace": "inputs",
-        "bindable_refs_source": INPUT_BINDABLE_REFS_SOURCE_PATH,
+        "bindable_refs_source": INPUT_BINDABLE_SOURCE_OF_TRUTH,
+        "bindable_refs_projection": INPUT_BINDABLE_REFS_PROJECTION_PATH,
         "known_refs_only": true,
         "facts_bindable": false,
     })

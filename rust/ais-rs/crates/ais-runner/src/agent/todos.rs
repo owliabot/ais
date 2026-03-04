@@ -194,14 +194,19 @@ impl TodoBoard {
         true
     }
 
-    pub fn replace_from_specs(&mut self, intent: &str, specs: &[TodoSpec]) {
+    pub fn replace_from_specs(&mut self, intent: &str, specs: &[TodoSpec]) -> usize {
         self.todos.clear();
         self.next_seq = 1;
         let mut seen_titles = BTreeSet::<String>::new();
+        let mut rejected_placeholder_tail = 0usize;
         for spec in specs {
             let Some(title) = normalize_summary(Some(spec.title.as_str())) else {
                 continue;
             };
+            if is_placeholder_follow_up_title(title.as_str()) {
+                rejected_placeholder_tail = rejected_placeholder_tail.saturating_add(1);
+                continue;
+            }
             let dedupe_key = title.to_lowercase();
             if !seen_titles.insert(dedupe_key) {
                 continue;
@@ -221,6 +226,7 @@ impl TodoBoard {
                 Vec::new(),
             );
         }
+        rejected_placeholder_tail
     }
 
     pub fn to_runtime_value(&self) -> Value {
@@ -353,6 +359,11 @@ fn initial_title_from_intent(intent: &str) -> String {
         preview.push(character);
     }
     format!("Execute intent: {preview}")
+}
+
+fn is_placeholder_follow_up_title(title: &str) -> bool {
+    let normalized = title.trim().to_ascii_lowercase();
+    normalized.starts_with("continue intent segment ")
 }
 
 fn acceptance_rule_resolved_from_state_summary(state_summary: Option<&Value>, rule: &str) -> bool {

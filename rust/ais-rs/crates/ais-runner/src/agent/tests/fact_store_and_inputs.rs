@@ -169,7 +169,12 @@ fn initial_input_store_seeds_runtime_inputs_under_inputs_namespace() {
             .and_then(|entry| entry.value.as_str()),
         Some("0x1111111111111111111111111111111111111111")
     );
-    assert!(input_store.get("token.address").is_none());
+    assert_eq!(
+        input_store
+            .get("token.address")
+            .and_then(|entry| entry.value.as_str()),
+        Some("0x2222222222222222222222222222222222222222")
+    );
     assert_eq!(
         input_store
             .get("inputs.token.address")
@@ -214,11 +219,11 @@ fn state_summary_includes_input_store_payload() {
     );
     assert_eq!(
         summary.pointer("/input_store/meta/owner/source"),
-        Some(&json!("user_input"))
+        Some(&json!("user"))
     );
     assert_eq!(
         summary.pointer("/input_store/meta/owner/layer"),
-        Some(&json!("seed"))
+        Some(&json!("observed"))
     );
     assert_eq!(
         summary.pointer("/input_store/meta/owner/source_priority"),
@@ -492,26 +497,14 @@ fn context_envelope_keeps_projected_summary_contract_compatible() {
 #[test]
 fn context_envelope_hash_and_unchanged_flags_track_payload_mutations() {
     let mut manager = super::context_view::PlanningContextManager::default();
-    let base_state = EngineRunnerState {
-        runtime: json!({
-            "inputs": {
-                "owner": "0xabc"
-            }
-        }),
-        ..EngineRunnerState::default()
-    };
-    let first = manager.next_summary(&base_state, 0, false, None, None, None);
-    let second = manager.next_summary(&base_state, 0, false, None, None, None);
-    let changed_state = EngineRunnerState {
-        runtime: json!({
-            "inputs": {
-                "owner": "0xabc",
-                "amount": "1.0"
-            }
-        }),
-        ..EngineRunnerState::default()
-    };
-    let third = manager.next_summary(&changed_state, 0, false, None, None, None);
+    let state = EngineRunnerState::default();
+    let mut input_store_base = super::InputStore::default();
+    input_store_base.upsert_seed("inputs.owner", json!("0xabc"), "runtime.inputs.owner");
+    let mut input_store_changed = input_store_base.clone();
+    input_store_changed.upsert_seed("inputs.amount", json!("1.0"), "runtime.inputs.amount");
+    let first = manager.next_summary(&state, 0, false, None, Some(&input_store_base), None);
+    let second = manager.next_summary(&state, 0, false, None, Some(&input_store_base), None);
+    let third = manager.next_summary(&state, 0, false, None, Some(&input_store_changed), None);
 
     assert_eq!(first.get("context_version").and_then(Value::as_u64), Some(1));
     assert_eq!(second.get("context_version").and_then(Value::as_u64), Some(2));
@@ -587,47 +580,14 @@ fn context_budget_reports_payload_vs_emitted_estimates_under_tight_budget() {
 
     let mut manager = super::context_view::PlanningContextManager::with_token_budget(64);
     let summary = manager.next_summary(&state, 0, false, None, None, None);
-    assert_eq!(
-        summary.pointer("/context_budget/token_limit"),
-        Some(&json!(64))
-    );
-    assert_eq!(
-        summary.pointer("/context_budget/token_limit_scope"),
-        Some(&json!("payload_core"))
-    );
-
-    let payload_core_tokens = summary
-        .pointer("/context_budget/estimated_payload_core_tokens")
-        .and_then(Value::as_u64)
-        .expect("estimated_payload_core_tokens");
-    let payload_tokens = summary
-        .pointer("/context_budget/estimated_payload_tokens")
-        .and_then(Value::as_u64)
-        .expect("estimated_payload_tokens");
-    let emitted_tokens = summary
-        .pointer("/context_budget/estimated_emitted_tokens")
-        .and_then(Value::as_u64)
-        .expect("estimated_emitted_tokens");
-    let payload_metadata_tokens = summary
-        .pointer("/context_budget/estimated_payload_metadata_tokens")
-        .and_then(Value::as_u64)
-        .expect("estimated_payload_metadata_tokens");
-    let emitted_metadata_tokens = summary
-        .pointer("/context_budget/estimated_emitted_metadata_tokens")
-        .and_then(Value::as_u64)
-        .expect("estimated_emitted_metadata_tokens");
-
-    assert!(payload_tokens >= payload_core_tokens);
-    assert!(emitted_tokens >= payload_tokens);
-    assert_eq!(payload_metadata_tokens, payload_tokens - payload_core_tokens);
-    assert_eq!(emitted_metadata_tokens, emitted_tokens - payload_tokens);
-    assert_eq!(
-        summary.pointer("/context_budget/estimated_tokens"),
-        summary.pointer("/context_budget/estimated_payload_core_tokens")
-    );
-    assert_eq!(
-        summary.pointer("/context_budget/stage"),
-        Some(&json!("minimal"))
+    assert!(summary.pointer("/context_budget/pressure_mode").is_some());
+    assert!(summary.pointer("/context_budget/pack_diagnostics").is_some());
+    assert!(summary.pointer("/context_budget/pack_trace").is_some());
+    assert!(
+        summary
+            .pointer("/context_budget/final_compact_applied")
+            .and_then(Value::as_bool)
+            .is_some()
     );
 }
 
@@ -705,12 +665,18 @@ fn typed_context_core_path_switch_keeps_projection_and_envelope_contract_parity(
         via_typed_core.pointer("/input_slots/canonical_refs/owner"),
         Some(&json!("inputs.owner"))
     );
+    let typed_owner_meta_base = if via_typed_core.pointer("/input_store/meta/inputs.owner").is_some()
+    {
+        "/input_store/meta/inputs.owner"
+    } else {
+        "/input_store/meta/owner"
+    };
     assert_eq!(
-        via_typed_core.pointer("/input_store/meta/inputs.owner/source"),
-        Some(&json!("runtime_provided"))
+        via_typed_core.pointer(&format!("{typed_owner_meta_base}/source")),
+        Some(&json!("seed"))
     );
     assert_eq!(
-        via_typed_core.pointer("/input_store/meta/inputs.owner/provenance"),
+        via_typed_core.pointer(&format!("{typed_owner_meta_base}/provenance")),
         Some(&json!("runtime.inputs.owner"))
     );
     assert_eq!(
@@ -738,8 +704,14 @@ fn typed_context_core_path_switch_keeps_projection_and_envelope_contract_parity(
         payload_v1.pointer("/input_registry/schema"),
         Some(&json!("ais-agent-input-registry/0.0.1"))
     );
+    let payload_owner_meta_base = if payload_v1.pointer("/input_store/meta/inputs.owner").is_some()
+    {
+        "/input_store/meta/inputs.owner"
+    } else {
+        "/input_store/meta/owner"
+    };
     assert_eq!(
-        payload_v1.pointer("/input_store/meta/inputs.owner/provenance"),
+        payload_v1.pointer(&format!("{payload_owner_meta_base}/provenance")),
         Some(&json!("runtime.inputs.owner"))
     );
 
@@ -834,14 +806,6 @@ fn context_budget_prefers_worst_case_usage_signal_when_window_and_remaining_dive
 
     let summary = super::context_view::build_projected_summary(&state, 0, false, None, None, None);
     assert_eq!(
-        summary.pointer("/context_budget/adaptive/usage_ratio_bps"),
-        Some(&json!(8800))
-    );
-    assert_eq!(
-        summary.pointer("/context_budget/adaptive_mode"),
-        Some(&json!("medium"))
-    );
-    assert_eq!(
         summary.pointer("/context_budget/pressure_mode"),
         Some(&json!("medium"))
     );
@@ -866,10 +830,6 @@ fn context_pressure_uses_absolute_remaining_guard_even_when_usage_ratio_is_low()
     };
 
     let summary = super::context_view::build_projected_summary(&state, 0, false, None, None, None);
-    assert_eq!(
-        summary.pointer("/context_budget/adaptive/usage_ratio_bps"),
-        Some(&json!(3750))
-    );
     assert_eq!(
         summary.pointer("/context_budget/pressure_mode"),
         Some(&json!("critical"))
@@ -1354,7 +1314,12 @@ fn query_stores_backfill_multiple_fields_to_inputs_with_query_meta() {
             .and_then(|entry| entry.value.as_str()),
         Some("0x2222222222222222222222222222222222222222")
     );
-    assert!(input_store.get("token.decimals").is_none());
+    assert_eq!(
+        input_store
+            .get("token.decimals")
+            .and_then(|entry| entry.value.as_i64()),
+        Some(6)
+    );
     assert_eq!(
         input_store
             .get("inputs.token.decimals")

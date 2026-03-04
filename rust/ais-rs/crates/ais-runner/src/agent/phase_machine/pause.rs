@@ -16,6 +16,13 @@ pub(crate) enum MissingRequiredInputBackflow {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) enum MissingRequiredInputRecoveryBackflow {
+    RetryScheduled,
+    ResolvedByUserInput { answers: Map<String, Value> },
+    Paused,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) enum ResolvePauseBackflow {
     MissingRequiredInputResolved { answers: Map<String, Value> },
     MissingRequiredInputPaused,
@@ -42,10 +49,11 @@ pub(crate) fn resolve_missing_required_input_payload(
     payload: &Value,
     record_payload_before_collect: bool,
 ) -> Result<MissingRequiredInputBackflow, RunnerError> {
+    let normalized_payload = super::super::missing_input::normalize_missing_required_input_payload(payload);
     if record_payload_before_collect {
-        super::super::missing_input::record(&mut state.runtime, payload);
+        super::super::missing_input::record(&mut state.runtime, &normalized_payload);
     }
-    let questions = payload
+    let questions = normalized_payload
         .get("questions")
         .and_then(Value::as_array)
         .cloned()
@@ -54,13 +62,217 @@ pub(crate) fn resolve_missing_required_input_payload(
         state,
         fact_store,
         questions.as_slice(),
+        &normalized_payload,
     )? {
         super::super::missing_input::mark_consumed(&mut state.runtime);
         state.paused_reason = None;
         return Ok(MissingRequiredInputBackflow::ResolvedByUserInput { answers });
     }
-    super::super::missing_input::pause_with_payload(state, payload);
+    super::super::missing_input::pause_with_payload(state, &normalized_payload);
     Ok(MissingRequiredInputBackflow::Paused)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn recover_missing_required_input_payload(
+    command: &AgentCommand,
+    state: &mut EngineRunnerState,
+    context: &mut super::super::orchestrator::SegmentedAgentContext,
+    candidate_context: &CandidateContext,
+    readonly_autofill_router: Option<&ais_engine::RouterExecutor>,
+    payload: &Value,
+    scope_id: &str,
+    done: bool,
+    phase_hint: &'static str,
+    record_payload_before_collect: bool,
+    collect_user_answers: bool,
+) -> Result<MissingRequiredInputRecoveryBackflow, RunnerError> {
+    let normalized_payload = super::super::missing_input::normalize_missing_required_input_payload(payload);
+    let recovery_outcome = super::super::orchestrator::recover_missing_refs(
+        command,
+        state,
+        context,
+        &normalized_payload,
+        candidate_context,
+        readonly_autofill_router,
+        scope_id,
+        done,
+        phase_hint,
+    )
+    ;
+    if recovery_outcome.should_retry_round() {
+        return Ok(MissingRequiredInputRecoveryBackflow::RetryScheduled);
+    }
+    let gated_payload =
+        recovery_payload_from_outcome(&normalized_payload, &recovery_outcome, phase_hint, scope_id);
+    if !can_prompt_user_missing_input(&gated_payload) {
+        super::super::missing_input::pause_with_payload(state, &gated_payload);
+        return Ok(MissingRequiredInputRecoveryBackflow::Paused);
+    }
+    if !collect_user_answers {
+        if record_payload_before_collect {
+            super::super::missing_input::record(&mut state.runtime, &gated_payload);
+        }
+        super::super::missing_input::pause_with_payload(state, &gated_payload);
+        return Ok(MissingRequiredInputRecoveryBackflow::Paused);
+    }
+    match resolve_missing_required_input_payload(
+        state,
+        context.input_store_mut(),
+        &gated_payload,
+        record_payload_before_collect,
+    )? {
+        MissingRequiredInputBackflow::ResolvedByUserInput { answers } => Ok(
+            MissingRequiredInputRecoveryBackflow::ResolvedByUserInput { answers },
+        ),
+        MissingRequiredInputBackflow::Paused => Ok(MissingRequiredInputRecoveryBackflow::Paused),
+    }
+}
+
+pub(crate) fn can_prompt_user_missing_input(payload: &Value) -> bool {
+    let reason = payload
+        .pointer("/recovery/reason")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    if reason.is_empty() {
+        return false;
+    }
+    let status = payload
+        .pointer("/recovery/status")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let allowed_status = matches!(
+        status,
+        "need_user_input" | "exhausted_unavailable" | "compile_autofill_exhausted"
+    );
+    if !allowed_status {
+        return false;
+    }
+    let missing_refs = payload
+        .pointer("/recovery/missing_refs")
+        .and_then(Value::as_array)
+        .map(|items| !items.is_empty())
+        .unwrap_or(false);
+    let unresolved_refs = payload
+        .pointer("/recovery_exhaustion/unresolved_refs")
+        .and_then(Value::as_array)
+        .map(|items| !items.is_empty())
+        .unwrap_or(false);
+    let reasons = payload
+        .pointer("/recovery_exhaustion/reasons")
+        .and_then(Value::as_array)
+        .map(|items| !items.is_empty())
+        .unwrap_or(false);
+    let attempt_trace_id = payload
+        .pointer("/recovery_exhaustion/attempt_trace_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
+    let questions = payload
+        .get("questions")
+        .and_then(Value::as_array)
+        .map(|items| !items.is_empty())
+        .unwrap_or(false);
+    (missing_refs || questions || unresolved_refs) && reasons && attempt_trace_id
+}
+
+pub(crate) fn attach_missing_input_recovery(
+    payload: &Value,
+    status: &str,
+    reason: &str,
+    source: &str,
+    phase_hint: &str,
+    scope_id: &str,
+    missing_refs: &[String],
+) -> Value {
+    let recovery_exhaustion = build_recovery_exhaustion_payload(
+        status,
+        reason,
+        source,
+        phase_hint,
+        scope_id,
+        missing_refs,
+    );
+    let mut out = payload.clone();
+    if let Some(object) = out.as_object_mut() {
+        object.insert(
+            "recovery".to_string(),
+            serde_json::json!({
+                "status": status,
+                "reason": reason,
+                "source": source,
+                "missing_refs": missing_refs,
+                "reasons": recovery_exhaustion.get("reasons").cloned().unwrap_or(Value::Array(Vec::new())),
+                "attempt_trace_id": recovery_exhaustion.get("attempt_trace_id").cloned().unwrap_or(Value::String(String::new())),
+            }),
+        );
+        object.insert("recovery_exhaustion".to_string(), recovery_exhaustion);
+    }
+    out
+}
+
+fn build_recovery_exhaustion_payload(
+    status: &str,
+    reason: &str,
+    source: &str,
+    phase_hint: &str,
+    scope_id: &str,
+    missing_refs: &[String],
+) -> Value {
+    let reason_text = reason.trim();
+    let reasons = if reason_text.is_empty() {
+        vec!["recovery_exhausted".to_string()]
+    } else {
+        vec![reason_text.to_string()]
+    };
+    let scope = scope_id.trim();
+    let phase = phase_hint.trim();
+    let attempt_trace_id = format!(
+        "{source}:{phase}:{scope}:{status}",
+        phase = if phase.is_empty() { "unknown_phase" } else { phase },
+        scope = if scope.is_empty() { "unknown_scope" } else { scope },
+    );
+    serde_json::json!({
+        "unresolved_refs": missing_refs,
+        "reasons": reasons,
+        "attempt_trace_id": attempt_trace_id,
+    })
+}
+
+fn recovery_payload_from_outcome(
+    payload: &Value,
+    outcome: &super::super::missing_ref_recovery::RecoveryOutcome,
+    phase_hint: &str,
+    scope_id: &str,
+) -> Value {
+    match outcome {
+        super::super::missing_ref_recovery::RecoveryOutcome::NeedUserInput {
+            missing_refs,
+            reason,
+        } => attach_missing_input_recovery(
+            payload,
+            "need_user_input",
+            reason,
+            "missing_ref_recovery",
+            phase_hint,
+            scope_id,
+            missing_refs,
+        ),
+        super::super::missing_ref_recovery::RecoveryOutcome::ExhaustedUnavailable {
+            missing_refs,
+            reason,
+        } => attach_missing_input_recovery(
+            payload,
+            "exhausted_unavailable",
+            reason,
+            "missing_ref_recovery",
+            phase_hint,
+            scope_id,
+            missing_refs,
+        ),
+        super::super::missing_ref_recovery::RecoveryOutcome::Recovered
+        | super::super::missing_ref_recovery::RecoveryOutcome::RetryScheduled => payload.clone(),
+    }
 }
 
 pub(crate) fn resolve_execution_pause_backflow(
@@ -157,7 +369,7 @@ fn runtime_missing_required_input_payload(
     if reason_code != "missing_required_input" {
         return None;
     }
-    Some(payload)
+    Some(super::super::missing_input::normalize_missing_required_input_payload(&payload))
 }
 
 #[cfg(test)]

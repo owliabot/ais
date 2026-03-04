@@ -101,7 +101,8 @@ fn planner_context_budget_resolution_prefers_cli_then_config_then_default() {
             fallback: vec![],
             max_retries_per_provider: None,
             rotation: RunnerLlmRotationMode::StickyPrimary,
-            prompts_dir: None,
+            controller_prompts_dir: None,
+            operator_templates_dir: None,
             planner_context_token_budget: Some(7000),
             max_tool_rounds: None,
             context_limit_tokens: None,
@@ -166,7 +167,8 @@ fn segmented_max_tool_rounds_resolution_prefers_cli_then_config_then_default() {
             fallback: vec![],
             max_retries_per_provider: None,
             rotation: RunnerLlmRotationMode::StickyPrimary,
-            prompts_dir: None,
+            controller_prompts_dir: None,
+            operator_templates_dir: None,
             planner_context_token_budget: None,
             max_tool_rounds: Some(18),
             context_limit_tokens: None,
@@ -191,4 +193,3 @@ fn segmented_max_tool_rounds_resolution_prefers_cli_then_config_then_default() {
         super::intent_segmented::DEFAULT_SEGMENTED_MAX_TOOL_ROUNDS
     );
 }
-

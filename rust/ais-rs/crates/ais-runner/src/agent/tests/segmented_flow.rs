@@ -314,13 +314,44 @@ fn write_compile_write_gate_missing_then_revise_missing_input_script() -> PathBu
                         "details":{
                             "questions":[
                                 {"id":"recipient","question":"recipient profile?"}
-                            ]
+                            ],
+                            "recovery_exhaustion":{
+                                "unresolved_refs":["recipient"],
+                                "reasons":["host_recovery_exhausted"],
+                                "attempt_trace_id":"trace-compile-autofill-1"
+                            }
                         }
                     }
                 }
             }]
         }))
         .expect("script line 5"),
+        serde_json::to_string(&json!({
+            "assistant_content":"revise after adjudicate fallback",
+            "tool_calls":[{
+                "id":"tool-revise-2",
+                "name":"plan.revise_segment",
+                "arguments":{
+                    "status":"unavailable",
+                    "done":false,
+                    "error":{
+                        "reason_code":"missing_required_input",
+                        "message":"still missing recipient profile",
+                        "details":{
+                            "questions":[
+                                {"id":"recipient","question":"recipient profile?"}
+                            ],
+                            "recovery_exhaustion":{
+                                "unresolved_refs":["recipient"],
+                                "reasons":["host_recovery_exhausted"],
+                                "attempt_trace_id":"trace-compile-autofill-2"
+                            }
+                        }
+                    }
+                }
+            }]
+        }))
+        .expect("script line 6"),
     ]
     .join("\n");
     write_temp_file(
@@ -560,6 +591,54 @@ fn write_compile_write_gate_missing_retry_bounded_script() -> PathBuf {
             ]
         }))
         .expect("script line 5"),
+        serde_json::to_string(&json!({
+            "assistant_content":"revise fallback to missing input pause",
+            "tool_calls":[{
+                "id":"tool-revise-final",
+                "name":"plan.revise_segment",
+                "arguments":{
+                    "status":"unavailable",
+                    "done":false,
+                    "error":{
+                        "reason_code":"missing_required_input",
+                        "message":"token decimals is still unresolved",
+                        "details":{
+                            "questions":[{"id":"token.decimals","question":"Provide token decimals"}],
+                            "recovery_exhaustion":{
+                                "unresolved_refs":["token.decimals"],
+                                "reasons":["host_recovery_exhausted"],
+                                "attempt_trace_id":"trace-compile-bounded-1"
+                            }
+                        }
+                    }
+                }
+            }]
+        }))
+        .expect("script line 6"),
+        serde_json::to_string(&json!({
+            "assistant_content":"revise fallback after adjudicate",
+            "tool_calls":[{
+                "id":"tool-revise-final-2",
+                "name":"plan.revise_segment",
+                "arguments":{
+                    "status":"unavailable",
+                    "done":false,
+                    "error":{
+                        "reason_code":"missing_required_input",
+                        "message":"token decimals is still unresolved",
+                        "details":{
+                            "questions":[{"id":"token.decimals","question":"Provide token decimals"}],
+                            "recovery_exhaustion":{
+                                "unresolved_refs":["token.decimals"],
+                                "reasons":["host_recovery_exhausted"],
+                                "attempt_trace_id":"trace-compile-bounded-2"
+                            }
+                        }
+                    }
+                }
+            }]
+        }))
+        .expect("script line 7"),
     ]
     .join("\n");
     write_temp_file(
@@ -635,17 +714,55 @@ fn write_missing_required_input_script() -> PathBuf {
                                         "question":"token decimals?",
                                         "options":[{"label":"18","value":18}]
                                     }
-                                ]
+                                ],
+                                "recovery_exhaustion":{
+                                    "unresolved_refs":["token.decimals"],
+                                    "reasons":["host_recovery_exhausted"],
+                                    "attempt_trace_id":"trace-missing-input-1"
+                                }
                             }
                         }
                     }
                 }
             ]
         }))
-        .expect("script line 4")]
+        .expect("script line 4"),
+        serde_json::to_string(&json!({
+            "assistant_content":"need more input after adjudicate",
+            "tool_calls":[
+                {
+                    "id":"tool-propose-2",
+                    "name":"plan.revise_segment",
+                    "arguments":{
+                        "status":"unavailable",
+                        "done":false,
+                        "error":{
+                            "reason_code":"missing_required_input",
+                            "message":"missing token decimals",
+                            "details":{
+                                "questions":[
+                                    {
+                                        "id":"token.decimals",
+                                        "question":"token decimals?",
+                                        "options":[{"label":"18","value":18}]
+                                    }
+                                ],
+                                "recovery_exhaustion":{
+                                    "unresolved_refs":["token.decimals"],
+                                    "reasons":["host_recovery_exhausted"],
+                                    "attempt_trace_id":"trace-missing-input-2"
+                                }
+                            }
+                        }
+                    }
+                }
+            ]
+        }))
+        .expect("script line 5")]
     .join("\n");
     write_temp_file("agent-segmented-missing-input-script", llm_script.as_str())
 }
+
 
 fn write_missing_required_object_input_script() -> PathBuf {
     let llm_script = [serde_json::to_string(&json!({
@@ -717,14 +834,54 @@ fn write_missing_required_object_input_script() -> PathBuf {
                                             "value":{"address":"0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266","chain_ref":"eip155:31338"}
                                         }]
                                     }
-                                ]
+                                ],
+                                "recovery_exhaustion":{
+                                    "unresolved_refs":["recipient.profile"],
+                                    "reasons":["host_recovery_exhausted"],
+                                    "attempt_trace_id":"trace-missing-object-1"
+                                }
                             }
                         }
                     }
                 }
             ]
         }))
-        .expect("script line 4")]
+        .expect("script line 4"),
+        serde_json::to_string(&json!({
+            "assistant_content":"need more input after adjudicate",
+            "tool_calls":[
+                {
+                    "id":"tool-propose-2",
+                    "name":"plan.revise_segment",
+                    "arguments":{
+                        "status":"unavailable",
+                        "done":false,
+                        "error":{
+                            "reason_code":"missing_required_input",
+                            "message":"missing recipient profile",
+                            "details":{
+                                "questions":[
+                                    {
+                                        "id":"recipient.profile",
+                                        "question":"recipient profile?",
+                                        "options":[{
+                                            "label":"ops wallet",
+                                            "value":{"address":"0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266","chain_ref":"eip155:31338"}
+                                        }]
+                                    }
+                                ],
+                                "recovery_exhaustion":{
+                                    "unresolved_refs":["recipient.profile"],
+                                    "reasons":["host_recovery_exhausted"],
+                                    "attempt_trace_id":"trace-missing-object-2"
+                                }
+                            }
+                        }
+                    }
+                }
+            ]
+        }))
+        .expect("script line 5")]
     .join("\n");
     write_temp_file(
         "agent-segmented-missing-object-input-script",
@@ -831,7 +988,7 @@ fn execute_agent_segmented_missing_required_input_pauses_instead_of_failing() {
             .pointer("/llm_usage/calls")
             .and_then(Value::as_u64)
             .is_some_and(|calls| calls >= 4),
-        "missing-input pause flow should include begin/ground/todos/propose calls: {parsed}"
+        "missing-input pause flow should include begin/ground/todos/propose and optional adjudicate calls: {parsed}"
     );
 }
 
@@ -855,7 +1012,7 @@ fn execute_agent_segmented_missing_required_object_input_keeps_same_pause_contra
             .pointer("/llm_usage/calls")
             .and_then(Value::as_u64)
             .is_some_and(|calls| calls >= 4),
-        "missing-input pause flow should include begin/ground/todos/propose calls: {parsed}"
+        "missing-input pause flow should include begin/ground/todos/propose and optional adjudicate calls: {parsed}"
     );
 
     let checkpoint_text = fs::read_to_string(checkpoint_path).expect("checkpoint file");
@@ -866,7 +1023,7 @@ fn execute_agent_segmented_missing_required_object_input_keeps_same_pause_contra
     );
     assert_eq!(
         checkpoint.pointer("/runtime_snapshot/agent/missing_required_input/questions/0/id"),
-        Some(&json!("recipient.profile"))
+        Some(&json!("inputs.recipient.profile"))
     );
     assert_eq!(
         checkpoint.pointer("/runtime_snapshot/agent/missing_required_input/questions/0/question"),
@@ -912,7 +1069,7 @@ fn compile_autofill_retry_is_bounded_to_single_revise_round() {
     );
     assert_eq!(
         parsed.pointer("/llm_usage/diagnostics/phase_round_count/revise_segment"),
-        Some(&json!(1))
+        Some(&json!(3))
     );
 }
 

@@ -129,6 +129,14 @@ impl SegmentedAgentContext {
         self.completed_segments as u8
     }
 
+    pub(super) fn has_compile_autofill_attempt(&self, key: &str) -> bool {
+        self.compile_autofill_attempted_todos.contains(key)
+    }
+
+    pub(super) fn mark_compile_autofill_attempt(&mut self, key: impl Into<String>) {
+        self.compile_autofill_attempted_todos.insert(key.into());
+    }
+
     pub(super) fn input_store_mut(&mut self) -> &mut InputStore {
         &mut self.input_store
     }
@@ -307,6 +315,7 @@ fn execute_segmented_intent_agent_main(
 
     let initial_router = build_router_executor_for_plan(&active_plan, config)
         .map_err(RunnerError::ConfigInvalidForPlan)?;
+    let readonly_autofill_router = crate::config::build_router_executor(config).ok();
     if resumed_from_checkpoint {
         if let Some(paused_reason) = super::reconcile_pending_side_effects(
             &mut checkpoint_ledger,
@@ -365,6 +374,15 @@ fn execute_segmented_intent_agent_main(
     let mut total_events = 0usize;
     let mut total_iterations = 0usize;
     let mut command_builder = CommandBuilder::new(run_id.as_str());
+    let resumed_command_max = command_builder.set_next_index_from_seen_ids(&state.seen_command_ids);
+    if resumed_from_checkpoint && (command.verbose || command.verbose_llm) {
+        eprintln!(
+            "[checkpoint] command_id_resume mode=continue run_id={} seen_ids={} max_suffix={}",
+            run_id,
+            state.seen_command_ids.len(),
+            resumed_command_max
+        );
+    }
     let trace_enabled = command.verbose || command.verbose_llm;
     let planner_round_limit = command
         .max_planner_rounds
@@ -406,6 +424,7 @@ fn execute_segmented_intent_agent_main(
             &mut state,
             &mut context,
             &candidate_context,
+            readonly_autofill_router.as_ref(),
             reuse_runtime_grounding,
         ) {
             Ok(value) => value,
@@ -533,6 +552,7 @@ fn execute_segmented_intent_agent_main(
         &mut state,
         &mut context,
         &candidate_context,
+        readonly_autofill_router.as_ref(),
         runtime_has_todo_progress,
     ) {
         if command.verbose {
@@ -617,6 +637,50 @@ fn execute_segmented_intent_agent_main(
                     .to_string(),
             )],
         );
+        let current_todo_id = context
+            .todo_board
+            .current_todo_id()
+            .ok_or_else(|| RunnerError::Llm("todo board has no current todo".to_string()))?
+            .to_string();
+        if context.previous_error.is_none() {
+            let precheck_refs =
+                precheck_missing_input_refs_for_current_todo(&context, context.state_summary().as_ref());
+            if !precheck_refs.is_empty() {
+                super::trace::emit(
+                    trace_enabled,
+                    "plan_precheck",
+                    "missing_refs_detected",
+                    &[
+                        ("todo_id", current_todo_id.clone()),
+                        ("missing_refs", precheck_refs.join(",")),
+                    ],
+                );
+                let precheck_payload = precheck_missing_input_payload(
+                    precheck_refs.as_slice(),
+                    context.completed_segments as u8,
+                );
+                let recovery_outcome = recover_missing_refs(
+                    command,
+                    &mut state,
+                    &mut context,
+                    &precheck_payload,
+                    &candidate_context,
+                    readonly_autofill_router.as_ref(),
+                    current_todo_id.as_str(),
+                    false,
+                    "plan_precheck",
+                );
+                if recovery_outcome.should_retry_round() {
+                    super::trace::emit(
+                        trace_enabled,
+                        "plan_precheck",
+                        "recovery_retry_scheduled",
+                        &[("todo_id", current_todo_id.clone())],
+                    );
+                    continue;
+                }
+            }
+        }
 
         let draft = match plan_round(&mut planner, &state, &mut context) {
             Ok(draft) => draft,
@@ -648,11 +712,6 @@ fn execute_segmented_intent_agent_main(
                 ));
             }
         };
-        let current_todo_id = context
-            .todo_board
-            .current_todo_id()
-            .ok_or_else(|| RunnerError::Llm("todo board has no current todo".to_string()))?
-            .to_string();
         let planned_segment = match draft {
             SegmentDraft::Proposed {
                 summary,
@@ -703,27 +762,23 @@ fn execute_segmented_intent_agent_main(
                         issues.as_slice(),
                         context.completed_segments as u8,
                     );
-                    if try_schedule_missing_input_query_autofill_round(
+                    match super::phase_machine::pause::recover_missing_required_input_payload(
                         command,
                         &mut state,
                         &mut context,
-                        &payload,
                         &candidate_context,
+                        readonly_autofill_router.as_ref(),
+                        &payload,
                         current_todo_id.as_str(),
                         done,
                         "plan_round",
-                    ) {
-                        continue;
-                    }
-                    match super::phase_machine::pause::resolve_missing_required_input_payload(
-                        &mut state,
-                        context.input_store_mut(),
-                        &payload,
                         false,
+                        true,
                     )? {
-                        super::phase_machine::pause::MissingRequiredInputBackflow::ResolvedByUserInput {
-                            answers,
-                        } => {
+                        super::phase_machine::pause::MissingRequiredInputRecoveryBackflow::RetryScheduled => {
+                            continue;
+                        }
+                        super::phase_machine::pause::MissingRequiredInputRecoveryBackflow::ResolvedByUserInput { answers } => {
                             context.todo_board.mark_current_todo();
                             super::runtime_store::record_todo_progress(
                                 &mut state.runtime,
@@ -762,7 +817,7 @@ fn execute_segmented_intent_agent_main(
                             );
                             continue;
                         }
-                        super::phase_machine::pause::MissingRequiredInputBackflow::Paused => {
+                        super::phase_machine::pause::MissingRequiredInputRecoveryBackflow::Paused => {
                             context
                                 .todo_board
                                 .mark_current_blocked("missing_required_input");
@@ -879,10 +934,35 @@ fn execute_segmented_intent_agent_main(
                     ) {
                         continue;
                     }
+                    let prompt_payload = compile_missing_input_prompt_payload(&state, &payload);
+                    if !super::phase_machine::pause::can_prompt_user_missing_input(&prompt_payload)
+                    {
+                        super::missing_input::pause_with_payload(&mut state, &prompt_payload);
+                        context
+                            .todo_board
+                            .mark_current_blocked("missing_required_input");
+                        super::runtime_store::record_todo_progress(
+                            &mut state.runtime,
+                            &context.todo_board,
+                        );
+                        super::checkpoint_flow::checkpoint_round(
+                            command,
+                            run_id.as_str(),
+                            &active_plan_hash,
+                            &active_plan,
+                            &state,
+                            &checkpoint_ledger,
+                            planner.planning_memory_checkpoint_value(),
+                            &context.input_store,
+                            &context.checkpoint_extensions,
+                        )?;
+                        context.final_status = EngineRunStatus::Paused;
+                        break;
+                    }
                     match super::phase_machine::pause::resolve_missing_required_input_payload(
                         &mut state,
                         context.input_store_mut(),
-                        &payload,
+                        &prompt_payload,
                         false,
                     )? {
                         super::phase_machine::pause::MissingRequiredInputBackflow::ResolvedByUserInput {
@@ -967,6 +1047,48 @@ fn execute_segmented_intent_agent_main(
                 continue;
             }
         };
+        let execution_precheck_refs = collect_segment_missing_input_refs(
+            &planned_segment.segment,
+            &context.input_store,
+        );
+        if !execution_precheck_refs.is_empty() {
+            super::trace::emit(
+                trace_enabled,
+                "execute_precheck",
+                "missing_refs_detected",
+                &[
+                    ("todo_id", planned_segment.todo_id.clone()),
+                    ("segment_id", planned_segment.segment.segment_id.clone()),
+                    ("missing_refs", execution_precheck_refs.join(",")),
+                ],
+            );
+            let payload = precheck_missing_input_payload(
+                execution_precheck_refs.as_slice(),
+                context.completed_segments as u8,
+            );
+            let recovery_outcome = recover_missing_refs(
+                command,
+                &mut state,
+                &mut context,
+                &payload,
+                &candidate_context,
+                readonly_autofill_router.as_ref(),
+                planned_segment.todo_id.as_str(),
+                planned_segment.done,
+                "execute_precheck",
+            );
+            if recovery_outcome.should_retry_round() {
+                super::trace::emit(
+                    trace_enabled,
+                    "execute_precheck",
+                    "recovery_retry_scheduled",
+                    &[("todo_id", planned_segment.todo_id.clone())],
+                );
+                continue;
+            }
+            context.set_previous_error_and_refresh(&state, planned_segment.done, payload);
+            continue;
+        }
 
         phase_tracker.transition_to(AgentPhase::ExecuteSegment, "execute_round");
         super::trace::emit(
@@ -1060,42 +1182,109 @@ fn execute_segmented_intent_agent_main(
                         pause_round,
                     )
                 {
-                    if try_schedule_missing_input_query_autofill_round(
+                    match super::phase_machine::pause::recover_missing_required_input_payload(
                         command,
                         &mut state,
                         &mut context,
-                        &payload,
                         &candidate_context,
+                        readonly_autofill_router.as_ref(),
+                        &payload,
                         planned_segment.todo_id.as_str(),
                         planned_segment.done,
                         "pause_resolution",
-                    ) {
-                        context.todo_board.mark_current_todo();
-                        super::runtime_store::record_todo_progress(
-                            &mut state.runtime,
-                            &context.todo_board,
-                        );
-                        super::checkpoint_flow::checkpoint_round(
-                            command,
-                            run_id.as_str(),
-                            &active_plan_hash,
-                            &active_plan,
-                            &state,
-                            &checkpoint_ledger,
-                            planner.planning_memory_checkpoint_value(),
-                            &context.input_store,
-                            &context.checkpoint_extensions,
-                        )?;
-                        super::trace::emit(
-                            trace_enabled,
-                            "pause_resolution",
-                            "autofill_scheduled",
-                            &[
-                                ("todo_id", planned_segment.todo_id.clone()),
-                                ("segment_id", planned_segment.segment.segment_id.clone()),
-                            ],
-                        );
-                        continue;
+                        true,
+                        true,
+                    )? {
+                        super::phase_machine::pause::MissingRequiredInputRecoveryBackflow::RetryScheduled => {
+                            context.todo_board.mark_current_todo();
+                            super::runtime_store::record_todo_progress(
+                                &mut state.runtime,
+                                &context.todo_board,
+                            );
+                            super::checkpoint_flow::checkpoint_round(
+                                command,
+                                run_id.as_str(),
+                                &active_plan_hash,
+                                &active_plan,
+                                &state,
+                                &checkpoint_ledger,
+                                planner.planning_memory_checkpoint_value(),
+                                &context.input_store,
+                                &context.checkpoint_extensions,
+                            )?;
+                            super::trace::emit(
+                                trace_enabled,
+                                "pause_resolution",
+                                "autofill_scheduled",
+                                &[
+                                    ("todo_id", planned_segment.todo_id.clone()),
+                                    ("segment_id", planned_segment.segment.segment_id.clone()),
+                                ],
+                            );
+                            continue;
+                        }
+                        super::phase_machine::pause::MissingRequiredInputRecoveryBackflow::ResolvedByUserInput { answers } => {
+                            context.todo_board.mark_current_todo();
+                            super::runtime_store::record_todo_progress(
+                                &mut state.runtime,
+                                &context.todo_board,
+                            );
+                            context.set_previous_error_and_refresh(
+                                &state,
+                                planned_segment.done,
+                                super::missing_input::resolved_payload(
+                                    &answers,
+                                    context.completed_segments as u8,
+                                ),
+                            );
+                            super::checkpoint_flow::checkpoint_round(
+                                command,
+                                run_id.as_str(),
+                                &active_plan_hash,
+                                &active_plan,
+                                &state,
+                                &checkpoint_ledger,
+                                planner.planning_memory_checkpoint_value(),
+                                &context.input_store,
+                                &context.checkpoint_extensions,
+                            )?;
+                            if command.verbose {
+                                eprintln!(
+                                    "[agent] execution missing_required_input resolved via user answers keys={}",
+                                    answers.keys().cloned().collect::<Vec<_>>().join(",")
+                                );
+                            }
+                            super::trace::emit(
+                                trace_enabled,
+                                "pause_resolution",
+                                "resolved_by_user_input",
+                                &[
+                                    ("todo_id", planned_segment.todo_id.clone()),
+                                    ("segment_id", planned_segment.segment.segment_id.clone()),
+                                ],
+                            );
+                            continue;
+                        }
+                        super::phase_machine::pause::MissingRequiredInputRecoveryBackflow::Paused => {
+                            context
+                                .todo_board
+                                .mark_current_blocked("missing_required_input");
+                            super::runtime_store::record_todo_progress(
+                                &mut state.runtime,
+                                &context.todo_board,
+                            );
+                            super::trace::emit(
+                                trace_enabled,
+                                "pause_resolution",
+                                "paused_missing_required_input",
+                                &[
+                                    ("todo_id", planned_segment.todo_id.clone()),
+                                    ("segment_id", planned_segment.segment.segment_id.clone()),
+                                ],
+                            );
+                            context.final_status = EngineRunStatus::Paused;
+                            break;
+                        }
                     }
                 }
                 match super::phase_machine::pause::resolve_execution_pause_backflow(
@@ -1260,6 +1449,11 @@ fn record_planner_llm_usage<P>(
         "llm_usage",
         planner.llm_usage_value(),
     );
+    super::runtime_store::record_runtime_agent_field(
+        &mut state.runtime,
+        "tool_lifecycle",
+        planner.tool_lifecycle_value(),
+    );
 }
 
 pub(super) fn refresh_tool_memory_projection<P>(
@@ -1347,6 +1541,7 @@ fn bootstrap_todos_if_needed<P: LlmProvider>(
     state: &mut EngineRunnerState,
     context: &mut SegmentedAgentContext,
     candidate_context: &CandidateContext,
+    readonly_autofill_router: Option<&ais_engine::RouterExecutor>,
     runtime_has_todo_progress: bool,
 ) -> Result<(), RunnerError> {
     super::phase_machine::todo::bootstrap_todos_if_needed(
@@ -1355,6 +1550,7 @@ fn bootstrap_todos_if_needed<P: LlmProvider>(
         state,
         context,
         candidate_context,
+        readonly_autofill_router,
         runtime_has_todo_progress,
     )
 }
@@ -1365,6 +1561,7 @@ fn bootstrap_intent_grounding_if_needed<P: LlmProvider>(
     state: &mut EngineRunnerState,
     context: &mut SegmentedAgentContext,
     candidate_context: &CandidateContext,
+    readonly_autofill_router: Option<&ais_engine::RouterExecutor>,
     runtime_has_intent_grounding: bool,
 ) -> Result<bool, RunnerError> {
     super::phase_machine::grounding::bootstrap_intent_grounding_if_needed(
@@ -1373,6 +1570,7 @@ fn bootstrap_intent_grounding_if_needed<P: LlmProvider>(
         state,
         context,
         candidate_context,
+        readonly_autofill_router,
         runtime_has_intent_grounding,
     )
 }
@@ -1560,6 +1758,34 @@ fn compile_error_missing_required_input_payload(error_payload: &Value, round: u8
     ))
 }
 
+fn compile_missing_input_prompt_payload(state: &EngineRunnerState, payload: &Value) -> Value {
+    let status = state
+        .runtime
+        .pointer("/agent/compile_autofill/status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let reason = state
+        .runtime
+        .pointer("/agent/compile_autofill/reason")
+        .and_then(Value::as_str)
+        .unwrap_or("compile_autofill_unknown");
+    let missing_refs = super::missing_ref_recovery::missing_required_input_refs(payload);
+    let recovery_status = if status == "unresolved" {
+        "compile_autofill_exhausted"
+    } else {
+        "need_user_input"
+    };
+    super::phase_machine::pause::attach_missing_input_recovery(
+        payload,
+        recovery_status,
+        reason,
+        "compile_autofill",
+        "compile_autofill",
+        "compile",
+        missing_refs.as_slice(),
+    )
+}
+
 fn is_write_gate_missing_input_issue(issue: &Value, kind: &str) -> bool {
     if kind != "write_gate_missing" {
         return false;
@@ -1602,190 +1828,70 @@ fn advance_todo_after_execute_completion(
     planner_done || acceptance_complete
 }
 
-pub(crate) fn try_schedule_missing_input_query_autofill_round(
+fn precheck_missing_input_refs_for_current_todo(
+    context: &SegmentedAgentContext,
+    state_summary: Option<&Value>,
+) -> Vec<String> {
+    let Some(current_todo) = context.todo_board.current() else {
+        return Vec::new();
+    };
+    let mut refs = BTreeSet::<String>::new();
+    for fact in &current_todo.required_facts {
+        let Some(slot) = super::input_normalize::normalize_missing_input_ref(fact) else {
+            continue;
+        };
+        let canonical_ref = format!("inputs.{slot}");
+        if !runtime_has_input_ref(state_summary, canonical_ref.as_str()) {
+            refs.insert(canonical_ref);
+        }
+    }
+    refs.into_iter().collect::<Vec<_>>()
+}
+
+fn precheck_missing_input_payload(missing_refs: &[String], round: u8) -> Value {
+    let questions = missing_refs
+        .iter()
+        .map(|reference| {
+            serde_json::json!({
+                "id": reference,
+                "question": format!("Provide `{reference}`"),
+                "required": true,
+                "options": [],
+            })
+        })
+        .collect::<Vec<_>>();
+    super::missing_input::payload_with_context(
+        Some("todo precheck missing required inputs"),
+        questions.as_slice(),
+        &[],
+        missing_refs,
+        missing_refs,
+        round,
+    )
+}
+
+pub(super) fn recover_missing_refs(
     command: &AgentCommand,
     state: &mut EngineRunnerState,
     context: &mut SegmentedAgentContext,
     missing_input_payload: &Value,
     candidate_context: &CandidateContext,
+    readonly_autofill_router: Option<&ais_engine::RouterExecutor>,
     scope_id: &str,
     done: bool,
     phase_hint: &'static str,
-) -> bool {
-    let trace_enabled = command.verbose || command.verbose_llm;
-    let has_query_option = payload_has_query_option(missing_input_payload);
-    let mut missing_refs = missing_required_input_refs(missing_input_payload);
-    if missing_refs.is_empty() {
-        missing_refs = payload_question_input_refs(missing_input_payload);
-    }
-    let static_resolved = apply_static_missing_ref_refill(
+) -> super::missing_ref_recovery::RecoveryOutcome {
+    super::missing_ref_recovery::recover_missing_refs(
+        command,
         state,
         context,
-        missing_refs.as_slice(),
-        phase_hint,
-        scope_id,
-    );
-    missing_refs = missing_refs
-        .into_iter()
-        .filter(|path| !runtime_has_input_ref(context.state_summary.as_ref(), path))
-        .collect::<Vec<_>>();
-    if !static_resolved.is_empty() {
-        let mut previous_error = missing_input_payload.clone();
-        if let Some(object) = previous_error.as_object_mut() {
-            object.insert(
-                "autofill".to_string(),
-                serde_json::json!({
-                    "mode": "host_static_refill_round",
-                    "phase_hint": phase_hint,
-                    "scope_id": scope_id,
-                    "resolved_refs": static_resolved,
-                    "unresolved_refs": missing_refs.clone(),
-                }),
-            );
-        }
-        context.set_previous_error_and_refresh(state, done, previous_error);
-        super::runtime_store::record_runtime_agent_field(
-            &mut state.runtime,
-            "missing_ref_refill",
-            serde_json::json!({
-                "status": if missing_refs.is_empty() { "resolved" } else { "resolved_partial" },
-                "phase_hint": phase_hint,
-                "scope_id": scope_id,
-                "resolved_refs": static_resolved,
-                "unresolved_refs": missing_refs.clone(),
-                "attempt": "static_intent_config",
-            }),
-        );
-        super::trace::emit(
-            trace_enabled,
-            phase_hint,
-            "autofill_attempt_resolved",
-            &[
-                ("scope_id", scope_id.to_string()),
-                ("selected_query_refs", "static_refill".to_string()),
-            ],
-        );
-        return true;
-    }
-    if !has_query_option || missing_refs.is_empty() {
-        emit_missing_input_autofill_unresolved(
-            trace_enabled,
-            state,
-            phase_hint,
-            scope_id,
-            missing_refs.as_slice(),
-            if !has_query_option {
-                "no_query_option"
-            } else {
-                "already_resolved"
-            },
-        );
-        return false;
-    }
-    super::trace::emit(
-        trace_enabled,
-        phase_hint,
-        "autofill_attempt_start",
-        &[
-            ("scope_id", scope_id.to_string()),
-            ("missing_refs", missing_refs.join(",")),
-        ],
-    );
-
-    let retry_key = format!("{phase_hint}:{scope_id}");
-    if context
-        .compile_autofill_attempted_todos
-        .contains(retry_key.as_str())
-    {
-        emit_missing_input_autofill_unresolved(
-            trace_enabled,
-            state,
-            phase_hint,
-            scope_id,
-            missing_refs.as_slice(),
-            "retry_limited",
-        );
-        return false;
-    }
-
-    let resolution = super::intent_segmented::resolve_missing_facts_for_refs(
+        missing_input_payload,
         candidate_context,
-        missing_refs.as_slice(),
-        3,
-    );
-    let selected_query_refs = selected_query_refs_from_missing_resolution(&resolution);
-    if selected_query_refs.is_empty() {
-        emit_missing_input_autofill_unresolved(
-            trace_enabled,
-            state,
-            phase_hint,
-            scope_id,
-            missing_refs.as_slice(),
-            "no_query_candidates",
-        );
-        return false;
-    }
-    context.compile_autofill_attempted_todos.insert(retry_key);
-    let resolver_unresolved_refs = resolution
-        .get("unresolved_refs")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let mut previous_error = missing_input_payload.clone();
-    if let Some(object) = previous_error.as_object_mut() {
-        object.insert(
-            "autofill".to_string(),
-            serde_json::json!({
-                "mode": "host_missing_input_round",
-                "phase_hint": phase_hint,
-                "scope_id": scope_id,
-                "missing_refs": missing_refs,
-                "selected_query_refs": selected_query_refs,
-                "resolver_unresolved_refs": resolver_unresolved_refs,
-                "resolver": resolution,
-            }),
-        );
-    }
-    context.set_previous_error_and_refresh(state, done, previous_error);
-    super::runtime_store::record_runtime_agent_field(
-        &mut state.runtime,
-        "missing_input_autofill",
-        serde_json::json!({
-            "status": "scheduled",
-            "phase_hint": phase_hint,
-            "scope_id": scope_id,
-            "missing_refs": missing_required_input_refs(missing_input_payload),
-            "selected_query_refs": selected_query_refs,
-        }),
-    );
-    super::runtime_store::record_runtime_agent_field(
-        &mut state.runtime,
-        "missing_ref_refill",
-        serde_json::json!({
-            "status": "scheduled",
-            "phase_hint": phase_hint,
-            "scope_id": scope_id,
-            "attempt": "dynamic_query",
-            "missing_refs": missing_refs,
-            "selected_query_refs": selected_query_refs,
-        }),
-    );
-    super::trace::emit(
-        trace_enabled,
+        readonly_autofill_router,
+        scope_id,
+        done,
         phase_hint,
-        "autofill_attempt_resolved",
-        &[
-            ("scope_id", scope_id.to_string()),
-            ("selected_query_refs", selected_query_refs.join(",")),
-        ],
-    );
-    true
+    )
 }
 
 fn try_schedule_compile_autofill_round(
@@ -1800,8 +1906,9 @@ fn try_schedule_compile_autofill_round(
 ) -> bool {
     let trace_enabled = command.verbose || command.verbose_llm;
     emit_unknown_input_ref_repair_suggested(trace_enabled, compile_error_payload, todo_id);
-    let initial_missing_refs = missing_required_input_refs(missing_input_payload);
-    let static_resolved = apply_static_missing_ref_refill(
+    let initial_missing_refs =
+        super::missing_ref_recovery::missing_required_input_refs(missing_input_payload);
+    let static_outcome = apply_static_missing_ref_refill(
         state,
         context,
         initial_missing_refs.as_slice(),
@@ -1812,7 +1919,72 @@ fn try_schedule_compile_autofill_round(
         .into_iter()
         .filter(|path| !runtime_has_input_ref(context.state_summary.as_ref(), path))
         .collect::<Vec<_>>();
-    if !static_resolved.is_empty() {
+    let ambiguous_bindings = static_outcome
+        .ambiguous_bindings
+        .iter()
+        .filter(|item| {
+            missing_refs
+                .iter()
+                .any(|missing| missing == &item.missing_ref)
+        })
+        .map(|item| {
+            serde_json::json!({
+                "missing_ref": item.missing_ref,
+                "candidate_refs": item.candidate_refs,
+            })
+        })
+        .collect::<Vec<_>>();
+    let adjudicate_retry_key = format!("binding_adjudicate:compile:{todo_id}");
+    if !ambiguous_bindings.is_empty()
+        && !context
+            .compile_autofill_attempted_todos
+            .contains(adjudicate_retry_key.as_str())
+    {
+        context
+            .compile_autofill_attempted_todos
+            .insert(adjudicate_retry_key);
+        let mut previous_error = super::compile_error_state_payload(
+            compile_error_payload,
+            context.completed_segments_u8(),
+        );
+        if let Some(object) = previous_error.as_object_mut() {
+            object.insert(
+                "autofill".to_string(),
+                serde_json::json!({
+                    "mode": "host_binding_adjudicate_round",
+                    "todo_id": todo_id,
+                    "resolved_refs": static_outcome.resolved_refs.clone(),
+                    "unresolved_refs": missing_refs.clone(),
+                    "ambiguous_bindings": ambiguous_bindings,
+                    "available_input_refs": available_input_ref_catalog(context.state_summary.as_ref()),
+                    "query_candidate_pool": [],
+                }),
+            );
+        }
+        context.set_previous_error_and_refresh(state, done, previous_error);
+        super::runtime_store::record_runtime_agent_field(
+            &mut state.runtime,
+            "missing_ref_refill",
+            serde_json::json!({
+                "status": "adjudicate_scheduled",
+                "todo_id": todo_id,
+                "attempt": "llm_binding_adjudicate",
+                "resolved_refs": static_outcome.resolved_refs.clone(),
+                "unresolved_refs": missing_refs.clone(),
+            }),
+        );
+        super::trace::emit(
+            trace_enabled,
+            "compile_autofill",
+            "autofill_attempt_resolved",
+            &[
+                ("todo_id", todo_id.to_string()),
+                ("selected_query_refs", "llm_binding_adjudicate".to_string()),
+            ],
+        );
+        return true;
+    }
+    if !static_outcome.resolved_refs.is_empty() {
         let mut previous_error = super::compile_error_state_payload(
             compile_error_payload,
             context.completed_segments_u8(),
@@ -1823,7 +1995,7 @@ fn try_schedule_compile_autofill_round(
                 serde_json::json!({
                     "mode": "host_static_refill_round",
                     "todo_id": todo_id,
-                    "resolved_refs": static_resolved,
+                    "resolved_refs": static_outcome.resolved_refs.clone(),
                     "unresolved_refs": missing_refs.clone(),
                 }),
             );
@@ -1836,7 +2008,7 @@ fn try_schedule_compile_autofill_round(
                 "status": if missing_refs.is_empty() { "resolved" } else { "resolved_partial" },
                 "todo_id": todo_id,
                 "attempt": "static_intent_config",
-                "resolved_refs": static_resolved,
+                "resolved_refs": static_outcome.resolved_refs.clone(),
                 "unresolved_refs": missing_refs.clone(),
             }),
         );
@@ -1856,6 +2028,24 @@ fn try_schedule_compile_autofill_round(
         ],
     );
     if context.compile_autofill_attempted_todos.contains(todo_id) {
+        if compile_error_has_unknown_input_ref(compile_error_payload) {
+            super::trace::emit(
+                trace_enabled,
+                "compile_autofill",
+                "unknown_ref_repair_exhausted",
+                &[("todo_id", todo_id.to_string())],
+            );
+            super::runtime_store::record_runtime_agent_field(
+                &mut state.runtime,
+                "unknown_ref_repair",
+                serde_json::json!({
+                    "status": "exhausted",
+                    "reason_code": "unknown_input_ref_exhausted",
+                    "todo_id": todo_id,
+                    "missing_refs": missing_refs,
+                }),
+            );
+        }
         emit_compile_autofill_unresolved(
             trace_enabled,
             state,
@@ -1871,8 +2061,60 @@ fn try_schedule_compile_autofill_round(
         missing_refs.as_slice(),
         3,
     );
-    let selected_query_refs = selected_query_refs_from_missing_resolution(&resolution);
+    let selected_query_refs =
+        super::missing_ref_recovery::selected_query_refs_from_missing_resolution(&resolution);
     if selected_query_refs.is_empty() {
+        let available_input_refs = available_input_ref_catalog(context.state_summary.as_ref());
+        if !context
+            .compile_autofill_attempted_todos
+            .contains(adjudicate_retry_key.as_str())
+        {
+            context
+                .compile_autofill_attempted_todos
+                .insert(adjudicate_retry_key);
+            let mut previous_error = super::compile_error_state_payload(
+                compile_error_payload,
+                context.completed_segments_u8(),
+            );
+            if let Some(object) = previous_error.as_object_mut() {
+                object.insert(
+                    "autofill".to_string(),
+                    serde_json::json!({
+                        "mode": "host_binding_adjudicate_round",
+                        "todo_id": todo_id,
+                        "resolved_refs": static_outcome.resolved_refs.clone(),
+                        "unresolved_refs": missing_refs.clone(),
+                        "ambiguous_bindings": [],
+                        "available_input_refs": available_input_refs,
+                        "query_candidate_pool": super::missing_ref_recovery::query_candidate_pool_from_missing_resolution(&resolution),
+                        "resolver": resolution,
+                    }),
+                );
+            }
+            context.set_previous_error_and_refresh(state, done, previous_error);
+            super::runtime_store::record_runtime_agent_field(
+                &mut state.runtime,
+                "missing_ref_refill",
+                serde_json::json!({
+                    "status": "adjudicate_scheduled",
+                    "todo_id": todo_id,
+                    "attempt": "llm_binding_adjudicate",
+                    "resolved_refs": static_outcome.resolved_refs.clone(),
+                    "unresolved_refs": missing_refs.clone(),
+                    "reason": "no_query_candidates",
+                }),
+            );
+            super::trace::emit(
+                trace_enabled,
+                "compile_autofill",
+                "autofill_attempt_resolved",
+                &[
+                    ("todo_id", todo_id.to_string()),
+                    ("selected_query_refs", "llm_binding_adjudicate".to_string()),
+                ],
+            );
+            return true;
+        }
         emit_compile_autofill_unresolved(
             trace_enabled,
             state,
@@ -1919,7 +2161,7 @@ fn try_schedule_compile_autofill_round(
         serde_json::json!({
             "status": "scheduled",
             "todo_id": todo_id,
-            "missing_refs": missing_required_input_refs(missing_input_payload),
+            "missing_refs": super::missing_ref_recovery::missing_required_input_refs(missing_input_payload),
             "selected_query_refs": selected_query_refs,
         }),
     );
@@ -1944,6 +2186,15 @@ fn try_schedule_compile_autofill_round(
         ],
     );
     true
+}
+
+fn compile_error_has_unknown_input_ref(payload: &Value) -> bool {
+    payload
+        .get("issues")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flat_map(|issues| issues.iter())
+        .any(|issue| issue.get("reference").and_then(Value::as_str) == Some("unknown_input_ref"))
 }
 
 #[derive(Debug, Clone)]
@@ -2193,130 +2444,90 @@ fn emit_unknown_input_ref_repair_suggested(
     }
 }
 
-fn selected_query_refs_from_missing_resolution(resolution_payload: &Value) -> Vec<String> {
-    let mut refs = BTreeSet::<String>::new();
-    for query_ref in resolution_payload
-        .get("resolved")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flat_map(|items| items.iter())
-        .filter_map(|item| {
-            item.get("query_candidates")
-                .and_then(Value::as_array)
-                .and_then(|items| items.first())
-                .and_then(|candidate| candidate.get("query_ref"))
+pub(super) fn available_input_ref_catalog(state_summary: Option<&Value>) -> Vec<Value> {
+    let mut refs = Vec::<Value>::new();
+    let Some(summary) = state_summary else {
+        return refs;
+    };
+    let mut seen = BTreeSet::<String>::new();
+    let meta_map = summary
+        .pointer("/input_store/meta")
+        .and_then(Value::as_object);
+    let facts = summary
+        .pointer("/input_store/facts")
+        .and_then(Value::as_object);
+
+    // Bindable refs are sourced from InputStore projection only.
+    for raw_ref in super::known_input_refs_from_state_summary(Some(summary)) {
+        let slot = raw_ref.strip_prefix("inputs.").unwrap_or(raw_ref.as_str());
+        let value = facts.and_then(|map| {
+            map.get(slot)
+                .or_else(|| map.get(raw_ref.as_str()))
+                .or_else(|| value_at_dotted_path_object(map, slot))
+        });
+        let meta = meta_map.and_then(|entries| {
+            entries
+                .get(slot)
+                .or_else(|| entries.get(raw_ref.as_str()))
+                .or_else(|| value_at_dotted_path_object(entries, slot))
+        });
+        refs.push(serde_json::json!({
+            "ref": raw_ref,
+            "has_value": value.is_some(),
+            "value_type": value.map(infer_binding_value_type).unwrap_or("unknown"),
+            "source_priority": meta
+                .and_then(|item| item.get("source_priority"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            "source": meta
+                .and_then(|item| item.get("source"))
                 .and_then(Value::as_str)
-        })
-    {
-        refs.insert(query_ref.to_string());
+                .unwrap_or("unknown"),
+        }));
+        seen.insert(format!("inputs.{slot}"));
     }
-    refs.into_iter().collect::<Vec<_>>()
+    refs
 }
 
-fn payload_has_query_option(payload: &Value) -> bool {
-    payload
-        .get("questions")
-        .and_then(Value::as_array)
-        .is_some_and(|questions| {
-            questions
-                .iter()
-                .filter_map(|question| question.get("options").and_then(Value::as_array))
-                .flatten()
-                .any(option_has_query_hint)
-        })
-}
-
-fn option_has_query_hint(option: &Value) -> bool {
-    option
-        .get("label")
-        .and_then(Value::as_str)
-        .is_some_and(query_hint)
-        || option.get("value").is_some_and(value_has_query_hint)
-}
-
-fn value_has_query_hint(value: &Value) -> bool {
+fn infer_binding_value_type(value: &Value) -> &'static str {
     match value {
-        Value::String(raw) => query_hint(raw),
-        Value::Object(object) => object.values().any(value_has_query_hint),
-        Value::Array(items) => items.iter().any(value_has_query_hint),
-        _ => false,
-    }
-}
-
-fn query_hint(raw: &str) -> bool {
-    raw.trim().to_ascii_lowercase().contains("query")
-}
-
-fn payload_question_input_refs(payload: &Value) -> Vec<String> {
-    let mut refs = BTreeSet::<String>::new();
-    for question_id in payload
-        .get("questions")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flat_map(|items| items.iter())
-        .filter_map(|question| question.get("id").and_then(Value::as_str))
-    {
-        collect_missing_input_ref(question_id, None, &mut refs);
-    }
-    refs.into_iter().collect::<Vec<_>>()
-}
-
-fn missing_required_input_refs(payload: &Value) -> Vec<String> {
-    let mut refs = BTreeSet::<String>::new();
-    for raw in payload
-        .get("missing_refs")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flat_map(|items| items.iter())
-    {
-        if let Some(raw_ref) = raw.as_str() {
-            collect_missing_input_ref(raw_ref, Some(raw), &mut refs);
-            continue;
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "numeric",
+        Value::String(text) => {
+            let trimmed = text.trim();
+            if trimmed.starts_with("eip155:") {
+                "chain"
+            } else if trimmed.len() == 42
+                && trimmed.starts_with("0x")
+                && trimmed
+                    .as_bytes()
+                    .iter()
+                    .skip(2)
+                    .all(|byte| byte.is_ascii_hexdigit())
+            {
+                "address"
+            } else {
+                "text"
+            }
         }
-        let reference = raw
-            .get("ref")
-            .or_else(|| raw.get("missing_ref"))
-            .or_else(|| raw.get("path"))
-            .and_then(Value::as_str);
-        if let Some(reference) = reference {
-            collect_missing_input_ref(reference, Some(raw), &mut refs);
-        }
+        _ => "unknown",
     }
-    refs.into_iter().collect::<Vec<_>>()
 }
 
-fn emit_missing_input_autofill_unresolved(
-    trace_enabled: bool,
-    state: &mut EngineRunnerState,
-    phase_hint: &str,
-    scope_id: &str,
-    missing_refs: &[String],
-    reason: &str,
-) {
-    super::runtime_store::record_runtime_agent_field(
-        &mut state.runtime,
-        "missing_input_autofill",
-        serde_json::json!({
-            "status": "unresolved",
-            "phase_hint": phase_hint,
-            "scope_id": scope_id,
-            "missing_refs": missing_refs,
-            "reason": reason,
-        }),
-    );
-    super::trace::emit(
-        trace_enabled,
-        phase_hint,
-        "autofill_attempt_unresolved",
-        &[
-            ("scope_id", scope_id.to_string()),
-            ("missing_refs", missing_refs.join(",")),
-            ("reason", reason.to_string()),
-        ],
-    );
+fn value_at_dotted_path_object<'a>(
+    map: &'a serde_json::Map<String, Value>,
+    dotted: &str,
+) -> Option<&'a Value> {
+    let mut segments = dotted.split('.').filter(|part| !part.is_empty());
+    let first = segments.next()?;
+    let mut current = map.get(first)?;
+    for segment in segments {
+        current = current.get(segment)?;
+    }
+    Some(current)
 }
 
-fn runtime_has_input_ref(state_summary: Option<&Value>, input_ref: &str) -> bool {
+pub(super) fn runtime_has_input_ref(state_summary: Option<&Value>, input_ref: &str) -> bool {
     let Some(canonical_slot) = super::input_normalize::normalize_input_slot_key(input_ref) else {
         return false;
     };
@@ -2345,15 +2556,28 @@ fn runtime_has_input_ref(state_summary: Option<&Value>, input_ref: &str) -> bool
             .is_some()
 }
 
-fn apply_static_missing_ref_refill(
+#[derive(Debug, Clone, Default)]
+pub(super) struct StaticRefillOutcome {
+    pub(super) resolved_refs: Vec<String>,
+    pub(super) ambiguous_bindings: Vec<AmbiguousBinding>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct AmbiguousBinding {
+    pub(super) missing_ref: String,
+    pub(super) candidate_refs: Vec<String>,
+}
+
+pub(super) fn apply_static_missing_ref_refill(
     state: &mut EngineRunnerState,
     context: &mut SegmentedAgentContext,
     missing_refs: &[String],
     phase_hint: &str,
     scope_id: &str,
-) -> Vec<String> {
+) -> StaticRefillOutcome {
     let summary_snapshot = context.state_summary.clone();
     let mut resolved = BTreeSet::<String>::new();
+    let mut ambiguous = Vec::<AmbiguousBinding>::new();
     for raw_ref in missing_refs {
         let Some(slot) = super::input_normalize::normalize_input_slot_key(raw_ref) else {
             continue;
@@ -2363,35 +2587,50 @@ fn apply_static_missing_ref_refill(
             resolved.insert(canonical_ref);
             continue;
         }
-        let Some(value) = resolve_static_input_value(summary_snapshot.as_ref(), slot.as_str())
-        else {
-            continue;
-        };
-        let provenance = format!("autofill.static.{phase_hint}.{scope_id}.{slot}");
-        super::input_normalize::set_runtime_input_value(
-            &mut state.runtime,
-            slot.as_str(),
-            value.clone(),
-        );
-        let _ = super::upsert_store_value_with_source(
-            context.input_store_mut(),
-            slot.as_str(),
-            value,
-            super::input_store::InputValueLayer::Derived,
-            "autofill_static",
-            85,
-            provenance,
-        );
-        resolved.insert(canonical_ref);
+        match resolve_static_input_binding(summary_snapshot.as_ref(), slot.as_str()) {
+            StaticInputBindingDecision::Resolved(value) => {
+                let provenance = format!("autofill.static.{phase_hint}.{scope_id}.{slot}");
+                super::input_normalize::set_runtime_input_value(
+                    &mut state.runtime,
+                    slot.as_str(),
+                    value.clone(),
+                );
+                let _ = super::upsert_store_value_with_source(
+                    context.input_store_mut(),
+                    slot.as_str(),
+                    value,
+                    super::input_store::InputValueLayer::Derived,
+                    "autofill_static",
+                    85,
+                    provenance,
+                );
+                resolved.insert(canonical_ref);
+            }
+            StaticInputBindingDecision::Ambiguous(candidate_refs) => {
+                ambiguous.push(AmbiguousBinding {
+                    missing_ref: canonical_ref,
+                    candidate_refs,
+                });
+            }
+            StaticInputBindingDecision::Unresolved => {}
+        }
     }
     if !resolved.is_empty() {
         context.refresh_state_summary(state, false);
     }
-    resolved.into_iter().collect::<Vec<_>>()
+    StaticRefillOutcome {
+        resolved_refs: resolved.into_iter().collect::<Vec<_>>(),
+        ambiguous_bindings: ambiguous,
+    }
 }
 
-fn resolve_static_input_value(state_summary: Option<&Value>, slot: &str) -> Option<Value> {
-    let summary = state_summary?;
+fn resolve_static_input_binding(
+    state_summary: Option<&Value>,
+    slot: &str,
+) -> StaticInputBindingDecision {
+    let Some(summary) = state_summary else {
+        return StaticInputBindingDecision::Unresolved;
+    };
     let mut candidates = vec![slot.to_string()];
     for alias in static_alias_slots(slot) {
         if !candidates.contains(&alias) {
@@ -2410,7 +2649,7 @@ fn resolve_static_input_value(state_summary: Option<&Value>, slot: &str) -> Opti
             .cloned()
             .map(|value| unwrap_input_value(&value))
         {
-            return Some(value);
+            return StaticInputBindingDecision::Resolved(value);
         }
         if let Some(value) = summary
             .pointer("/intent_context/facts")
@@ -2423,7 +2662,7 @@ fn resolve_static_input_value(state_summary: Option<&Value>, slot: &str) -> Opti
             .cloned()
             .map(|value| unwrap_input_value(&value))
         {
-            return Some(value);
+            return StaticInputBindingDecision::Resolved(value);
         }
         if let Some(value) = summary
             .pointer("/intent_slots/resolved_inputs")
@@ -2432,10 +2671,380 @@ fn resolve_static_input_value(state_summary: Option<&Value>, slot: &str) -> Opti
             .cloned()
             .map(|value| unwrap_input_value(&value))
         {
-            return Some(value);
+            return StaticInputBindingDecision::Resolved(value);
         }
     }
-    None
+    resolve_static_input_value_by_semantic_match(summary, slot)
+}
+
+pub(super) fn resolve_static_input_value_for_slot(
+    state_summary: Option<&Value>,
+    slot: &str,
+) -> Option<Value> {
+    match resolve_static_input_binding(state_summary, slot) {
+        StaticInputBindingDecision::Resolved(value) => Some(value),
+        StaticInputBindingDecision::Ambiguous(_) | StaticInputBindingDecision::Unresolved => None,
+    }
+}
+
+enum StaticInputBindingDecision {
+    Resolved(Value),
+    Ambiguous(Vec<String>),
+    Unresolved,
+}
+
+fn resolve_static_input_value_by_semantic_match(
+    summary: &Value,
+    slot: &str,
+) -> StaticInputBindingDecision {
+    let Some(requirement) = TypedBindingRequirement::from_slot(slot) else {
+        return StaticInputBindingDecision::Unresolved;
+    };
+    let mut scored = typed_binding_candidates(summary)
+        .into_iter()
+        .filter_map(|candidate| {
+            score_typed_binding_candidate(&requirement, &candidate).map(|score| (score, candidate))
+        })
+        .collect::<Vec<_>>();
+    if scored.is_empty() {
+        return StaticInputBindingDecision::Unresolved;
+    }
+    scored.sort_by(|left, right| right.0.cmp(&left.0));
+    let Some((best_score, best_candidate)) = scored.first() else {
+        return StaticInputBindingDecision::Unresolved;
+    };
+    if *best_score < 50 {
+        return StaticInputBindingDecision::Unresolved;
+    }
+    let second_score = scored.get(1).map(|item| item.0).unwrap_or_default();
+    let confident = *best_score >= 180 || best_score.saturating_sub(second_score) >= 15;
+    if confident {
+        return StaticInputBindingDecision::Resolved(best_candidate.value.clone());
+    }
+    let candidate_refs = scored
+        .iter()
+        .take(3)
+        .map(|(_, candidate)| canonicalize_binding_candidate_ref(candidate.key.as_str()))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if candidate_refs.len() < 2 {
+        return StaticInputBindingDecision::Unresolved;
+    }
+    StaticInputBindingDecision::Ambiguous(candidate_refs)
+}
+
+fn canonicalize_binding_candidate_ref(raw_key: &str) -> String {
+    if let Some(slot) = super::input_normalize::normalize_input_slot_key(raw_key) {
+        return format!("inputs.{slot}");
+    }
+    raw_key.to_string()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BindingValueType {
+    Address,
+    Boolean,
+    Numeric,
+    Chain,
+    Text,
+    Unknown,
+}
+
+#[derive(Debug, Clone)]
+struct TypedBindingRequirement {
+    normalized_slot: String,
+    tokens: Vec<String>,
+    expected_type: BindingValueType,
+}
+
+impl TypedBindingRequirement {
+    fn from_slot(slot: &str) -> Option<Self> {
+        let tokens = semantic_tokens(slot);
+        if tokens.is_empty() {
+            return None;
+        }
+        Some(Self {
+            normalized_slot: normalize_semantic_key(slot),
+            expected_type: infer_slot_type(slot, tokens.as_slice()),
+            tokens,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TypedBindingCandidate {
+    key: String,
+    normalized_key: String,
+    tokens: Vec<String>,
+    value: Value,
+    value_type: BindingValueType,
+    source_priority: u16,
+}
+
+fn typed_binding_candidates(summary: &Value) -> Vec<TypedBindingCandidate> {
+    let mut candidates = Vec::<TypedBindingCandidate>::new();
+    if let Some(facts) = summary
+        .pointer("/input_store/facts")
+        .and_then(Value::as_object)
+    {
+        let meta_map = summary
+            .pointer("/input_store/meta")
+            .and_then(Value::as_object);
+        for (key, value) in facts {
+            let source_priority = meta_map
+                .and_then(|meta| meta.get(key.as_str()))
+                .and_then(|entry| entry.get("source_priority"))
+                .and_then(Value::as_u64)
+                .unwrap_or(60)
+                .min(u16::MAX as u64) as u16;
+            push_typed_binding_candidate(
+                &mut candidates,
+                key.as_str(),
+                unwrap_input_value(value),
+                source_priority,
+            );
+        }
+    }
+    if let Some(facts) = summary
+        .pointer("/intent_context/facts")
+        .and_then(Value::as_object)
+    {
+        for (key, value) in facts {
+            push_typed_binding_candidate(
+                &mut candidates,
+                key.as_str(),
+                unwrap_input_value(value),
+                55,
+            );
+        }
+    }
+    if let Some(facts) = summary
+        .pointer("/intent_slots/resolved_inputs")
+        .and_then(Value::as_object)
+    {
+        for (key, value) in facts {
+            let source_priority = value
+                .get("confidence")
+                .and_then(Value::as_u64)
+                .map(|confidence| 50 + confidence.min(50))
+                .unwrap_or(50)
+                .min(u16::MAX as u64) as u16;
+            push_typed_binding_candidate(
+                &mut candidates,
+                key.as_str(),
+                unwrap_input_value(value),
+                source_priority,
+            );
+        }
+    }
+    candidates
+}
+
+fn push_typed_binding_candidate(
+    candidates: &mut Vec<TypedBindingCandidate>,
+    key: &str,
+    value: Value,
+    source_priority: u16,
+) {
+    let tokens = semantic_tokens(key);
+    if tokens.is_empty() {
+        return;
+    }
+    candidates.push(TypedBindingCandidate {
+        key: key.to_string(),
+        normalized_key: normalize_semantic_key(key),
+        value_type: infer_value_type(&value),
+        value,
+        source_priority,
+        tokens,
+    });
+}
+
+fn score_typed_binding_candidate(
+    requirement: &TypedBindingRequirement,
+    candidate: &TypedBindingCandidate,
+) -> Option<u16> {
+    if !binding_type_compatible(requirement.expected_type, candidate.value_type) {
+        return None;
+    }
+    if requirement.normalized_slot == candidate.normalized_key {
+        return Some(220 + candidate.source_priority / 5);
+    }
+
+    let overlap = semantic_overlap(requirement.tokens.as_slice(), candidate.tokens.as_slice());
+    if overlap.shared_total == 0 {
+        return None;
+    }
+
+    let mut score = 0u16;
+    score = score.saturating_add((overlap.shared_non_generic as u16).saturating_mul(35));
+    score = score.saturating_add((overlap.shared_total as u16).saturating_mul(8));
+    if requirement.expected_type == candidate.value_type {
+        score = score.saturating_add(25);
+    }
+    score = score.saturating_add(candidate.source_priority.min(100) / 4);
+    if overlap.slot_has_address && overlap.candidate_has_address {
+        score = score.saturating_add(20);
+    }
+    if overlap.slot_has_decimals && overlap.candidate_has_decimals {
+        score = score.saturating_add(20);
+    }
+    if candidate.key.starts_with(requirement.tokens[0].as_str()) {
+        score = score.saturating_add(10);
+    }
+    Some(score)
+}
+
+#[derive(Default)]
+struct SemanticOverlap {
+    shared_total: usize,
+    shared_non_generic: usize,
+    slot_has_address: bool,
+    candidate_has_address: bool,
+    slot_has_decimals: bool,
+    candidate_has_decimals: bool,
+}
+
+fn semantic_overlap(slot_tokens: &[String], candidate_tokens: &[String]) -> SemanticOverlap {
+    let mut overlap = SemanticOverlap::default();
+    overlap.slot_has_address = slot_tokens.iter().any(|token| token == "address");
+    overlap.candidate_has_address = candidate_tokens.iter().any(|token| token == "address");
+    overlap.slot_has_decimals = slot_tokens.iter().any(|token| token == "decimals");
+    overlap.candidate_has_decimals = candidate_tokens.iter().any(|token| token == "decimals");
+
+    let candidate_set = candidate_tokens
+        .iter()
+        .map(|token| token.as_str())
+        .collect::<BTreeSet<_>>();
+    for token in slot_tokens {
+        if !candidate_set.contains(token.as_str()) {
+            continue;
+        }
+        overlap.shared_total = overlap.shared_total.saturating_add(1);
+        if !is_generic_semantic_token(token.as_str()) {
+            overlap.shared_non_generic = overlap.shared_non_generic.saturating_add(1);
+        }
+    }
+    overlap
+}
+
+fn binding_type_compatible(expected: BindingValueType, actual: BindingValueType) -> bool {
+    expected == BindingValueType::Unknown
+        || actual == BindingValueType::Unknown
+        || expected == actual
+        || (expected == BindingValueType::Numeric && actual == BindingValueType::Text)
+        || (expected == BindingValueType::Boolean && actual == BindingValueType::Text)
+}
+
+fn infer_slot_type(slot: &str, tokens: &[String]) -> BindingValueType {
+    if is_address_like_slot(slot)
+        || has_any_token(
+            tokens,
+            &[
+                "address",
+                "owner",
+                "recipient",
+                "wallet",
+                "account",
+                "signer",
+            ],
+        )
+    {
+        return BindingValueType::Address;
+    }
+    if has_any_token(
+        tokens,
+        &[
+            "amount",
+            "threshold",
+            "decimals",
+            "bps",
+            "nonce",
+            "limit",
+            "deadline",
+            "gas",
+            "fee",
+            "price",
+        ],
+    ) {
+        return BindingValueType::Numeric;
+    }
+    if has_any_token(tokens, &["chain", "chainid", "chainref"]) {
+        return BindingValueType::Chain;
+    }
+    if has_any_token(
+        tokens,
+        &[
+            "bool", "enabled", "enable", "disabled", "allow", "should", "is", "has", "use",
+        ],
+    ) {
+        return BindingValueType::Boolean;
+    }
+    BindingValueType::Unknown
+}
+
+fn infer_value_type(value: &Value) -> BindingValueType {
+    match value {
+        Value::Bool(_) => BindingValueType::Boolean,
+        Value::Number(_) => BindingValueType::Numeric,
+        Value::String(text) => {
+            let trimmed = text.trim();
+            if is_evm_address_str(trimmed) {
+                return BindingValueType::Address;
+            }
+            if trimmed.starts_with("eip155:") {
+                return BindingValueType::Chain;
+            }
+            if trimmed.eq_ignore_ascii_case("true") || trimmed.eq_ignore_ascii_case("false") {
+                return BindingValueType::Boolean;
+            }
+            if trimmed.parse::<f64>().is_ok() {
+                return BindingValueType::Numeric;
+            }
+            BindingValueType::Text
+        }
+        _ => BindingValueType::Unknown,
+    }
+}
+
+fn has_any_token(tokens: &[String], expected: &[&str]) -> bool {
+    tokens
+        .iter()
+        .any(|token| expected.contains(&token.as_str()))
+}
+
+fn is_evm_address_str(value: &str) -> bool {
+    value.len() == 42
+        && value.starts_with("0x")
+        && value
+            .as_bytes()
+            .iter()
+            .skip(2)
+            .all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn is_generic_semantic_token(token: &str) -> bool {
+    matches!(
+        token,
+        "inputs" | "input" | "value" | "field" | "data" | "ref" | "address" | "amount"
+    )
+}
+
+fn semantic_tokens(key: &str) -> Vec<String> {
+    key.to_ascii_lowercase()
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|segment| !segment.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>()
+}
+
+fn normalize_semantic_key(key: &str) -> String {
+    semantic_tokens(key).join("")
+}
+
+fn is_address_like_slot(slot: &str) -> bool {
+    slot.ends_with(".address") || slot.ends_with("_address")
 }
 
 fn unwrap_input_value(value: &Value) -> Value {
@@ -2562,6 +3171,13 @@ fn execute_round(
 
 fn bind_segment_todo_id(segment: &mut PlanSketchSegment, todo_id: &str) {
     super::phase_machine::segment_exec::bind_segment_todo_id(segment, todo_id);
+}
+
+fn collect_segment_missing_input_refs(
+    segment: &PlanSketchSegment,
+    input_store: &InputStore,
+) -> Vec<String> {
+    super::phase_machine::segment_exec::collect_segment_missing_input_refs(segment, input_store)
 }
 
 fn build_todo_receipt(

@@ -2902,7 +2902,12 @@ fn unavailable_draft_extracts_missing_input_questions_from_error_details() {
                             {"label": "wallet-1", "value": "0xabc", "confidence": 90}
                         ]
                     }
-                ]
+                ],
+                "recovery_exhaustion": {
+                    "unresolved_refs": ["inputs.owner"],
+                    "reasons": ["no_query_candidates", "no_binding_candidates"],
+                    "attempt_trace_id": "missing_ref_recovery:grounding:todo_1:user_input:2"
+                }
             }))),
         }),
         questions: PlannerQuestionList::default(),
@@ -2929,6 +2934,72 @@ fn unavailable_draft_extracts_missing_input_questions_from_error_details() {
         }
         _ => panic!("draft must be unavailable"),
     }
+}
+
+#[test]
+fn unavailable_draft_rejects_params_question_id_for_missing_required_input() {
+    let error = parse_segment_draft(SegmentToolArgs {
+        status: "unavailable".to_string(),
+        done: false,
+        segment: None,
+        summary: None,
+        cursor_next: None,
+        issues: PlannerIssueList::default(),
+        error: Some(PlannerToolError {
+            reason_code: "missing_required_input".to_string(),
+            message: Some("missing token address".to_string()),
+            details: Some(PlannerErrorDetails::Raw(json!({
+                "questions": [
+                    {
+                        "id": "params.token.address",
+                        "question": "token?"
+                    }
+                ],
+                "recovery_exhaustion": {
+                    "unresolved_refs": ["inputs.token.address"],
+                    "reasons": ["no_query_candidates"],
+                    "attempt_trace_id": "missing_ref_recovery:grounding:todo_1:user_input:1"
+                }
+            }))),
+        }),
+        questions: PlannerQuestionList::default(),
+    })
+    .expect_err("params.* question id must be rejected");
+    assert!(error.to_string().contains("question.id must be canonical source ref"));
+}
+
+#[test]
+fn unavailable_draft_rejects_params_unresolved_refs_for_missing_required_input() {
+    let error = parse_segment_draft(SegmentToolArgs {
+        status: "unavailable".to_string(),
+        done: false,
+        segment: None,
+        summary: None,
+        cursor_next: None,
+        issues: PlannerIssueList::default(),
+        error: Some(PlannerToolError {
+            reason_code: "missing_required_input".to_string(),
+            message: Some("missing token address".to_string()),
+            details: Some(PlannerErrorDetails::Raw(json!({
+                "questions": [
+                    {
+                        "id": "token.address",
+                        "question": "token?"
+                    }
+                ],
+                "recovery_exhaustion": {
+                    "unresolved_refs": ["params.token.address"],
+                    "reasons": ["no_query_candidates"],
+                    "attempt_trace_id": "missing_ref_recovery:grounding:todo_1:user_input:1"
+                }
+            }))),
+        }),
+        questions: PlannerQuestionList::default(),
+    })
+    .expect_err("params.* unresolved ref must be rejected");
+    assert!(error
+        .to_string()
+        .contains("recovery_exhaustion.unresolved_refs must use source refs only"));
 }
 
 #[test]
@@ -3022,7 +3093,12 @@ fn todo_unavailable_prefers_top_level_questions_over_error_details() {
                             "id": "owner_from_details",
                             "question": "details owner?",
                             "options": [{"label":"wallet-1","value":"0xabc"}]
-                        }]
+                        }],
+                        "recovery_exhaustion": {
+                            "unresolved_refs": ["inputs.owner"],
+                            "reasons": ["no_query_candidates"],
+                            "attempt_trace_id": "missing_ref_recovery:todo:todo_1:user_input:1"
+                        }
                     }
                 }
             }),
@@ -3109,6 +3185,10 @@ fn render_segment_prompt_uses_detect_free_valueref_and_contracts() {
     assert_eq!(
         value.pointer("/depends_on_contract/examples/1"),
         Some(&json!("q_token_balance"))
+    );
+    assert!(
+        value.get("adjudicate_recovery_contract").is_none(),
+        "prompt payload should not include legacy adjudicate_recovery_contract block"
     );
     assert_eq!(
             value.pointer("/input_ref_semantic_contract/rule"),
@@ -3450,6 +3530,23 @@ fn extract_round_context_signal_reads_pressure_and_compression_flags() {
     );
     assert_eq!(signal.pressure_mode.as_deref(), Some("critical"));
     assert!(signal.compressed);
+    assert!(!signal.adjudicate_mode);
+}
+
+#[test]
+fn extract_round_context_signal_detects_host_binding_adjudicate_mode() {
+    let signal = extract_round_context_signal(
+        json!({
+            "previous_error": {
+                "autofill": {
+                    "mode": "host_binding_adjudicate_round"
+                }
+            }
+        })
+        .to_string()
+        .as_str(),
+    );
+    assert!(signal.adjudicate_mode);
 }
 
 #[test]
@@ -4010,6 +4107,26 @@ fn no_toolcall_repair_payload_contains_phase_finalize_and_allowed_tools() {
             .iter()
             .any(|tool| tool.as_str() == Some("plan.propose_segment")),
         "allowed_tools={allowed:?}"
+    );
+}
+
+#[test]
+fn adjudicate_finalize_guard_payload_requires_finalize() {
+    let payload =
+        adjudicate_finalize_guard_payload("plan.revise_segment", 2, "empty_catalog_search_streak");
+    assert_eq!(
+        payload.pointer("/loop_guard/kind"),
+        Some(&json!("adjudicate_budget_guard"))
+    );
+    assert_eq!(
+        payload.pointer("/loop_guard/max_rounds"),
+        Some(&json!(ADJUDICATE_MAX_TOOL_ROUNDS))
+    );
+    assert_eq!(
+        payload.pointer("/loop_guard/contract"),
+        Some(&json!(
+            "Call `plan.revise_segment` exactly once as the last tool call in this response."
+        ))
     );
 }
 

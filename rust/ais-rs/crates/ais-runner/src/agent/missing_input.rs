@@ -106,8 +106,12 @@ pub(super) fn maybe_collect_and_apply_answers(
     state: &mut EngineRunnerState,
     input_store: &mut InputStore,
     questions: &[Value],
+    payload: &Value,
 ) -> Result<Option<Map<String, Value>>, RunnerError> {
-    let Some(answers) = super::maybe_collect_missing_input_answers(questions)? else {
+    let recovery_exhaustion = payload.get("recovery_exhaustion");
+    let Some(answers) =
+        super::maybe_collect_missing_input_answers_with_recovery(questions, recovery_exhaustion)?
+    else {
         return Ok(None);
     };
     apply_answers(state, input_store, &answers);
@@ -175,14 +179,24 @@ pub(super) fn payload_from_pause(
         .cloned()
         .unwrap_or_default();
 
-    Some(payload_with_context(
+    let payload = payload_with_context(
         message,
         questions.as_slice(),
         issues.as_slice(),
         missing_refs.as_slice(),
         suggested_paths.as_slice(),
         round,
-    ))
+    );
+    let mut payload = normalize_missing_required_input_payload(&payload);
+    if let Some(recovery_exhaustion) = details.get("recovery_exhaustion") {
+        if let Some(object) = payload.as_object_mut() {
+            object.insert(
+                "recovery_exhaustion".to_string(),
+                recovery_exhaustion.clone(),
+            );
+        }
+    }
+    Some(normalize_missing_required_input_payload(&payload))
 }
 
 fn string_array_field(value: Option<&Value>) -> Vec<String> {
@@ -198,6 +212,249 @@ fn string_array_field(value: Option<&Value>) -> Vec<String> {
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>()
+}
+
+pub(super) fn normalize_missing_required_input_payload(payload: &Value) -> Value {
+    let mut out = payload.clone();
+    let Some(object) = out.as_object_mut() else {
+        return out;
+    };
+    let missing_refs_raw = string_array_field(object.get("missing_refs"));
+    let suggested_paths_raw = string_array_field(object.get("suggested_paths"));
+    let source_refs = normalize_source_refs(
+        missing_refs_raw.as_slice(),
+        suggested_paths_raw.as_slice(),
+    );
+    let questions = object
+        .get("questions")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let normalized_questions =
+        normalize_question_entries(questions.as_slice(), source_refs.as_slice());
+    object.insert(
+        "missing_refs".to_string(),
+        Value::Array(source_refs.iter().map(|item| Value::String(item.clone())).collect()),
+    );
+    object.insert(
+        "suggested_paths".to_string(),
+        Value::Array(source_refs.iter().map(|item| Value::String(item.clone())).collect()),
+    );
+    object.insert("questions".to_string(), Value::Array(normalized_questions));
+    if let Some(recovery_exhaustion) = normalize_recovery_exhaustion(
+        object.get("recovery_exhaustion"),
+        object.get("recovery"),
+        source_refs.as_slice(),
+    ) {
+        object.insert("recovery_exhaustion".to_string(), recovery_exhaustion);
+    }
+    out
+}
+
+fn normalize_recovery_exhaustion(
+    recovery_exhaustion: Option<&Value>,
+    recovery: Option<&Value>,
+    source_refs: &[String],
+) -> Option<Value> {
+    let unresolved_refs_raw = recovery_exhaustion
+        .and_then(|value| value.get("unresolved_refs"))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut unresolved_refs =
+        normalize_recovery_unresolved_refs(unresolved_refs_raw.as_slice(), source_refs);
+    if unresolved_refs.is_empty() {
+        unresolved_refs = source_refs.to_vec();
+    }
+    let mut reasons = recovery_exhaustion
+        .and_then(|value| value.get("reasons"))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if reasons.is_empty() {
+        if let Some(reason) = recovery
+            .and_then(|value| value.get("reason"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            reasons.push(reason.to_string());
+        }
+    }
+    if reasons.is_empty() {
+        reasons.push("recovery_exhausted".to_string());
+    }
+    let attempt_trace_id = recovery_exhaustion
+        .and_then(|value| value.get("attempt_trace_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            recovery
+                .and_then(|value| value.get("attempt_trace_id"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "missing_ref_recovery:unknown".to_string());
+    if unresolved_refs.is_empty() {
+        return None;
+    }
+    Some(serde_json::json!({
+        "unresolved_refs": unresolved_refs,
+        "reasons": reasons,
+        "attempt_trace_id": attempt_trace_id,
+    }))
+}
+
+fn normalize_recovery_unresolved_refs(raw_refs: &[String], source_refs: &[String]) -> Vec<String> {
+    let mut out = BTreeSet::<String>::new();
+    let mut source_pool = source_refs.iter().cloned().collect::<BTreeSet<_>>();
+    for raw_ref in raw_refs {
+        if let Some(canonical) = canonicalize_source_ref(raw_ref, &source_pool) {
+            source_pool.insert(canonical.clone());
+            out.insert(canonical);
+            continue;
+        }
+        if let Some(canonical) = canonical_source_ref(raw_ref) {
+            source_pool.insert(canonical.clone());
+            out.insert(canonical);
+        }
+    }
+    out.into_iter().collect::<Vec<_>>()
+}
+
+fn normalize_source_refs(missing_refs: &[String], suggested_paths: &[String]) -> Vec<String> {
+    let mut out = BTreeSet::<String>::new();
+    let mut source_pool = BTreeSet::<String>::new();
+    for raw in missing_refs.iter().chain(suggested_paths.iter()) {
+        if raw.trim().is_empty() || raw.trim().starts_with("params.") {
+            continue;
+        }
+        if let Some(canonical) = canonicalize_source_ref(raw, &source_pool) {
+            source_pool.insert(canonical.clone());
+            out.insert(canonical);
+        }
+    }
+    for raw in missing_refs.iter().chain(suggested_paths.iter()) {
+        if let Some(canonical) = canonicalize_source_ref(raw, &source_pool) {
+            source_pool.insert(canonical.clone());
+            out.insert(canonical);
+        }
+    }
+    out.into_iter().collect::<Vec<_>>()
+}
+
+fn normalize_question_entries(questions: &[Value], source_refs: &[String]) -> Vec<Value> {
+    let source_set = source_refs.iter().cloned().collect::<BTreeSet<_>>();
+    let mut seen_ids = BTreeSet::<String>::new();
+    let mut normalized = Vec::<Value>::new();
+    for question in questions {
+        let Some(mut question_object) = question.as_object().cloned() else {
+            continue;
+        };
+        let normalized_id = question_object
+            .get("id")
+            .and_then(Value::as_str)
+            .and_then(|id| canonicalize_source_ref(id, &source_set));
+        let has_internal_param_id = question_object
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| id.trim().starts_with("params."));
+        if has_internal_param_id && normalized_id.is_none() {
+            continue;
+        }
+        if let Some(id) = normalized_id {
+            if !seen_ids.insert(id.clone()) {
+                continue;
+            }
+            question_object.insert("id".to_string(), Value::String(id));
+        }
+        normalized.push(Value::Object(question_object));
+    }
+    normalized
+}
+
+fn canonicalize_source_ref(raw: &str, source_refs: &BTreeSet<String>) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.starts_with("params.") {
+        return map_param_ref_to_source(trimmed, source_refs);
+    }
+    canonical_source_ref(trimmed).map(|canonical| remap_semantic_alias(canonical, source_refs))
+}
+
+fn canonical_source_ref(raw: &str) -> Option<String> {
+    super::input_normalize::normalize_missing_input_ref(raw).map(|slot| format!("inputs.{slot}"))
+}
+
+fn map_param_ref_to_source(raw: &str, source_refs: &BTreeSet<String>) -> Option<String> {
+    let param_path = raw
+        .trim()
+        .strip_prefix("params.")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let canonical = super::input_normalize::normalize_input_slot_key(param_path)
+        .map(|slot| format!("inputs.{slot}"));
+    if let Some(canonical_ref) = canonical.as_ref() {
+        if source_refs.contains(canonical_ref) {
+            return Some(canonical_ref.clone());
+        }
+        if canonical_ref == "inputs.token.address" {
+            if let Some(mapped) = choose_token_address_source(source_refs) {
+                return Some(mapped);
+            }
+        }
+    }
+    canonical
+}
+
+fn remap_semantic_alias(canonical: String, source_refs: &BTreeSet<String>) -> String {
+    if source_refs.contains(canonical.as_str()) {
+        return canonical;
+    }
+    if canonical == "inputs.token.address" {
+        if let Some(mapped) = choose_token_address_source(source_refs) {
+            return mapped;
+        }
+    }
+    canonical
+}
+
+fn choose_token_address_source(source_refs: &BTreeSet<String>) -> Option<String> {
+    let candidates = source_refs
+        .iter()
+        .filter(|reference| {
+            reference.starts_with("inputs.")
+                && reference.contains("token")
+                && (reference.ends_with(".address") || reference.ends_with("_address"))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if candidates.len() == 1 {
+        return candidates.first().cloned();
+    }
+    None
 }
 
 #[cfg(test)]

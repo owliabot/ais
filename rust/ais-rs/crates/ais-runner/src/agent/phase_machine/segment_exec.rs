@@ -1,3 +1,4 @@
+use ais_core::{stable_hash_hex, StableJsonOptions};
 use super::super::input_normalize::normalize_input_slot_key;
 use super::super::*;
 use ais_engine::{
@@ -13,6 +14,14 @@ pub(crate) struct ExecuteRoundOutcome {
     pub(crate) iterations: usize,
     pub(crate) round_events: Vec<EngineEventRecord>,
     pub(crate) last_iteration_events: Vec<EngineEventRecord>,
+}
+
+#[derive(Debug, Clone)]
+struct InputStoreSyncReport {
+    synced_refs: Vec<String>,
+    hash_changed: bool,
+    previous_hash: Option<String>,
+    current_hash: Option<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -35,6 +44,29 @@ pub(crate) fn execute_round(
     total_events: &mut usize,
     todo_id: &str,
 ) -> Result<ExecuteRoundOutcome, RunnerError> {
+    let sync_report = sync_runtime_inputs_from_input_store(&mut state.runtime, fact_store);
+    if command.verbose || command.verbose_llm {
+        super::super::trace::emit(
+            true,
+            "execute_round",
+            "input_store_sync_applied",
+            &[
+                ("segment_id", segment.segment_id.clone()),
+                ("synced_count", sync_report.synced_refs.len().to_string()),
+                ("hash_changed", sync_report.hash_changed.to_string()),
+                (
+                    "previous_hash",
+                    sync_report
+                        .previous_hash
+                        .unwrap_or_else(|| "-".to_string()),
+                ),
+                (
+                    "current_hash",
+                    sync_report.current_hash.unwrap_or_else(|| "-".to_string()),
+                ),
+            ],
+        );
+    }
     let replacement = super::super::merge_segment_plan(active_plan, segment_plan)?;
     let replace_reason = format!("segment:{}", segment.segment_id);
     let replace_command = super::super::build_replace_plan_command(
@@ -42,7 +74,7 @@ pub(crate) fn execute_round(
         &replacement,
         Some(replace_reason.as_str()),
     )?;
-    let processed = process_replace_plan_commands(
+    let mut processed = process_replace_plan_commands(
         run_id,
         config,
         &[replace_command],
@@ -74,6 +106,57 @@ pub(crate) fn execute_round(
             fact_store,
             checkpoint_extensions,
         )?;
+    }
+    if !processed.plan_replaced
+        && has_duplicate_command_id_rejection(processed.events.as_slice())
+    {
+        super::super::trace::emit(
+            command.verbose || command.verbose_llm,
+            "execute_round",
+            "command_id_repair_attempt",
+            &[
+                ("segment_id", segment.segment_id.clone()),
+                ("todo_id", todo_id.to_string()),
+            ],
+        );
+        let retry_command = super::super::build_replace_plan_command(
+            command_builder,
+            &replacement,
+            Some(replace_reason.as_str()),
+        )?;
+        let retry_processed = process_replace_plan_commands(
+            run_id,
+            config,
+            &[retry_command],
+            engine_options,
+            state,
+            active_plan,
+            active_plan_hash,
+        )?;
+        if !retry_processed.events.is_empty() {
+            let annotated = annotate_events_with_todo(retry_processed.events.as_slice(), segment, todo_id);
+            *total_events = total_events.saturating_add(annotated.len());
+            super::super::write_event_sinks(command, annotated.as_slice())?;
+            checkpoint_ledger.absorb_events(annotated.as_slice());
+            checkpoint_ledger.mark_approved_nodes(
+                &state.approved_node_ids,
+                wall_clock_timestamp_rfc3339().as_str(),
+            );
+            super::super::record_side_effect_lifecycle(&mut state.runtime, checkpoint_ledger);
+            round_events.extend(annotated);
+            super::super::checkpoint_flow::checkpoint_round(
+                command,
+                run_id,
+                active_plan_hash,
+                active_plan,
+                state,
+                checkpoint_ledger,
+                planning_memory.clone(),
+                fact_store,
+                checkpoint_extensions,
+            )?;
+        }
+        processed = retry_processed;
     }
     if !processed.plan_replaced {
         return Err(RunnerError::Llm(
@@ -134,6 +217,129 @@ pub(crate) fn execute_round(
         round_events,
         last_iteration_events,
     })
+}
+
+fn has_duplicate_command_id_rejection(events: &[EngineEventRecord]) -> bool {
+    events.iter().any(|record| {
+        record.event.event_type == ais_engine::EngineEventType::CommandRejected
+            && record
+                .event
+                .data
+                .get("reason_code")
+                .and_then(Value::as_str)
+                .is_some_and(|reason| reason == "duplicate_command_id")
+    })
+}
+
+fn sync_runtime_inputs_from_input_store(
+    runtime: &mut Value,
+    fact_store: &InputStore,
+) -> InputStoreSyncReport {
+    let previous_hash = stable_inputs_hash(runtime.pointer("/inputs"));
+    if !runtime.is_object() {
+        *runtime = Value::Object(Map::new());
+    }
+    if let Some(root) = runtime.as_object_mut() {
+        root.insert("inputs".to_string(), Value::Object(Map::new()));
+    }
+    let mut synced_refs = Vec::<String>::new();
+    for slot in fact_store.list_ref_strings() {
+        let Some(value) = fact_store.get(slot.as_str()).map(|entry| entry.value.clone()) else {
+            continue;
+        };
+        super::super::input_normalize::set_runtime_input_value(runtime, slot.as_str(), value);
+        synced_refs.push(format!("inputs.{slot}"));
+    }
+    let current_hash = stable_inputs_hash(runtime.pointer("/inputs"));
+    InputStoreSyncReport {
+        synced_refs,
+        hash_changed: previous_hash != current_hash,
+        previous_hash,
+        current_hash,
+    }
+}
+
+fn stable_inputs_hash(value: Option<&Value>) -> Option<String> {
+    stable_hash_hex(value?, &StableJsonOptions::default()).ok()
+}
+
+pub(crate) fn collect_segment_input_ref_closure(segment: &PlanSketchSegment) -> Vec<String> {
+    let mut refs = BTreeSet::<String>::new();
+    for step in &segment.steps {
+        collect_input_refs_from_value(&Value::Object(step.inputs.clone()), &mut refs);
+        if let Some(when) = step.when.as_ref() {
+            collect_input_refs_from_text(when.cel.as_str(), &mut refs);
+        }
+        if let Some(until) = step.until.as_ref() {
+            collect_input_refs_from_value(until, &mut refs);
+        }
+        for template in &step.constraint_templates {
+            collect_input_refs_from_value(&Value::Object(template.params.clone()), &mut refs);
+        }
+    }
+    refs.into_iter().collect::<Vec<_>>()
+}
+
+pub(crate) fn collect_segment_missing_input_refs(
+    segment: &PlanSketchSegment,
+    fact_store: &InputStore,
+) -> Vec<String> {
+    collect_segment_input_ref_closure(segment)
+        .into_iter()
+        .filter(|reference| {
+            let Some(slot) = normalize_input_slot_key(reference.as_str()) else {
+                return false;
+            };
+            !fact_store.has(slot.as_str())
+        })
+        .collect::<Vec<_>>()
+}
+
+fn collect_input_refs_from_value(value: &Value, refs: &mut BTreeSet<String>) {
+    match value {
+        Value::Object(object) => {
+            if let Some(reference) = object.get("ref").and_then(Value::as_str) {
+                let trimmed = reference.trim();
+                if trimmed.starts_with("inputs.") {
+                    refs.insert(trimmed.to_string());
+                }
+            }
+            for nested in object.values() {
+                collect_input_refs_from_value(nested, refs);
+            }
+        }
+        Value::Array(items) => {
+            for nested in items {
+                collect_input_refs_from_value(nested, refs);
+            }
+        }
+        Value::String(text) => collect_input_refs_from_text(text.as_str(), refs),
+        _ => {}
+    }
+}
+
+fn collect_input_refs_from_text(text: &str, refs: &mut BTreeSet<String>) {
+    let bytes = text.as_bytes();
+    let mut offset = 0usize;
+    while offset < bytes.len() {
+        let Some(relative) = text[offset..].find("inputs.") else {
+            break;
+        };
+        let start = offset + relative;
+        let mut end = start + "inputs.".len();
+        while end < bytes.len() {
+            let ch = bytes[end] as char;
+            if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | ':') {
+                end = end.saturating_add(1);
+                continue;
+            }
+            break;
+        }
+        if let Some(slot) = normalize_input_slot_key(&text[start..end]) {
+            refs.insert(format!("inputs.{slot}"));
+        }
+        offset = end;
+    }
 }
 
 pub(crate) fn bind_segment_todo_id(segment: &mut PlanSketchSegment, todo_id: &str) {

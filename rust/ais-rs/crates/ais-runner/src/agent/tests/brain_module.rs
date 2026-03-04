@@ -13,6 +13,7 @@ fn assist_threshold_matches_confirmation_summary_risk_level() {
             reason: Some("policy".to_string()),
             confirmation_hash: Some("abc".to_string()),
             confirmation_summary: Some(json!({"risk_level": 2})),
+            segment_bundle: Vec::new(),
         }),
         last_error_reason: None,
     };
@@ -31,6 +32,7 @@ fn decision_path_is_enumerable() {
             reason: Some("policy".to_string()),
             confirmation_hash: Some("abc".to_string()),
             confirmation_summary: Some(json!({"risk_level": 2})),
+            segment_bundle: Vec::new(),
         }),
         last_error_reason: None,
     };
@@ -86,6 +88,7 @@ fn assist_policy_uses_llm_for_low_risk_confirm() {
             reason: Some("policy".to_string()),
             confirmation_hash: Some("abc".to_string()),
             confirmation_summary: Some(json!({"risk_level": 2})),
+            segment_bundle: Vec::new(),
         }),
         last_error_reason: None,
     };
@@ -119,6 +122,7 @@ fn assist_threshold_outside_range_falls_back_to_manual_path() {
             reason: Some("policy".to_string()),
             confirmation_hash: Some("abc".to_string()),
             confirmation_summary: Some(json!({"risk_level": 4})),
+            segment_bundle: Vec::new(),
         }),
         last_error_reason: None,
     };
@@ -192,6 +196,38 @@ fn manual_always_approve_short_circuits_prompt() {
     let commands = policy
         .decide(&summary, &mut builder)
         .expect("must auto-approve");
+    assert_eq!(commands.len(), 1);
+    assert_eq!(
+        commands[0].command.command_type,
+        ais_engine::EngineCommandType::UserConfirm
+    );
+    assert_eq!(
+        commands[0]
+            .command
+            .data
+            .get("decision")
+            .and_then(serde_json::Value::as_str),
+        Some("approve")
+    );
+}
+
+#[test]
+fn manual_segment_batch_approve_short_circuits_followup_confirms() {
+    let mut policy =
+        AgentDecisionPolicy::<ScriptedLlmProvider>::new(ApprovalsMode::Safe, None, None);
+    policy.manual_batch_approve_segment = Some("seg_3".to_string());
+    let mut builder = CommandBuilder::new("run-test");
+    let summary = PauseSummary {
+        raw_reason: Some("need_user_confirm:seg_3__a_erc20_transfer".to_string()),
+        kind: PauseKind::NeedUserConfirm,
+        node_id: Some("seg_3__a_erc20_transfer".to_string()),
+        need_user_confirm: None,
+        last_error_reason: None,
+    };
+
+    let commands = policy
+        .decide(&summary, &mut builder)
+        .expect("must batch approve same segment");
     assert_eq!(commands.len(), 1);
     assert_eq!(
         commands[0].command.command_type,

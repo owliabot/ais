@@ -35,6 +35,7 @@ pub struct AgentDecisionPolicy<P> {
     assist_threshold: Option<u8>,
     llm: Option<LlmBrain<P>>,
     manual_always_approve_this_run: bool,
+    manual_batch_approve_segment: Option<String>,
 }
 
 impl<P> AgentDecisionPolicy<P> {
@@ -48,6 +49,7 @@ impl<P> AgentDecisionPolicy<P> {
             assist_threshold,
             llm,
             manual_always_approve_this_run: false,
+            manual_batch_approve_segment: None,
         }
     }
 
@@ -83,6 +85,25 @@ where
         summary: &PauseSummary,
         commands: &mut CommandBuilder,
     ) -> Result<Vec<EngineCommandEnvelope>, RunnerError> {
+        if let Some(segment_id) = self.manual_batch_approve_segment.as_deref() {
+            if summary.kind == PauseKind::NeedUserConfirm
+                && summary
+                    .node_id
+                    .as_deref()
+                    .and_then(segment_id_from_node_id)
+                    .is_some_and(|current| current == segment_id)
+            {
+                let node_id = summary.node_id.as_deref().unwrap_or_default();
+                eprintln!(
+                    "[agent] segment batch approve applied segment_id={} node={}",
+                    segment_id, node_id
+                );
+                return Ok(vec![commands.user_confirm(node_id, "approve")]);
+            }
+            if summary.kind != PauseKind::NeedUserConfirm {
+                self.manual_batch_approve_segment = None;
+            }
+        }
         if self.manual_always_approve_this_run
             && summary.kind == PauseKind::NeedUserConfirm
             && summary.node_id.is_some()
@@ -116,6 +137,7 @@ where
                                 summary,
                                 commands,
                                 &mut self.manual_always_approve_this_run,
+                                &mut self.manual_batch_approve_segment,
                             )
                         }
                     }
@@ -124,12 +146,16 @@ where
                         summary,
                         commands,
                         &mut self.manual_always_approve_this_run,
+                        &mut self.manual_batch_approve_segment,
                     )
                 }
             }
-            DecisionPath::ManualPrompt => {
-                prompt_human_decision(summary, commands, &mut self.manual_always_approve_this_run)
-            }
+            DecisionPath::ManualPrompt => prompt_human_decision(
+                summary,
+                commands,
+                &mut self.manual_always_approve_this_run,
+                &mut self.manual_batch_approve_segment,
+            ),
         }
     }
 }
@@ -138,10 +164,37 @@ fn prompt_human_decision(
     summary: &PauseSummary,
     commands: &mut CommandBuilder,
     manual_always_approve_this_run: &mut bool,
+    manual_batch_approve_segment: &mut Option<String>,
 ) -> Result<Vec<EngineCommandEnvelope>, RunnerError> {
     eprintln!("{}", summary.render_for_humans());
+    if summary.kind == PauseKind::NeedUserConfirm
+        && summary
+            .node_id
+            .as_deref()
+            .and_then(segment_id_from_node_id)
+            .is_some()
+    {
+        if let Some(bundle_count) = summary
+            .need_user_confirm
+            .as_ref()
+            .map(|need| need.segment_bundle.len())
+            .filter(|count| *count > 1)
+        {
+            eprintln!("[agent] segment has {bundle_count} confirmable actions");
+        }
+        eprintln!(
+            "{}",
+            super::render_operator_template(
+                "operator.need_user_confirm.help",
+                &[(
+                    "default",
+                    "- batch_confirm_hint: use `approve_all` once to approve remaining confirmations in the same segment".to_string(),
+                )]
+            )
+        );
+    }
     loop {
-        eprint!("[agent] next action (help/approve/deny/cancel/jsonl): ");
+        eprint!("[agent] next action (help/approve/approve_all/deny/cancel/jsonl): ");
         io::stderr()
             .flush()
             .map_err(|error| RunnerError::EventsIo(error.to_string()))?;
@@ -159,6 +212,9 @@ fn prompt_human_decision(
             "help" | "h" => {
                 eprintln!("help:");
                 eprintln!("- approve|a     (need_user_confirm) approve current node");
+                eprintln!(
+                    "- approve_all|all  (need_user_confirm) approve current + remaining confirm nodes in same segment"
+                );
                 eprintln!("- deny|d        (need_user_confirm) deny current node");
                 eprintln!(
                     "- always_approve_this_run|aa  auto approve remaining confirmations this run"
@@ -176,6 +232,18 @@ fn prompt_human_decision(
                 };
                 return Ok(vec![commands.user_confirm(node_id, "approve")]);
             }
+            "approve_all" | "all" => {
+                let Some(node_id) = summary.node_id.as_deref() else {
+                    eprintln!("[agent] no node_id available for approve_all");
+                    continue;
+                };
+                *manual_batch_approve_segment =
+                    segment_id_from_node_id(node_id).map(str::to_string);
+                if let Some(segment_id) = manual_batch_approve_segment.as_deref() {
+                    eprintln!("[agent] enabled segment batch approve for segment_id={segment_id}");
+                }
+                return Ok(vec![commands.user_confirm(node_id, "approve")]);
+            }
             "deny" | "d" => {
                 let Some(node_id) = summary.node_id.as_deref() else {
                     eprintln!("[agent] no node_id available for deny");
@@ -189,6 +257,7 @@ fn prompt_human_decision(
                     continue;
                 };
                 *manual_always_approve_this_run = true;
+                *manual_batch_approve_segment = None;
                 eprintln!("[agent] enabled always_approve_this_run for this process");
                 return Ok(vec![commands.user_confirm(node_id, "approve")]);
             }
@@ -204,6 +273,14 @@ fn prompt_human_decision(
 
         eprintln!("[agent] unknown input: `{line}` (type `help`)");
     }
+}
+
+fn segment_id_from_node_id(node_id: &str) -> Option<&str> {
+    let trimmed = node_id.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    trimmed.split_once("__").map(|(segment_id, _)| segment_id)
 }
 
 fn decode_jsonl(line: &str) -> Result<EngineCommandEnvelope, RunnerError> {

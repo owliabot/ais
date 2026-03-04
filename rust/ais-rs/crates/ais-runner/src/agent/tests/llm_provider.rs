@@ -75,7 +75,8 @@ fn load_llm_provider_rejects_unknown_provider() {
             fallback: vec![],
             max_retries_per_provider: None,
             rotation: RunnerLlmRotationMode::StickyPrimary,
-            prompts_dir: None,
+            controller_prompts_dir: None,
+            operator_templates_dir: None,
             planner_context_token_budget: None,
             max_tool_rounds: None,
             context_limit_tokens: None,
@@ -132,7 +133,8 @@ fn load_llm_provider_accepts_provider_chain_config() {
             }],
             max_retries_per_provider: Some(2),
             rotation: RunnerLlmRotationMode::RoundRobin,
-            prompts_dir: None,
+            controller_prompts_dir: None,
+            operator_templates_dir: None,
             planner_context_token_budget: None,
             max_tool_rounds: None,
             context_limit_tokens: None,
@@ -143,5 +145,4 @@ fn load_llm_provider_accepts_provider_chain_config() {
     let result = super::load_llm_provider(&command, &config).expect("must build");
     assert!(result.is_some());
 }
-
 

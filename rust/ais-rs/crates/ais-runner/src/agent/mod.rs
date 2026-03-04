@@ -12,6 +12,7 @@ mod intent_context;
 mod intent_segmented;
 mod r#loop;
 mod missing_input;
+mod missing_ref_recovery;
 mod orchestrator;
 mod phase_machine;
 mod planning_memory;
@@ -81,8 +82,9 @@ use intent_segmented::{
     SegmentDraft, SegmentPlanningRequest, SegmentedIntentPlanner, SegmentedPromptOverrides,
     TodoDraft, TodoPlanningRequest,
 };
-use prompts::PromptCatalog;
+use prompts::{ControllerPromptCatalog, OperatorTemplateCatalog, PromptCatalog};
 use r#loop::{run_agent_loop, AgentLoopConfig, CommandBuilder};
+use std::sync::Mutex;
 use todos::TodoBoard;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -105,6 +107,7 @@ struct MissingInputQuestionPrompt {
 }
 
 const AIS_INPUT_STORE_MIGRATION_MODE_ENV: &str = "AIS_RUNNER_INPUT_STORE_MIGRATION_MODE";
+static OPERATOR_TEMPLATE_CATALOG: Mutex<Option<OperatorTemplateCatalog>> = Mutex::new(None);
 
 /// Input source migration toggle used during P3 rollout.
 #[derive(Debug, Clone, Copy)]
@@ -268,12 +271,21 @@ pub fn execute_agent(command: &AgentCommand) -> Result<String, RunnerError> {
     let max_index_candidates = command
         .max_index_candidates
         .unwrap_or(DEFAULT_MAX_INDEX_CANDIDATES);
-    let prompt_catalog = PromptCatalog::from_prompts_dir(
+    let prompt_catalog = ControllerPromptCatalog::from_prompts_dir(
         config
             .llm
             .as_ref()
-            .and_then(|llm| llm.prompts_dir.as_deref()),
+            .and_then(|llm| llm.controller_prompts_dir.as_deref()),
     );
+    let operator_templates = OperatorTemplateCatalog::from_templates_dir(
+        config
+            .llm
+            .as_ref()
+            .and_then(|llm| llm.operator_templates_dir.as_deref()),
+    );
+    if let Ok(mut lock) = OPERATOR_TEMPLATE_CATALOG.lock() {
+        *lock = Some(operator_templates);
+    }
     let candidate_context =
         build_candidate_context_for_agent(command, pack.as_ref(), max_index_candidates)?;
     if command.plan.is_none() {
@@ -381,6 +393,15 @@ pub fn execute_agent(command: &AgentCommand) -> Result<String, RunnerError> {
             .map_err(|error| RunnerError::WorkspaceValidate(error.to_string()))?;
     }
     let mut command_builder = CommandBuilder::new(run_id.as_str());
+    let resumed_command_max = command_builder.set_next_index_from_seen_ids(&state.seen_command_ids);
+    if resumed_from_checkpoint && (command.verbose || command.verbose_llm) {
+        eprintln!(
+            "[checkpoint] command_id_resume mode=continue run_id={} seen_ids={} max_suffix={}",
+            run_id,
+            state.seen_command_ids.len(),
+            resumed_command_max
+        );
+    }
     let mut total_iterations = 0usize;
     let final_status = loop {
         let loop_result = run_agent_loop(
@@ -769,17 +790,6 @@ pub(super) fn known_input_refs_from_state_summary(state_summary: Option<&Value>)
         .and_then(Value::as_array)
         .into_iter()
         .flat_map(|items| items.iter())
-        .filter_map(Value::as_str)
-    {
-        if let Some(canonical_slot) = input_normalize::normalize_input_slot_key(raw_ref) {
-            refs.insert(format!("inputs.{canonical_slot}"));
-        }
-    }
-    for raw_ref in state_summary
-        .and_then(|summary| summary.pointer("/input_slots/canonical_refs"))
-        .and_then(Value::as_object)
-        .into_iter()
-        .flat_map(|entries| entries.values())
         .filter_map(Value::as_str)
     {
         if let Some(canonical_slot) = input_normalize::normalize_input_slot_key(raw_ref) {
@@ -1783,8 +1793,16 @@ fn record_runtime_agent_field(runtime: &mut Value, key: &str, value: Value) {
     runtime_store::record_runtime_agent_field(runtime, key, value);
 }
 
+#[cfg(test)]
 fn maybe_collect_missing_input_answers(
     questions: &[Value],
+) -> Result<Option<Map<String, Value>>, RunnerError> {
+    maybe_collect_missing_input_answers_with_recovery(questions, None)
+}
+
+fn maybe_collect_missing_input_answers_with_recovery(
+    questions: &[Value],
+    recovery_exhaustion: Option<&Value>,
 ) -> Result<Option<Map<String, Value>>, RunnerError> {
     if questions.is_empty() {
         return Ok(None);
@@ -1816,10 +1834,23 @@ fn maybe_collect_missing_input_answers(
             Ok(Some(answers))
         };
     }
-    eprintln!(
-        "[agent] planner requires additional inputs ({} question(s))",
-        pending_questions.len()
+    if let Some(summary) = render_missing_input_recovery_summary(recovery_exhaustion) {
+        eprintln!("{summary}");
+    }
+    let header = render_operator_template(
+        "operator.missing_input.header",
+        &[
+            ("count", pending_questions.len().to_string()),
+            (
+                "default",
+                format!(
+                    "[agent] planner requires additional inputs ({} question(s))",
+                    pending_questions.len()
+                ),
+            ),
+        ],
     );
+    eprintln!("{header}");
     for question in pending_questions {
         if let Some(value) = prompt_missing_input_question(&question)? {
             answers.insert(question.id, value);
@@ -1829,6 +1860,60 @@ fn maybe_collect_missing_input_answers(
         return Ok(None);
     }
     Ok(Some(answers))
+}
+
+fn render_missing_input_recovery_summary(recovery_exhaustion: Option<&Value>) -> Option<String> {
+    let recovery_exhaustion = recovery_exhaustion?;
+    let unresolved_refs = recovery_exhaustion
+        .get("unresolved_refs")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let reasons = recovery_exhaustion
+        .get("reasons")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let attempt_trace_id = recovery_exhaustion
+        .get("attempt_trace_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if unresolved_refs.is_empty() || reasons.is_empty() || attempt_trace_id.is_empty() {
+        return None;
+    }
+    let unresolved_text = unresolved_refs.join(", ");
+    let reason_text = reasons.join(" | ");
+    Some(render_operator_template(
+        "operator.missing_input.recovery_summary",
+        &[
+            ("attempt_trace_id", attempt_trace_id.to_string()),
+            ("unresolved_refs", unresolved_text),
+            ("reasons", reason_text),
+            (
+                "default",
+                format!(
+                    "[agent][missing_input][recovery] attempt_trace_id={attempt_trace_id} unresolved_refs={unresolved_refs} reasons={reasons}",
+                    unresolved_refs = unresolved_refs.join(","),
+                    reasons = reasons.join("|"),
+                ),
+            ),
+        ],
+    ))
 }
 
 fn should_prompt_for_missing_input() -> bool {
@@ -1893,10 +1978,21 @@ fn prompt_missing_input_question(
 ) -> Result<Option<Value>, RunnerError> {
     let required = question.required.unwrap_or(true);
     loop {
-        eprintln!(
-            "[agent][missing_input] {}: {}",
-            question.id, question.question
+        let line = render_operator_template(
+            "operator.missing_input.question",
+            &[
+                ("id", question.id.clone()),
+                ("question", question.question.clone()),
+                (
+                    "default",
+                    format!(
+                        "[agent][missing_input] {}: {}",
+                        question.id, question.question
+                    ),
+                ),
+            ],
         );
+        eprintln!("{line}");
         if !question.options.is_empty() {
             for (index, option) in question.options.iter().enumerate() {
                 if let Some(description) = option.description.as_deref() {
@@ -1954,6 +2050,32 @@ fn prompt_missing_input_question(
 
 fn parse_user_supplied_answer_value(input: &str) -> Value {
     serde_json::from_str::<Value>(input).unwrap_or_else(|_| Value::String(input.to_string()))
+}
+
+pub(super) fn render_operator_template(id: &str, values: &[(&str, String)]) -> String {
+    let default = values
+        .iter()
+        .find(|(key, _)| *key == "default")
+        .map(|(_, value)| value.clone())
+        .unwrap_or_default();
+    let Some(raw) = load_operator_template(id) else {
+        return default;
+    };
+    apply_template_values(raw.as_str(), values)
+}
+
+pub(super) fn load_operator_template(id: &str) -> Option<String> {
+    let lock = OPERATOR_TEMPLATE_CATALOG.lock().ok()?;
+    lock.as_ref()?.load_template(id)
+}
+
+pub(super) fn apply_template_values(template: &str, values: &[(&str, String)]) -> String {
+    let mut rendered = template.to_string();
+    for (key, value) in values {
+        let needle = format!("{{{{{key}}}}}");
+        rendered = rendered.replace(needle.as_str(), value.as_str());
+    }
+    rendered
 }
 
 #[cfg(test)]
@@ -2713,13 +2835,33 @@ fn render_agent_output(
             "llm_usage": llm_usage,
         }))?),
         OutputFormat::Text => {
-            let mut output = format!(
+            let default_summary = format!(
                 "AIS agent\nstatus: {}\npaused_reason: {}\nresumed_from_checkpoint: {}\niterations: {}\nevents: {}",
                 status_text,
                 state.paused_reason.clone().unwrap_or_else(|| "none".to_string()),
                 resumed_from_checkpoint,
                 iterations,
                 total_events,
+            );
+            let mut output = render_operator_template(
+                "operator.output.summary",
+                &[
+                    ("status", status_text.to_string()),
+                    (
+                        "paused_reason",
+                        state
+                            .paused_reason
+                            .clone()
+                            .unwrap_or_else(|| "none".to_string()),
+                    ),
+                    (
+                        "resumed_from_checkpoint",
+                        resumed_from_checkpoint.to_string(),
+                    ),
+                    ("iterations", iterations.to_string()),
+                    ("events", total_events.to_string()),
+                    ("default", default_summary),
+                ],
             );
             if let Some(line) = render_llm_usage_line(llm_usage.as_ref()) {
                 output.push('\n');

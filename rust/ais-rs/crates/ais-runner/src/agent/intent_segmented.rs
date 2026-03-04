@@ -8,9 +8,11 @@ use ais_schema::{
 use ais_sdk::documents::PlanSketchSegment;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use super::budget::{compact_json_with_options, JsonBudgetOptions};
 use super::candidates::{CandidateContext, DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT};
@@ -214,6 +216,8 @@ const REPEATED_PLAN_CHECK_FAILURE_THRESHOLD: u64 = 3;
 const FINALIZE_SCHEMA_REPAIR_ATTEMPT_LIMIT: u8 = 2;
 const NON_FINALIZE_TOOL_SCHEMA_REPAIR_ATTEMPT_LIMIT: u8 = 2;
 const NO_TOOLCALL_RETRY_ATTEMPT_LIMIT: u8 = 2;
+const ADJUDICATE_MAX_TOOL_ROUNDS: u8 = 3;
+const ADJUDICATE_EMPTY_SEARCH_STREAK_LIMIT: u64 = 2;
 const LLM_CHARS_PER_TOKEN_ESTIMATE: usize = 4;
 const CONTEXT_SOFT_LIMIT_NUMERATOR: u64 = 9;
 const CONTEXT_SOFT_LIMIT_DENOMINATOR: u64 = 10;
@@ -261,6 +265,23 @@ struct PlannerDiagnosticsTracker {
     no_toolcall_retries_total: u64,
     no_toolcall_retries_exhausted_total: u64,
     empty_search_streak_max: u64,
+    parallel_batches_total: u64,
+    parallel_calls_total: u64,
+    parallel_failures_total: u64,
+    parallel_partial_success_total: u64,
+    tool_exec_total: u64,
+    tool_exec_success: u64,
+    tool_exec_error: u64,
+    tool_exec_cached_hit: u64,
+    tool_exec_parallel: u64,
+    tool_exec_sequential: u64,
+    tool_exec_blocked_finalize: u64,
+    tool_exec_repair_retry: u64,
+    tool_exec_repair_exhausted: u64,
+    tool_exec_count_by_tool: BTreeMap<String, u64>,
+    tool_exec_error_by_tool: BTreeMap<String, u64>,
+    tool_exec_latency_sum_ms_by_tool: BTreeMap<String, u64>,
+    tool_exec_latency_max_ms_by_tool: BTreeMap<String, u64>,
     seen_tool_call_keys: BTreeSet<String>,
 }
 
@@ -343,6 +364,75 @@ impl PlannerDiagnosticsTracker {
             self.no_toolcall_retries_exhausted_total.saturating_add(1);
     }
 
+    fn observe_parallel_batch(&mut self, calls: u64) {
+        self.parallel_batches_total = self.parallel_batches_total.saturating_add(1);
+        self.parallel_calls_total = self.parallel_calls_total.saturating_add(calls);
+    }
+
+    fn observe_parallel_partial_success(&mut self) {
+        self.parallel_partial_success_total = self.parallel_partial_success_total.saturating_add(1);
+    }
+
+    fn observe_tool_exec_end(
+        &mut self,
+        tool_name: &str,
+        mode: &'static str,
+        status: &'static str,
+        latency_ms: u64,
+    ) {
+        self.tool_exec_total = self.tool_exec_total.saturating_add(1);
+        let total = self
+            .tool_exec_count_by_tool
+            .entry(tool_name.to_string())
+            .or_insert(0);
+        *total = total.saturating_add(1);
+        if mode == "parallel" {
+            self.tool_exec_parallel = self.tool_exec_parallel.saturating_add(1);
+        } else {
+            self.tool_exec_sequential = self.tool_exec_sequential.saturating_add(1);
+        }
+        match status {
+            "success" => self.tool_exec_success = self.tool_exec_success.saturating_add(1),
+            "cached_hit" => {
+                self.tool_exec_cached_hit = self.tool_exec_cached_hit.saturating_add(1);
+            }
+            "blocked_finalize" => {
+                self.tool_exec_blocked_finalize = self.tool_exec_blocked_finalize.saturating_add(1);
+            }
+            _ => {
+                self.tool_exec_error = self.tool_exec_error.saturating_add(1);
+                let errors = self
+                    .tool_exec_error_by_tool
+                    .entry(tool_name.to_string())
+                    .or_insert(0);
+                *errors = errors.saturating_add(1);
+                if mode == "parallel" {
+                    self.parallel_failures_total = self.parallel_failures_total.saturating_add(1);
+                }
+            }
+        }
+        let latency_sum = self
+            .tool_exec_latency_sum_ms_by_tool
+            .entry(tool_name.to_string())
+            .or_insert(0);
+        *latency_sum = latency_sum.saturating_add(latency_ms);
+        let latency_max = self
+            .tool_exec_latency_max_ms_by_tool
+            .entry(tool_name.to_string())
+            .or_insert(0);
+        if latency_ms > *latency_max {
+            *latency_max = latency_ms;
+        }
+    }
+
+    fn observe_tool_exec_retry(&mut self, exhausted: bool) {
+        if exhausted {
+            self.tool_exec_repair_exhausted = self.tool_exec_repair_exhausted.saturating_add(1);
+        } else {
+            self.tool_exec_repair_retry = self.tool_exec_repair_retry.saturating_add(1);
+        }
+    }
+
     fn duplicate_ratio_bps(&self) -> u64 {
         if self.total_tool_calls == 0 {
             return 0;
@@ -417,6 +507,25 @@ impl PlannerDiagnosticsTracker {
             "memory_projection_budget_tokens": self.memory_projection_budget_tokens,
             "memory_projection_estimated_tokens": self.memory_projection_estimated_tokens,
             "empty_search_streak_max": self.empty_search_streak_max,
+            "parallel_batches_total": self.parallel_batches_total,
+            "parallel_calls_total": self.parallel_calls_total,
+            "parallel_failures_total": self.parallel_failures_total,
+            "parallel_partial_success_total": self.parallel_partial_success_total,
+            "tool_exec": {
+                "total": self.tool_exec_total,
+                "success": self.tool_exec_success,
+                "error": self.tool_exec_error,
+                "cached_hit": self.tool_exec_cached_hit,
+                "parallel": self.tool_exec_parallel,
+                "sequential": self.tool_exec_sequential,
+                "blocked_finalize": self.tool_exec_blocked_finalize,
+                "repair_retry": self.tool_exec_repair_retry,
+                "repair_exhausted": self.tool_exec_repair_exhausted,
+                "count_by_tool": self.tool_exec_count_by_tool,
+                "error_by_tool": self.tool_exec_error_by_tool,
+                "latency_sum_ms_by_tool": self.tool_exec_latency_sum_ms_by_tool,
+                "latency_max_ms_by_tool": self.tool_exec_latency_max_ms_by_tool,
+            }
         })
     }
 }
@@ -495,6 +604,7 @@ impl PlanCheckFailureLoopGuard {
 struct RoundContextSignal {
     pressure_mode: Option<String>,
     compressed: bool,
+    adjudicate_mode: bool,
 }
 
 impl PlannerLlmUsageTracker {
@@ -611,10 +721,16 @@ impl Default for SegmentedPromptContextBuilder {
                 "candidate_ref is required for query/action steps and optional for assert/branch control steps.",
                 "Plan against state_summary.todo_state.current_todo only and produce exactly one deterministic segment for that todo.",
                 "depends_on may only reference step ids in the current segment; never use cross-segment refs like seg_1/....",
-                "For inputs.* refs, use only state_summary.input_registry.known_refs; never invent candidate/protocol/action refs outside discovered context.",
+                "For inputs.* refs, use InputStore-only bindable refs: source_of_truth=state_summary.input_store, projection=state_summary.input_registry.known_refs; never invent candidate/protocol/action refs outside discovered context.",
                 "For unknown_input_ref repair, preserve slot semantics: token/address params map to address-like refs (for example *.address), and *.decimals refs cannot substitute token/address slots.",
+                "If previous_error.autofill.mode=host_binding_adjudicate_round: first prefer host-provided ambiguous_bindings[]/query_candidate_pool/available_input_refs; you may call readonly discovery tools (list_candidates/catalog.search/get_candidate_detail/guide.get) to find query refs; output binding/query decisions before asking user input.",
+                "If previous_error.autofill.mode=host_missing_input_round: prioritize resolver.selected_query_refs/query_candidate_pool for recovery; attempt query_decisions/binding_decisions before emitting missing_required_input questions.",
+                "Never ask user input until both input-ref binding and query-based recovery are exhausted for current missing refs.",
+                "When resolver or host recovery has viable query/binding candidates, continue recovery and do not emit missing_required_input yet.",
+                "Emit missing_required_input only after recovery exhaustion, and include error.details.recovery_exhaustion with unresolved_refs[] + reasons[] + attempt_trace_id.",
+                "For missing_required_input, unresolved_refs/questions must use canonical source refs (inputs.* / node outputs) and must never expose params.* paths to users.",
                 "For transfer/swap writes, enforce same-segment gate chain query -> assert|branch -> action and refresh volatile write facts by query when needed.",
-                "For errors, return status=invalid|unavailable with error.reason_code; for missing_required_input include error.details.questions[]. Repair order is strict: shape -> ref -> slot -> semantic.",
+                "For errors, return status=invalid|unavailable with error.reason_code; for missing_required_input use canonical shape: error.details.questions[] + error.details.recovery_exhaustion{unresolved_refs[],reasons[],attempt_trace_id} (all non-empty). Repair order is strict: shape -> ref -> slot -> semantic.",
             ]
             .into_iter()
             .map(str::to_string)
@@ -634,7 +750,7 @@ impl Default for SegmentedPromptContextBuilder {
                 "Goal: derive deterministic initial inputs/facts before todo planning; prioritize high-confidence owner/recipient/amount/token/chain fields and avoid guessing.",
                 "When grounding-required facts for known refs are missing, call catalog.resolve_missing_facts with missing_refs before asking user input.",
                 "If status=proposed and ready_for_todos=false, include actionable questions or missing_refs (non-empty).",
-                "If required grounding fields remain missing, return unavailable with reason_code=missing_required_input and questions[].",
+                "If required grounding fields remain missing, return unavailable with reason_code=missing_required_input and canonical error.details.questions[] + error.details.recovery_exhaustion.",
                 "Call plan.ground_intent exactly once and only as the last tool call.",
                 "Do not call plan.begin, plan.propose_todos, plan.propose_segment, or plan.revise_segment.",
             ]
@@ -663,7 +779,8 @@ impl Default for SegmentedPromptContextBuilder {
                 "Segment shape must stay flat: do not output legacy branch-tree fields (if_true/if_false/then/else/children); encode branch paths via flat steps + when.cel + depends_on.",
                 "You must call plan.check_segment and only finalize when check result has ok=true.",
                 "If token decimals or write-required facts are unknown, call catalog.resolve_missing_facts with missing refs, then add corresponding query steps before write when possible; do not patch token/address slots with *.decimals refs.",
-                "If required facts are missing, return unavailable with reason_code=missing_required_input and include error.details.questions[].",
+                "If required facts are missing and resolver/host recovery still has query or binding candidates, continue recovery and do not emit missing_required_input yet.",
+                "If required facts are still missing after recovery is exhausted, return unavailable with reason_code=missing_required_input and include canonical error.details.questions[] + error.details.recovery_exhaustion.",
                 "Call plan.propose_segment exactly once and only as the last tool call.",
                 "Never call plan.begin or plan.revise_segment.",
             ]
@@ -680,7 +797,8 @@ impl Default for SegmentedPromptContextBuilder {
                 "You must call plan.check_segment and only finalize when check result has ok=true.",
                 "Repair order is strict: shape -> ref -> slot -> semantic; keep semantic edits minimal.",
                 "If decimals/facts are missing, call catalog.resolve_missing_facts and prefer adding matched query steps before returning missing_required_input; do not patch token/address slots with *.decimals refs.",
-                "If required facts are missing, return unavailable with reason_code=missing_required_input and include error.details.questions[].",
+                "If required facts are missing and resolver/host recovery still has query or binding candidates, continue recovery and do not emit missing_required_input yet.",
+                "If required facts are still missing after recovery is exhausted, return unavailable with reason_code=missing_required_input and include canonical error.details.questions[] + error.details.recovery_exhaustion.",
                 "Call plan.revise_segment exactly once and only as the last tool call.",
                 "Never call plan.begin or plan.propose_segment.",
             ]
@@ -732,15 +850,17 @@ impl SegmentedPromptContextBuilder {
         candidate_context: Option<&CandidateContext>,
     ) -> PromptRenderOutput {
         let phase_rules = self.phase_rules(phase);
+        let base_rules: Cow<'_, [String]> = Cow::Borrowed(self.base_rules.as_slice());
+        let contracts_summary: Cow<'_, [String]> = Cow::Borrowed(self.contracts_summary.as_slice());
         let workspace_summary = workspace_summary(candidate_context);
         let pack_summary =
             "Planning snapshot source: request.snapshot_hash (derived from pack/catalog/chain_scope/approval mode).";
         let modules = json!({
             "version": SEGMENTED_PROMPT_VERSION,
             "phase": phase_name(phase),
-            "base_rules": self.base_rules,
+            "base_rules": base_rules,
             "phase_rules": phase_rules,
-            "contracts_summary": self.contracts_summary,
+            "contracts_summary": contracts_summary,
             "pack_summary": pack_summary,
             "workspace_summary": workspace_summary,
         });
@@ -748,9 +868,9 @@ impl SegmentedPromptContextBuilder {
             .unwrap_or_else(|_| "prompt-hash-unavailable".to_string());
         let prompt = format!(
             "You are an AIS segmented planner.\nPrompt-Version: {SEGMENTED_PROMPT_VERSION}\nPrompt-Hash: {hash}\n\nBase Rules:\n{}\n\nPhase Rules:\n{}\n\nContracts Summary:\n{}\n\nPack Summary:\n- {pack_summary}\n\nWorkspace Summary:\n{}",
-            numbered_lines(self.base_rules.as_slice()),
+            numbered_lines(base_rules.as_ref()),
             numbered_lines(phase_rules.as_slice()),
-            numbered_lines(self.contracts_summary.as_slice()),
+            numbered_lines(contracts_summary.as_ref()),
             workspace_summary_lines(&workspace_summary)
         );
         PromptRenderOutput {
@@ -850,6 +970,20 @@ impl<P> LlmSegmentedIntentPlanner<P> {
             );
         }
         usage
+    }
+
+    pub fn tool_lifecycle_value(&self) -> Value {
+        let diagnostics = self.diagnostics_tracker.to_value();
+        json!({
+            "schema": "ais-agent-tool-lifecycle/0.0.1",
+            "counters": diagnostics.pointer("/tool_exec").cloned().unwrap_or(Value::Null),
+            "parallel": {
+                "batches_total": diagnostics.pointer("/parallel_batches_total").cloned().unwrap_or(Value::Null),
+                "calls_total": diagnostics.pointer("/parallel_calls_total").cloned().unwrap_or(Value::Null),
+                "failures_total": diagnostics.pointer("/parallel_failures_total").cloned().unwrap_or(Value::Null),
+                "partial_success_total": diagnostics.pointer("/parallel_partial_success_total").cloned().unwrap_or(Value::Null),
+            }
+        })
     }
 
     #[allow(dead_code)]
@@ -972,6 +1106,11 @@ impl<P> LlmSegmentedIntentPlanner<P> {
                 .and_then(|message| message.content.as_deref())
                 .unwrap_or_default(),
         );
+        let effective_max_tool_rounds = if round_signal.adjudicate_mode {
+            self.max_tool_rounds.min(ADJUDICATE_MAX_TOOL_ROUNDS)
+        } else {
+            self.max_tool_rounds
+        };
         let mut loop_guard = CatalogSearchLoopGuard::default();
         let mut plan_check_failure_guard = PlanCheckFailureLoopGuard::default();
         let mut control_step_ref_hint_emitted = false;
@@ -1006,7 +1145,7 @@ impl<P> LlmSegmentedIntentPlanner<P> {
             }
         }
 
-        for round in 0..self.max_tool_rounds {
+        for round in 0..effective_max_tool_rounds {
             self.diagnostics_tracker.observe_phase_round(phase);
             let llm_request = CompleteWithToolsRequest {
                 messages: messages.clone(),
@@ -1143,6 +1282,284 @@ impl<P> LlmSegmentedIntentPlanner<P> {
             let mut round_memory_hits = 0u64;
             let mut round_loop_hint: Option<Value> = None;
             let mut round_control_ref_hint: Option<Value> = None;
+            let all_parallel_readonly = !response.tool_calls.is_empty()
+                && response.tool_calls.iter().all(|call| {
+                    call.name != finalize_tool && is_parallel_readonly_tool(call.name.as_str())
+                });
+            if all_parallel_readonly {
+                let planner_usage = self.llm_usage_value();
+                let projection_budget_tokens =
+                    ToolMemoryBudgetPolicy::derive_tool_memory_projection_token_budget(
+                        Some(&planner_usage),
+                        None,
+                    );
+                let remaining_tokens = planner_usage
+                    .get("context_remaining_tokens")
+                    .and_then(Value::as_u64);
+                let usage_ratio_bps = planner_usage
+                    .get("context_soft_limit_tokens")
+                    .and_then(Value::as_u64)
+                    .and_then(|soft_limit| {
+                        if soft_limit == 0 {
+                            None
+                        } else {
+                            Some(10_000_u64.saturating_sub(
+                                remaining_tokens.unwrap_or(0).saturating_mul(10_000) / soft_limit,
+                            ))
+                        }
+                    });
+                let pressure_mode = ToolMemoryBudgetPolicy::derive_context_pressure_mode(
+                    usage_ratio_bps,
+                    remaining_tokens,
+                );
+                let compress_level =
+                    ToolMemoryBudgetPolicy::derive_global_compress_level(pressure_mode);
+                self.diagnostics_tracker
+                    .observe_parallel_batch(response.tool_calls.len() as u64);
+
+                let mut call_results =
+                    Vec::<(ToolCall, Result<DecodedSegmentedToolCall, RunnerError>, u64)>::new();
+                for call in &response.tool_calls {
+                    let started_at = Instant::now();
+                    super::trace::emit(
+                        self.verbose_llm,
+                        phase_name(phase),
+                        "planner_tool_exec_start",
+                        &[
+                            ("tool_call_id", call.id.clone()),
+                            ("tool", call.name.clone()),
+                            ("execution_mode", "parallel".to_string()),
+                        ],
+                    );
+                    let normalized_args =
+                        normalize_tool_args_for_validation(call.name.as_str(), &call.arguments);
+                    let effective_arguments = if normalized_args.changed() {
+                        normalized_args.arguments
+                    } else {
+                        call.arguments.clone()
+                    };
+                    let dedupe_key = super::tools::cache::tool_cache_key(
+                        call.name.as_str(),
+                        &effective_arguments,
+                    );
+                    let _ = self
+                        .diagnostics_tracker
+                        .observe_tool_call(call.name.as_str(), dedupe_key);
+                    let mut effective_call = call.clone();
+                    effective_call.arguments = effective_arguments;
+                    let cache_key = super::tools::cache::tool_cache_key(
+                        effective_call.name.as_str(),
+                        &effective_call.arguments,
+                    );
+                    if let Some(cache_key) = cache_key.as_deref() {
+                        if let Some(content) = self.planning_memory.get(cache_key) {
+                            call_results.push((
+                                call.clone(),
+                                Ok(DecodedSegmentedToolCall::ToolMessage {
+                                    tool_name: call.name.clone(),
+                                    tool_call_id: call.id.clone(),
+                                    content: content.to_string(),
+                                    cached: true,
+                                }),
+                                started_at.elapsed().as_millis() as u64,
+                            ));
+                            continue;
+                        }
+                    }
+                    let decoded = decode_segmented_tool_call_with_memory(
+                        &effective_call,
+                        finalize_tool,
+                        phase,
+                        self.candidate_context.as_ref(),
+                        segment_check_context,
+                        None,
+                        Some(projection_budget_tokens),
+                        Some(compress_level),
+                    );
+                    let latency_ms = started_at.elapsed().as_millis() as u64;
+                    if let (
+                        Ok(DecodedSegmentedToolCall::ToolMessage {
+                            content,
+                            cached: false,
+                            ..
+                        }),
+                        Some(cache_key),
+                    ) = (&decoded, cache_key)
+                    {
+                        self.planning_memory.insert(cache_key, content.clone());
+                    }
+                    call_results.push((call.clone(), decoded, latency_ms));
+                }
+
+                let mut parallel_errors = 0u64;
+                for (call, decoded, latency_ms) in call_results {
+                    match decoded {
+                        Ok(DecodedSegmentedToolCall::ToolMessage {
+                            tool_name,
+                            tool_call_id,
+                            content,
+                            cached,
+                        }) => {
+                            self.diagnostics_tracker
+                                .observe_tool_result(tool_name.as_str(), cached);
+                            if cached {
+                                round_memory_hits = round_memory_hits.saturating_add(1);
+                            }
+                            self.diagnostics_tracker.observe_tool_exec_end(
+                                tool_name.as_str(),
+                                "parallel",
+                                if cached { "cached_hit" } else { "success" },
+                                latency_ms,
+                            );
+                            super::trace::emit(
+                                self.verbose_llm,
+                                phase_name(phase),
+                                "planner_tool_exec_end",
+                                &[
+                                    ("tool_call_id", tool_call_id.clone()),
+                                    ("tool", tool_name.clone()),
+                                    (
+                                        "status",
+                                        if cached { "cached_hit" } else { "success" }.to_string(),
+                                    ),
+                                    ("execution_mode", "parallel".to_string()),
+                                    ("latency_ms", latency_ms.to_string()),
+                                ],
+                            );
+                            if tool_name == "catalog.search" {
+                                let signature =
+                                    catalog_search_signature_from_result(content.as_str());
+                                let is_empty = catalog_search_result_is_empty(content.as_str());
+                                if is_empty {
+                                    let should_hint = loop_guard.observe_empty(signature);
+                                    self.diagnostics_tracker
+                                        .observe_empty_search_streak(loop_guard.max_streak());
+                                    if round_signal.adjudicate_mode
+                                        && loop_guard.max_streak()
+                                            >= ADJUDICATE_EMPTY_SEARCH_STREAK_LIMIT
+                                    {
+                                        round_loop_hint = Some(adjudicate_finalize_guard_payload(
+                                            finalize_tool,
+                                            round.saturating_add(1),
+                                            "empty_catalog_search_streak",
+                                        ));
+                                    } else if should_hint {
+                                        round_loop_hint =
+                                            Some(catalog_search_loop_guard_hint_payload(
+                                                loop_guard.current_streak,
+                                            ));
+                                    }
+                                } else {
+                                    loop_guard.observe_non_empty();
+                                }
+                            }
+                            tool_results.push(LlmMessage {
+                                role: MessageRole::Tool,
+                                content: Some(content),
+                                tool_name: Some(tool_name),
+                                tool_call_id: Some(tool_call_id),
+                                tool_calls: vec![],
+                            });
+                        }
+                        Ok(DecodedSegmentedToolCall::Final(_)) => {
+                            parallel_errors = parallel_errors.saturating_add(1);
+                            self.diagnostics_tracker.observe_tool_exec_end(
+                                call.name.as_str(),
+                                "parallel",
+                                "error",
+                                latency_ms,
+                            );
+                            let content = planner_tool_error_payload(
+                                call.name.as_str(),
+                                call.id.as_str(),
+                                "parallel_tool_unexpected_finalize",
+                                "readonly parallel batch produced finalize tool output unexpectedly",
+                            );
+                            tool_results.push(LlmMessage {
+                                role: MessageRole::Tool,
+                                content: Some(content),
+                                tool_name: Some(call.name.clone()),
+                                tool_call_id: Some(call.id.clone()),
+                                tool_calls: vec![],
+                            });
+                        }
+                        Err(error) => {
+                            parallel_errors = parallel_errors.saturating_add(1);
+                            self.diagnostics_tracker.observe_tool_exec_end(
+                                call.name.as_str(),
+                                "parallel",
+                                "error",
+                                latency_ms,
+                            );
+                            super::trace::emit(
+                                self.verbose_llm,
+                                phase_name(phase),
+                                "planner_tool_exec_end",
+                                &[
+                                    ("tool_call_id", call.id.clone()),
+                                    ("tool", call.name.clone()),
+                                    ("status", "error".to_string()),
+                                    ("execution_mode", "parallel".to_string()),
+                                    ("latency_ms", latency_ms.to_string()),
+                                    ("error", error.to_string()),
+                                ],
+                            );
+                            let content = planner_tool_error_payload(
+                                call.name.as_str(),
+                                call.id.as_str(),
+                                "planner_tool_execution_failed",
+                                error.to_string().as_str(),
+                            );
+                            tool_results.push(LlmMessage {
+                                role: MessageRole::Tool,
+                                content: Some(content),
+                                tool_name: Some(call.name.clone()),
+                                tool_call_id: Some(call.id.clone()),
+                                tool_calls: vec![],
+                            });
+                        }
+                    }
+                }
+                if parallel_errors > 0 && (parallel_errors as usize) < response.tool_calls.len() {
+                    self.diagnostics_tracker.observe_parallel_partial_success();
+                }
+                if tool_results.is_empty() {
+                    return Err(RunnerError::Llm(
+                        "segmented planner returned no actionable tools".to_string(),
+                    ));
+                }
+                messages.extend(tool_results);
+                if let Some(loop_hint) = round_loop_hint {
+                    let hint_text = serde_json::to_string_pretty(&loop_hint)
+                        .unwrap_or_else(|_| "{}".to_string());
+                    messages.push(LlmMessage {
+                        role: MessageRole::User,
+                        content: Some(hint_text),
+                        tool_name: None,
+                        tool_call_id: None,
+                        tool_calls: vec![],
+                    });
+                }
+                if self.verbose_llm {
+                    let duplicate_ratio_bps = self.diagnostics_tracker.duplicate_ratio_bps();
+                    eprintln!(
+                        "[llm] segmented planner round_summary round={} phase={} pressure_mode={} compressed={} memory_hits={} duplicate_ratio_bps={} empty_search_streak_max={} adjudicate_mode={} max_rounds={}",
+                        round + 1,
+                        phase_name(phase),
+                        round_signal
+                            .pressure_mode
+                            .as_deref()
+                            .unwrap_or("-"),
+                        round_signal.compressed,
+                        round_memory_hits,
+                        duplicate_ratio_bps,
+                        self.diagnostics_tracker.empty_search_streak_max,
+                        round_signal.adjudicate_mode,
+                        effective_max_tool_rounds,
+                    );
+                }
+                continue;
+            }
             for call in &response.tool_calls {
                 let normalized_args =
                     normalize_tool_args_for_validation(call.name.as_str(), &call.arguments);
@@ -1177,6 +1594,17 @@ impl<P> LlmSegmentedIntentPlanner<P> {
                         call.id
                     );
                 }
+                let tool_exec_started_at = Instant::now();
+                super::trace::emit(
+                    self.verbose_llm,
+                    phase_name(phase),
+                    "planner_tool_exec_start",
+                    &[
+                        ("tool_call_id", call.id.clone()),
+                        ("tool", call.name.clone()),
+                        ("execution_mode", "sequential".to_string()),
+                    ],
+                );
                 let mut effective_call = call.clone();
                 effective_call.arguments = effective_arguments;
                 let planner_usage = self.llm_usage_value();
@@ -1229,6 +1657,7 @@ impl<P> LlmSegmentedIntentPlanner<P> {
                                 && check_segment_schema_repair_attempts
                                     < NON_FINALIZE_TOOL_SCHEMA_REPAIR_ATTEMPT_LIMIT
                             {
+                                self.diagnostics_tracker.observe_tool_exec_retry(false);
                                 check_segment_schema_repair_attempts =
                                     check_segment_schema_repair_attempts.saturating_add(1);
                                 super::trace::emit(
@@ -1272,6 +1701,13 @@ impl<P> LlmSegmentedIntentPlanner<P> {
                                     tool_call_id: Some(call.id.clone()),
                                     tool_calls: vec![],
                                 });
+                                let latency_ms = tool_exec_started_at.elapsed().as_millis() as u64;
+                                self.diagnostics_tracker.observe_tool_exec_end(
+                                    call.name.as_str(),
+                                    "sequential",
+                                    "blocked_finalize",
+                                    latency_ms,
+                                );
                                 continue;
                             }
                             super::trace::emit(
@@ -1287,6 +1723,7 @@ impl<P> LlmSegmentedIntentPlanner<P> {
                                     ),
                                 ],
                             );
+                            self.diagnostics_tracker.observe_tool_exec_retry(true);
                         }
                         if call.name == finalize_tool {
                             self.last_failed_finalize = Some(compact_failed_finalize_payload(
@@ -1304,6 +1741,7 @@ impl<P> LlmSegmentedIntentPlanner<P> {
                                 if finalize_schema_repair_attempts
                                     < FINALIZE_SCHEMA_REPAIR_ATTEMPT_LIMIT
                                 {
+                                    self.diagnostics_tracker.observe_tool_exec_retry(false);
                                     finalize_schema_repair_attempts =
                                         finalize_schema_repair_attempts.saturating_add(1);
                                     self.diagnostics_tracker
@@ -1354,6 +1792,7 @@ impl<P> LlmSegmentedIntentPlanner<P> {
                                 }
                                 self.diagnostics_tracker
                                     .observe_finalize_schema_repair_exhausted();
+                                self.diagnostics_tracker.observe_tool_exec_retry(true);
                                 super::trace::emit(
                                     self.verbose_llm,
                                     phase_name(phase),
@@ -1369,6 +1808,26 @@ impl<P> LlmSegmentedIntentPlanner<P> {
                                 );
                             }
                         }
+                        let latency_ms = tool_exec_started_at.elapsed().as_millis() as u64;
+                        self.diagnostics_tracker.observe_tool_exec_end(
+                            call.name.as_str(),
+                            "sequential",
+                            "error",
+                            latency_ms,
+                        );
+                        super::trace::emit(
+                            self.verbose_llm,
+                            phase_name(phase),
+                            "planner_tool_exec_end",
+                            &[
+                                ("tool_call_id", call.id.clone()),
+                                ("tool", call.name.clone()),
+                                ("status", "error".to_string()),
+                                ("execution_mode", "sequential".to_string()),
+                                ("latency_ms", latency_ms.to_string()),
+                                ("error", error.to_string()),
+                            ],
+                        );
                         return Err(error);
                     }
                 };
@@ -1442,9 +1901,35 @@ impl<P> LlmSegmentedIntentPlanner<P> {
                                     tool_call_id: Some(call.id.clone()),
                                     tool_calls: vec![],
                                 });
+                                let latency_ms = tool_exec_started_at.elapsed().as_millis() as u64;
+                                self.diagnostics_tracker.observe_tool_exec_end(
+                                    call.name.as_str(),
+                                    "sequential",
+                                    "blocked_finalize",
+                                    latency_ms,
+                                );
                                 continue;
                             }
                         }
+                        let latency_ms = tool_exec_started_at.elapsed().as_millis() as u64;
+                        self.diagnostics_tracker.observe_tool_exec_end(
+                            call.name.as_str(),
+                            "sequential",
+                            "success",
+                            latency_ms,
+                        );
+                        super::trace::emit(
+                            self.verbose_llm,
+                            phase_name(phase),
+                            "planner_tool_exec_end",
+                            &[
+                                ("tool_call_id", call.id.clone()),
+                                ("tool", call.name.clone()),
+                                ("status", "success".to_string()),
+                                ("execution_mode", "sequential".to_string()),
+                                ("latency_ms", latency_ms.to_string()),
+                            ],
+                        );
                         return Ok(result);
                     }
                     DecodedSegmentedToolCall::ToolMessage {
@@ -1503,7 +1988,16 @@ impl<P> LlmSegmentedIntentPlanner<P> {
                                 let should_hint = loop_guard.observe_empty(signature);
                                 self.diagnostics_tracker
                                     .observe_empty_search_streak(loop_guard.max_streak());
-                                if should_hint {
+                                if round_signal.adjudicate_mode
+                                    && loop_guard.max_streak()
+                                        >= ADJUDICATE_EMPTY_SEARCH_STREAK_LIMIT
+                                {
+                                    round_loop_hint = Some(adjudicate_finalize_guard_payload(
+                                        finalize_tool,
+                                        round.saturating_add(1),
+                                        "empty_catalog_search_streak",
+                                    ));
+                                } else if should_hint {
                                     round_loop_hint = Some(catalog_search_loop_guard_hint_payload(
                                         loop_guard.current_streak,
                                     ));
@@ -1527,6 +2021,28 @@ impl<P> LlmSegmentedIntentPlanner<P> {
                                 truncate_for_log(content.as_str(), 900)
                             );
                         }
+                        let latency_ms = tool_exec_started_at.elapsed().as_millis() as u64;
+                        self.diagnostics_tracker.observe_tool_exec_end(
+                            tool_name.as_str(),
+                            "sequential",
+                            if cached { "cached_hit" } else { "success" },
+                            latency_ms,
+                        );
+                        super::trace::emit(
+                            self.verbose_llm,
+                            phase_name(phase),
+                            "planner_tool_exec_end",
+                            &[
+                                ("tool_call_id", tool_call_id.clone()),
+                                ("tool", tool_name.clone()),
+                                (
+                                    "status",
+                                    if cached { "cached_hit" } else { "success" }.to_string(),
+                                ),
+                                ("execution_mode", "sequential".to_string()),
+                                ("latency_ms", latency_ms.to_string()),
+                            ],
+                        );
                         tool_results.push(LlmMessage {
                             role: MessageRole::Tool,
                             content: Some(content),
@@ -1585,7 +2101,7 @@ impl<P> LlmSegmentedIntentPlanner<P> {
             if self.verbose_llm {
                 let duplicate_ratio_bps = self.diagnostics_tracker.duplicate_ratio_bps();
                 eprintln!(
-                    "[llm] segmented planner round_summary round={} phase={} pressure_mode={} compressed={} memory_hits={} duplicate_ratio_bps={} empty_search_streak_max={}",
+                    "[llm] segmented planner round_summary round={} phase={} pressure_mode={} compressed={} memory_hits={} duplicate_ratio_bps={} empty_search_streak_max={} adjudicate_mode={} max_rounds={}",
                     round + 1,
                     phase_name(phase),
                     round_signal
@@ -1595,11 +2111,25 @@ impl<P> LlmSegmentedIntentPlanner<P> {
                     round_signal.compressed,
                     round_memory_hits,
                     duplicate_ratio_bps,
-                    self.diagnostics_tracker.empty_search_streak_max
+                    self.diagnostics_tracker.empty_search_streak_max,
+                    round_signal.adjudicate_mode,
+                    effective_max_tool_rounds,
                 );
             }
         }
 
+        if round_signal.adjudicate_mode {
+            let payload = adjudicate_finalize_guard_payload(
+                finalize_tool,
+                effective_max_tool_rounds,
+                "adjudicate_round_limit_reached",
+            );
+            let payload_text =
+                serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+            return Err(RunnerError::Llm(format!(
+                "segmented planner adjudicate rounds exhausted: finalize_required payload={payload_text}"
+            )));
+        }
         Err(RunnerError::Llm(
             "segmented planner tool round limit reached".to_string(),
         ))
@@ -1993,6 +2523,13 @@ enum PlannerErrorDetails {
 }
 
 impl PlannerErrorDetails {
+    fn recovery_exhaustion_value(&self) -> Option<&Value> {
+        match self {
+            Self::Typed(typed) => typed.extra.get("recovery_exhaustion"),
+            Self::Raw(raw) => raw.get("recovery_exhaustion"),
+        }
+    }
+
     #[cfg(test)]
     fn to_value(&self) -> Value {
         match self {
@@ -2017,6 +2554,51 @@ impl PlannerErrorDetails {
                 })
                 .unwrap_or_default(),
         }
+    }
+
+    fn recovery_exhaustion_unresolved_refs(&self) -> Vec<String> {
+        let unresolved = self
+            .recovery_exhaustion_value()
+            .and_then(Value::as_object)
+            .and_then(|object| object.get("unresolved_refs"));
+        unresolved
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    }
+    fn recovery_exhaustion_reasons(&self) -> Vec<String> {
+        self.recovery_exhaustion_value()
+            .and_then(Value::as_object)
+            .and_then(|object| object.get("reasons"))
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    }
+
+    fn recovery_exhaustion_attempt_trace_id(&self) -> Option<String> {
+        self.recovery_exhaustion_value()
+            .and_then(Value::as_object)
+            .and_then(|object| object.get("attempt_trace_id"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
     }
 }
 
@@ -2373,6 +2955,31 @@ fn decode_segmented_tool_call_with_memory(
         projection_budget_tokens,
         compress_level,
     )
+}
+
+fn is_parallel_readonly_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "catalog.search" | "get_candidate_detail" | "guide.get" | "list_candidates"
+    )
+}
+
+fn planner_tool_error_payload(
+    tool_name: &str,
+    tool_call_id: &str,
+    reason_code: &str,
+    message: &str,
+) -> String {
+    serde_json::to_string(&json!({
+        "ok": false,
+        "reason_code": reason_code,
+        "tool": tool_name,
+        "tool_call_id": tool_call_id,
+        "message": message,
+        "retryable": true,
+        "details": {},
+    }))
+    .unwrap_or_else(|_| "{\"ok\":false}".to_string())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3109,6 +3716,7 @@ pub(super) fn parse_segment_draft(args: SegmentToolArgs) -> Result<SegmentDraft,
                 RunnerError::Llm("unavailable segment draft requires `error`".to_string())
             })?;
             let questions = extract_missing_input_questions(error.details.as_ref(), &questions);
+            validate_missing_required_input_error("plan.propose_segment|plan.revise_segment", &error, questions.as_slice())?;
             Ok(SegmentDraft::Unavailable {
                 reason_code: error.reason_code,
                 message: error.message,
@@ -3161,6 +3769,7 @@ pub(super) fn parse_todo_draft(args: TodoToolArgs) -> Result<TodoDraft, RunnerEr
                 RunnerError::Llm("unavailable todo draft requires `error`".to_string())
             })?;
             let questions = extract_missing_input_questions(error.details.as_ref(), &questions);
+            validate_missing_required_input_error("plan.propose_todos", &error, questions.as_slice())?;
             Ok(TodoDraft::Unavailable {
                 reason_code: error.reason_code,
                 message: error.message,
@@ -3231,6 +3840,7 @@ pub(super) fn parse_grounding_draft(
                 RunnerError::Llm("unavailable grounding draft requires `error`".to_string())
             })?;
             let questions = extract_missing_input_questions(error.details.as_ref(), &questions);
+            validate_missing_required_input_error("plan.ground_intent", &error, questions.as_slice())?;
             Ok(IntentGroundingDraft::Unavailable {
                 reason_code: error.reason_code,
                 message: error.message,
@@ -3388,6 +3998,66 @@ fn extract_missing_input_questions(
         .iter()
         .filter_map(|question| serde_json::to_value(question).ok())
         .collect::<Vec<_>>()
+}
+
+fn validate_missing_required_input_error(
+    tool_name: &str,
+    error: &PlannerToolError,
+    questions: &[Value],
+) -> Result<(), RunnerError> {
+    if error.reason_code != "missing_required_input" {
+        return Ok(());
+    }
+    if questions.is_empty() {
+        return Err(RunnerError::Llm(format!(
+            "invalid {tool_name} args: reason_code=missing_required_input requires non-empty error.details.questions[]"
+        )));
+    }
+    if let Some(invalid_question_id) = questions.iter().find_map(|question| {
+        question
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|id| id.starts_with("params."))
+    }) {
+        return Err(RunnerError::Llm(format!(
+            "invalid {tool_name} args: missing_required_input question.id must be canonical source ref (received `{invalid_question_id}`)"
+        )));
+    }
+    if let Some(invalid_unresolved_ref) = error
+        .details
+        .as_ref()
+        .into_iter()
+        .flat_map(PlannerErrorDetails::recovery_exhaustion_unresolved_refs)
+        .map(|item| item.trim().to_string())
+        .find(|reference| reference.starts_with("params."))
+    {
+        return Err(RunnerError::Llm(format!(
+            "invalid {tool_name} args: missing_required_input recovery_exhaustion.unresolved_refs must use source refs only (received `{invalid_unresolved_ref}`)"
+        )));
+    }
+    let reasons = error
+        .details
+        .as_ref()
+        .into_iter()
+        .flat_map(PlannerErrorDetails::recovery_exhaustion_reasons)
+        .collect::<Vec<_>>();
+    if reasons.is_empty() {
+        return Err(RunnerError::Llm(format!(
+            "invalid {tool_name} args: missing_required_input requires non-empty error.details.recovery_exhaustion.reasons[]"
+        )));
+    }
+    if error
+        .details
+        .as_ref()
+        .and_then(PlannerErrorDetails::recovery_exhaustion_attempt_trace_id)
+        .is_none()
+    {
+        return Err(RunnerError::Llm(format!(
+            "invalid {tool_name} args: missing_required_input requires non-empty error.details.recovery_exhaustion.attempt_trace_id"
+        )));
+    }
+    Ok(())
 }
 
 pub(super) fn decode_plan_sketch_segment_arg(
@@ -3813,7 +4483,7 @@ fn render_todos_prompt_with_patch(request: &TodoPlanningRequest, patch: Option<&
             "rules": [
                 "Return status=proposed with a non-empty todos array when intent is actionable.",
                 "Todos must be deterministic, concise, and non-overlapping.",
-                "Use unavailable+missing_required_input with error.details.questions[] when required user inputs are missing."
+                "Use unavailable+missing_required_input with canonical error.details.questions[] + error.details.recovery_exhaustion when required inputs remain missing after recovery."
             ]
         },
         "session_id": request.session.session_id,
@@ -3846,7 +4516,7 @@ fn render_grounding_prompt_with_patch(
                 "Use high confidence only for direct grounding into resolved_inputs.",
                 "For low-confidence or conflicting fields, provide questions and set ready_for_todos=false.",
                 "When status=proposed and ready_for_todos=false, output must include non-empty questions or missing_refs.",
-                "When required data is missing, use unavailable + missing_required_input + questions."
+                "When required data is missing after recovery exhaustion, use unavailable + missing_required_input + canonical error.details.questions[] + error.details.recovery_exhaustion."
             ],
             "actionability_examples": {
                 "good": [
@@ -4017,10 +4687,11 @@ fn render_segment_prompt_with_patch(
             },
             "missing_required_input": {
                 "when": "status=unavailable and error.reason_code=missing_required_input",
-                "required_fields": ["error.details.questions"],
+                "required_fields": ["error.details.questions", "error.details.recovery_exhaustion.unresolved_refs", "error.details.recovery_exhaustion.reasons", "error.details.recovery_exhaustion.attempt_trace_id"],
                 "question_shape": {
                     "id": "string",
                     "question": "string",
+                    "required": "boolean(optional)",
                     "options": [
                         {
                             "label": "string",
@@ -4028,6 +4699,11 @@ fn render_segment_prompt_with_patch(
                             "value": "any(optional)"
                         }
                     ]
+                },
+                "recovery_exhaustion_shape": {
+                    "unresolved_refs": ["inputs.<slot>"],
+                    "reasons": ["string(non-empty)"],
+                    "attempt_trace_id": "string(non-empty)"
                 }
             }
         },
@@ -4415,9 +5091,15 @@ fn extract_round_context_signal(user_prompt: &str) -> RoundContextSignal {
             compressed_total > 0 || evicted_total > 0 || trace_non_empty || overflowed
         })
         .unwrap_or(false);
+    let adjudicate_mode = parsed
+        .as_ref()
+        .and_then(|value| value.pointer("/previous_error/autofill/mode"))
+        .and_then(Value::as_str)
+        == Some("host_binding_adjudicate_round");
     RoundContextSignal {
         pressure_mode,
         compressed,
+        adjudicate_mode,
     }
 }
 
@@ -4466,6 +5148,24 @@ fn catalog_search_loop_guard_hint_payload(streak: u64) -> Value {
                 "if discovery baseline is missing, call list_candidates once",
                 "narrow by explicit refs and call get_candidate_detail",
                 "for control semantics (assert/branch/until/retry), call guide.get with {\"schema\":\"ais-plan-sketch/0.1.0\"} or {\"topic\":\"cel\"}"
+            ]
+        }
+    })
+}
+
+fn adjudicate_finalize_guard_payload(finalize_tool: &str, round: u8, reason: &str) -> Value {
+    json!({
+        "loop_guard": {
+            "kind": "adjudicate_budget_guard",
+            "reason": reason,
+            "round": round,
+            "max_rounds": ADJUDICATE_MAX_TOOL_ROUNDS,
+            "required_action": "Finalize now.",
+            "contract": format!("Call `{finalize_tool}` exactly once as the last tool call in this response."),
+            "rules": [
+                "Do not issue more discovery tools in this round.",
+                "Return best-effort binding_decisions/query_decisions from available evidence.",
+                "If still unresolved, finalize with status=unavailable reason_code=missing_required_input and include error.details.questions[] + error.details.recovery_exhaustion{unresolved_refs[],reasons[],attempt_trace_id}."
             ]
         }
     })

@@ -7,7 +7,7 @@ use ais_sdk::PlanDocument;
 use serde_json::{Map, Value};
 
 use super::brain::DecisionPolicy;
-use super::summary::{summarize_pause, PauseKind, PauseSummary};
+use super::summary::{summarize_pause_with_context, PauseKind, PauseSummary};
 
 #[derive(Debug, Clone, Copy)]
 pub struct AgentLoopConfig {
@@ -32,6 +32,24 @@ impl CommandBuilder {
             prefix: format!("{run_id}-cmd"),
             next_index: 0,
         }
+    }
+
+    pub fn set_next_index_from_seen_ids(&mut self, seen_command_ids: &[String]) -> u64 {
+        let mut max_seen = 0u64;
+        for command_id in seen_command_ids {
+            let Some(suffix) = command_id.strip_prefix(self.prefix.as_str()) else {
+                continue;
+            };
+            let Some(index_text) = suffix.strip_prefix('-') else {
+                continue;
+            };
+            let Ok(index) = index_text.parse::<u64>() else {
+                continue;
+            };
+            max_seen = max_seen.max(index);
+        }
+        self.next_index = self.next_index.max(max_seen);
+        max_seen
     }
 
     pub fn user_confirm(&mut self, node_id: &str, decision: &str) -> EngineCommandEnvelope {
@@ -138,8 +156,12 @@ where
                 if state.paused_reason.is_none() {
                     continue;
                 }
-                let pause_summary: PauseSummary =
-                    summarize_pause(state.paused_reason.as_deref(), result.events.as_slice());
+                let pause_summary: PauseSummary = summarize_pause_with_context(
+                    state.paused_reason.as_deref(),
+                    result.events.as_slice(),
+                    Some(plan),
+                    Some(state),
+                );
                 if pause_summary.kind != PauseKind::NeedUserConfirm {
                     return Ok(AgentLoopResult {
                         status: EngineRunStatus::Paused,

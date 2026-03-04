@@ -171,3 +171,32 @@ fn intent_acceptance_complete_reads_input_and_intent_context_from_state_summary(
     });
     assert!(board.intent_acceptance_complete(Some(&state_summary)));
 }
+
+#[test]
+fn todo_board_replace_from_specs_rejects_placeholder_tail_todos() {
+    let mut board = TodoBoard::bootstrap("transfer 10 usdc");
+    let rejected = board.replace_from_specs(
+        "transfer 10 usdc",
+        &[
+            TodoSpec {
+                title: "Query balance".to_string(),
+                required_facts: vec![],
+                produced_facts: vec![],
+                acceptance: vec![],
+            },
+            TodoSpec {
+                title: "Continue intent segment 9".to_string(),
+                required_facts: vec![],
+                produced_facts: vec![],
+                acceptance: vec![],
+            },
+        ],
+    );
+    let runtime = board.to_runtime_value();
+    assert_eq!(rejected, 1);
+    assert_eq!(
+        runtime.pointer("/todos/0/title"),
+        Some(&json!("Query balance"))
+    );
+    assert!(runtime.pointer("/todos/1").is_none());
+}

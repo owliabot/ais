@@ -65,17 +65,18 @@ pub(crate) fn plan_round<P: LlmProvider>(
                         context.planner_output_retries, MAX_PLANNER_OUTPUT_REPAIR_RETRIES, error
                     );
                     let last_failed_finalize = planner.take_last_failed_finalize();
-                    context.set_previous_error_and_refresh(
-                        state,
-                        false,
-                        super::super::segmented_planner_output_error_payload(
-                            &error,
-                            expected_finalize_tool,
-                            context.planning_rounds as u8,
-                            context.planner_output_retries as u8,
-                            last_failed_finalize,
-                        ),
+                    let mut payload = super::super::segmented_planner_output_error_payload(
+                        &error,
+                        expected_finalize_tool,
+                        context.planning_rounds as u8,
+                        context.planner_output_retries as u8,
+                        last_failed_finalize,
                     );
+                    super::super::missing_ref_recovery::preserve_autofill_context(
+                        context.previous_error.as_ref(),
+                        &mut payload,
+                    );
+                    context.set_previous_error_and_refresh(state, false, payload);
                     continue;
                 }
                 return Err(error);

@@ -290,7 +290,8 @@ llm:
   provider: openrouter
   model: openai/gpt-4.1-mini
   api_key: test-key
-  prompts_dir: ./prompts
+  controller_prompts_dir: ./prompts
+  operator_templates_dir: ./operator-templates
   max_retries_per_provider: 2
   rotation: round_robin
   planner_context_token_budget: 9000
@@ -311,7 +312,11 @@ chains:
     assert_eq!(llm.model, "openai/gpt-4.1-mini");
     assert_eq!(llm.api_key, "test-key");
     assert_eq!(llm.api_base, None);
-    assert_eq!(llm.prompts_dir.as_deref(), Some("./prompts"));
+    assert_eq!(llm.controller_prompts_dir.as_deref(), Some("./prompts"));
+    assert_eq!(
+        llm.operator_templates_dir.as_deref(),
+        Some("./operator-templates")
+    );
     assert_eq!(llm.max_retries_per_provider, Some(2));
     assert_eq!(llm.rotation, super::RunnerLlmRotationMode::RoundRobin);
     assert_eq!(llm.planner_context_token_budget, Some(9000));
@@ -362,16 +367,16 @@ chains:
 }
 
 #[test]
-fn load_runner_config_rejects_empty_prompts_dir() {
+fn load_runner_config_rejects_empty_controller_prompts_dir() {
     let path = write_temp_file(
-        "runner-config-llm-empty-prompts-dir",
+        "runner-config-llm-empty-controller-prompts-dir",
         r#"
 schema: ais-runner/0.0.1
 llm:
   provider: openrouter
   model: openai/gpt-4.1-mini
   api_key: test-key
-  prompts_dir: "   "
+  controller_prompts_dir: "   "
 chains:
   eip155:1:
     rpc_url: https://rpc.evm.example
@@ -384,7 +389,36 @@ chains:
                 .iter()
                 .filter_map(|issue| issue.reference.as_deref())
                 .collect::<Vec<_>>();
-            assert!(refs.contains(&"runner.config.llm.prompts_dir"));
+            assert!(refs.contains(&"runner.config.llm.controller_prompts_dir"));
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
+fn load_runner_config_rejects_empty_operator_templates_dir() {
+    let path = write_temp_file(
+        "runner-config-llm-empty-operator-templates-dir",
+        r#"
+schema: ais-runner/0.0.1
+llm:
+  provider: openrouter
+  model: openai/gpt-4.1-mini
+  api_key: test-key
+  operator_templates_dir: "   "
+chains:
+  eip155:1:
+    rpc_url: https://rpc.evm.example
+"#,
+    );
+    let error = load_runner_config(path.as_path()).expect_err("must reject");
+    match error {
+        RunnerConfigError::Validation(issues) => {
+            let refs = issues
+                .iter()
+                .filter_map(|issue| issue.reference.as_deref())
+                .collect::<Vec<_>>();
+            assert!(refs.contains(&"runner.config.llm.operator_templates_dir"));
         }
         other => panic!("unexpected error: {other}"),
     }

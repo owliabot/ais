@@ -121,7 +121,7 @@ fn missing_required_input_payload_from_pause_prefers_latest_event_payload() {
     );
     assert_eq!(
         payload.pointer("/questions/0/id"),
-        Some(&json!("event_owner"))
+        Some(&json!("inputs.event_owner"))
     );
 }
 
@@ -145,5 +145,99 @@ fn missing_required_input_payload_from_pause_uses_runtime_payload_when_events_mi
         payload.get("message").and_then(Value::as_str),
         Some("runtime-source")
     );
-    assert_eq!(payload.pointer("/questions/0/id"), Some(&json!("owner")));
+    assert_eq!(payload.pointer("/questions/0/id"), Some(&json!("inputs.owner")));
+}
+
+#[test]
+fn resolve_missing_required_input_payload_normalizes_params_refs_before_pause() {
+    let mut state = EngineRunnerState::default();
+    let mut fact_store = InputStore::default();
+    let payload = json!({
+        "reason_code":"missing_required_input",
+        "questions":[
+            {"id":"params.token.address","question":"Provide params token address","required":true,"options":[]}
+        ],
+        "missing_refs":["params.token.address"],
+        "suggested_paths":["params.token.address"]
+    });
+
+    let result = resolve_missing_required_input_payload(
+        &mut state,
+        &mut fact_store,
+        &payload,
+        true,
+    )
+    .expect("pause resolution");
+    assert!(matches!(result, MissingRequiredInputBackflow::Paused));
+    assert_eq!(state.paused_reason.as_deref(), Some("missing_required_input"));
+    assert_eq!(
+        state.runtime.pointer("/agent/missing_required_input/missing_refs"),
+        Some(&json!(["inputs.token.address"]))
+    );
+    assert!(
+        state
+            .runtime
+            .pointer("/agent/missing_required_input/questions/0/id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.starts_with("params."))
+    );
+}
+
+#[test]
+fn attach_missing_input_recovery_adds_recovery_exhaustion_evidence() {
+    let payload = json!({
+        "reason_code": "missing_required_input",
+        "questions": [{"id":"inputs.owner","question":"owner?"}]
+    });
+    let attached = attach_missing_input_recovery(
+        &payload,
+        "need_user_input",
+        "no_query_candidates",
+        "missing_ref_recovery",
+        "grounding",
+        "todo_1",
+        &["inputs.owner".to_string()],
+    );
+    assert_eq!(
+        attached.pointer("/recovery_exhaustion/unresolved_refs/0"),
+        Some(&json!("inputs.owner"))
+    );
+    assert_eq!(
+        attached.pointer("/recovery_exhaustion/reasons/0"),
+        Some(&json!("no_query_candidates"))
+    );
+    assert_eq!(
+        attached
+            .pointer("/recovery_exhaustion/attempt_trace_id")
+            .and_then(Value::as_str),
+        Some("missing_ref_recovery:grounding:todo_1:need_user_input")
+    );
+}
+
+#[test]
+fn can_prompt_user_missing_input_requires_recovery_exhaustion_evidence() {
+    let with_evidence = json!({
+        "recovery": {
+            "status": "need_user_input",
+            "reason": "no_query_candidates",
+            "missing_refs": ["inputs.owner"]
+        },
+        "recovery_exhaustion": {
+            "unresolved_refs": ["inputs.owner"],
+            "reasons": ["no_query_candidates"],
+            "attempt_trace_id": "missing_ref_recovery:grounding:todo_1:need_user_input"
+        },
+        "questions": [{"id":"inputs.owner","question":"owner?"}]
+    });
+    assert!(can_prompt_user_missing_input(&with_evidence));
+
+    let missing_evidence = json!({
+        "recovery": {
+            "status": "need_user_input",
+            "reason": "no_query_candidates",
+            "missing_refs": ["inputs.owner"]
+        },
+        "questions": [{"id":"inputs.owner","question":"owner?"}]
+    });
+    assert!(!can_prompt_user_missing_input(&missing_evidence));
 }

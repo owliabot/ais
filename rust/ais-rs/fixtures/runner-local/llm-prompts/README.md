@@ -2,7 +2,7 @@
 
 This fixture shows how to externalize `ais-runner` prompts via markdown files.
 
-Set `llm.prompts_dir` in runner config:
+Set `llm.controller_prompts_dir` in runner config:
 
 ```yaml
 schema: ais-runner/0.0.1
@@ -10,13 +10,14 @@ llm:
   provider: openrouter
   model: openai/gpt-4.1-mini
   api_key: ${OPENROUTER_API_KEY}
-  prompts_dir: rust/ais-rs/fixtures/runner-local/llm-prompts/prompts
+  controller_prompts_dir: rust/ais-rs/fixtures/runner-local/llm-prompts/prompts
+  operator_templates_dir: rust/ais-rs/fixtures/runner-local/llm-prompts/operator-templates
 chains:
   eip155:1:
     rpc_url: ${EVM_RPC_URL}
 ```
 
-Supported prompt files in `prompts/`:
+Supported controller prompt files in `prompts/`:
 
 - `agent.controller.system.md`
 - `segmented.base_rules.md`
@@ -30,6 +31,13 @@ Supported prompt files in `prompts/`:
 - `segmented.grounding.patch.md` (JSON object, deep-merged into grounding prompt payload)
 - `segmented.todos.patch.md` (JSON object, deep-merged into todo planning payload)
 - `segmented.segment.patch.md` (JSON object, deep-merged into propose/revise payload)
+
+Supported operator template files in `operator-templates/`:
+
+- `operator.missing_input.header.md`
+- `operator.missing_input.question.md`
+- `operator.need_user_confirm.help.md`
+- `operator.output.summary.md`
 
 Notes:
 

@@ -2,11 +2,18 @@ use std::fs;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Default)]
-pub struct PromptCatalog {
+pub struct ControllerPromptCatalog {
     prompts_dir: Option<PathBuf>,
 }
 
-impl PromptCatalog {
+#[derive(Debug, Clone, Default)]
+pub struct OperatorTemplateCatalog {
+    templates_dir: Option<PathBuf>,
+}
+
+pub type PromptCatalog = ControllerPromptCatalog;
+
+impl ControllerPromptCatalog {
     pub fn from_prompts_dir(prompts_dir: Option<&str>) -> Self {
         let prompts_dir = prompts_dir
             .map(str::trim)
@@ -37,6 +44,25 @@ impl PromptCatalog {
     pub fn load_json_prompt(&self, id: &str) -> Option<serde_json::Value> {
         let text = self.load_prompt(id)?;
         serde_json::from_str::<serde_json::Value>(text.as_str()).ok()
+    }
+}
+
+impl OperatorTemplateCatalog {
+    pub fn from_templates_dir(templates_dir: Option<&str>) -> Self {
+        let templates_dir = templates_dir
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from);
+        Self { templates_dir }
+    }
+
+    pub fn load_template(&self, id: &str) -> Option<String> {
+        let dir = self.templates_dir.as_ref()?;
+        let path = dir.join(format!("{id}.md"));
+        let raw = fs::read_to_string(path).ok()?;
+        let body = extract_markdown_body(raw.as_str());
+        let trimmed = body.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
     }
 }
 

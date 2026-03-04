@@ -225,6 +225,10 @@ fn projected_summary_includes_input_slots_and_missing_refs() {
     );
     assert_eq!(
         summary.pointer("/input_binding/bindable_refs_source"),
+        Some(&json!("state_summary.input_store"))
+    );
+    assert_eq!(
+        summary.pointer("/input_binding/bindable_refs_projection"),
         Some(&json!("state_summary.input_registry.known_refs"))
     );
     assert_eq!(

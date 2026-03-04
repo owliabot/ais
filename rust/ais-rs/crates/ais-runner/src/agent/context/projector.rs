@@ -7,7 +7,8 @@ use super::collector::{
 use ais_engine::EngineRunnerState;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
-const INPUT_BINDABLE_REFS_SOURCE_PATH: &str = "state_summary.input_registry.known_refs";
+const INPUT_BINDABLE_SOURCE_OF_TRUTH: &str = "state_summary.input_store";
+const INPUT_BINDABLE_REFS_PROJECTION_PATH: &str = "state_summary.input_registry.known_refs";
 const INPUT_BINDING_SCHEMA: &str = "ais-agent-input-binding-contract/0.0.1";
 
 pub(in super::super) fn build_projected_summary_base(
@@ -47,7 +48,8 @@ fn build_input_binding_contract() -> Value {
     json!({
         "schema": INPUT_BINDING_SCHEMA,
         "bindable_namespace": "inputs",
-        "bindable_refs_source": INPUT_BINDABLE_REFS_SOURCE_PATH,
+        "bindable_refs_source": INPUT_BINDABLE_SOURCE_OF_TRUTH,
+        "bindable_refs_projection": INPUT_BINDABLE_REFS_PROJECTION_PATH,
         "known_refs_only": true,
         "facts_bindable": false,
     })
