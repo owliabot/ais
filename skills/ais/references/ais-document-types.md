@@ -49,7 +49,7 @@ actions:
 ## 2) Pack
 - Schema ID: `ais-pack/0.0.2`
 - Purpose: bundle protocol includes and policy controls.
-- Key fields: `schema` (required), `includes` (required); optional: `meta`, `policy`, `token_policy`, `providers`, `plugins`, `overrides`.
+- Key fields: `schema` (required), `includes` (required, `Vec<Value>` — each item is a protocol ref object or action/query ref); optional top-level: `name`, `version`, `description`, `meta`, `policy`, `token_policy`, `providers`, `plugins`, `overrides`, `extensions`.
 
 Example:
 ```yaml
