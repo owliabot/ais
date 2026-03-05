@@ -1,67 +1,92 @@
 ---
 name: ais
-description: Use AIS through the Rust toolchain and `ais-runner`. Use when running plans/workflows/replay/agent flows, or authoring AIS YAML documents (protocol/pack/workflow/plan/plan-sketch/catalog).
+description: Use ais-runner to execute AIS plans, workflows, agent flows, or author AIS YAML documents. Use when: running plans/workflows/replay/agent, validating documents with --dry-run, or authoring protocol/pack/workflow/plan/plan-sketch/catalog files.
 ---
 
-# AIS (Rust-only)
+# AIS
 
-Assumes `ais-runner` is already on PATH.
-
-## Main CLI: `ais-runner`
-
-Primary command families:
+## Preflight
 
 ```bash
-ais-runner run plan --plan <file> [--config <file>] [--dry-run] [--format json|text]
-ais-runner run workflow --workflow <file> [--workspace <dir>] [--config <file>] [--dry-run] [--outputs <json-file>]
-ais-runner plan diff --before <plan> --after <plan>
-ais-runner replay [--trace-jsonl <file> | --checkpoint <file> --plan <file> --config <file>] [--until-node <id>]
-ais-runner agent (--plan <file> | --intent "<text>" | --intent-file <file>) --config <runner-config> [--workspace <dir>] [--approvals-mode safe|assist|yolo]
+command -v ais-runner          # verify binary is on PATH
+ais-runner --help              # confirm version and commands
 ```
 
-Output and stream contracts:
-- `--format text` (default) or `--format json`
-- JSONL boundaries:
-- `--events-jsonl <path|->`
-- `--trace <path>`
-- `--commands-stdin-jsonl`
+## Commands
 
-Read full command/flag/output/error details in [references/ais-runner-cli.md](references/ais-runner-cli.md).
+```bash
+# Dry-run (no config required)
+ais-runner run plan --plan <file.yaml> --dry-run [--format json|text]
+ais-runner run workflow --workflow <file.yaml> [--workspace <dir>] --dry-run
+
+# Execute (requires --config)
+ais-runner run plan --plan <file.yaml> --config <runner.yaml> [--format json|text]
+ais-runner run workflow --workflow <file.yaml> --config <runner.yaml> [--outputs <out.json>]
+
+# Diff two plans
+ais-runner plan diff --before <a.yaml> --after <b.yaml>
+
+# Replay from trace or checkpoint
+ais-runner replay --trace-jsonl <file> [--until-node <id>]
+ais-runner replay --checkpoint <file> --plan <file> --config <runner.yaml>
+
+# Agent — run from natural language intent or plan
+ais-runner agent --intent "swap 1 ETH to USDC" --config <runner.yaml> [--workspace <dir>] \
+  [--approvals-mode safe|assist|yolo]
+ais-runner agent --plan <file.yaml> --config <runner.yaml>
+ais-runner agent --intent-file <file.txt> --config <runner.yaml>
+```
 
 ⚠️ `--approvals-mode yolo` skips all approval gates — use only in trusted test environments.
 
-## AIS YAML document types
+## Minimal runner config (`runner.yaml`)
 
-AIS inputs are YAML-authored documents with a required `schema:` field identifying the contract type:
-- `protocol`
-- `pack`
-- `workflow`
-- `plan`
-- `plan-sketch`
-- `catalog`
+Every non-dry-run command requires `--config`. Minimal structure:
 
-Read schema IDs, key fields, and examples in [references/ais-document-types.md](references/ais-document-types.md).
+```yaml
+schema: "ais-runner/0.0.1"
+chain_providers:
+  "eip155:11155111":                  # Sepolia testnet
+    type: http
+    url: "https://rpc.sepolia.org"
+wallet:
+  type: local
+  private_key_env: "PRIVATE_KEY"     # export PRIVATE_KEY=0x...
+```
 
-## Rust crates for custom tooling
+For mainnet Ethereum substitute `eip155:1` and a mainnet RPC URL. Solana uses `solana:<genesis-hash>`.
 
-Core crates:
-- `ais-runner`
-- `ais-sdk`
-- `ais-engine`
-- `ais-core`
-- `ais-schema`
-- `ais-cel`
-- `ais-llm`
+## I/O streams (advanced)
 
-Executors:
-- `ais-evm-executor`
-- `ais-solana-executor`
-- `ais-offchain-executor`
+Output streams (optional flags on run plan / run workflow / agent):
+- `--events-jsonl <path|->` — one `ais-engine-event/0.0.3` JSON object per line; pass `-` to stream to stdout
+- `--trace <path>` — redacted event trace, one JSON object per line
 
-Read responsibilities, entry points, and status in [references/rust-crates.md](references/rust-crates.md).
+Input stream:
+- `--commands-stdin-jsonl` — send `ais-engine-command/0.0.1` envelopes via stdin, one per line
 
-## References
+## Approvals
 
-- CLI reference: [references/ais-runner-cli.md](references/ais-runner-cli.md)
-- Document contracts: [references/ais-document-types.md](references/ais-document-types.md)
-- Rust crate map: [references/rust-crates.md](references/rust-crates.md)
+In `safe` mode the runner pauses before risk-level ≥ 3 actions and waits for confirmation.
+When running non-interactively, pipe approval commands via `--commands-stdin-jsonl`:
+```json
+{"kind":"approve","node_id":"n1"}
+{"kind":"reject","node_id":"n1"}
+```
+Use `--approvals-mode yolo` to skip all gates (unsafe). Paused runs can be resumed from checkpoint.
+
+## AIS document families
+
+AIS documents are strict **JSON or YAML** files. Each must set a versioned `schema` field:
+
+| Family | schema value | Used as input to |
+|--------|-------------|-----------------|
+| protocol | `ais/0.0.2` | pack includes |
+| pack | `ais-pack/0.0.2` | `--pack` flag / workspace |
+| workflow | `ais-flow/0.0.3` | `run workflow --workflow` |
+| plan | `ais-plan/0.0.3` | `run plan --plan` / `agent --plan` |
+| plan-sketch | `ais-plan-sketch/0.1.0` | agent planning IR only (not directly executable) |
+| catalog | `ais-catalog/0.0.1` | agent index (auto-built from workspace) |
+
+Full field reference: [references/ais-document-types.md](references/ais-document-types.md)
+Full CLI reference: [references/ais-runner-cli.md](references/ais-runner-cli.md)

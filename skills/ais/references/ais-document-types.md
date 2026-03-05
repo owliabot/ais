@@ -1,6 +1,6 @@
 # AIS Document Types
 
-AIS documents are strict YAML files identified by a `schema:` field.
+AIS documents are strict JSON or YAML files identified by a `schema:` field.
 
 All six document families are strict: unknown fields are rejected unless carried in an explicit `extensions` field.
 

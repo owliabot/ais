@@ -139,6 +139,11 @@ Global formatting:
 ## 3) JSONL boundary contracts
 
 ## `--events-jsonl`
+Sample output line:
+```json
+{"schema":"ais-engine-event/0.0.3","kind":"node_started","node_id":"n1","ts":"2026-03-05T00:00:00Z"}
+```
+
 - Available on `run plan`, `run workflow`, `agent`.
 - Output record schema: `ais-engine-event/0.0.3` (`EngineEventRecord`), one JSON object per line.
 - `--events-jsonl -` behavior:
@@ -150,6 +155,12 @@ Global formatting:
 - Output is one redacted event JSON object per line (`encode_trace_jsonl_line` with default redaction).
 
 ## `--commands-stdin-jsonl`
+Sample input lines:
+```json
+{"kind":"approve","node_id":"n1"}
+{"kind":"reject","node_id":"n2","reason":"Too much slippage"}
+```
+
 - Available on `run plan`, `run workflow`.
 - Input schema: `ais-engine-command/0.0.1` (`EngineCommandEnvelope`), one JSON object per line via stdin.
 - Empty lines are ignored.
