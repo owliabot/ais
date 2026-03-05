@@ -1,0 +1,40 @@
+schema: "ais-runner/0.0.1"
+
+# Runner config for Uniswap V3 on Sepolia (eip155:11155111).
+# Replace RPC URL, private_key and wallet_address before use.
+
+# Uncomment and fill in the llm block to use `agent` mode.
+# Note: runner validates api_key as non-empty when llm block is present.
+# llm:
+#   provider: openrouter
+#   model: minimax/minimax-m2.5
+#   api_key: "<your-api-key>"
+#   api_base: https://openrouter.ai/api/v1
+#   prompts_dir: fixtures/runner-local/llm-prompts/prompts
+#   context_limit_tokens: 128K
+
+engine:
+  max_concurrency: 4
+  per_chain:
+    "eip155:11155111":
+      max_read_concurrency: 4
+      max_write_concurrency: 1
+
+chains:
+  "eip155:11155111":
+    rpc_url: "https://rpc.sepolia.org"
+    wait_for_receipt: true
+    receipt_poll:
+      interval_ms: 3000
+      max_attempts: 40
+    signer:
+      type: "evm_private_key"
+      # ⚠️  Replace with your Sepolia wallet private key. Never use mainnet keys here.
+      private_key: "0x0000000000000000000000000000000000000000000000000000000000000001"
+
+runtime:
+  ctx:
+    # Fallback owner address used by protocol actions (e.g. recipient defaults).
+    # When signer.private_key is set, the agent derives the owner automatically
+    # from the private key (higher priority). Set this to match your signer key.
+    wallet_address: "0x0000000000000000000000000000000000000000"

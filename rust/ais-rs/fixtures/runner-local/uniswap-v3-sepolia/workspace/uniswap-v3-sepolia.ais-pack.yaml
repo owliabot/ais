@@ -1,0 +1,56 @@
+schema: "ais-pack/0.0.2"
+
+meta:
+  name: "uniswap-v3-sepolia-safe-pack"
+  version: "0.0.2"
+  description: "Safe defaults for Uniswap V3 Sepolia swaps and quotes."
+
+includes:
+  - protocol: "uniswap-v3-sepolia"
+    version: "0.0.2"
+    source: "local"
+    chain_scope: ["eip155:11155111"]
+
+policy:
+  approvals:
+    auto_execute_max_risk_level: 2
+    require_approval_min_risk_level: 3
+
+  hard_constraints_defaults:
+    max_slippage_bps: 200
+    allow_unlimited_approval: false
+    max_approval_multiplier: 1.10  # Schema-valid; not yet enforced by runtime constraint gate
+
+token_policy:
+  resolution:
+    allow_symbol_input: true
+    require_user_confirm_asset_address: true
+    require_allowlist_for_symbol_resolution: false
+
+providers:
+  quote:
+    enabled:
+      - provider: "uniswap-v3-quoter"
+        chains: ["eip155:11155111"]
+        priority: 10
+
+plugins:
+  execution:
+    enabled:
+      # evm_rpc is a Plugin type (not Core); included defensively but not used by current actions.
+      - type: "evm_rpc"
+        chains: ["eip155:11155111"]
+      # evm_read and evm_call are Core types; listing them here is informational only.
+      - type: "evm_read"
+        chains: ["eip155:11155111"]
+      - type: "evm_call"
+        chains: ["eip155:11155111"]
+
+overrides:
+  actions:
+    "uniswap-v3-sepolia.swap-exact-in":
+      hard_constraints:
+        max_slippage_bps: 200
+    "uniswap-v3-sepolia.swap-exact-out":
+      hard_constraints:
+        max_slippage_bps: 200

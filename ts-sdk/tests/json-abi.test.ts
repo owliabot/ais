@@ -26,7 +26,6 @@ describe('JSON ABI encoding (AIS 0.0.2)', () => {
             { name: 'tokenOut', type: 'address' },
             { name: 'fee', type: 'uint24' },
             { name: 'recipient', type: 'address' },
-            { name: 'deadline', type: 'uint256' },
             { name: 'amountIn', type: 'uint256' },
             { name: 'amountOutMinimum', type: 'uint256' },
             { name: 'sqrtPriceLimitX96', type: 'uint160' },
@@ -36,8 +35,9 @@ describe('JSON ABI encoding (AIS 0.0.2)', () => {
       outputs: [],
     };
 
+    // SwapRouter02 (v1.1) ExactInputSingleParams has no deadline field.
     expect(buildFunctionSignatureFromJsonAbi(abi)).toBe(
-      'exactInputSingle((address,address,uint24,address,uint256,uint256,uint256,uint160))'
+      'exactInputSingle((address,address,uint24,address,uint256,uint256,uint160))'
     );
   });
 
@@ -54,7 +54,6 @@ describe('JSON ABI encoding (AIS 0.0.2)', () => {
             { name: 'tokenOut', type: 'address' },
             { name: 'fee', type: 'uint24' },
             { name: 'recipient', type: 'address' },
-            { name: 'deadline', type: 'uint256' },
             { name: 'amountIn', type: 'uint256' },
             { name: 'amountOutMinimum', type: 'uint256' },
             { name: 'sqrtPriceLimitX96', type: 'uint160' },
@@ -64,6 +63,7 @@ describe('JSON ABI encoding (AIS 0.0.2)', () => {
       outputs: [],
     };
 
+    // SwapRouter02 (v1.1): no deadline field in ExactInputSingleParams.
     const signature = buildFunctionSignatureFromJsonAbi(abi);
     const selector = encodeFunctionSelector(signature);
 
@@ -77,7 +77,6 @@ describe('JSON ABI encoding (AIS 0.0.2)', () => {
         tokenOut,
         fee: 3000n,
         recipient,
-        deadline: 1n,
         amountIn: 2n,
         amountOutMinimum: 3n,
         sqrtPriceLimitX96: 0n,
@@ -85,7 +84,7 @@ describe('JSON ABI encoding (AIS 0.0.2)', () => {
     });
 
     expect(data.startsWith(selector)).toBe(true);
-    expect(data.length).toBe(10 + 8 * 64);
+    expect(data.length).toBe(10 + 7 * 64);
 
     const expected =
       selector +
@@ -93,7 +92,6 @@ describe('JSON ABI encoding (AIS 0.0.2)', () => {
       pad32(tokenOut) +
       pad32('0x' + 3000n.toString(16)) +
       pad32(recipient) +
-      pad32('0x1') +
       pad32('0x2') +
       pad32('0x3') +
       pad32('0x0');
