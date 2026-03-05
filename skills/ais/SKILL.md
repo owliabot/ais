@@ -113,7 +113,7 @@ In `safe` mode the runner pauses before risk-level ≥ 3 actions.
 
 ⚠️ `--approvals-mode yolo` skips all approval gates — use only in trusted test environments.
 
-> **Verbosity flags:** `--verbose` is available on all commands (prints debug info to stderr). `--verbose-llm` is agent-only (logs each LLM request/response to stderr).
+> **Verbosity flags:** `--verbose` is available on `run plan`, `run workflow`, and `agent` only — **not** on `replay` or `plan diff`. `--verbose-llm` is agent-only (logs each LLM request/response to stderr).
 
 Paused runs can be resumed by re-running `ais-runner agent` with `--checkpoint <file>`:
 

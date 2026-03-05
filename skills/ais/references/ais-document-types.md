@@ -2,7 +2,7 @@
 
 AIS documents are strict JSON or YAML files identified by a `schema:` field.
 
-All six document families are strict: unknown fields are rejected unless carried in an explicit `extensions` field.
+All six document families are strict: most unknown fields are rejected. An `extensions` field (free-form object) is available at the top level of most document types and on action/query nodes — but NOT on all nested objects (e.g., plan ABI entries have no `extensions` escape hatch).
 
 ## 1) Protocol
 - Schema ID: `ais/0.0.2`
