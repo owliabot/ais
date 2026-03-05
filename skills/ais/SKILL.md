@@ -71,7 +71,7 @@ chains:
       type: evm_private_key
       private_key: ${PRIVATE_KEY}
 llm:
-  provider: openai                    # or: anthropic, openrouter, groq
+  provider: openai                    # valid: openai, anthropic, openrouter, groq, zhipu, vllm, gemini, ollama, nvidia, deepseek
   model: gpt-4o
   api_key: ${OPENAI_API_KEY}
   api_base: https://api.openai.com/v1 # optional; use for OpenAI-compatible endpoints
@@ -104,7 +104,17 @@ In `safe` mode the runner pauses before risk-level ≥ 3 actions.
 
 ⚠️ `--approvals-mode yolo` skips all approval gates — use only in trusted test environments.
 
-Paused runs can be resumed from checkpoint (`--checkpoint`).
+Paused runs can be resumed by re-running `ais-runner agent` with `--checkpoint <file>`:
+
+```bash
+# Intent mode resume
+ais-runner agent --intent "swap 1 ETH for USDC" --config runner.yaml --workspace ./workspace --checkpoint ./run.ckpt
+
+# Plan mode resume
+ais-runner agent --plan plan.yaml --config runner.yaml --checkpoint ./run.ckpt
+```
+
+> ⚠️ `replay --checkpoint` is a debug/trace replay path — it does NOT continue agent execution. Always use `agent ... --checkpoint` to resume a paused run.
 
 ## AIS document families
 
