@@ -1,8 +1,14 @@
-# AIS Document Types
+# AIS Document Types (YAML Inputs)
 
-AIS documents are strict JSON or YAML files identified by a `schema:` field.
+Source specs:
+- `/home/ocbot/.openclaw/workspace/repos/ais/specs/ais-1-protocol.md`
+- `/home/ocbot/.openclaw/workspace/repos/ais/specs/ais-1-pack.md`
+- `/home/ocbot/.openclaw/workspace/repos/ais/specs/ais-1-workflow.md`
+- `/home/ocbot/.openclaw/workspace/repos/ais/specs/ais-2-plan.md`
+- `/home/ocbot/.openclaw/workspace/repos/ais/specs/ais-2-plan-sketch.md`
+- `/home/ocbot/.openclaw/workspace/repos/ais/specs/ais-1-catalog.md`
 
-All six document families are strict: most unknown fields are rejected. An `extensions` field (free-form object) is available at the top level of most document types and on action/query nodes — but NOT on all nested objects (e.g., plan ABI entries have no `extensions` escape hatch).
+All six document families are strict: unknown fields are rejected unless carried in an explicit `extensions` field.
 
 ## 1) Protocol
 - Schema ID: `ais/0.0.2`
@@ -12,44 +18,14 @@ All six document families are strict: most unknown fields are rejected. An `exte
 Example:
 ```yaml
 schema: "ais/0.0.2"
-meta:
-  protocol: "example-token"
-  version: "0.0.2"
-deployments:
-  - chain: "eip155:1"
-    contracts:
-      token: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"  # USDC
-actions:
-  transfer:
-    description: "Transfer tokens"
-    risk_level: 3
-    params:
-      - name: recipient
-        type: address
-        description: "Recipient address"
-      - name: amount
-        type: uint256
-        description: "Amount in atomic units"
-    execution:
-      "eip155:1":
-        type: evm_call
-        to: { ref: "contracts.token" }
-        abi:
-          type: "function"
-          name: "transfer"
-          inputs:
-            - { name: "to", type: "address" }
-            - { name: "value", type: "uint256" }
-          outputs: []
-        args:
-          to: { ref: "params.recipient" }
-          value: { ref: "params.amount" }
+meta: { protocol: "uniswap-v3", version: "0.0.2" }
+actions: { swap_exact_in: { description: "...", execution: { "eip155:*": {} } } }
 ```
 
 ## 2) Pack
 - Schema ID: `ais-pack/0.0.2`
 - Purpose: bundle protocol includes and policy controls.
-- Key fields: `schema` (required), `includes` (required, `Vec<Value>` — each item is a protocol ref object or action/query ref); optional top-level: `name`, `version`, `description`, `meta`, `policy`, `token_policy`, `providers`, `plugins`, `overrides`, `extensions`.
+- Key fields: `schema`, `meta`, `includes`, `policy`, optional `token_policy`, `providers`, `plugins`, `overrides`.
 
 Example:
 ```yaml
@@ -97,19 +73,14 @@ nodes:
 ## 5) Plan Sketch
 - Schema ID: `ais-plan-sketch/0.1.0`
 - Purpose: LLM-facing segmented planning IR; must be compiled to `ais-plan/0.0.3` before execution.
-- Plan-sketches are compiled automatically by `ais-runner agent --intent` during segmented planning. `agent --plan` bypasses planning entirely.
 - Key fields: `schema`, `intent`, `pack_snapshot`, `catalog_snapshot`, `segments[]`; each segment carries `segment_id`, `cursor_in`, `cursor_out`, `done`, `steps[]`.
 
 Example:
 ```yaml
 schema: "ais-plan-sketch/0.1.0"
 intent: "swap 1 ETH to USDC"
-pack_snapshot:
-  hash: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f601"  # 64-char lowercase hex
-catalog_snapshot:
-  schema: "ais-catalog/0.0.1"                                              # required
-  hash: "b1c2d3e4f5a6b1c2d3e4f5a6b1c2d3e4f5a6b1c2d3e4f5a6b1c2d3e4f5a602"  # 64-char lowercase hex
-chain_scope: ["eip155:1"]
+pack_snapshot: { name: safe-defi-pack, version: "0.0.2", hash: "..." }
+catalog_snapshot: { hash: "..." }
 segments:
   - segment_id: s1
     cursor_in: "0"
@@ -128,7 +99,7 @@ Example:
 ```yaml
 schema: "ais-catalog/0.0.1"
 created_at: "2026-03-04T00:00:00Z"
-hash: "b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2"
+hash: "sha256:..."
 actions:
   - ref: uniswap-v3@0.0.2/swap_exact_in
     protocol: uniswap-v3
@@ -136,12 +107,3 @@ actions:
     id: swap_exact_in
     risk_level: 3
 ```
-
-Note: `actions`, `queries`, and `packs` are **required** arrays in the root (can be empty `[]`). Each `hash` field must be a 64-character lowercase hex string (no prefix).
-
-**Card required fields:**
-- Action card: `ref`, `protocol`, `version`, `id`, `risk_level`, `execution_types`, `execution_chains`
-- Query card: `ref`, `protocol`, `version`, `id`, `execution_types`, `execution_chains`
-- Pack card: `name`, `version`, `includes`
-
-> Catalogs are agent-internal documents and are auto-built by `ais-runner agent`. Do not place catalog files in the workspace — the catalog schema is not registered in the validator and will cause a load error.
