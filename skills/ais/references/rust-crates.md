@@ -1,10 +1,10 @@
 # AIS Rust Crates
 
 Source of truth: crate README files under
-`/home/ocbot/.openclaw/workspace/repos/ais/rust/ais-rs/crates/*/README.md`
+`rust/ais-rs/crates/*/README.md`
 
 Workspace root:
-`/home/ocbot/.openclaw/workspace/repos/ais/rust/ais-rs/`
+`rust/ais-rs/`
 
 ## `ais-runner`
 - Responsibility: CLI/runtime orchestration for `run plan`, `run workflow`, `plan diff`, `replay`, `agent`; wires config/router/checkpoint/events/trace.

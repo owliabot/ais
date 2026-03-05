@@ -1,12 +1,12 @@
 # AIS Document Types (YAML Inputs)
 
 Source specs:
-- `/home/ocbot/.openclaw/workspace/repos/ais/specs/ais-1-protocol.md`
-- `/home/ocbot/.openclaw/workspace/repos/ais/specs/ais-1-pack.md`
-- `/home/ocbot/.openclaw/workspace/repos/ais/specs/ais-1-workflow.md`
-- `/home/ocbot/.openclaw/workspace/repos/ais/specs/ais-2-plan.md`
-- `/home/ocbot/.openclaw/workspace/repos/ais/specs/ais-2-plan-sketch.md`
-- `/home/ocbot/.openclaw/workspace/repos/ais/specs/ais-1-catalog.md`
+- `specs/ais-1-protocol.md`
+- `specs/ais-1-pack.md`
+- `specs/ais-1-workflow.md`
+- `specs/ais-2-plan.md`
+- `specs/ais-2-plan-sketch.md`
+- `specs/ais-1-catalog.md`
 
 All six document families are strict: unknown fields are rejected unless carried in an explicit `extensions` field.
 

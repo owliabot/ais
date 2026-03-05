@@ -6,7 +6,7 @@ description: Use AIS through the Rust toolchain and `ais-runner`. Use when runni
 # AIS (Rust-only)
 
 Assumes `ais-runner` is already on PATH. Rust workspace for reference:
-`/home/ocbot/.openclaw/workspace/repos/ais/rust/ais-rs/`
+`rust/ais-rs/`
 
 ## Main CLI: `ais-runner`
 
