@@ -152,8 +152,7 @@ Global formatting:
   - `resumed_from_checkpoint`
   - `iterations`
   - `events_emitted`
-  - `llm_usage`
-  - `llm_usage` schema: `ais-agent-llm-usage/0.0.1` with fields: `calls`, `input_tokens`, `output_tokens`, `total_tokens`, `context_limit_tokens` (nullable)
+  - `llm_usage` _(nullable)_ — schema `ais-agent-llm-usage/0.0.1`; key fields: `calls`, `estimated_calls`, `input_tokens`, `output_tokens`, `total_tokens`, `context_limit_tokens`, `context_soft_limit_tokens`, `context_window_input_tokens`, `context_window_total_tokens`, `context_remaining_tokens`, `source`
 
 ## 3) JSONL boundary contracts
 
@@ -166,8 +165,8 @@ Sample output line:
 - Available on `run plan`, `run workflow`, `agent`.
 - Output record schema: `ais-engine-event/0.0.3` (`EngineEventRecord`), one JSON object per line.
 - `--events-jsonl -` behavior:
-  - no text/json summary rendering
-  - stdout is raw event JSONL stream
+  - **`run plan` / `run workflow`**: suppresses text/json summary; stdout is raw event JSONL stream
+  - **`agent`**: event JSONL lines AND final summary both go to stdout — use a file path instead of `-` to keep them separate
 
 ## `--trace`
 - Available on `run plan`, `run workflow`, `agent`.
@@ -181,7 +180,7 @@ Sample output line:
 | `user_confirm` | Approve or deny a node awaiting confirmation | `node_id`, `decision` (`"approve"` or `"deny"`) |
 | `apply_patches` | Patch runtime values before next engine step | `patches: [{op, path, value}]` |
 | `user_input` | Provide a value for a pending input request | `input_id`, `value` |
-| `user_select` | Choose from a pending selection | `input_id`, `selected_index`, `options[]` |
+| `user_select` | Choose from a pending selection | `input_id`, `selected_value` — OR — `input_id`, `selected_index`, `options[]` (use `selected_value` when known) |
 | `cancel` | Cancel the run | _(empty data)_ |
 | `replace_plan` | Swap the active plan mid-run | `plan` (full `ais-plan/0.0.3` object) |
 
