@@ -1,0 +1,39 @@
+schema: "ais-runner/0.0.1"
+
+# ─────────────────────────────────────────────
+# LLM (required for agent mode)
+# Uncomment and fill in your API key + model.
+# ─────────────────────────────────────────────
+# llm:
+#   provider: openrouter
+#   model: qwen/qwen3.5-122b-a10b
+#   api_key: "<YOUR_API_KEY>"
+#   api_base: https://openrouter.ai/api/v1
+#   controller_prompts_dir: fixtures/runner-local/llm-prompts/prompts
+#   operator_templates_dir: fixtures/runner-local/llm-prompts/operator-templates
+#   context_limit_tokens: 262K
+
+engine:
+  max_concurrency: 4
+  per_chain:
+    "eip155:11155111":
+      max_read_concurrency: 4
+      max_write_concurrency: 1
+
+chains:
+  "eip155:11155111":
+    # Set your Sepolia RPC URL here (e.g. https://rpc.sepolia.org or Alchemy/Infura)
+    rpc_url: "https://rpc.sepolia.org"
+    wait_for_receipt: true
+    receipt_poll:
+      interval_ms: 2000
+      max_attempts: 60
+    signer:
+      type: "evm_private_key"
+      # ⚠️  Sepolia testnet only — never use a key with mainnet funds here
+      private_key: ""
+
+runtime:
+  ctx:
+    # Set to your Sepolia wallet address (must match private_key above)
+    wallet_address: ""

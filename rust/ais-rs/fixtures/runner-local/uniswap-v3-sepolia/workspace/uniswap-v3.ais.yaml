@@ -1,0 +1,267 @@
+schema: "ais/0.0.2"
+
+meta:
+  protocol: "uniswap-v3"
+  version: "0.0.2"
+  name: "Uniswap V3"
+  homepage: "https://uniswap.org"
+  description: "Swap via Uniswap V3 router with quote-based minOut (Sepolia deployment)"
+  tags: ["dex", "swap", "liquidity", "amm"]
+
+capabilities_required:
+  - "cel_v1"
+  - "evm_read"
+  - "evm_call"
+
+deployments:
+  - chain: "eip155:11155111"
+    contracts:
+      router:           "0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48"
+      quoter:           "0xEd1f6473345F45b75F8179591dd5bA1888cf2FB3"
+      factory:          "0x0227628f3F023bb0B980b67D528571c95c6DaC1c"
+      position_manager: "0x1238536071E1c677A632429e3655c799b22cDA52"
+
+supported_assets:
+  - symbol: "WETH"
+    name: "Wrapped Ether"
+    decimals:
+      eip155:11155111: 18
+    addresses:
+      eip155:11155111: "0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14"
+    tags: ["wrapped"]
+
+  - symbol: "USDC"
+    name: "USD Coin (Test)"
+    decimals:
+      eip155:11155111: 6
+    addresses:
+      eip155:11155111: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"
+    tags: ["stable"]
+
+risks:
+  - level: "warning"
+    text: "Sepolia testnet only. Use only test funds."
+    applies_to: ["swap-exact-in"]
+
+actions:
+  swap-exact-in:
+    description: "Swap exact input amount for as much output as possible with quote-based minOut."
+    risk_level: 3
+    risk_tags: ["mev_exposure", "slippage", "approval"]
+
+    params:
+      - name: token_in
+        type: asset
+        description: "Input token asset"
+      - name: token_out
+        type: asset
+        description: "Output token asset"
+      - name: amount_in
+        type: token_amount
+        description: "Human input amount for token_in"
+        asset_ref: "token_in"
+      - name: slippage_bps
+        type: uint32
+        description: "Max slippage in basis points, e.g. 50 = 0.5%"
+        default: "50"
+        constraints:
+          min: 1
+          max: 2000
+      - name: fee
+        type: uint32
+        description: "Uniswap V3 fee tier, e.g. 500, 3000"
+        required: false
+      - name: recipient
+        type: address
+        description: "Recipient of token_out (defaults to sender)"
+        required: false
+
+    requires_queries:
+      - "quote-exact-in-single"
+      - "allowance-token-in"
+
+    hard_constraints:
+      max_slippage_bps: { ref: "params.slippage_bps" }
+      allow_unlimited_approval: { lit: false }
+
+    calculated_fields:
+      amount_in_atomic:
+        expr: { cel: "to_atomic(params.amount_in, params.token_in)" }
+        inputs: ["params.amount_in", "params.token_in"]
+      recipient:
+        expr: { cel: "params.recipient != null ? params.recipient : ctx.wallet_address" }
+        inputs: ["params.recipient", "ctx.wallet_address"]
+      fee_tier:
+        expr:
+          detect:
+            kind: "best_quote"
+            candidates:
+              - { lit: "100" }
+              - { lit: "500" }
+              - { lit: "3000" }
+              - { lit: "10000" }
+            constraints:
+              prefer_liquidity: true
+        inputs: []
+      deadline_unix:
+        expr: { cel: "ctx.now + 600" }
+        inputs: ["ctx.now"]
+      min_out_atomic:
+        expr: { cel: "mul_div(query[\"quote-exact-in-single\"].amount_out_atomic, (10000 - params.slippage_bps), 10000)" }
+        inputs: ["query.quote-exact-in-single.amount_out_atomic", "params.slippage_bps"]
+      approval_amount_atomic:
+        expr: { cel: "calculated.amount_in_atomic" }
+        inputs: ["calculated.amount_in_atomic"]
+
+    execution:
+      "eip155:*":
+        type: composite
+        steps:
+          - id: approve_if_needed
+            description: "Approve router to spend token_in if allowance insufficient"
+            condition: { cel: "query[\"allowance-token-in\"].allowance_atomic < calculated.amount_in_atomic" }
+            execution:
+              type: evm_call
+              to: { ref: "params.token_in.address" }
+              abi:
+                type: "function"
+                name: "approve"
+                inputs:
+                  - { name: "spender", type: "address" }
+                  - { name: "amount", type: "uint256" }
+                outputs: []
+              args:
+                spender: { ref: "contracts.router" }
+                amount: { ref: "calculated.approval_amount_atomic" }
+
+          - id: swap
+            description: "Execute exactInputSingle swap"
+            execution:
+              type: evm_call
+              to: { ref: "contracts.router" }
+              abi:
+                type: "function"
+                name: "exactInputSingle"
+                inputs:
+                  - name: "params"
+                    type: "tuple"
+                    components:
+                      - { name: "tokenIn", type: "address" }
+                      - { name: "tokenOut", type: "address" }
+                      - { name: "fee", type: "uint24" }
+                      - { name: "recipient", type: "address" }
+                      - { name: "deadline", type: "uint256" }
+                      - { name: "amountIn", type: "uint256" }
+                      - { name: "amountOutMinimum", type: "uint256" }
+                      - { name: "sqrtPriceLimitX96", type: "uint160" }
+                outputs: []
+              args:
+                params:
+                  object:
+                    tokenIn: { ref: "params.token_in.address" }
+                    tokenOut: { ref: "params.token_out.address" }
+                    fee: { ref: "calculated.fee_tier" }
+                    recipient: { ref: "calculated.recipient" }
+                    deadline: { ref: "calculated.deadline_unix" }
+                    amountIn: { ref: "calculated.amount_in_atomic" }
+                    amountOutMinimum: { ref: "calculated.min_out_atomic" }
+                    sqrtPriceLimitX96: { lit: "0" }
+
+queries:
+  quote-exact-in-single:
+    description: "Quote output for exact input single hop via QuoterV2"
+    params:
+      - name: token_in
+        type: asset
+        description: "Input token asset"
+      - name: token_out
+        type: asset
+        description: "Output token asset"
+      - name: amount_in
+        type: token_amount
+        description: "Human amount for token_in"
+        asset_ref: "token_in"
+      - name: fee
+        type: uint32
+        description: "Optional fee tier (auto-detected if not provided)"
+        required: false
+
+    returns:
+      - name: amount_out_atomic
+        type: uint256
+        description: "Quoted output amount in token_out atomic units"
+
+    cache_ttl: 3
+    consistency:
+      block_tag: "latest"
+      require_same_block: true
+
+    execution:
+      "eip155:*":
+        type: evm_read
+        to: { ref: "contracts.quoter" }
+        abi:
+          type: "function"
+          name: "quoteExactInputSingle"
+          inputs:
+            - name: "params"
+              type: "tuple"
+              components:
+                - { name: "tokenIn", type: "address" }
+                - { name: "tokenOut", type: "address" }
+                - { name: "amountIn", type: "uint256" }
+                - { name: "fee", type: "uint24" }
+                - { name: "sqrtPriceLimitX96", type: "uint160" }
+          outputs:
+            - { name: "amountOut", type: "uint256" }
+            - { name: "sqrtPriceX96After", type: "uint160" }
+            - { name: "initializedTicksCrossed", type: "uint32" }
+            - { name: "gasEstimate", type: "uint256" }
+        output_map:
+          amount_out_atomic: "amountOut"
+        args:
+          params:
+            object:
+              tokenIn: { ref: "params.token_in.address" }
+              tokenOut: { ref: "params.token_out.address" }
+              amountIn: { cel: "to_atomic(params.amount_in, params.token_in)" }
+              fee:
+                detect:
+                  kind: "best_quote"
+                  candidates:
+                    - { lit: "100" }
+                    - { lit: "500" }
+                    - { lit: "3000" }
+                    - { lit: "10000" }
+                  constraints:
+                    prefer_liquidity: true
+              sqrtPriceLimitX96: { lit: "0" }
+
+  allowance-token-in:
+    description: "Read token_in allowance for router"
+    params:
+      - name: token_in
+        type: asset
+        description: "Input token asset"
+
+    returns:
+      - name: allowance_atomic
+        type: uint256
+        description: "Allowance in token_in atomic units"
+
+    cache_ttl: 10
+    execution:
+      "eip155:*":
+        type: evm_read
+        to: { ref: "params.token_in.address" }
+        abi:
+          type: "function"
+          name: "allowance"
+          inputs:
+            - { name: "owner", type: "address" }
+            - { name: "spender", type: "address" }
+          outputs:
+            - { name: "allowance_atomic", type: "uint256" }
+        args:
+          owner: { ref: "ctx.wallet_address" }
+          spender: { ref: "contracts.router" }
