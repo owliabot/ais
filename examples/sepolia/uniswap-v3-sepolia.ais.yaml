@@ -66,9 +66,10 @@ actions:
       - "quote-exact-in"
       - "allowance"
 
-    hard_constraints:
-      max_slippage_bps: { ref: "params.slippage_bps" }
-      allow_unlimited_approval: { lit: false }
+    extensions:
+      hard_constraints:
+        max_slippage_bps: { ref: "params.slippage_bps" }
+        allow_unlimited_approval: { lit: false }
 
     calculated_fields:
       amount_in_atomic:
@@ -186,9 +187,10 @@ actions:
       - "quote-exact-out"
       - "allowance"
 
-    hard_constraints:
-      max_slippage_bps: { ref: "params.slippage_bps" }
-      allow_unlimited_approval: { lit: false }
+    extensions:
+      hard_constraints:
+        max_slippage_bps: { ref: "params.slippage_bps" }
+        allow_unlimited_approval: { lit: false }
 
     calculated_fields:
       amount_out_atomic:
