@@ -123,13 +123,13 @@ AIS documents are strict **JSON or YAML** files. Each must set a versioned `sche
 
 - **Discovered automatically:** protocol, pack, workflow, plan
 - **Ignored during scan:** catalog, plan-sketch (they are never auto-loaded from workspace)
-- **Pack policy** is only activated when passed explicitly via `--pack <file>`, not auto-applied from workspace
+- **Pack policy** is only activated when passed explicitly via `--pack <file>` (agent only — `run workflow` has no `--pack` flag; pack is only used for workspace validation in workflow execution)
 
 Typical structure:
 ```text
 workspace/
   myprotocol.ais.yaml          # protocol (ais/0.0.2)
-  mypack.ais-pack.yaml         # pack (ais-pack/0.0.2)  -> must be passed via --pack to activate
+  mypack.ais-pack.yaml         # pack (ais-pack/0.0.2)  -> agent only: pass via --pack to activate policy
   swap-workflow.ais-flow.yaml  # workflow (ais-flow/0.0.3)
 ```
 

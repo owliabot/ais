@@ -160,7 +160,7 @@ Global formatting:
 ## `--events-jsonl`
 Sample output line:
 ```json
-{"schema":"ais-engine-event/0.0.3","kind":"node_started","node_id":"n1","ts":"2026-03-05T00:00:00Z"}
+{"schema":"ais-engine-event/0.0.3","run_id":"abc123","seq":0,"ts":"2026-03-05T00:00:00Z","event":{"type":"node_ready","node_id":"n1"}}
 ```
 
 - Available on `run plan`, `run workflow`, `agent`.
