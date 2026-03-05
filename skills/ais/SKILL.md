@@ -1,6 +1,6 @@
 ---
 name: ais
-description: Use ais-runner to execute AIS plans, workflows, agent flows, or author AIS YAML documents. Use when: running plans/workflows/replay/agent, validating documents with --dry-run, or authoring protocol/pack/workflow/plan/plan-sketch/catalog files.
+description: Use ais-runner to execute AIS plans, workflows, agent flows, or author AIS YAML documents. Use when: running plans/workflows/replay/agent, validating documents with --dry-run, or authoring protocol/pack/workflow/plan/plan-sketch/catalog files (JSON or YAML).
 ---
 
 # AIS
@@ -112,6 +112,8 @@ In `safe` mode the runner pauses before risk-level ≥ 3 actions.
 **For `agent`:** approvals are handled interactively or via checkpoint resume. Use `--approvals-mode assist` for semi-automatic or `yolo` to skip all gates (unsafe).
 
 ⚠️ `--approvals-mode yolo` skips all approval gates — use only in trusted test environments.
+
+> **Verbosity flags:** `--verbose` is available on all commands (prints debug info to stderr). `--verbose-llm` is agent-only (logs each LLM request/response to stderr).
 
 Paused runs can be resumed by re-running `ais-runner agent` with `--checkpoint <file>`:
 

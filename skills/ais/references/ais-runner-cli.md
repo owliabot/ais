@@ -120,8 +120,8 @@ Global formatting:
   - `resumed_from_checkpoint`
   - `iterations`
   - `events_emitted`
-  - `command_accepted`
-  - `command_rejected`
+  - `command_accepted` _(integer)_ — count of commands processed successfully
+  - `command_rejected` _(integer)_ — count of commands rejected (unknown id, wrong type, etc.)
   - `completed_node_ids`
 
 ## `run workflow`
