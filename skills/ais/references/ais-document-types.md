@@ -1,12 +1,14 @@
 # AIS Document Types (YAML Inputs)
 
 Source specs:
-- `/home/ocbot/.openclaw/workspace/repos/ais/specs/ais-1-protocol.md`
-- `/home/ocbot/.openclaw/workspace/repos/ais/specs/ais-1-pack.md`
-- `/home/ocbot/.openclaw/workspace/repos/ais/specs/ais-1-workflow.md`
-- `/home/ocbot/.openclaw/workspace/repos/ais/specs/ais-2-plan.md`
-- `/home/ocbot/.openclaw/workspace/repos/ais/specs/ais-2-plan-sketch.md`
-- `/home/ocbot/.openclaw/workspace/repos/ais/specs/ais-1-catalog.md`
+- `specs/ais-1-protocol.md`
+- `specs/ais-1-pack.md`
+- `specs/ais-1-workflow.md`
+- `specs/ais-2-plan.md`
+- `specs/ais-2-plan-sketch.md`
+- `specs/ais-1-catalog.md`
+
+Paths are relative to the repo root.
 
 All six document families are strict: unknown fields are rejected unless carried in an explicit `extensions` field.
 
@@ -18,8 +20,32 @@ All six document families are strict: unknown fields are rejected unless carried
 Example:
 ```yaml
 schema: "ais/0.0.2"
-meta: { protocol: "uniswap-v3", version: "0.0.2" }
-actions: { swap_exact_in: { description: "...", execution: { "eip155:*": {} } } }
+meta: { protocol: "example-protocol", version: "0.0.2" }
+actions:
+  transfer:
+    description: "Transfer tokens"
+    risk_level: 3
+    params:
+      - name: recipient
+        type: address
+        description: "Recipient address"
+      - name: amount
+        type: uint256
+        description: "Amount in atomic units"
+    execution:
+      "eip155:*":
+        type: evm_call
+        to: { ref: "contracts.token" }
+        abi:
+          type: "function"
+          name: "transfer"
+          inputs:
+            - { name: "to", type: "address" }
+            - { name: "value", type: "uint256" }
+          outputs: []
+        args:
+          to: { ref: "params.recipient" }
+          value: { ref: "params.amount" }
 ```
 
 ## 2) Pack

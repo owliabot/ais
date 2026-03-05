@@ -6,7 +6,9 @@ description: Use AIS through the Rust toolchain and `ais-runner`. Use when runni
 # AIS (Rust-only)
 
 Assumes `ais-runner` is already on PATH. Rust workspace for reference:
-`/home/ocbot/.openclaw/workspace/repos/ais/rust/ais-rs/`
+`rust/ais-rs/`
+
+Paths are relative to the repo root.
 
 ## Main CLI: `ais-runner`
 
@@ -17,7 +19,7 @@ ais-runner run plan --plan <file> [--config <file>] [--dry-run] [--format json|t
 ais-runner run workflow --workflow <file> [--workspace <dir>] [--config <file>] [--dry-run] [--outputs <json-file>]
 ais-runner plan diff --before <plan> --after <plan>
 ais-runner replay [--trace-jsonl <file> | --checkpoint <file> --plan <file> --config <file>] [--until-node <id>]
-ais-runner agent --intent "<text>" --config <runner-config> [--workspace <dir>] [--approvals-mode safe|assist|yolo]
+ais-runner agent (--plan <file> | --intent "<text>" | --intent-file <file>) --config <runner-config> [--workspace <dir>] [--approvals-mode safe|assist|yolo]
 ```
 
 Output and stream contracts:
@@ -28,6 +30,8 @@ Output and stream contracts:
 - `--commands-stdin-jsonl`
 
 Read full command/flag/output/error details in [references/ais-runner-cli.md](references/ais-runner-cli.md).
+
+⚠️ `--approvals-mode yolo` skips all approval gates — use only in trusted test environments.
 
 ## AIS YAML document types
 

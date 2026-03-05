@@ -1,11 +1,13 @@
 # `ais-runner` CLI Reference
 
 Primary sources:
-- `/home/ocbot/.openclaw/workspace/repos/ais/docs/ais-rust-cli.md`
-- `/home/ocbot/.openclaw/workspace/repos/ais/rust/ais-rs/crates/ais-runner/src/cli.rs`
-- `/home/ocbot/.openclaw/workspace/repos/ais/rust/ais-rs/crates/ais-runner/src/run.rs`
-- `/home/ocbot/.openclaw/workspace/repos/ais/rust/ais-rs/crates/ais-runner/src/agent/mod.rs`
-- `/home/ocbot/.openclaw/workspace/repos/ais/rust/ais-rs/crates/ais-runner/src/error.rs`
+- `docs/ais-rust-cli.md`
+- `rust/ais-rs/crates/ais-runner/src/cli.rs`
+- `rust/ais-rs/crates/ais-runner/src/run.rs`
+- `rust/ais-rs/crates/ais-runner/src/agent/mod.rs`
+- `rust/ais-rs/crates/ais-runner/src/error.rs`
+
+Paths are relative to the repo root.
 
 ## 1) Command surface
 
@@ -80,6 +82,8 @@ ais-runner agent \
   [--checkpoint <path>] \
   [--profile standard|demo-scripted] \
   [--llm-script-jsonl <file>] \
+  [--llm-transcript-path <file>] \
+  [--llm-transcript-append] \
   [--verbose] \
   [--verbose-llm] \
   [--approvals-mode safe|assist|yolo] \
