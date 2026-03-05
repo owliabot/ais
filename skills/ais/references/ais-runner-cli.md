@@ -33,7 +33,7 @@ Without this file, plans with unresolved `inputs.*` refs will fail at execution 
 
 Notes:
 - `--config` is optional only for `--dry-run`; required for execution mode.
-- `--events-jsonl -` sends raw event JSONL to stdout and suppresses summary output.
+- `--events-jsonl -` sends raw event JSONL to stdout; suppresses summary on `run plan` / `run workflow`. For `agent`: event lines and final summary **both** go to stdout — use a file path instead to keep them separate.
 
 ## `run workflow`
 

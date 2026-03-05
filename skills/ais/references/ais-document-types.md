@@ -104,8 +104,12 @@ Example:
 ```yaml
 schema: "ais-plan-sketch/0.1.0"
 intent: "swap 1 ETH to USDC"
-pack_snapshot: { name: safe-defi-pack, version: "0.0.2", hash: "..." }
-catalog_snapshot: { hash: "..." }
+pack_snapshot:
+  hash: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f601"  # 64-char lowercase hex
+catalog_snapshot:
+  schema: "ais-catalog/0.0.1"                                              # required
+  hash: "b1c2d3e4f5a6b1c2d3e4f5a6b1c2d3e4f5a6b1c2d3e4f5a6b1c2d3e4f5a602"  # 64-char lowercase hex
+chain_scope: ["eip155:1"]
 segments:
   - segment_id: s1
     cursor_in: "0"
@@ -133,4 +137,4 @@ actions:
     risk_level: 3
 ```
 
-Note: `actions`, `queries`, and `packs` are all optional arrays — include only the ones present in your catalog.
+Note: `actions`, `queries`, and `packs` are **required** arrays in the root (can be empty `[]`). Each `hash` field must be a 64-character lowercase hex string (no prefix).

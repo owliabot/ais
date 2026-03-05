@@ -132,7 +132,7 @@ AIS documents are strict **JSON or YAML** files. Each must set a versioned `sche
 | Family | schema value | Used as input to |
 |--------|-------------|-----------------|
 | protocol | `ais/0.0.2` | pack includes |
-| pack | `ais-pack/0.0.2` | `--pack <file>` (explicit, not auto-discovered) |
+| pack | `ais-pack/0.0.2` | auto-discovered in workspace (schema scan); policy only activates via `--pack <file>` (agent only) |
 | workflow | `ais-flow/0.0.3` | `run workflow --workflow` |
 | plan | `ais-plan/0.0.3` | `run plan --plan` / `agent --plan` |
 | plan-sketch | `ais-plan-sketch/0.1.0` | internal agent planning IR — compiled automatically by `ais-runner agent`; not a direct CLI input |
