@@ -182,6 +182,8 @@ Checkpoint lifecycle:
 
 ## 5) Error conventions
 
+All errors are written to stderr. Exit code is non-zero on failure. Error messages below are stable CLI text that can be matched programmatically.
+
 High-frequency user-facing errors (exact text from `RunnerError`):
 - `runner config path is required for plan execution: pass --config <file>`
 - `replay requires --trace-jsonl <file> or --checkpoint <file>`

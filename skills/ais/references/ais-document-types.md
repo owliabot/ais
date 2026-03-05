@@ -12,7 +12,13 @@ All six document families are strict: unknown fields are rejected unless carried
 Example:
 ```yaml
 schema: "ais/0.0.2"
-meta: { protocol: "example-protocol", version: "0.0.2" }
+meta:
+  protocol: "example-token"
+  version: "0.0.2"
+deployments:
+  - chain: "eip155:1"
+    contracts:
+      token: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"  # USDC
 actions:
   transfer:
     description: "Transfer tokens"
@@ -25,7 +31,7 @@ actions:
         type: uint256
         description: "Amount in atomic units"
     execution:
-      "eip155:*":
+      "eip155:1":
         type: evm_call
         to: { ref: "contracts.token" }
         abi:
@@ -91,6 +97,7 @@ nodes:
 ## 5) Plan Sketch
 - Schema ID: `ais-plan-sketch/0.1.0`
 - Purpose: LLM-facing segmented planning IR; must be compiled to `ais-plan/0.0.3` before execution.
+- Plan-sketches are compiled automatically by `ais-runner agent` during its planning loop. You do not compile them manually; they are internal to the agent workflow.
 - Key fields: `schema`, `intent`, `pack_snapshot`, `catalog_snapshot`, `segments[]`; each segment carries `segment_id`, `cursor_in`, `cursor_out`, `done`, `steps[]`.
 
 Example:
@@ -125,3 +132,5 @@ actions:
     id: swap_exact_in
     risk_level: 3
 ```
+
+Note: `actions`, `queries`, and `packs` are all optional arrays — include only the ones present in your catalog.

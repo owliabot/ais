@@ -37,8 +37,6 @@ ais-runner agent --plan <file.yaml> --config <runner.yaml>
 ais-runner agent --intent-file <file.txt> --config <runner.yaml>
 ```
 
-⚠️ `--approvals-mode yolo` skips all approval gates — use only in trusted test environments.
-
 ## Minimal runner config (`runner.yaml`)
 
 Every non-dry-run command requires `--config`. Minimal structure:
@@ -46,15 +44,15 @@ Every non-dry-run command requires `--config`. Minimal structure:
 ```yaml
 schema: "ais-runner/0.0.1"
 chain_providers:
-  "eip155:11155111":                  # Sepolia testnet
+  "eip155:1":                         # Ethereum mainnet
     type: http
-    url: "https://rpc.sepolia.org"
+    url: "https://eth.llamarpc.com"   # replace with your RPC endpoint
 wallet:
   type: local
   private_key_env: "PRIVATE_KEY"     # export PRIVATE_KEY=0x...
 ```
 
-For mainnet Ethereum substitute `eip155:1` and a mainnet RPC URL. Solana uses `solana:<genesis-hash>`.
+For Sepolia testnet substitute `eip155:11155111` and a Sepolia RPC URL. Solana uses `solana:<genesis-hash>`.
 
 ## I/O streams (advanced)
 
@@ -63,17 +61,23 @@ Output streams (optional flags on run plan / run workflow / agent):
 - `--trace <path>` — redacted event trace, one JSON object per line
 
 Input stream:
-- `--commands-stdin-jsonl` — send `ais-engine-command/0.0.1` envelopes via stdin, one per line
+- `--commands-stdin-jsonl` — send `ais-engine-command/0.0.1` envelopes via stdin, one per line (**`run plan` and `run workflow` only** — not available for `agent`)
 
 ## Approvals
 
-In `safe` mode the runner pauses before risk-level ≥ 3 actions and waits for confirmation.
-When running non-interactively, pipe approval commands via `--commands-stdin-jsonl`:
+In `safe` mode the runner pauses before risk-level ≥ 3 actions.
+
+**For `run plan` / `run workflow`:** pipe approval commands via `--commands-stdin-jsonl`:
 ```json
 {"kind":"approve","node_id":"n1"}
-{"kind":"reject","node_id":"n1"}
+{"kind":"reject","node_id":"n2","reason":"Too much slippage"}
 ```
-Use `--approvals-mode yolo` to skip all gates (unsafe). Paused runs can be resumed from checkpoint.
+
+**For `agent`:** approvals are handled interactively or via checkpoint resume. Use `--approvals-mode assist` for semi-automatic or `yolo` to skip all gates (unsafe).
+
+⚠️ `--approvals-mode yolo` skips all approval gates — use only in trusted test environments.
+
+Paused runs can be resumed from checkpoint (`--checkpoint`).
 
 ## AIS document families
 
@@ -85,7 +89,7 @@ AIS documents are strict **JSON or YAML** files. Each must set a versioned `sche
 | pack | `ais-pack/0.0.2` | `--pack` flag / workspace |
 | workflow | `ais-flow/0.0.3` | `run workflow --workflow` |
 | plan | `ais-plan/0.0.3` | `run plan --plan` / `agent --plan` |
-| plan-sketch | `ais-plan-sketch/0.1.0` | agent planning IR only (not directly executable) |
+| plan-sketch | `ais-plan-sketch/0.1.0` | internal agent planning IR — compiled automatically by `ais-runner agent`; not a direct CLI input |
 | catalog | `ais-catalog/0.0.1` | agent index (auto-built from workspace) |
 
 Full field reference: [references/ais-document-types.md](references/ais-document-types.md)

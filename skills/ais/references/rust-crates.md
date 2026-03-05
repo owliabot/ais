@@ -8,8 +8,8 @@ This file documents which crates power which `ais-runner` CLI behaviors. Useful 
 | `run plan` (execute) | `ais-engine`, `ais-runner` |
 | `run workflow` (compile → plan) | `ais-sdk` |
 | `run workflow` (execute) | `ais-engine`, `ais-runner` |
-| `plan diff` | `ais-engine` (diff APIs) |
-| `replay` | `ais-engine` (replay APIs) |
+| `plan diff` | `ais-runner` (CLI dispatch), `ais-engine` (diff logic) |
+| `replay` | `ais-runner` (CLI dispatch), `ais-engine` (replay logic) |
 | `agent` (LLM planning) | `ais-llm`, `ais-sdk` |
 | `agent` (execution) | `ais-engine`, `ais-runner` |
 | CEL expression evaluation | `ais-cel` |
