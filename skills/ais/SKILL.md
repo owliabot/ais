@@ -50,7 +50,7 @@ ais-runner agent --plan <file.yaml> --config <runner.yaml> \
 ```
 
 > **Agent modes:**
-> - `--intent / --intent-file`: segmented LLM planner -> compiles plan-sketch -> executes. Requires `--workspace` and `llm` in runner config.
+> - `--intent / --intent-file`: segmented LLM planner -> compiles plan-sketch -> executes. Requires `--workspace` and an LLM provider source (`config.llm` for standard profile, or `--profile demo-scripted --llm-script-jsonl <file>`).
 > - `--plan`: execution-only. No LLM, no plan-sketch, no workspace needed. Adds a pause/resume decision loop for `need_user_confirm` events (manual/assist/yolo), pack-policy integration via `--pack`, and outputs `ais-runner-agent/0.0.1` schema (includes `iterations`, `llm_usage`).
 
 ## Minimal runner config (`runner.yaml`)

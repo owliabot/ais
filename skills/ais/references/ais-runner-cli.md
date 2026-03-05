@@ -116,7 +116,7 @@ Global formatting:
 - Execute `json` schema: `ais-runner-run-plan/0.0.1`
   - `schema`
   - `status` (`completed|paused|stopped`)
-  - `paused_reason` _(nullable string, open-ended)_ — known prefixes: `need_user_confirm:<node_id>`, `need_user_input:<node_id>`, `assert_failed:<node_id>`, `executor_error:<node_id>`, `hard_block:<node_id>`, `condition_failed:<node_id>`, `no_progress`, `cancelled_by_command`, `replace_plan_rejected:<reason>`, `user_confirm_denied`; treat as opaque
+  - `paused_reason` _(nullable string, open-ended — treat as opaque)_ — known prefixes include: `need_user_confirm:<node_id>`, `need_user_input:<node_id>`, `need_user_input:command`, `assert_failed:<node_id>`, `executor_error:<node_id>`, `hard_block:<node_id>`, `condition_failed:<node_id>`, `no_progress`, `cancelled_by_command`, `user_confirm_denied`, `until_failed:<node_id>`, `until_not_met:<node_id>`, `retry_exhausted:<node_id>`, `retry_timeout:<node_id>`, `replace_plan_rejected:<reason>`, `need_user_confirm:replace_plan`, `side_effect_reconcile_pending:<ids>`, `side_effect_reconcile_reverted:<ids>`, `missing_required_input`, `replay_step_limit`
   - `resumed_from_checkpoint`
   - `iterations`
   - `events_emitted`
@@ -142,13 +142,13 @@ Global formatting:
   - `status` (`completed|paused|reached_until_node`)
   - `events_emitted`
   - `completed_node_ids`
-  - `paused_reason` _(nullable string, open-ended)_ — known prefixes: `need_user_confirm:<node_id>`, `need_user_input:<node_id>`, `assert_failed:<node_id>`, `executor_error:<node_id>`, `hard_block:<node_id>`, `condition_failed:<node_id>`, `no_progress`, `cancelled_by_command`, `replace_plan_rejected:<reason>`, `user_confirm_denied`; treat as opaque
+  - `paused_reason` _(nullable string, open-ended — treat as opaque)_ — known prefixes include: `need_user_confirm:<node_id>`, `need_user_input:<node_id>`, `need_user_input:command`, `assert_failed:<node_id>`, `executor_error:<node_id>`, `hard_block:<node_id>`, `condition_failed:<node_id>`, `no_progress`, `cancelled_by_command`, `user_confirm_denied`, `until_failed:<node_id>`, `until_not_met:<node_id>`, `retry_exhausted:<node_id>`, `retry_timeout:<node_id>`, `replace_plan_rejected:<reason>`, `need_user_confirm:replace_plan`, `side_effect_reconcile_pending:<ids>`, `side_effect_reconcile_reverted:<ids>`, `missing_required_input`, `replay_step_limit`
 
 ## `agent`
 - `json` schema: `ais-runner-agent/0.0.1`
   - `schema`
   - `status` (`completed|paused|stopped`)
-  - `paused_reason` _(nullable string, open-ended)_ — known prefixes: `need_user_confirm:<node_id>`, `need_user_input:<node_id>`, `assert_failed:<node_id>`, `executor_error:<node_id>`, `hard_block:<node_id>`, `condition_failed:<node_id>`, `no_progress`, `cancelled_by_command`, `replace_plan_rejected:<reason>`, `user_confirm_denied`; treat as opaque
+  - `paused_reason` _(nullable string, open-ended — treat as opaque)_ — known prefixes include: `need_user_confirm:<node_id>`, `need_user_input:<node_id>`, `need_user_input:command`, `assert_failed:<node_id>`, `executor_error:<node_id>`, `hard_block:<node_id>`, `condition_failed:<node_id>`, `no_progress`, `cancelled_by_command`, `user_confirm_denied`, `until_failed:<node_id>`, `until_not_met:<node_id>`, `retry_exhausted:<node_id>`, `retry_timeout:<node_id>`, `replace_plan_rejected:<reason>`, `need_user_confirm:replace_plan`, `side_effect_reconcile_pending:<ids>`, `side_effect_reconcile_reverted:<ids>`, `missing_required_input`, `replay_step_limit`
   - `resumed_from_checkpoint`
   - `iterations`
   - `events_emitted`

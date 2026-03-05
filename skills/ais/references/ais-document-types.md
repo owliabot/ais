@@ -128,7 +128,7 @@ Example:
 ```yaml
 schema: "ais-catalog/0.0.1"
 created_at: "2026-03-04T00:00:00Z"
-hash: "sha256:..."
+hash: "b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2"
 actions:
   - ref: uniswap-v3@0.0.2/swap_exact_in
     protocol: uniswap-v3
