@@ -44,7 +44,7 @@ ais-runner agent --plan <file.yaml> --config <runner.yaml> \
 
 > **Agent modes:**
 > - `--intent / --intent-file`: segmented LLM planner -> compiles plan-sketch -> executes. Requires `--workspace` and `llm` in runner config.
-> - `--plan`: execution-only. No LLM, no plan-sketch, no workspace needed. Equivalent to `run plan` with approval loop.
+> - `--plan`: execution-only. No LLM, no plan-sketch, no workspace needed. Adds a pause/resume decision loop for `need_user_confirm` events (manual/assist/yolo), pack-policy integration via `--pack`, and outputs `ais-runner-agent/0.0.1` schema (includes `iterations`, `llm_usage`).
 
 ## Minimal runner config (`runner.yaml`)
 
@@ -94,8 +94,8 @@ In `safe` mode the runner pauses before risk-level ≥ 3 actions.
 
 **For `run plan` / `run workflow`:** pipe approval commands via `--commands-stdin-jsonl`:
 ```json
-{"kind":"approve","node_id":"n1"}
-{"kind":"reject","node_id":"n2","reason":"Too much slippage"}
+{"schema":"ais-engine-command/0.0.1","command":{"id":"cmd-1","type":"user_confirm","data":{"node_id":"n1","decision":"approve"}}}
+{"schema":"ais-engine-command/0.0.1","command":{"id":"cmd-2","type":"user_confirm","data":{"node_id":"n2","decision":"deny"}}}
 ```
 
 **For `agent`:** approvals are handled interactively or via checkpoint resume. Use `--approvals-mode assist` for semi-automatic or `yolo` to skip all gates (unsafe).

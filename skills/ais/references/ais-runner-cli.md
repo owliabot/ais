@@ -176,8 +176,8 @@ Sample output line:
 ## `--commands-stdin-jsonl`
 Sample input lines:
 ```json
-{"kind":"approve","node_id":"n1"}
-{"kind":"reject","node_id":"n2","reason":"Too much slippage"}
+{"schema":"ais-engine-command/0.0.1","command":{"id":"cmd-1","type":"user_confirm","data":{"node_id":"n1","decision":"approve"}}}
+{"schema":"ais-engine-command/0.0.1","command":{"id":"cmd-2","type":"user_confirm","data":{"node_id":"n2","decision":"deny"}}}
 ```
 
 - Available on `run plan`, `run workflow`.
