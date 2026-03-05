@@ -138,3 +138,10 @@ actions:
 ```
 
 Note: `actions`, `queries`, and `packs` are **required** arrays in the root (can be empty `[]`). Each `hash` field must be a 64-character lowercase hex string (no prefix).
+
+**Card required fields:**
+- Action card: `ref`, `protocol`, `version`, `id`, `risk_level`, `execution_types`, `execution_chains`
+- Query card: `ref`, `protocol`, `version`, `id`, `execution_types`, `execution_chains`
+- Pack card: `name`, `version`, `includes`
+
+> Catalogs are agent-internal documents and are auto-built by `ais-runner agent`. Do not place catalog files in the workspace — the catalog schema is not registered in the validator and will cause a load error.

@@ -145,7 +145,7 @@ AIS documents are strict **JSON or YAML** files. Each must set a versioned `sche
 `ais-runner agent --workspace <dir>` and `run workflow --workspace <dir>` scan the directory recursively. Files are classified by their `schema:` field:
 
 - **Discovered automatically:** protocol, pack, workflow, plan
-- **Ignored during scan:** catalog, plan-sketch (they are never auto-loaded from workspace)
+- **Ignored during scan:** plan-sketch (never auto-loaded). Catalog files should not be placed in workspace — the `ais-catalog/0.0.1` schema is not registered in the schema validator and will cause a workspace load error if present.
 - **Pack policy** is only activated when passed explicitly via `--pack <file>` (agent only — `run workflow` has no `--pack` flag; pack is only used for workspace validation in workflow execution)
 
 Typical structure:
