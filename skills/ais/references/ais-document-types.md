@@ -1,14 +1,6 @@
-# AIS Document Types (YAML Inputs)
+# AIS Document Types
 
-Source specs:
-- `specs/ais-1-protocol.md`
-- `specs/ais-1-pack.md`
-- `specs/ais-1-workflow.md`
-- `specs/ais-2-plan.md`
-- `specs/ais-2-plan-sketch.md`
-- `specs/ais-1-catalog.md`
-
-Paths are relative to the repo root.
+AIS documents are strict YAML files identified by a `schema:` field.
 
 All six document families are strict: unknown fields are rejected unless carried in an explicit `extensions` field.
 

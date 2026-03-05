@@ -5,10 +5,7 @@ description: Use AIS through the Rust toolchain and `ais-runner`. Use when runni
 
 # AIS (Rust-only)
 
-Assumes `ais-runner` is already on PATH. Rust workspace for reference:
-`rust/ais-rs/`
-
-Paths are relative to the repo root.
+Assumes `ais-runner` is already on PATH.
 
 ## Main CLI: `ais-runner`
 

@@ -1,12 +1,6 @@
 # AIS Rust Crates
 
-Source of truth: crate README files under
-`rust/ais-rs/crates/*/README.md`
-
-Workspace root:
-`rust/ais-rs/`
-
-Paths are relative to the repo root.
+Key crates in the AIS Rust workspace.
 
 ## `ais-runner`
 - Responsibility: CLI/runtime orchestration for `run plan`, `run workflow`, `plan diff`, `replay`, `agent`; wires config/router/checkpoint/events/trace.

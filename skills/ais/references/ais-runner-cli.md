@@ -1,14 +1,5 @@
 # `ais-runner` CLI Reference
 
-Primary sources:
-- `docs/ais-rust-cli.md`
-- `rust/ais-rs/crates/ais-runner/src/cli.rs`
-- `rust/ais-rs/crates/ais-runner/src/run.rs`
-- `rust/ais-rs/crates/ais-runner/src/agent/mod.rs`
-- `rust/ais-rs/crates/ais-runner/src/error.rs`
-
-Paths are relative to the repo root.
-
 ## 1) Command surface
 
 ## `run plan`
