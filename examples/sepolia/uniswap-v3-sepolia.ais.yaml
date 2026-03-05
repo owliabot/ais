@@ -48,6 +48,8 @@ actions:
       - name: fee
         type: uint32
         description: "Uniswap V3 fee tier (100, 500, 3000, 10000)"
+        constraints:
+          enum: [100, 500, 3000, 10000]
       - name: recipient
         type: address
         description: "Recipient of token_out; defaults to wallet"
@@ -56,6 +58,9 @@ actions:
         type: uint256
         description: "Relative deadline in seconds from now"
         default: "600"
+        constraints:
+          min: 60
+          max: 3600
 
     requires_queries:
       - "quote-exact-in"
@@ -163,6 +168,8 @@ actions:
       - name: fee
         type: uint32
         description: "Uniswap V3 fee tier (100, 500, 3000, 10000)"
+        constraints:
+          enum: [100, 500, 3000, 10000]
       - name: recipient
         type: address
         description: "Recipient of token_out; defaults to wallet"
@@ -171,6 +178,9 @@ actions:
         type: uint256
         description: "Relative deadline in seconds from now"
         default: "600"
+        constraints:
+          min: 60
+          max: 3600
 
     requires_queries:
       - "quote-exact-out"
@@ -272,6 +282,8 @@ queries:
       - name: fee
         type: uint32
         description: "Uniswap V3 fee tier"
+        constraints:
+          enum: [100, 500, 3000, 10000]
 
     returns:
       - name: amount_out_atomic
@@ -341,6 +353,8 @@ queries:
       - name: fee
         type: uint32
         description: "Uniswap V3 fee tier"
+        constraints:
+          enum: [100, 500, 3000, 10000]
 
     returns:
       - name: amount_in_atomic

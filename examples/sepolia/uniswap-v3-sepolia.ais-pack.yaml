@@ -15,30 +15,3 @@ policy:
   approvals:
     auto_execute_max_risk_level: 2
     require_approval_min_risk_level: 3
-
-  hard_constraints_defaults:
-    max_slippage_bps: 200
-    allow_unlimited_approval: false
-    max_approval_multiplier: 1.10
-
-token_policy:
-  resolution:
-    allow_symbol_input: true
-    require_user_confirm_asset_address: true
-    require_allowlist_for_symbol_resolution: false
-
-providers:
-  quote:
-    enabled:
-      - provider: "uniswap-v3-quoter"
-        chains: ["eip155:11155111"]
-        priority: 10
-
-overrides:
-  actions:
-    "uniswap-v3-sepolia.swap-exact-in":
-      hard_constraints:
-        max_slippage_bps: 200
-    "uniswap-v3-sepolia.swap-exact-out":
-      hard_constraints:
-        max_slippage_bps: 200
