@@ -30,17 +30,21 @@ ais-runner plan diff --before <a.yaml> --after <b.yaml>
 ais-runner replay --trace-jsonl <file> [--until-node <id>]
 ais-runner replay --checkpoint <file> --plan <file> --config <runner.yaml>
 
-# Agent — run from natural language intent or plan
-ais-runner agent --intent "swap 1 ETH to USDC" --config <runner.yaml> [--workspace <dir>] \
+# Agent — two distinct modes:
+
+# Intent mode (LLM planning): requires --workspace + llm config
+ais-runner agent --intent "swap 1 ETH to USDC" --config <runner.yaml> --workspace <dir> \
+  [--pack <pack-file>] [--approvals-mode safe|assist|yolo]
+ais-runner agent --intent-file <file.txt> --config <runner.yaml> --workspace <dir>
+
+# Plan execution mode (no planning): executes an existing plan directly
+ais-runner agent --plan <file.yaml> --config <runner.yaml> \
   [--approvals-mode safe|assist|yolo]
-ais-runner agent --plan <file.yaml> --config <runner.yaml>
-ais-runner agent --intent-file <file.txt> --config <runner.yaml>
 ```
 
-> **Agent intent mode prerequisites:**
-> - `--workspace <dir>` is required (must contain AIS protocol/pack/workflow files for candidate discovery)
-> - `--config runner.yaml` must include an `llm` block with a configured provider
-> - `--pack <pack-file>` is optional but recommended to scope available actions/policy
+> **Agent modes:**
+> - `--intent / --intent-file`: segmented LLM planner -> compiles plan-sketch -> executes. Requires `--workspace` and `llm` in runner config.
+> - `--plan`: execution-only. No LLM, no plan-sketch, no workspace needed. Equivalent to `run plan` with approval loop.
 
 ## Minimal runner config (`runner.yaml`)
 

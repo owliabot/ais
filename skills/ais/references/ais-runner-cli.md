@@ -18,6 +18,19 @@ ais-runner run plan \
   [--format text|json]
 ```
 
+### `--runtime <file>` (optional)
+
+Optional JSON or YAML file providing runtime context for reference resolution. Use when a plan references `inputs.*` or other runtime namespaces:
+
+```yaml
+# example runtime.yaml
+inputs:
+  amount: "1000000"   # USDC atomic units
+  recipient: "0xRecipient..."
+```
+
+Without this file, plans with unresolved `inputs.*` refs will fail at execution time.
+
 Notes:
 - `--config` is optional only for `--dry-run`; required for execution mode.
 - `--events-jsonl -` sends raw event JSONL to stdout and suppresses summary output.
@@ -83,6 +96,13 @@ ais-runner agent \
   [--planner-context-token-budget <n>] \
   [--format text|json]
 ```
+
+### `--profile` semantics
+
+| Value | Behavior |
+|-------|----------|
+| `standard` (default) | Uses real LLM provider from `config.llm`; `--llm-script-jsonl` is forbidden |
+| `demo-scripted` | Replays pre-recorded LLM responses from `--llm-script-jsonl` file (testing/demo use only); real LLM config is ignored |
 
 ## 2) Output formats and schemas
 
