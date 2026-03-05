@@ -55,7 +55,7 @@ ais-runner agent --plan <file.yaml> --config <runner.yaml> \
 
 ## Minimal runner config (`runner.yaml`)
 
-Every non-dry-run command requires `--config`. Minimal structure for EVM plan/workflow:
+Execution of `run plan`, `run workflow`, and `agent` requires `--config`. `plan diff` and `replay --trace-jsonl` do not. Minimal structure for EVM plan/workflow:
 
 ```yaml
 schema: "ais-runner/0.0.1"

@@ -116,7 +116,7 @@ Global formatting:
 - Execute `json` schema: `ais-runner-run-plan/0.0.1`
   - `schema`
   - `status` (`completed|paused|stopped`)
-  - `paused_reason`
+  - `paused_reason` _(nullable string, open-ended)_ — known prefixes: `need_user_confirm:<node_id>`, `need_user_input:<node_id>`, `assert_failed:<node_id>`, `executor_error:<node_id>`, `hard_block:<node_id>`, `condition_failed:<node_id>`, `no_progress`, `cancelled_by_command`, `replace_plan_rejected:<reason>`, `user_confirm_denied`; treat as opaque
   - `resumed_from_checkpoint`
   - `iterations`
   - `events_emitted`
@@ -142,13 +142,13 @@ Global formatting:
   - `status` (`completed|paused|reached_until_node`)
   - `events_emitted`
   - `completed_node_ids`
-  - `paused_reason`
+  - `paused_reason` _(nullable string, open-ended)_ — known prefixes: `need_user_confirm:<node_id>`, `need_user_input:<node_id>`, `assert_failed:<node_id>`, `executor_error:<node_id>`, `hard_block:<node_id>`, `condition_failed:<node_id>`, `no_progress`, `cancelled_by_command`, `replace_plan_rejected:<reason>`, `user_confirm_denied`; treat as opaque
 
 ## `agent`
 - `json` schema: `ais-runner-agent/0.0.1`
   - `schema`
   - `status` (`completed|paused|stopped`)
-  - `paused_reason`
+  - `paused_reason` _(nullable string, open-ended)_ — known prefixes: `need_user_confirm:<node_id>`, `need_user_input:<node_id>`, `assert_failed:<node_id>`, `executor_error:<node_id>`, `hard_block:<node_id>`, `condition_failed:<node_id>`, `no_progress`, `cancelled_by_command`, `replace_plan_rejected:<reason>`, `user_confirm_denied`; treat as opaque
   - `resumed_from_checkpoint`
   - `iterations`
   - `events_emitted`
@@ -202,7 +202,7 @@ Sample input lines:
 
 ## 4) Replay/checkpoint contracts
 
-- Replay inputs are mutually exclusive by source:
+- Replay inputs are precedence by source (if both are provided, trace path runs first and checkpoint args are ignored):
 - trace mode: `--trace-jsonl <file>`
 - checkpoint mode: `--checkpoint <file> --plan <file> --config <file>`
 - `--until-node <id>` can stop replay at a node boundary.
@@ -233,7 +233,7 @@ Additional conventions:
 ## 6) Minimal usage examples
 
 ```bash
-# plan dry-run JSON
+# plan dry-run JSON → returns ais-dry-run-report/0.0.1 object directly (not wrapped)
 ais-runner run plan --plan ./plan.json --dry-run --format json
 
 # plan execute with event/trace/checkpoint sinks
