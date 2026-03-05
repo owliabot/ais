@@ -37,22 +37,43 @@ ais-runner agent --plan <file.yaml> --config <runner.yaml>
 ais-runner agent --intent-file <file.txt> --config <runner.yaml>
 ```
 
+> **Agent intent mode prerequisites:**
+> - `--workspace <dir>` is required (must contain AIS protocol/pack/workflow files for candidate discovery)
+> - `--config runner.yaml` must include an `llm` block with a configured provider
+> - `--pack <pack-file>` is optional but recommended to scope available actions/policy
+
 ## Minimal runner config (`runner.yaml`)
 
-Every non-dry-run command requires `--config`. Minimal structure:
+Every non-dry-run command requires `--config`. Minimal structure for EVM plan/workflow:
 
 ```yaml
 schema: "ais-runner/0.0.1"
-chain_providers:
+chains:
   "eip155:1":                         # Ethereum mainnet
-    type: http
-    url: "https://eth.llamarpc.com"   # replace with your RPC endpoint
-wallet:
-  type: local
-  private_key_env: "PRIVATE_KEY"     # export PRIVATE_KEY=0x...
+    rpc_url: ${EVM_RPC_URL}
+    signer:
+      type: evm_private_key
+      private_key: ${PRIVATE_KEY}     # 0x-prefixed hex key
 ```
 
-For Sepolia testnet substitute `eip155:11155111` and a Sepolia RPC URL. Solana uses `solana:<genesis-hash>`.
+For `ais-runner agent` (intent mode), also add an `llm` block:
+
+```yaml
+schema: "ais-runner/0.0.1"
+chains:
+  "eip155:1":
+    rpc_url: ${EVM_RPC_URL}
+    signer:
+      type: evm_private_key
+      private_key: ${PRIVATE_KEY}
+llm:
+  provider: openai                    # or: anthropic, openrouter, groq
+  model: gpt-4o
+  api_key: ${OPENAI_API_KEY}
+  api_base: https://api.openai.com/v1 # optional; use for OpenAI-compatible endpoints
+```
+
+For Sepolia testnet substitute `eip155:11155111` and a Sepolia RPC URL.
 
 ## I/O streams (advanced)
 
@@ -86,11 +107,27 @@ AIS documents are strict **JSON or YAML** files. Each must set a versioned `sche
 | Family | schema value | Used as input to |
 |--------|-------------|-----------------|
 | protocol | `ais/0.0.2` | pack includes |
-| pack | `ais-pack/0.0.2` | `--pack` flag / workspace |
+| pack | `ais-pack/0.0.2` | `--pack <file>` (explicit, not auto-discovered) |
 | workflow | `ais-flow/0.0.3` | `run workflow --workflow` |
 | plan | `ais-plan/0.0.3` | `run plan --plan` / `agent --plan` |
 | plan-sketch | `ais-plan-sketch/0.1.0` | internal agent planning IR — compiled automatically by `ais-runner agent`; not a direct CLI input |
 | catalog | `ais-catalog/0.0.1` | agent index (auto-built from workspace) |
+
+## Workspace layout
+
+`ais-runner agent --workspace <dir>` and `run workflow --workspace <dir>` scan the directory recursively. Files are classified by their `schema:` field:
+
+- **Discovered automatically:** protocol, pack, workflow, plan
+- **Ignored during scan:** catalog, plan-sketch (they are never auto-loaded from workspace)
+- **Pack policy** is only activated when passed explicitly via `--pack <file>`, not auto-applied from workspace
+
+Typical structure:
+```text
+workspace/
+  myprotocol.ais.yaml          # protocol (ais/0.0.2)
+  mypack.ais-pack.yaml         # pack (ais-pack/0.0.2)  -> must be passed via --pack to activate
+  swap-workflow.ais-flow.yaml  # workflow (ais-flow/0.0.3)
+```
 
 Full field reference: [references/ais-document-types.md](references/ais-document-types.md)
 Full CLI reference: [references/ais-runner-cli.md](references/ais-runner-cli.md)

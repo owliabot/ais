@@ -73,8 +73,6 @@ ais-runner agent \
   [--checkpoint <path>] \
   [--profile standard|demo-scripted] \
   [--llm-script-jsonl <file>] \
-  [--llm-transcript-path <file>] \
-  [--llm-transcript-append] \
   [--verbose] \
   [--verbose-llm] \
   [--approvals-mode safe|assist|yolo] \
@@ -135,6 +133,7 @@ Global formatting:
   - `iterations`
   - `events_emitted`
   - `llm_usage`
+  - `llm_usage` schema: `ais-agent-llm-usage/0.0.1` with fields: `calls`, `input_tokens`, `output_tokens`, `total_tokens`, `context_limit_tokens` (nullable)
 
 ## 3) JSONL boundary contracts
 
@@ -213,6 +212,7 @@ ais-runner run workflow --workflow ./workflow.yaml --workspace ./workspace \
 
 # replay from trace until a node
 ais-runner replay --trace-jsonl ./trace.jsonl --until-node node-2 --format json
+# Note: replace node-2 with the exact node id from your plan — this must be a precise match
 
 # agent intent mode
 ais-runner agent --intent "swap 1 ETH to USDC" --config ./runner.yaml \
