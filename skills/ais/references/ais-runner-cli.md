@@ -174,11 +174,26 @@ Sample output line:
 - Output is one redacted event JSON object per line (`encode_trace_jsonl_line` with default redaction).
 
 ## `--commands-stdin-jsonl`
+**Available command types:**
+
+| `type` | Purpose | Required `data` fields |
+|--------|---------|----------------------|
+| `user_confirm` | Approve or deny a node awaiting confirmation | `node_id`, `decision` (`"approve"` or `"deny"`) |
+| `apply_patches` | Patch runtime values before next engine step | `patches: [{op, path, value}]` |
+| `user_input` | Provide a value for a pending input request | `input_id`, `value` |
+| `user_select` | Choose from a pending selection | `input_id`, `selected_index`, `options[]` |
+| `cancel` | Cancel the run | _(empty data)_ |
+| `replace_plan` | Swap the active plan mid-run | `plan` (full `ais-plan/0.0.3` object) |
+
 Sample input lines:
 ```json
 {"schema":"ais-engine-command/0.0.1","command":{"id":"cmd-1","type":"user_confirm","data":{"node_id":"n1","decision":"approve"}}}
 {"schema":"ais-engine-command/0.0.1","command":{"id":"cmd-2","type":"user_confirm","data":{"node_id":"n2","decision":"deny"}}}
+{"schema":"ais-engine-command/0.0.1","command":{"id":"cmd-3","type":"user_input","data":{"input_id":"recipient","value":"0xAbc..."}}}
+{"schema":"ais-engine-command/0.0.1","command":{"id":"cmd-4","type":"cancel","data":{}}}
 ```
+
+> ⚠️ Commands are read **once** before the engine loop starts (not streamed). Missing approvals cause a `paused` run requiring checkpoint resume.
 
 - Available on `run plan`, `run workflow`.
 - Input schema: `ais-engine-command/0.0.1` (`EngineCommandEnvelope`), one JSON object per line via stdin.

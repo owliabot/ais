@@ -92,11 +92,13 @@ Input stream:
 
 In `safe` mode the runner pauses before risk-level ≥ 3 actions.
 
-**For `run plan` / `run workflow`:** pipe approval commands via `--commands-stdin-jsonl`:
+**For `run plan` / `run workflow`:** commands are read **once** from stdin before the engine loop starts. Pre-load approval commands via `--commands-stdin-jsonl`:
 ```json
 {"schema":"ais-engine-command/0.0.1","command":{"id":"cmd-1","type":"user_confirm","data":{"node_id":"n1","decision":"approve"}}}
 {"schema":"ais-engine-command/0.0.1","command":{"id":"cmd-2","type":"user_confirm","data":{"node_id":"n2","decision":"deny"}}}
 ```
+
+> ⚠️ If a node requires approval but no matching command was pre-loaded, the run exits with `status: paused` and `paused_reason: need_user_confirm:<node_id>`. Resume with `--checkpoint` after loading additional commands.
 
 **For `agent`:** approvals are handled interactively or via checkpoint resume. Use `--approvals-mode assist` for semi-automatic or `yolo` to skip all gates (unsafe).
 
