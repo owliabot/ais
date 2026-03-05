@@ -24,7 +24,14 @@ ais-runner run plan --plan <file.yaml> --config <runner.yaml> [--format json|tex
 ais-runner run workflow --workflow <file.yaml> --config <runner.yaml> [--outputs <out.json>]
 
 # Diff two plans
-ais-runner plan diff --before <a.yaml> --after <b.yaml>
+ais-runner plan diff --before <a.yaml> --after <b.yaml> [--format text|json]
+
+# Text output example:
+# plan diff: added=0 removed=0 changed=1
+# changed:
+#   - id=swap chain=eip155:1 exec=evm_call changes=execution_type
+
+# JSON output shape: { summary:{added,removed,changed}, added:[], removed:[], changed:[{id,changes[],before,after}] }
 
 # Replay from trace or checkpoint
 ais-runner replay --trace-jsonl <file> [--until-node <id>]
@@ -78,6 +85,8 @@ llm:
 ```
 
 For Sepolia testnet substitute `eip155:11155111` and a Sepolia RPC URL.
+
+> **`llm.api_key` is required** — no `api_key_env` field exists. Use `${ENV_VAR}` placeholder syntax (missing env vars fail config parse immediately).
 
 ## I/O streams (advanced)
 
