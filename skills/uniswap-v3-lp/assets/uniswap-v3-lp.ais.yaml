@@ -453,15 +453,15 @@ queries:
         type: address
       - name: fee
         type: uint24
-      - name: tick_lower
+      - name: tickLower
         type: int24
-      - name: tick_upper
+      - name: tickUpper
         type: int24
       - name: liquidity
         type: uint128
-      - name: tokens_owed0
+      - name: tokensOwed0
         type: uint128
-      - name: tokens_owed1
+      - name: tokensOwed1
         type: uint128
 
     cache_ttl: 5
@@ -498,7 +498,7 @@ queries:
         description: "Pool contract address (from get-pool query)"
 
     returns:
-      - name: sqrt_price_x96
+      - name: sqrtPriceX96
         type: uint160
       - name: tick
         type: int24
@@ -536,7 +536,7 @@ queries:
         description: "Fee tier"
 
     returns:
-      - name: pool_address
+      - name: pool
         type: address
 
     cache_ttl: 60

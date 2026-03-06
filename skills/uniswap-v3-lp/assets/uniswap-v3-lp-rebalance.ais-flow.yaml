@@ -207,7 +207,7 @@ outputs:
     cel: "nodes.q_position.outputs.tickLower"
   old_tick_upper:
     cel: "nodes.q_position.outputs.tickUpper"
-  collected_amount0:
+  owed_before_collect_amount0:
     cel: "nodes.q_position_after.outputs.tokensOwed0"
-  collected_amount1:
+  owed_before_collect_amount1:
     cel: "nodes.q_position_after.outputs.tokensOwed1"
