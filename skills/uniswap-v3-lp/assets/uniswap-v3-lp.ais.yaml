@@ -82,9 +82,6 @@ actions:
       - "allowance-token0"
       - "allowance-token1"
 
-    hard_constraints:
-      max_slippage_bps: { ref: "params.slippage_bps" }
-      allow_unlimited_approval: { lit: false }
 
     calculated_fields:
       amount0_atomic:
@@ -243,9 +240,6 @@ actions:
         description: "Current token1 allowance for position manager (pre-fetched)"
         required: false
 
-    hard_constraints:
-      max_slippage_bps: { ref: "params.slippage_bps" }
-      allow_unlimited_approval: { lit: false }
 
     calculated_fields:
       amount0_min:
@@ -493,15 +487,6 @@ queries:
             - { name: "feeGrowthInside1LastX128", type: "uint256" }
             - { name: "tokensOwed0", type: "uint128" }
             - { name: "tokensOwed1", type: "uint128" }
-        output_map:
-          token0: "token0"
-          token1: "token1"
-          fee: "fee"
-          tick_lower: "tickLower"
-          tick_upper: "tickUpper"
-          liquidity: "liquidity"
-          tokens_owed0: "tokensOwed0"
-          tokens_owed1: "tokensOwed1"
         args:
           tokenId: { ref: "params.token_id" }
 
@@ -535,9 +520,6 @@ queries:
             - { name: "observationCardinalityNext", type: "uint16" }
             - { name: "feeProtocol", type: "uint8" }
             - { name: "unlocked", type: "bool" }
-        output_map:
-          sqrt_price_x96: "sqrtPriceX96"
-          tick: "tick"
         args: {}
 
   get-pool:
@@ -571,8 +553,6 @@ queries:
             - { name: "fee", type: "uint24" }
           outputs:
             - { name: "pool", type: "address" }
-        output_map:
-          pool_address: "pool"
         args:
           tokenA: { ref: "params.token0" }
           tokenB: { ref: "params.token1" }
