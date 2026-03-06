@@ -51,7 +51,7 @@ actions:
         type: uint32
         description: "Fee tier: 100, 500, 3000, or 10000"
         constraints:
-          allowed_values: [100, 500, 3000, 10000]
+          enum: [100, 500, 3000, 10000]
       - name: tick_lower
         type: int32
         description: "Lower tick boundary — must be multiple of tick spacing, less than tick_upper"
@@ -210,7 +210,7 @@ actions:
         type: uint32
         description: "Fee tier: 100, 500, 3000, or 10000"
         constraints:
-          allowed_values: [100, 500, 3000, 10000]
+          enum: [100, 500, 3000, 10000]
       - name: tick_lower
         type: int32
         description: "Lower tick (tick_spacing-aligned, < tick_upper)"

@@ -137,52 +137,46 @@ nodes:
     deps: [q_allowance0, q_allowance1]
     # calculated_overrides compute tick_spacing, new_tick_lower, new_tick_upper
     # from the current tick and range_width_ticks input.
-    calculated_overrides:
-      tick_lower:
-        expr:
-          cel: >
-            int(
-              floor(
-                double(nodes.q_slot0.outputs.tick - int(inputs.range_width_ticks)) /
-                double(
-                  nodes.q_position.outputs.fee == 100 ? 1 :
-                  nodes.q_position.outputs.fee == 500 ? 10 :
-                  nodes.q_position.outputs.fee == 3000 ? 60 : 200
-                )
-              ) *
-              double(
-                nodes.q_position.outputs.fee == 100 ? 1 :
-                nodes.q_position.outputs.fee == 500 ? 10 :
-                nodes.q_position.outputs.fee == 3000 ? 60 : 200
-              )
-            )
-        depends_on: []
-      tick_upper:
-        expr:
-          cel: >
-            int(
-              ceil(
-                double(nodes.q_slot0.outputs.tick + int(inputs.range_width_ticks)) /
-                double(
-                  nodes.q_position.outputs.fee == 100 ? 1 :
-                  nodes.q_position.outputs.fee == 500 ? 10 :
-                  nodes.q_position.outputs.fee == 3000 ? 60 : 200
-                )
-              ) *
-              double(
-                nodes.q_position.outputs.fee == 100 ? 1 :
-                nodes.q_position.outputs.fee == 500 ? 10 :
-                nodes.q_position.outputs.fee == 3000 ? 60 : 200
-              )
-            )
-        depends_on: [tick_lower]
     args:
       token0_address: { ref: "nodes.q_position.outputs.token0" }
       token1_address: { ref: "nodes.q_position.outputs.token1" }
       fee: { ref: "nodes.q_position.outputs.fee" }
-      # tick_lower / tick_upper are overridden by calculated_overrides above
-      tick_lower: { lit: "0" }
-      tick_upper: { lit: "0" }
+      # Tick range computed inline via CEL: floor/ceil to nearest tick_spacing boundary.
+      # tick_spacing: fee 100→1, 500→10, 3000→60, 10000→200
+      tick_lower:
+        cel: >
+          int(
+            floor(
+              double(nodes.q_slot0.outputs.tick - int(inputs.range_width_ticks)) /
+              double(
+                nodes.q_position.outputs.fee == 100 ? 1 :
+                nodes.q_position.outputs.fee == 500 ? 10 :
+                nodes.q_position.outputs.fee == 3000 ? 60 : 200
+              )
+            ) *
+            double(
+              nodes.q_position.outputs.fee == 100 ? 1 :
+              nodes.q_position.outputs.fee == 500 ? 10 :
+              nodes.q_position.outputs.fee == 3000 ? 60 : 200
+            )
+          )
+      tick_upper:
+        cel: >
+          int(
+            ceil(
+              double(nodes.q_slot0.outputs.tick + int(inputs.range_width_ticks)) /
+              double(
+                nodes.q_position.outputs.fee == 100 ? 1 :
+                nodes.q_position.outputs.fee == 500 ? 10 :
+                nodes.q_position.outputs.fee == 3000 ? 60 : 200
+              )
+            ) *
+            double(
+              nodes.q_position.outputs.fee == 100 ? 1 :
+              nodes.q_position.outputs.fee == 500 ? 10 :
+              nodes.q_position.outputs.fee == 3000 ? 60 : 200
+            )
+          )
       # Collected amounts are already atomic — no to_atomic conversion applied
       amount0_atomic: { ref: "nodes.a_collect.outputs.amount0" }
       amount1_atomic: { ref: "nodes.a_collect.outputs.amount1" }

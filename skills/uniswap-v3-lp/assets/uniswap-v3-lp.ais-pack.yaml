@@ -17,10 +17,6 @@ policy:
     auto_execute_max_risk_level: 1   # only collect-fees auto-executes
     require_approval_min_risk_level: 3  # mint/decrease require user approval
 
-  hard_constraints_defaults:
-    max_slippage_bps: 100
-    allow_unlimited_approval: false
-    max_approval_multiplier: 1.05
 
 token_policy:
   resolution:
