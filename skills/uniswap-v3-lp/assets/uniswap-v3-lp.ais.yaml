@@ -33,34 +33,38 @@ deployments:
 actions:
   mint-position:
     description: >
-      Create a new Uniswap V3 LP position (mint NFT) for a token pair
-      within a specified tick range. Approves both tokens before minting if needed.
+      Create a new Uniswap V3 LP position (mint NFT) for a token pair within a
+      specified tick range. token0 address MUST be < token1 address (required by
+      Uniswap V3). tick_lower MUST be < tick_upper. Both must be multiples of
+      fee-tier tick spacing. Approves both tokens before minting if needed.
     risk_level: 4
     risk_tags: ["approval", "slippage", "impermanent_loss", "price_range"]
 
     params:
       - name: token0
         type: asset
-        description: "First token (lower address)"
+        description: "First token — address MUST be lexicographically lower than token1"
       - name: token1
         type: asset
-        description: "Second token (higher address)"
+        description: "Second token — address MUST be lexicographically higher than token0"
       - name: fee
         type: uint32
         description: "Fee tier: 100, 500, 3000, or 10000"
+        constraints:
+          allowed_values: [100, 500, 3000, 10000]
       - name: tick_lower
         type: int32
-        description: "Lower tick boundary for the position"
+        description: "Lower tick boundary — must be multiple of tick spacing, less than tick_upper"
       - name: tick_upper
         type: int32
-        description: "Upper tick boundary for the position"
+        description: "Upper tick boundary — must be multiple of tick spacing, greater than tick_lower"
       - name: amount0_desired
         type: token_amount
-        description: "Desired amount of token0 to deposit"
+        description: "Desired human-readable amount of token0 to deposit"
         asset_ref: "token0"
       - name: amount1_desired
         type: token_amount
-        description: "Desired amount of token1 to deposit"
+        description: "Desired human-readable amount of token1 to deposit"
         asset_ref: "token1"
       - name: slippage_bps
         type: uint32
@@ -185,10 +189,160 @@ actions:
                     recipient: { ref: "calculated.recipient" }
                     deadline: { ref: "calculated.deadline_unix" }
 
-  decrease-liquidity:
+  # mint-position-atomic: used by the rebalance workflow where amounts are already
+  # in atomic (wei) units from a preceding collect call. Skips to_atomic conversion.
+  mint-position-atomic:
     description: >
-      Remove liquidity from an existing Uniswap V3 position by token ID.
-      Specify liquidity amount to withdraw as a fraction (0-1) or exact uint128.
+      Create a new Uniswap V3 LP position using atomic (raw on-chain) token amounts.
+      Use this from the rebalance workflow where collected amounts are already in atomic units.
+      token0_address MUST be < token1_address. tick_lower < tick_upper required.
+    risk_level: 4
+    risk_tags: ["approval", "slippage", "impermanent_loss", "price_range"]
+
+    params:
+      - name: token0_address
+        type: address
+        description: "token0 contract address (must be < token1_address)"
+      - name: token1_address
+        type: address
+        description: "token1 contract address (must be > token0_address)"
+      - name: fee
+        type: uint32
+        description: "Fee tier: 100, 500, 3000, or 10000"
+        constraints:
+          allowed_values: [100, 500, 3000, 10000]
+      - name: tick_lower
+        type: int32
+        description: "Lower tick (tick_spacing-aligned, < tick_upper)"
+      - name: tick_upper
+        type: int32
+        description: "Upper tick (tick_spacing-aligned, > tick_lower)"
+      - name: amount0_atomic
+        type: uint256
+        description: "Desired token0 amount in atomic units (no conversion applied)"
+      - name: amount1_atomic
+        type: uint256
+        description: "Desired token1 amount in atomic units (no conversion applied)"
+      - name: slippage_bps
+        type: uint32
+        description: "Max slippage in basis points"
+        default: "50"
+        constraints:
+          min: 1
+          max: 2000
+      - name: recipient
+        type: address
+        description: "NFT recipient (defaults to sender)"
+        required: false
+      - name: token0_allowance
+        type: uint256
+        description: "Current token0 allowance for position manager (pre-fetched)"
+        required: false
+      - name: token1_allowance
+        type: uint256
+        description: "Current token1 allowance for position manager (pre-fetched)"
+        required: false
+
+    hard_constraints:
+      max_slippage_bps: { ref: "params.slippage_bps" }
+      allow_unlimited_approval: { lit: false }
+
+    calculated_fields:
+      amount0_min:
+        expr: { cel: "mul_div(params.amount0_atomic, (10000 - params.slippage_bps), 10000)" }
+        inputs: ["params.amount0_atomic", "params.slippage_bps"]
+      amount1_min:
+        expr: { cel: "mul_div(params.amount1_atomic, (10000 - params.slippage_bps), 10000)" }
+        inputs: ["params.amount1_atomic", "params.slippage_bps"]
+      recipient:
+        expr: { cel: "params.recipient != null ? params.recipient : ctx.wallet_address" }
+        inputs: ["params.recipient", "ctx.wallet_address"]
+      deadline_unix:
+        expr: { cel: "ctx.now + 600" }
+        inputs: ["ctx.now"]
+
+    execution:
+      "eip155:*":
+        type: composite
+        steps:
+          - id: approve_token0_if_needed
+            condition:
+              cel: "params.token0_allowance != null && params.token0_allowance < params.amount0_atomic"
+            execution:
+              type: evm_call
+              to: { ref: "params.token0_address" }
+              abi:
+                type: "function"
+                name: "approve"
+                inputs:
+                  - { name: "spender", type: "address" }
+                  - { name: "amount", type: "uint256" }
+                outputs: []
+              args:
+                spender: { ref: "contracts.position_manager" }
+                amount: { ref: "params.amount0_atomic" }
+
+          - id: approve_token1_if_needed
+            condition:
+              cel: "params.token1_allowance != null && params.token1_allowance < params.amount1_atomic"
+            execution:
+              type: evm_call
+              to: { ref: "params.token1_address" }
+              abi:
+                type: "function"
+                name: "approve"
+                inputs:
+                  - { name: "spender", type: "address" }
+                  - { name: "amount", type: "uint256" }
+                outputs: []
+              args:
+                spender: { ref: "contracts.position_manager" }
+                amount: { ref: "params.amount1_atomic" }
+
+          - id: mint
+            execution:
+              type: evm_call
+              to: { ref: "contracts.position_manager" }
+              abi:
+                type: "function"
+                name: "mint"
+                inputs:
+                  - name: "params"
+                    type: "tuple"
+                    components:
+                      - { name: "token0", type: "address" }
+                      - { name: "token1", type: "address" }
+                      - { name: "fee", type: "uint24" }
+                      - { name: "tickLower", type: "int24" }
+                      - { name: "tickUpper", type: "int24" }
+                      - { name: "amount0Desired", type: "uint256" }
+                      - { name: "amount1Desired", type: "uint256" }
+                      - { name: "amount0Min", type: "uint256" }
+                      - { name: "amount1Min", type: "uint256" }
+                      - { name: "recipient", type: "address" }
+                      - { name: "deadline", type: "uint256" }
+                outputs:
+                  - { name: "tokenId", type: "uint256" }
+                  - { name: "liquidity", type: "uint128" }
+                  - { name: "amount0", type: "uint256" }
+                  - { name: "amount1", type: "uint256" }
+              args:
+                params:
+                  object:
+                    token0: { ref: "params.token0_address" }
+                    token1: { ref: "params.token1_address" }
+                    fee: { ref: "params.fee" }
+                    tickLower: { ref: "params.tick_lower" }
+                    tickUpper: { ref: "params.tick_upper" }
+                    amount0Desired: { ref: "params.amount0_atomic" }
+                    amount1Desired: { ref: "params.amount1_atomic" }
+                    amount0Min: { ref: "calculated.amount0_min" }
+                    amount1Min: { ref: "calculated.amount1_min" }
+                    recipient: { ref: "calculated.recipient" }
+                    deadline: { ref: "calculated.deadline_unix" }
+
+  decrease-liquidity:
+    description: "Remove liquidity from an existing Uniswap V3 position. liquidity must be > 0."
     risk_level: 3
     risk_tags: ["slippage", "impermanent_loss"]
 
@@ -198,14 +352,14 @@ actions:
         description: "NFT token ID of the position"
       - name: liquidity
         type: uint128
-        description: "Liquidity units to remove (from position-info query)"
+        description: "Liquidity units to remove (from position-info query). Must be > 0."
       - name: amount0_min
         type: uint256
-        description: "Min token0 to receive (slippage protection, atomic units)"
+        description: "Min token0 to receive (atomic units, slippage protection)"
         default: "0"
       - name: amount1_min
         type: uint256
-        description: "Min token1 to receive (slippage protection, atomic units)"
+        description: "Min token1 to receive (atomic units, slippage protection)"
         default: "0"
       - name: deadline
         type: uint256
@@ -246,7 +400,7 @@ actions:
               deadline: { ref: "calculated.deadline_unix" }
 
   collect-fees:
-    description: "Collect accumulated fees and/or withdrawn tokens from a position"
+    description: "Collect accumulated fees and/or withdrawn tokens from a position."
     risk_level: 1
     risk_tags: []
 
@@ -352,11 +506,11 @@ queries:
           tokenId: { ref: "params.token_id" }
 
   pool-slot0:
-    description: "Fetch current sqrtPriceX96 and tick from pool slot0"
+    description: "Fetch current sqrtPriceX96 and tick from pool slot0. pool_address must not be zero."
     params:
       - name: pool_address
         type: address
-        description: "Pool contract address"
+        description: "Pool contract address (from get-pool query)"
 
     returns:
       - name: sqrt_price_x96
@@ -387,14 +541,14 @@ queries:
         args: {}
 
   get-pool:
-    description: "Get pool address from factory for a token pair + fee"
+    description: "Get pool address from factory for a token pair + fee. Returns zero address if pool doesn't exist."
     params:
       - name: token0
         type: address
-        description: "Token0 address"
+        description: "Token0 address (must be < token1)"
       - name: token1
         type: address
-        description: "Token1 address"
+        description: "Token1 address (must be > token0)"
       - name: fee
         type: uint32
         description: "Fee tier"
@@ -462,6 +616,32 @@ queries:
       "eip155:*":
         type: evm_read
         to: { ref: "params.token1.address" }
+        abi:
+          type: "function"
+          name: "allowance"
+          inputs:
+            - { name: "owner", type: "address" }
+            - { name: "spender", type: "address" }
+          outputs:
+            - { name: "allowance_atomic", type: "uint256" }
+        args:
+          owner: { ref: "ctx.wallet_address" }
+          spender: { ref: "contracts.position_manager" }
+
+  raw-allowance:
+    description: "Read allowance for position manager by raw token address (used in rebalance workflow)"
+    params:
+      - name: token_address
+        type: address
+        description: "Token contract address"
+    returns:
+      - name: allowance_atomic
+        type: uint256
+    cache_ttl: 10
+    execution:
+      "eip155:*":
+        type: evm_read
+        to: { ref: "params.token_address" }
         abi:
           type: "function"
           name: "allowance"

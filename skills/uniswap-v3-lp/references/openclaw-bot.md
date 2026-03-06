@@ -6,11 +6,16 @@
 OpenClaw (oliwa bot)
   └── cron job (定时触发)
         └── exec: ais-runner run workflow  ← AIS 组装交易
-              └── clawlet (signer)         ← 签名 + 广播到链
+              └── evm_private_key signer   ← 当前实现：本地私钥
+                  (clawlet signer)         ← 计划中：需实现 ClawletSigner
 ```
 
-OpenClaw bot 通过 `cron` 工具定期调用 `ais-runner run workflow`，
-AIS 组装并验证 calldata，交给 clawlet 签名发送。bot 本身不接触私钥。
+OpenClaw bot 通过 `cron` 工具定期调用 `ais-runner run workflow`，AIS 组装并验证 calldata，交给 signer 签名发送。
+
+**当前 signer 状态：**
+- `ais-runner/src/config.rs` 的 `SignerConfig` enum 目前只支持 `evm_private_key` / `solana_private_key`。
+- `clawlet` signer 需要在 `ais-evm-executor` 中实现 `EvmTransactionSigner` trait 的 `ClawletSigner`，并在 `SignerConfig` 添加对应 variant，然后才能在 runner config 里使用 `type: "clawlet"`。
+- 在 clawlet signer 实现之前，runner.sepolia.yaml 使用 `evm_private_key`。
 
 ---
 

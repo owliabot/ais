@@ -1,24 +1,24 @@
-# Runner config template for uniswap-v3-lp skill.
-# Copy this file, fill in the blanks, and pass via --config.
+schema: "ais-runner/0.0.1"
+
+# Runner config template — Uniswap V3 LP (mainnet)
+#
+# SIGNER NOTE:
+# Current ais-runner supports `evm_private_key` only.
+# Clawlet (type: "clawlet") requires implementing ClawletSigner in ais-evm-executor.
+# See references/openclaw-bot.md for the planned integration design.
 
 chains:
   "eip155:1":
-    rpc_url: "https://mainnet.infura.io/v3/YOUR_KEY"   # or Alchemy, etc.
+    rpc_url: "https://mainnet.infura.io/v3/YOUR_KEY"   # or Alchemy
+    timeout_ms: 30000
+    wait_for_receipt: true
+    receipt_poll:
+      interval_ms: 5000
+      max_attempts: 20
     signer:
-      # clawlet signer — transactions are assembled by AIS and signed/sent via clawlet
-      type: "clawlet"
-      endpoint: "http://localhost:7777"   # clawlet daemon address
-      account: "default"                  # clawlet account label
+      type: evm_private_key
+      private_key: "0xYOUR_PRIVATE_KEY"   # load from env in production
 
-  # Uncomment for Sepolia testing:
-  # "eip155:11155111":
-  #   rpc_url: "https://rpc.sepolia.org"
-  #   signer:
-  #     type: "clawlet"
-  #     endpoint: "http://localhost:7777"
-  #     account: "sepolia-test"
-
-# LLM for agent mode (optional — not needed for direct plan/workflow runs)
 # llm:
 #   provider: "openai"
 #   model: "gpt-4o"
