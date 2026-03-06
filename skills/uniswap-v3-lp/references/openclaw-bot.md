@@ -50,6 +50,8 @@ cat > /tmp/rebalance-inputs.json << 'EOF'
   }
 }
 EOF
+# Note: ABI field names are camelCase in node outputs (tickLower, tokensOwed0 etc.)
+# Workflow refs use these directly, e.g. nodes.q_position.outputs.tickLower
 
 # 2. 运行 workflow
 ais-runner run workflow \

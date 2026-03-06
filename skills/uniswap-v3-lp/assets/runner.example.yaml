@@ -24,6 +24,6 @@ chains:
 #   model: "gpt-4o"
 #   api_key: "sk-..."
 
-runtime:
-  ctx:
-    wallet_address: "0xYOUR_WALLET_ADDRESS"   # clawlet account address
+
+# wallet_address goes in the --runtime file, not here.
+# See references/openclaw-bot.md for runtime file format.

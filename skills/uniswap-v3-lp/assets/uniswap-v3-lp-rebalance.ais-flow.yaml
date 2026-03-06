@@ -66,7 +66,7 @@ nodes:
       fee: { ref: "nodes.q_position.outputs.fee" }
     # Guard: pool must exist (non-zero address)
     assert:
-      cel: "nodes.q_pool.outputs.pool_address != \"0x0000000000000000000000000000000000000000\""
+      cel: "nodes.q_pool.outputs.pool != \"0x0000000000000000000000000000000000000000\""
     assert_message: "Pool does not exist for this token pair and fee tier"
 
   # ── Step 3: fetch current pool tick ──────────────────────────────────────
@@ -76,12 +76,12 @@ nodes:
     query: pool-slot0
     deps: [q_pool]
     args:
-      pool_address: { ref: "nodes.q_pool.outputs.pool_address" }
+      pool_address: { ref: "nodes.q_pool.outputs.pool" }
     # Guard: position must be out of range to justify rebalancing
     assert:
       cel: >
-        nodes.q_slot0.outputs.tick < nodes.q_position.outputs.tick_lower ||
-        nodes.q_slot0.outputs.tick > nodes.q_position.outputs.tick_upper
+        nodes.q_slot0.outputs.tick < nodes.q_position.outputs.tickLower ||
+        nodes.q_slot0.outputs.tick > nodes.q_position.outputs.tickUpper
     assert_message: "Position is still in range — no rebalancing needed"
 
   # ── Step 4: remove all liquidity ─────────────────────────────────────────
@@ -109,12 +109,23 @@ nodes:
     args:
       token_id: { ref: "inputs.token_id" }
 
-  # ── Step 6: fetch token allowances for new mint ───────────────────────────
+  # ── Step 6: re-query position to get tokensOwed after decrease ───────────
+  # After decreaseLiquidity: tokensOwed0/1 = freed liquidity tokens + fees
+  # These are exactly what collect will sweep, and what we re-mint with.
+  - id: q_position_after
+    type: query_ref
+    protocol: uniswap-v3-lp@0.0.1
+    query: position-info
+    deps: [a_collect]
+    args:
+      token_id: { ref: "inputs.token_id" }
+
+  # ── Step 7: fetch token allowances for new mint ───────────────────────────
   - id: q_allowance0
     type: query_ref
     protocol: uniswap-v3-lp@0.0.1
     query: raw-allowance
-    deps: [a_collect]
+    deps: [q_position_after]
     args:
       token_address: { ref: "nodes.q_position.outputs.token0" }
 
@@ -122,11 +133,11 @@ nodes:
     type: query_ref
     protocol: uniswap-v3-lp@0.0.1
     query: raw-allowance
-    deps: [a_collect]
+    deps: [q_position_after]
     args:
       token_address: { ref: "nodes.q_position.outputs.token1" }
 
-  # ── Step 7: mint new position at tick-aligned range ───────────────────────
+  # ── Step 8: mint new position at tick-aligned range ───────────────────────
   # Tick spacing by fee tier: 100→1, 500→10, 3000→60, 10000→200
   # new_tick_lower = floor((current - width) / spacing) * spacing
   # new_tick_upper = ceil((current + width) / spacing) * spacing
@@ -178,8 +189,9 @@ nodes:
             )
           )
       # Collected amounts are already atomic — no to_atomic conversion applied
-      amount0_atomic: { ref: "nodes.a_collect.outputs.amount0" }
-      amount1_atomic: { ref: "nodes.a_collect.outputs.amount1" }
+      # tokensOwed after decreaseLiquidity = freed liquidity + accumulated fees = total to re-mint
+      amount0_atomic: { ref: "nodes.q_position_after.outputs.tokensOwed0" }
+      amount1_atomic: { ref: "nodes.q_position_after.outputs.tokensOwed1" }
       slippage_bps: { ref: "inputs.slippage_bps" }
       token0_allowance: { ref: "nodes.q_allowance0.outputs.allowance_atomic" }
       token1_allowance: { ref: "nodes.q_allowance1.outputs.allowance_atomic" }
@@ -190,10 +202,10 @@ outputs:
   current_tick:
     cel: "nodes.q_slot0.outputs.tick"
   old_tick_lower:
-    cel: "nodes.q_position.outputs.tick_lower"
+    cel: "nodes.q_position.outputs.tickLower"
   old_tick_upper:
-    cel: "nodes.q_position.outputs.tick_upper"
+    cel: "nodes.q_position.outputs.tickUpper"
   collected_amount0:
-    cel: "nodes.a_collect.outputs.amount0"
+    cel: "nodes.q_position.outputs.tokensOwed0"
   collected_amount1:
-    cel: "nodes.a_collect.outputs.amount1"
+    cel: "nodes.q_position.outputs.tokensOwed1"
