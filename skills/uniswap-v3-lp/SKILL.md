@@ -141,20 +141,19 @@ Copy `assets/runner.example.yaml` → `config/runner.yaml`. Fill in `rpc_url`, c
 
 ## Clawlet 签名模型
 
-**AIS 不配置 signer，不持有私钥。**
+**owlia bot 通过 CLI 调用 AIS，通过 RPC 调用 clawlet。**
 
 ```
-AIS (组装 unsigned tx)  →  clawlet (签名 + 广播)  →  chain
+owlia bot
+  ├── CLI → ais-runner --dry-run    # 获取 unsigned tx
+  └── RPC → clawlet /tx/send        # 签名 + 广播
 ```
 
-AIS 的角色：读取链上数据（evm_read）+ 组装 calldata（ABI 编码）→ 输出 unsigned transaction。
-Clawlet 的角色：接收 unsigned tx → 用管理的私钥签名 → 广播到链。
+- AIS 不持有私钥，不调用 clawlet
+- `--dry-run` 模式：AIS 执行所有查询和计算，输出 unsigned tx JSON，不广播
+- bot 对每笔 pending_transaction 串行调用 clawlet RPC，等待 receipt 后继续
 
-两种集成方式：
-- **方案 A（推荐）**：在 `ais-evm-executor` 实现 `ClawletSigner` plugin，runner config 配置 `signer.type: "clawlet"`
-- **方案 B（临时）**：`ais-runner --dry-run --format json | clawlet tx send --stdin`
-
-详见 [references/openclaw-bot.md](references/openclaw-bot.md)。
+详细集成流程、伪代码、cron 配置见 [references/openclaw-bot.md](references/openclaw-bot.md)。
 
 ## Extending the Protocol
 
