@@ -83,7 +83,7 @@ ais-runner agent \
 ais-runner run workflow \
   --workflow workspace/uniswap-v3-lp-rebalance.ais-flow.yaml \
   --config config/runner.yaml \
-  --inputs '{"token_id": 12345, "range_width_ticks": 600, "slippage_bps": 50}'
+  --runtime /tmp/inputs.json  # inputs file: {inputs: {token_id, range_width_ticks, slippage_bps}, ctx: {wallet_address}}
 ```
 
 ## Automation / Periodic Rebalancing
@@ -96,7 +96,7 @@ while true; do
   ais-runner run workflow \
     --workflow workspace/uniswap-v3-lp-rebalance.ais-flow.yaml \
     --config config/runner.yaml \
-    --inputs '{"token_id": 12345, "range_width_ticks": 600}'
+    --runtime /tmp/inputs.json
   sleep 300
 done
 ```

@@ -31,7 +31,7 @@ Bot 不使用 agent/LLM 模式，只用 `run workflow`——完全确定性，�
 ais-runner run workflow \
   --workflow workspace/uniswap-v3-lp-rebalance.ais-flow.yaml \
   --config config/runner.sepolia.yaml \
-  --inputs '{"token_id": 12345, "range_width_ticks": 600, "slippage_bps": 50}' \
+  --runtime /tmp/inputs.json \
   --format json
 ```
 
@@ -146,12 +146,13 @@ Copy `assets/runner.example.yaml` → `config/runner.yaml`. Fill in `rpc_url`, c
 ```
 owlia bot
   ├── CLI → ais-runner --dry-run    # 获取 unsigned tx
-  └── RPC → clawlet /tx/send        # 签名 + 广播
+  └── clawlet signer（runner 内部）  # 签名 + 广播
 ```
 
 - AIS 不持有私钥，不调用 clawlet
-- `--dry-run` 模式：AIS 执行所有查询和计算，输出 unsigned tx JSON，不广播
-- bot 对每笔 pending_transaction 串行调用 clawlet RPC，等待 receipt 后继续
+- `--dry-run` 只做编译预览，不执行查询或 tx 构造（输出 `DryRunJsonReport`）
+- 实际执行：runner 调用 clawlet signer（需实现 `ClawletSigner`）完成签名+广播
+- bot 只需调用一次 CLI，不直接调 clawlet RPC
 
 详细集成流程、伪代码、cron 配置见 [references/openclaw-bot.md](references/openclaw-bot.md)。
 
