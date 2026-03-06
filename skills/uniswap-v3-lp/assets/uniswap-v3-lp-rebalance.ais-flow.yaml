@@ -100,32 +100,34 @@ nodes:
       amount0_min: { lit: "0" }
       amount1_min: { lit: "0" }
 
-  # ── Step 5: collect freed tokens + fees ──────────────────────────────────
-  - id: a_collect
-    type: action_ref
-    protocol: uniswap-v3-lp@0.0.1
-    action: collect-fees
-    deps: [a_decrease]
-    args:
-      token_id: { ref: "inputs.token_id" }
-
-  # ── Step 6: re-query position to get tokensOwed after decrease ───────────
-  # After decreaseLiquidity: tokensOwed0/1 = freed liquidity tokens + fees
-  # These are exactly what collect will sweep, and what we re-mint with.
+  # ── Step 5: re-query position after decrease to capture tokensOwed ─────────
+  # After decreaseLiquidity: tokensOwed0/1 = freed liquidity tokens + accumulated fees.
+  # Must query BEFORE collect — collect zeroes tokensOwed.
+  # These amounts are what we re-mint in the new position.
   - id: q_position_after
     type: query_ref
     protocol: uniswap-v3-lp@0.0.1
     query: position-info
-    deps: [a_collect]
+    deps: [a_decrease]
     args:
       token_id: { ref: "inputs.token_id" }
+
+  # ── Step 6: collect freed tokens + fees ──────────────────────────────────
+  - id: a_collect
+    type: action_ref
+    protocol: uniswap-v3-lp@0.0.1
+    action: collect-fees
+    deps: [q_position_after]
+    args:
+      token_id: { ref: "inputs.token_id" }
+
 
   # ── Step 7: fetch token allowances for new mint ───────────────────────────
   - id: q_allowance0
     type: query_ref
     protocol: uniswap-v3-lp@0.0.1
     query: raw-allowance
-    deps: [q_position_after]
+    deps: [a_collect]
     args:
       token_address: { ref: "nodes.q_position.outputs.token0" }
 
@@ -133,7 +135,7 @@ nodes:
     type: query_ref
     protocol: uniswap-v3-lp@0.0.1
     query: raw-allowance
-    deps: [q_position_after]
+    deps: [a_collect]
     args:
       token_address: { ref: "nodes.q_position.outputs.token1" }
 
@@ -206,6 +208,6 @@ outputs:
   old_tick_upper:
     cel: "nodes.q_position.outputs.tickUpper"
   collected_amount0:
-    cel: "nodes.q_position.outputs.tokensOwed0"
+    cel: "nodes.q_position_after.outputs.tokensOwed0"
   collected_amount1:
-    cel: "nodes.q_position.outputs.tokensOwed1"
+    cel: "nodes.q_position_after.outputs.tokensOwed1"
