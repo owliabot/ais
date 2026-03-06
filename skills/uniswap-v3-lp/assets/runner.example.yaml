@@ -2,10 +2,12 @@ schema: "ais-runner/0.0.1"
 
 # Runner config template — Uniswap V3 LP (mainnet)
 #
-# SIGNER NOTE:
-# Current ais-runner supports `evm_private_key` only.
-# Clawlet (type: "clawlet") requires implementing ClawletSigner in ais-evm-executor.
-# See references/openclaw-bot.md for the planned integration design.
+# TRANSACTION SIGNING MODEL:
+# AIS assembles unsigned transactions (calldata + to + value).
+# Clawlet receives the unsigned tx and handles signing + broadcast.
+# No signer configured here.
+#
+# See references/openclaw-bot.md for clawlet integration design.
 
 chains:
   "eip155:1":
@@ -15,9 +17,7 @@ chains:
     receipt_poll:
       interval_ms: 5000
       max_attempts: 20
-    signer:
-      type: evm_private_key
-      private_key: "0xYOUR_PRIVATE_KEY"   # load from env in production
+    # No signer — clawlet handles signing externally
 
 # llm:
 #   provider: "openai"
@@ -26,4 +26,4 @@ chains:
 
 runtime:
   ctx:
-    wallet_address: "0xYOUR_WALLET_ADDRESS"
+    wallet_address: "0xYOUR_WALLET_ADDRESS"   # clawlet account address

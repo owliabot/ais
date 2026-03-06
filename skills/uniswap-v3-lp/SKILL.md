@@ -139,16 +139,22 @@ Copy `assets/runner.example.yaml` → `config/runner.yaml`. Fill in `rpc_url`, c
 | `get-pool` | Pool address from factory |
 | `allowance-token0/1` | Approval check before mint |
 
-## Clawlet Wiring
+## Clawlet 签名模型
 
-AIS builds and encodes the calldata; clawlet handles signing and broadcast. Configure in runner.yaml:
-```yaml
-signer:
-  type: "clawlet"
-  endpoint: "http://localhost:7777"
-  account: "default"
+**AIS 不配置 signer，不持有私钥。**
+
 ```
-No private key ever touches AIS. See [references/lp-concepts.md](references/lp-concepts.md) for details.
+AIS (组装 unsigned tx)  →  clawlet (签名 + 广播)  →  chain
+```
+
+AIS 的角色：读取链上数据（evm_read）+ 组装 calldata（ABI 编码）→ 输出 unsigned transaction。
+Clawlet 的角色：接收 unsigned tx → 用管理的私钥签名 → 广播到链。
+
+两种集成方式：
+- **方案 A（推荐）**：在 `ais-evm-executor` 实现 `ClawletSigner` plugin，runner config 配置 `signer.type: "clawlet"`
+- **方案 B（临时）**：`ais-runner --dry-run --format json | clawlet tx send --stdin`
+
+详见 [references/openclaw-bot.md](references/openclaw-bot.md)。
 
 ## Extending the Protocol
 

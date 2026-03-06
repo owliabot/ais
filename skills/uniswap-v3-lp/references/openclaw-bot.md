@@ -1,21 +1,79 @@
 # OpenClaw Bot 集成 — 自动调仓
 
-## 架构
+## 架构与事务签名模型
 
 ```
 OpenClaw (oliwa bot)
   └── cron job (定时触发)
-        └── exec: ais-runner run workflow  ← AIS 组装交易
-              └── evm_private_key signer   ← 当前实现：本地私钥
-                  (clawlet signer)         ← 计划中：需实现 ClawletSigner
+        └── ais-runner run workflow
+              │
+              │  AIS 只负责：
+              │  - 读取链上数据（evm_read）
+              │  - 组装 unsigned tx（ABI 编码 calldata + to + value）
+              │
+              └── unsigned tx ──→ clawlet
+                                    ├── 签名（私钥在 clawlet 内，AIS 不接触）
+                                    └── 广播到链
 ```
 
-OpenClaw bot 通过 `cron` 工具定期调用 `ais-runner run workflow`，AIS 组装并验证 calldata，交给 signer 签名发送。
+**关键原则：AIS 不配置 signer，不持有私钥。**
+私钥完全在 clawlet 内部管理，AIS 只输出 unsigned transaction。
 
-**当前 signer 状态：**
-- `ais-runner/src/config.rs` 的 `SignerConfig` enum 目前只支持 `evm_private_key` / `solana_private_key`。
-- `clawlet` signer 需要在 `ais-evm-executor` 中实现 `EvmTransactionSigner` trait 的 `ClawletSigner`，并在 `SignerConfig` 添加对应 variant，然后才能在 runner config 里使用 `type: "clawlet"`。
-- 在 clawlet signer 实现之前，runner.sepolia.yaml 使用 `evm_private_key`。
+---
+
+## Clawlet 集成方案
+
+### 方案 A — ClawletSigner 插件（推荐，需实现）
+
+在 `ais-evm-executor` crate 中实现 `ClawletSigner`：
+
+```rust
+// rust/ais-rs/crates/ais-evm-executor/src/signer.rs 中新增：
+pub struct ClawletSigner {
+    endpoint: String,   // e.g. "http://localhost:7777"
+    account: String,    // clawlet account label
+}
+
+impl EvmTransactionSigner for ClawletSigner {
+    fn sign_and_send(&self, tx: &UnsignedTx) -> Result<TxHash, SignerError> {
+        // POST unsigned tx to clawlet endpoint
+        // clawlet signs with its managed key and broadcasts
+        // returns tx hash
+    }
+}
+```
+
+同时在 `ais-runner/src/config.rs` 的 `SignerConfig` enum 新增 variant：
+
+```rust
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SignerConfig {
+    EvmPrivateKey { private_key: String },
+    SolanaPrivateKey { private_key: String },
+    Clawlet { endpoint: String, account: String },  // 新增
+}
+```
+
+实现后，runner config 即可使用：
+```yaml
+signer:
+  type: "clawlet"
+  endpoint: "http://localhost:7777"
+  account: "sepolia-test"
+```
+
+### 方案 B — Dry-run + pipe（临时方案，无需代码改动）
+
+```bash
+# ais-runner 输出 unsigned tx JSON，pipe 给 clawlet
+ais-runner run workflow \
+  --workflow workspace/uniswap-v3-lp-rebalance.ais-flow.yaml \
+  --config config/runner.sepolia.yaml \
+  --inputs '{"token_id": "12345", "range_width_ticks": "600"}' \
+  --dry-run \
+  --format json \
+| clawlet tx send --chain eip155:11155111 --account sepolia-test --stdin
+```
 
 ---
 
@@ -30,87 +88,70 @@ OpenClaw bot 通过 `cron` 工具定期调用 `ais-runner run workflow`，AIS �
   "sessionTarget": "isolated",
   "payload": {
     "kind": "agentTurn",
-    "message": "Run the Uniswap V3 LP rebalance workflow for token ID 12345 on Sepolia. Use exec to run: ais-runner run workflow --workflow /path/to/workspace/uniswap-v3-lp-rebalance.ais-flow.yaml --config /path/to/config/runner.sepolia.yaml --inputs '{\"token_id\": 12345, \"range_width_ticks\": 600, \"slippage_bps\": 50}' --format json. Report whether rebalancing occurred and any errors.",
+    "message": "Run Uniswap V3 LP rebalance for token_id 12345 on Sepolia. Use exec to run ais-runner, pipe unsigned tx to clawlet. Report whether rebalancing occurred.",
     "timeoutSeconds": 120
   },
   "delivery": { "mode": "announce" }
 }
 ```
 
-关键字段说明：
-- `everyMs: 300000` → 每 5 分钟触发一次（按需调整）
-- `sessionTarget: "isolated"` → 在独立 session 中执行，不干扰主会话
-- `payload.kind: "agentTurn"` → bot 执行 agentTurn，在其中 exec ais-runner
-- `delivery.mode: "announce"` → 有结果时通知到 chat（调仓成功/失败均可见）
-
 ---
 
 ## 初始化步骤（由 bot 执行一次）
 
-1. **确认 ais-runner 在 PATH 上**
+1. **准备 workspace**
    ```bash
-   which ais-runner
-   # 或从 rust/ais-rs 构建：
-   # cargo install --path rust/ais-rs/crates/ais-runner
-   ```
-
-2. **准备 workspace**
-   ```bash
-   mkdir -p /path/to/workspace
+   mkdir -p /path/to/workspace /path/to/config
    cp skills/uniswap-v3-lp/assets/uniswap-v3-lp.ais.yaml         /path/to/workspace/
    cp skills/uniswap-v3-lp/assets/uniswap-v3-lp-rebalance.ais-flow.yaml /path/to/workspace/
    cp skills/uniswap-v3-lp/assets/uniswap-v3-lp.ais-pack.yaml    /path/to/workspace/
    cp skills/uniswap-v3-lp/assets/runner.sepolia.yaml             /path/to/config/
-   # 填写 runner.sepolia.yaml 中的 rpc_url / clawlet endpoint / wallet_address
+   # 填写 rpc_url 和 wallet_address
    ```
 
-3. **手动跑一次验证**
+2. **配置 clawlet**
+   ```bash
+   clawlet account add sepolia-test --key 0xYOUR_SEPOLIA_KEY
+   clawlet start  # 启动 clawlet daemon
+   ```
+
+3. **验证（方案 B dry-run）**
    ```bash
    ais-runner run workflow \
      --workflow /path/to/workspace/uniswap-v3-lp-rebalance.ais-flow.yaml \
      --config /path/to/config/runner.sepolia.yaml \
-     --inputs '{"token_id": 12345, "range_width_ticks": 600}' \
-     --format json
+     --inputs '{"token_id": "12345", "range_width_ticks": "600"}' \
+     --dry-run --format json
+   # 确认输出包含 unsigned tx 结构，再接入 clawlet
    ```
-   确认输出包含 `rebalanced: false`（in-range）或完整调仓结果。
-
-4. **注册 cron job**（由 bot 调用 cron 工具，见上方 JSON）
 
 ---
 
 ## 多个 Position 管理
 
-如需监控多个 position，为每个 token_id 分别注册一个 cron job，
-或在 agentTurn message 里循环：
-
 ```
-Run rebalance workflow for each of these positions on Sepolia:
-- token_id: 12345, range_width_ticks: 600
-- token_id: 67890, range_width_ticks: 1200
-Use the same config and workspace paths. Report status for each.
+Run rebalance for each position on Sepolia (token_ids: 12345, 67890).
+Use dry-run mode, pipe each unsigned tx to clawlet for signing.
+Report status for each.
 ```
 
 ---
 
 ## 输出解读
 
-`ais-runner run workflow --format json` 输出示例：
-
 ```json
 {
   "status": "ok",
   "outputs": {
-    "rebalanced": false,
+    "new_token_id": "12346",
     "current_tick": -74832,
     "old_tick_lower": -75600,
     "old_tick_upper": -74400,
-    "new_token_id": 12345
+    "collected_amount0": "1000000000000000",
+    "collected_amount1": "500000"
   }
 }
 ```
-
-- `rebalanced: false` → 价格在范围内，无链上操作
-- `rebalanced: true` → 已调仓，`new_token_id` 为新 position 的 NFT ID
 
 ---
 
@@ -118,7 +159,7 @@ Use the same config and workspace paths. Report status for each.
 
 | 错误 | 原因 | 处理 |
 |------|------|------|
-| `clawlet connection refused` | clawlet daemon 未运行 | 检查 clawlet 进程 |
-| `insufficient funds` | 钱包 ETH 不足 | 充值测试 ETH |
-| `approval failed` | token approve 失败 | 检查 token 余额 |
-| `liquidity is 0` | position 已无流动性 | 跳过该 token_id |
+| `assert failed: liquidity > 0` | position 已无流动性 | 跳过该 token_id |
+| `assert failed: pool_address != 0x0` | pool 不存在 | 检查 token pair 和 fee tier |
+| `assert failed: position is still in range` | 价格在范围内 | 无需操作，下次继续监控 |
+| `clawlet connection refused` | clawlet daemon 未运行 | `clawlet start` |

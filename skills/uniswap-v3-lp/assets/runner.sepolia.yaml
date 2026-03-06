@@ -2,14 +2,24 @@ schema: "ais-runner/0.0.1"
 
 # Runner config — Uniswap V3 LP on Sepolia (eip155:11155111)
 #
-# SIGNER NOTE:
-# The current ais-runner only supports `evm_private_key` as the EVM signer type.
-# Clawlet integration (type: "clawlet") requires implementing the EvmTransactionSigner
-# trait in ais-evm-executor and adding a ClawletSigner variant to SignerConfig in
-# ais-runner/src/config.rs. Until that is implemented, use evm_private_key below.
+# TRANSACTION SIGNING MODEL:
+# AIS assembles unsigned transactions (calldata + to + value).
+# Clawlet receives the unsigned tx and handles signing + broadcast.
+# Therefore NO signer is configured here — AIS does not touch private keys.
 #
-# For production/bot use, load private_key from an env var or secrets manager —
-# never hard-code a real key here.
+# Integration flow:
+#   ais-runner run workflow  →  unsigned tx  →  clawlet  →  chain
+#
+# Two integration options:
+#
+# Option A — Clawlet signer plugin (recommended, requires implementation):
+#   Implement ClawletSigner in ais-evm-executor that calls clawlet's sign+send API.
+#   Then set: signer.type: "clawlet" + endpoint + account
+#   See references/openclaw-bot.md for implementation spec.
+#
+# Option B — Dry-run + pipe (interim workaround):
+#   Run ais-runner with --dry-run to get unsigned tx JSON, then pipe to clawlet:
+#   ais-runner run workflow --dry-run --format json | clawlet tx send --stdin
 
 chains:
   "eip155:11155111":
@@ -19,9 +29,7 @@ chains:
     receipt_poll:
       interval_ms: 3000
       max_attempts: 20
-    signer:
-      type: evm_private_key
-      private_key: "0xYOUR_SEPOLIA_PRIVATE_KEY"   # Sepolia ONLY — never use a mainnet key
+    # No signer here — clawlet handles signing externally
 
 # Uncomment for agent (natural-language intent) mode:
 # llm:
@@ -31,7 +39,7 @@ chains:
 
 runtime:
   ctx:
-    wallet_address: "0xYOUR_WALLET_ADDRESS"   # must match private_key above
+    wallet_address: "0xYOUR_WALLET_ADDRESS"   # clawlet account address
 
 # Sepolia contract addresses (already in protocol — for reference only):
 #   Factory:          0x0227628f3F023bb0B980b67D528571c95c6DaC1c
