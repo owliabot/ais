@@ -1,0 +1,158 @@
+schema: "ais-flow/0.0.3"
+
+meta:
+  name: "uniswap-v3-lp-rebalance"
+  version: "0.0.1"
+  description: >
+    Auto-rebalance a Uniswap V3 LP position when price moves out of range.
+    Queries current position and pool price, removes liquidity + collects fees
+    if out-of-range, then mints a new position centered around current price.
+
+requires_pack: "uniswap-v3-lp@0.0.1"
+
+inputs:
+  - name: token_id
+    type: uint256
+    description: "NFT token ID of the existing LP position to monitor"
+  - name: range_width_ticks
+    type: uint32
+    description: >
+      Half-width of the new range in ticks (e.g. 600 = ±600 ticks from current tick).
+      Tick spacing must align to fee tier (500→10, 3000→60, 10000→200).
+    default: "600"
+  - name: slippage_bps
+    type: uint32
+    description: "Slippage tolerance in bps for mint"
+    default: "50"
+
+policy:
+  approvals:
+    auto_execute_max_risk_level: 1      # collect is auto; mint/decrease require approval
+    require_approval_min_risk_level: 3
+
+nodes:
+  # ── Step 1: fetch current position data ──────────────────────────────────
+  - id: q_position
+    type: query_ref
+    protocol: uniswap-v3-lp@0.0.1
+    query: position-info
+    params:
+      token_id: { ref: "inputs.token_id" }
+
+  # ── Step 2: fetch pool address ────────────────────────────────────────────
+  - id: q_pool
+    type: query_ref
+    protocol: uniswap-v3-lp@0.0.1
+    query: get-pool
+    deps: [q_position]
+    params:
+      token0: { ref: "q_position.outputs.token0" }
+      token1: { ref: "q_position.outputs.token1" }
+      fee: { ref: "q_position.outputs.fee" }
+
+  # ── Step 3: fetch current pool price / tick ───────────────────────────────
+  - id: q_slot0
+    type: query_ref
+    protocol: uniswap-v3-lp@0.0.1
+    query: pool-slot0
+    deps: [q_pool]
+    params:
+      pool_address: { ref: "q_pool.outputs.pool_address" }
+
+  # ── Step 4: check if out-of-range ─────────────────────────────────────────
+  - id: check_range
+    type: assert
+    deps: [q_slot0, q_position]
+    # We DON'T assert; we use this as a named branch predicate.
+    # Instead we branch on the condition below.
+    condition:
+      cel: >
+        q_slot0.outputs.tick < q_position.outputs.tick_lower ||
+        q_slot0.outputs.tick > q_position.outputs.tick_upper
+    # If condition is false (in range) → workflow ends without rebalancing.
+    on_false: finish_in_range
+
+  # ── Step 5: remove all liquidity ─────────────────────────────────────────
+  - id: a_decrease
+    type: action_ref
+    protocol: uniswap-v3-lp@0.0.1
+    action: decrease-liquidity
+    deps: [check_range]
+    params:
+      token_id: { ref: "inputs.token_id" }
+      liquidity: { ref: "q_position.outputs.liquidity" }
+      amount0_min: { lit: "0" }
+      amount1_min: { lit: "0" }
+
+  # ── Step 6: collect fees and freed tokens ────────────────────────────────
+  - id: a_collect
+    type: action_ref
+    protocol: uniswap-v3-lp@0.0.1
+    action: collect-fees
+    deps: [a_decrease]
+    params:
+      token_id: { ref: "inputs.token_id" }
+
+  # ── Step 7: compute new tick range centered on current tick ──────────────
+  # tick_lower = floor((current_tick - range_width) / tick_spacing) * tick_spacing
+  # tick_upper = ceil((current_tick + range_width) / tick_spacing) * tick_spacing
+  # Tick spacing: fee 500→10, 3000→60, 10000→200 (100→1)
+  - id: compute_ticks
+    type: assert
+    deps: [a_collect, q_slot0, q_position]
+    # Use CEL to derive tick_spacing from fee, then compute aligned tick bounds.
+    # This node passes through; outputs are consumed by next mint node.
+    condition:
+      cel: "true"  # always pass; outputs are the important part
+    outputs:
+      tick_spacing:
+        cel: >
+          q_position.outputs.fee == 100 ? 1 :
+          q_position.outputs.fee == 500 ? 10 :
+          q_position.outputs.fee == 3000 ? 60 : 200
+      new_tick_lower:
+        cel: >
+          int(floor(double(q_slot0.outputs.tick - int(inputs.range_width_ticks)) /
+            double(tick_spacing)) * double(tick_spacing))
+      new_tick_upper:
+        cel: >
+          int(ceil(double(q_slot0.outputs.tick + int(inputs.range_width_ticks)) /
+            double(tick_spacing)) * double(tick_spacing))
+
+  # ── Step 8: mint new position at new range ────────────────────────────────
+  # amounts: use what was collected; treat them as desired amounts.
+  # a_collect.outputs.amount0 / amount1 → desired amounts for new position.
+  - id: a_mint
+    type: action_ref
+    protocol: uniswap-v3-lp@0.0.1
+    action: mint-position
+    deps: [compute_ticks]
+    params:
+      token0: { ref: "q_position.outputs.token0" }
+      token1: { ref: "q_position.outputs.token1" }
+      fee: { ref: "q_position.outputs.fee" }
+      tick_lower: { ref: "compute_ticks.outputs.new_tick_lower" }
+      tick_upper: { ref: "compute_ticks.outputs.new_tick_upper" }
+      # amount0/1 are in atomic units from collect; the action expects token_amount,
+      # so pass atomic values and let the engine resolve via asset decimals.
+      amount0_desired: { ref: "a_collect.outputs.amount0" }
+      amount1_desired: { ref: "a_collect.outputs.amount1" }
+      slippage_bps: { ref: "inputs.slippage_bps" }
+
+  # ── Terminal node: already in range ──────────────────────────────────────
+  - id: finish_in_range
+    type: assert
+    condition: { cel: "true" }
+    # No-op terminal. Workflow completes without any on-chain action.
+
+outputs:
+  rebalanced:
+    cel: "check_range.condition_result"
+  new_token_id:
+    cel: "check_range.condition_result ? a_mint.outputs.tokenId : inputs.token_id"
+  current_tick:
+    cel: "q_slot0.outputs.tick"
+  old_tick_lower:
+    cel: "q_position.outputs.tick_lower"
+  old_tick_upper:
+    cel: "q_position.outputs.tick_upper"

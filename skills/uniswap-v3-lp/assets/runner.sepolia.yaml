@@ -1,0 +1,31 @@
+# Runner config — Uniswap V3 LP on Sepolia (eip155:11155111)
+# 1. Fill in rpc_url, clawlet endpoint/account, wallet_address
+# 2. Optionally uncomment llm block for agent mode
+# 3. Run from repo root: see SKILL.md for commands
+
+chains:
+  "eip155:11155111":
+    rpc_url: "https://rpc.sepolia.org"   # replace with Alchemy/Infura for reliability
+    signer:
+      # AIS assembles calldata; clawlet signs and broadcasts the transaction.
+      type: "clawlet"
+      endpoint: "http://localhost:7777"   # clawlet daemon address
+      account: "sepolia-test"             # clawlet account label
+
+# Uncomment for agent (natural-language intent) mode:
+# llm:
+#   provider: "openai"
+#   model: "gpt-4o"
+#   api_key: "sk-..."
+
+runtime:
+  ctx:
+    wallet_address: "0xYOUR_WALLET_ADDRESS"  # must match clawlet account
+
+# Sepolia contract addresses (already in protocol file — for reference):
+#   Factory:          0x0227628f3F023bb0B980b67D528571c95c6DaC1c
+#   PositionManager:  0x1238536071E1c677A632429e3655c799b22cDA52
+#   WETH:             0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14
+#   USDC (test):      0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238
+#
+# Sepolia faucet: https://sepoliafaucet.com  (需要测试 ETH)

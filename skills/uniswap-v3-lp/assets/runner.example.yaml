@@ -1,0 +1,29 @@
+# Runner config template for uniswap-v3-lp skill.
+# Copy this file, fill in the blanks, and pass via --config.
+
+chains:
+  "eip155:1":
+    rpc_url: "https://mainnet.infura.io/v3/YOUR_KEY"   # or Alchemy, etc.
+    signer:
+      # clawlet signer — transactions are assembled by AIS and signed/sent via clawlet
+      type: "clawlet"
+      endpoint: "http://localhost:7777"   # clawlet daemon address
+      account: "default"                  # clawlet account label
+
+  # Uncomment for Sepolia testing:
+  # "eip155:11155111":
+  #   rpc_url: "https://rpc.sepolia.org"
+  #   signer:
+  #     type: "clawlet"
+  #     endpoint: "http://localhost:7777"
+  #     account: "sepolia-test"
+
+# LLM for agent mode (optional — not needed for direct plan/workflow runs)
+# llm:
+#   provider: "openai"
+#   model: "gpt-4o"
+#   api_key: "sk-..."
+
+runtime:
+  ctx:
+    wallet_address: "0xYOUR_WALLET_ADDRESS"

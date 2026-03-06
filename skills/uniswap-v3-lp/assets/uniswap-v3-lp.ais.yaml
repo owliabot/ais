@@ -1,0 +1,475 @@
+schema: "ais/0.0.2"
+
+meta:
+  protocol: "uniswap-v3-lp"
+  version: "0.0.1"
+  name: "Uniswap V3 Liquidity"
+  homepage: "https://uniswap.org"
+  description: "Add, remove, and manage Uniswap V3 LP positions via NonfungiblePositionManager"
+  tags: ["dex", "lp", "liquidity", "amm", "uniswap-v3"]
+
+capabilities_required:
+  - "cel_v1"
+  - "evm_read"
+  - "evm_call"
+
+deployments:
+  - chain: "eip155:1"
+    contracts:
+      factory:          "0x1F98431c8aD98523631AE4a59f267346ea31F984"
+      position_manager: "0xC36442b4a4522E871399CD717aBDD847Ab11FE88"
+
+  - chain: "eip155:11155111"
+    contracts:
+      factory:          "0x0227628f3F023bb0B980b67D528571c95c6DaC1c"
+      position_manager: "0x1238536071E1c677A632429e3655c799b22cDA52"
+
+# Fee tier → tick spacing mapping
+# 100  → 1
+# 500  → 10
+# 3000 → 60
+# 10000 → 200
+
+actions:
+  mint-position:
+    description: >
+      Create a new Uniswap V3 LP position (mint NFT) for a token pair
+      within a specified tick range. Approves both tokens before minting if needed.
+    risk_level: 4
+    risk_tags: ["approval", "slippage", "impermanent_loss", "price_range"]
+
+    params:
+      - name: token0
+        type: asset
+        description: "First token (lower address)"
+      - name: token1
+        type: asset
+        description: "Second token (higher address)"
+      - name: fee
+        type: uint32
+        description: "Fee tier: 100, 500, 3000, or 10000"
+      - name: tick_lower
+        type: int32
+        description: "Lower tick boundary for the position"
+      - name: tick_upper
+        type: int32
+        description: "Upper tick boundary for the position"
+      - name: amount0_desired
+        type: token_amount
+        description: "Desired amount of token0 to deposit"
+        asset_ref: "token0"
+      - name: amount1_desired
+        type: token_amount
+        description: "Desired amount of token1 to deposit"
+        asset_ref: "token1"
+      - name: slippage_bps
+        type: uint32
+        description: "Max slippage in basis points (e.g. 50 = 0.5%)"
+        default: "50"
+        constraints:
+          min: 1
+          max: 2000
+      - name: recipient
+        type: address
+        description: "NFT recipient (defaults to sender)"
+        required: false
+
+    requires_queries:
+      - "allowance-token0"
+      - "allowance-token1"
+
+    hard_constraints:
+      max_slippage_bps: { ref: "params.slippage_bps" }
+      allow_unlimited_approval: { lit: false }
+
+    calculated_fields:
+      amount0_atomic:
+        expr: { cel: "to_atomic(params.amount0_desired, params.token0)" }
+        inputs: ["params.amount0_desired", "params.token0"]
+      amount1_atomic:
+        expr: { cel: "to_atomic(params.amount1_desired, params.token1)" }
+        inputs: ["params.amount1_desired", "params.token1"]
+      amount0_min:
+        expr: { cel: "mul_div(calculated.amount0_atomic, (10000 - params.slippage_bps), 10000)" }
+        inputs: ["calculated.amount0_atomic", "params.slippage_bps"]
+      amount1_min:
+        expr: { cel: "mul_div(calculated.amount1_atomic, (10000 - params.slippage_bps), 10000)" }
+        inputs: ["calculated.amount1_atomic", "params.slippage_bps"]
+      recipient:
+        expr: { cel: "params.recipient != null ? params.recipient : ctx.wallet_address" }
+        inputs: ["params.recipient", "ctx.wallet_address"]
+      deadline_unix:
+        expr: { cel: "ctx.now + 600" }
+        inputs: ["ctx.now"]
+
+    execution:
+      "eip155:*":
+        type: composite
+        steps:
+          - id: approve_token0_if_needed
+            description: "Approve position manager to spend token0 if needed"
+            condition:
+              cel: "query[\"allowance-token0\"].allowance_atomic < calculated.amount0_atomic"
+            execution:
+              type: evm_call
+              to: { ref: "params.token0.address" }
+              abi:
+                type: "function"
+                name: "approve"
+                inputs:
+                  - { name: "spender", type: "address" }
+                  - { name: "amount", type: "uint256" }
+                outputs: []
+              args:
+                spender: { ref: "contracts.position_manager" }
+                amount: { ref: "calculated.amount0_atomic" }
+
+          - id: approve_token1_if_needed
+            description: "Approve position manager to spend token1 if needed"
+            condition:
+              cel: "query[\"allowance-token1\"].allowance_atomic < calculated.amount1_atomic"
+            execution:
+              type: evm_call
+              to: { ref: "params.token1.address" }
+              abi:
+                type: "function"
+                name: "approve"
+                inputs:
+                  - { name: "spender", type: "address" }
+                  - { name: "amount", type: "uint256" }
+                outputs: []
+              args:
+                spender: { ref: "contracts.position_manager" }
+                amount: { ref: "calculated.amount1_atomic" }
+
+          - id: mint
+            description: "Mint new LP position NFT"
+            execution:
+              type: evm_call
+              to: { ref: "contracts.position_manager" }
+              abi:
+                type: "function"
+                name: "mint"
+                inputs:
+                  - name: "params"
+                    type: "tuple"
+                    components:
+                      - { name: "token0", type: "address" }
+                      - { name: "token1", type: "address" }
+                      - { name: "fee", type: "uint24" }
+                      - { name: "tickLower", type: "int24" }
+                      - { name: "tickUpper", type: "int24" }
+                      - { name: "amount0Desired", type: "uint256" }
+                      - { name: "amount1Desired", type: "uint256" }
+                      - { name: "amount0Min", type: "uint256" }
+                      - { name: "amount1Min", type: "uint256" }
+                      - { name: "recipient", type: "address" }
+                      - { name: "deadline", type: "uint256" }
+                outputs:
+                  - { name: "tokenId", type: "uint256" }
+                  - { name: "liquidity", type: "uint128" }
+                  - { name: "amount0", type: "uint256" }
+                  - { name: "amount1", type: "uint256" }
+              args:
+                params:
+                  object:
+                    token0: { ref: "params.token0.address" }
+                    token1: { ref: "params.token1.address" }
+                    fee: { ref: "params.fee" }
+                    tickLower: { ref: "params.tick_lower" }
+                    tickUpper: { ref: "params.tick_upper" }
+                    amount0Desired: { ref: "calculated.amount0_atomic" }
+                    amount1Desired: { ref: "calculated.amount1_atomic" }
+                    amount0Min: { ref: "calculated.amount0_min" }
+                    amount1Min: { ref: "calculated.amount1_min" }
+                    recipient: { ref: "calculated.recipient" }
+                    deadline: { ref: "calculated.deadline_unix" }
+
+  decrease-liquidity:
+    description: >
+      Remove liquidity from an existing Uniswap V3 position by token ID.
+      Specify liquidity amount to withdraw as a fraction (0-1) or exact uint128.
+    risk_level: 3
+    risk_tags: ["slippage", "impermanent_loss"]
+
+    params:
+      - name: token_id
+        type: uint256
+        description: "NFT token ID of the position"
+      - name: liquidity
+        type: uint128
+        description: "Liquidity units to remove (from position-info query)"
+      - name: amount0_min
+        type: uint256
+        description: "Min token0 to receive (slippage protection, atomic units)"
+        default: "0"
+      - name: amount1_min
+        type: uint256
+        description: "Min token1 to receive (slippage protection, atomic units)"
+        default: "0"
+      - name: deadline
+        type: uint256
+        description: "Unix deadline (defaults to now+600)"
+        required: false
+
+    calculated_fields:
+      deadline_unix:
+        expr: { cel: "params.deadline != null ? params.deadline : ctx.now + 600" }
+        inputs: ["params.deadline", "ctx.now"]
+
+    execution:
+      "eip155:*":
+        type: evm_call
+        to: { ref: "contracts.position_manager" }
+        abi:
+          type: "function"
+          name: "decreaseLiquidity"
+          inputs:
+            - name: "params"
+              type: "tuple"
+              components:
+                - { name: "tokenId", type: "uint256" }
+                - { name: "liquidity", type: "uint128" }
+                - { name: "amount0Min", type: "uint256" }
+                - { name: "amount1Min", type: "uint256" }
+                - { name: "deadline", type: "uint256" }
+          outputs:
+            - { name: "amount0", type: "uint256" }
+            - { name: "amount1", type: "uint256" }
+        args:
+          params:
+            object:
+              tokenId: { ref: "params.token_id" }
+              liquidity: { ref: "params.liquidity" }
+              amount0Min: { ref: "params.amount0_min" }
+              amount1Min: { ref: "params.amount1_min" }
+              deadline: { ref: "calculated.deadline_unix" }
+
+  collect-fees:
+    description: "Collect accumulated fees and/or withdrawn tokens from a position"
+    risk_level: 1
+    risk_tags: []
+
+    params:
+      - name: token_id
+        type: uint256
+        description: "NFT token ID of the position"
+      - name: recipient
+        type: address
+        description: "Fee recipient address (defaults to sender)"
+        required: false
+
+    calculated_fields:
+      recipient:
+        expr: { cel: "params.recipient != null ? params.recipient : ctx.wallet_address" }
+        inputs: ["params.recipient", "ctx.wallet_address"]
+
+    execution:
+      "eip155:*":
+        type: evm_call
+        to: { ref: "contracts.position_manager" }
+        abi:
+          type: "function"
+          name: "collect"
+          inputs:
+            - name: "params"
+              type: "tuple"
+              components:
+                - { name: "tokenId", type: "uint256" }
+                - { name: "recipient", type: "address" }
+                - { name: "amount0Max", type: "uint128" }
+                - { name: "amount1Max", type: "uint128" }
+          outputs:
+            - { name: "amount0", type: "uint256" }
+            - { name: "amount1", type: "uint256" }
+        args:
+          params:
+            object:
+              tokenId: { ref: "params.token_id" }
+              recipient: { ref: "calculated.recipient" }
+              amount0Max: { lit: "340282366920938463463374607431768211455" }  # uint128 max
+              amount1Max: { lit: "340282366920938463463374607431768211455" }
+
+queries:
+  position-info:
+    description: "Fetch on-chain data for an LP position NFT"
+    params:
+      - name: token_id
+        type: uint256
+        description: "NFT token ID"
+
+    returns:
+      - name: token0
+        type: address
+      - name: token1
+        type: address
+      - name: fee
+        type: uint24
+      - name: tick_lower
+        type: int24
+      - name: tick_upper
+        type: int24
+      - name: liquidity
+        type: uint128
+      - name: tokens_owed0
+        type: uint128
+      - name: tokens_owed1
+        type: uint128
+
+    cache_ttl: 5
+    execution:
+      "eip155:*":
+        type: evm_read
+        to: { ref: "contracts.position_manager" }
+        abi:
+          type: "function"
+          name: "positions"
+          inputs:
+            - { name: "tokenId", type: "uint256" }
+          outputs:
+            - { name: "nonce", type: "uint96" }
+            - { name: "operator", type: "address" }
+            - { name: "token0", type: "address" }
+            - { name: "token1", type: "address" }
+            - { name: "fee", type: "uint24" }
+            - { name: "tickLower", type: "int24" }
+            - { name: "tickUpper", type: "int24" }
+            - { name: "liquidity", type: "uint128" }
+            - { name: "feeGrowthInside0LastX128", type: "uint256" }
+            - { name: "feeGrowthInside1LastX128", type: "uint256" }
+            - { name: "tokensOwed0", type: "uint128" }
+            - { name: "tokensOwed1", type: "uint128" }
+        output_map:
+          token0: "token0"
+          token1: "token1"
+          fee: "fee"
+          tick_lower: "tickLower"
+          tick_upper: "tickUpper"
+          liquidity: "liquidity"
+          tokens_owed0: "tokensOwed0"
+          tokens_owed1: "tokensOwed1"
+        args:
+          tokenId: { ref: "params.token_id" }
+
+  pool-slot0:
+    description: "Fetch current sqrtPriceX96 and tick from pool slot0"
+    params:
+      - name: pool_address
+        type: address
+        description: "Pool contract address"
+
+    returns:
+      - name: sqrt_price_x96
+        type: uint160
+      - name: tick
+        type: int24
+
+    cache_ttl: 3
+    execution:
+      "eip155:*":
+        type: evm_read
+        to: { ref: "params.pool_address" }
+        abi:
+          type: "function"
+          name: "slot0"
+          inputs: []
+          outputs:
+            - { name: "sqrtPriceX96", type: "uint160" }
+            - { name: "tick", type: "int24" }
+            - { name: "observationIndex", type: "uint16" }
+            - { name: "observationCardinality", type: "uint16" }
+            - { name: "observationCardinalityNext", type: "uint16" }
+            - { name: "feeProtocol", type: "uint8" }
+            - { name: "unlocked", type: "bool" }
+        output_map:
+          sqrt_price_x96: "sqrtPriceX96"
+          tick: "tick"
+        args: {}
+
+  get-pool:
+    description: "Get pool address from factory for a token pair + fee"
+    params:
+      - name: token0
+        type: address
+        description: "Token0 address"
+      - name: token1
+        type: address
+        description: "Token1 address"
+      - name: fee
+        type: uint32
+        description: "Fee tier"
+
+    returns:
+      - name: pool_address
+        type: address
+
+    cache_ttl: 60
+    execution:
+      "eip155:*":
+        type: evm_read
+        to: { ref: "contracts.factory" }
+        abi:
+          type: "function"
+          name: "getPool"
+          inputs:
+            - { name: "tokenA", type: "address" }
+            - { name: "tokenB", type: "address" }
+            - { name: "fee", type: "uint24" }
+          outputs:
+            - { name: "pool", type: "address" }
+        output_map:
+          pool_address: "pool"
+        args:
+          tokenA: { ref: "params.token0" }
+          tokenB: { ref: "params.token1" }
+          fee: { ref: "params.fee" }
+
+  allowance-token0:
+    description: "Read token0 allowance for position manager"
+    params:
+      - name: token0
+        type: asset
+    returns:
+      - name: allowance_atomic
+        type: uint256
+    cache_ttl: 10
+    execution:
+      "eip155:*":
+        type: evm_read
+        to: { ref: "params.token0.address" }
+        abi:
+          type: "function"
+          name: "allowance"
+          inputs:
+            - { name: "owner", type: "address" }
+            - { name: "spender", type: "address" }
+          outputs:
+            - { name: "allowance_atomic", type: "uint256" }
+        args:
+          owner: { ref: "ctx.wallet_address" }
+          spender: { ref: "contracts.position_manager" }
+
+  allowance-token1:
+    description: "Read token1 allowance for position manager"
+    params:
+      - name: token1
+        type: asset
+    returns:
+      - name: allowance_atomic
+        type: uint256
+    cache_ttl: 10
+    execution:
+      "eip155:*":
+        type: evm_read
+        to: { ref: "params.token1.address" }
+        abi:
+          type: "function"
+          name: "allowance"
+          inputs:
+            - { name: "owner", type: "address" }
+            - { name: "spender", type: "address" }
+          outputs:
+            - { name: "allowance_atomic", type: "uint256" }
+        args:
+          owner: { ref: "ctx.wallet_address" }
+          spender: { ref: "contracts.position_manager" }
