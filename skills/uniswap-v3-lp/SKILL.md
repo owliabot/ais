@@ -35,7 +35,7 @@ ais-runner run workflow \
   --format json
 ```
 
-- 价格在范围内 → `rebalanced: false`，无链上操作（幂等）
+- 价格在范围内 → workflow assert 报错中止（调用方应先检查 tick 范围再触发）
 - 价格超出范围 → `decreaseLiquidity` → `collect` → `mint`，clawlet 签名发送
 
 ### 注册 OpenClaw Cron（定时自动调仓）
@@ -109,10 +109,11 @@ Or author an `ais-plan/0.0.3` referencing `mint-position` directly for determini
 ais-runner run workflow \
   --workflow workspace/uniswap-v3-lp-rebalance.ais-flow.yaml \
   --config config/runner.sepolia.yaml \
-  --inputs '{"token_id": 12345, "range_width_ticks": 600, "slippage_bps": 50}'
+  --runtime /tmp/rebalance-inputs.json
+# /tmp/rebalance-inputs.json: {"inputs": {"token_id": 12345, "range_width_ticks": 600, "slippage_bps": 50}, "ctx": {"wallet_address": "0xYOUR_WALLET"}}
 ```
 
-The workflow is idempotent — if the position is still in range, it exits with `rebalanced: false` and does nothing on-chain.
+The workflow asserts the position IS out-of-range and aborts with an error if it is still in range. Check `outputs.current_tick` vs `outputs.old_tick_lower/upper` first in your bot loop before invoking.
 
 For periodic auto-rebalancing, wrap in a cron loop or use OpenClaw cron with `agentTurn`.
 
