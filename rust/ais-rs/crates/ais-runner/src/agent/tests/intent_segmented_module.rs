@@ -274,7 +274,7 @@ fn segmented_planner_propose_segment_roundtrip() {
             assistant_content: Some("list".to_string()),
             tool_calls: vec![ToolCall {
                 id: "tool-1".to_string(),
-                name: "list_candidates".to_string(),
+                name: "catalog.discover".to_string(),
                 arguments: json!({}),
             }],
         }),
@@ -317,6 +317,7 @@ fn segmented_planner_propose_segment_roundtrip() {
                 max_segments: 3,
             },
             state_summary: None,
+            typed_summary: None,
             previous_error: None,
             last_segment: None,
         })
@@ -377,6 +378,7 @@ fn segmented_planner_propose_segment_accepts_stringified_segment_json_object() {
                 max_segments: 3,
             },
             state_summary: None,
+            typed_summary: None,
             previous_error: None,
             last_segment: None,
         })
@@ -435,6 +437,7 @@ fn segmented_planner_propose_segment_repairs_missing_status_in_round() {
                 max_segments: 3,
             },
             state_summary: None,
+            typed_summary: None,
             previous_error: None,
             last_segment: None,
         })
@@ -490,6 +493,7 @@ fn segmented_planner_propose_segment_repairs_invalid_done_type_in_round() {
                 max_segments: 3,
             },
             state_summary: None,
+            typed_summary: None,
             previous_error: None,
             last_segment: None,
         })
@@ -565,6 +569,7 @@ fn segmented_planner_propose_segment_finalize_schema_repair_retry_is_bounded() {
                 max_segments: 3,
             },
             state_summary: None,
+            typed_summary: None,
             previous_error: None,
             last_segment: None,
         })
@@ -632,6 +637,7 @@ fn segmented_planner_ground_intent_repairs_non_actionable_not_ready_in_round() {
                 max_segments: 3,
             },
             state_summary: None,
+            typed_summary: None,
         })
         .expect("non-actionable not-ready output should be repaired in-round");
     match draft {
@@ -692,6 +698,7 @@ fn segmented_planner_retries_no_toolcall_and_recovers() {
                 max_segments: 8,
             },
             state_summary: Some(json!({})),
+            typed_summary: None,
         })
         .expect("no-toolcall should recover via retry");
     assert!(matches!(draft, TodoDraft::Proposed { .. }));
@@ -736,6 +743,7 @@ fn segmented_planner_no_toolcall_retry_is_bounded() {
                 max_segments: 8,
             },
             state_summary: Some(json!({})),
+            typed_summary: None,
         })
         .expect_err("no-toolcall retries must be bounded");
     assert!(
@@ -795,6 +803,7 @@ fn segmented_planner_propose_segment_uses_cursor_out_when_cursor_next_missing() 
                 max_segments: 3,
             },
             state_summary: None,
+            typed_summary: None,
             previous_error: None,
             last_segment: None,
         })
@@ -900,6 +909,7 @@ fn segmented_planner_blocks_finalize_until_check_segment_ok() {
             intent: "read balance".to_string(),
             session,
             state_summary: None,
+            typed_summary: None,
             previous_error: None,
             last_segment: None,
         })
@@ -1000,6 +1010,7 @@ fn segmented_planner_repairs_check_segment_missing_segment_in_round() {
             intent: "read balance".to_string(),
             session,
             state_summary: None,
+            typed_summary: None,
             previous_error: None,
             last_segment: None,
         })
@@ -1120,6 +1131,7 @@ fn segmented_planner_blocks_finalize_when_segment_differs_from_checked_draft() {
             intent: "read balance".to_string(),
             session,
             state_summary: None,
+            typed_summary: None,
             previous_error: None,
             last_segment: None,
         })
@@ -1137,7 +1149,7 @@ fn decode_segmented_tool_call_large_catalog_stays_compact_and_budgeted() {
     let context = large_catalog_candidate_context(260, 260);
     let list_call = ToolCall {
         id: "tool-list".to_string(),
-        name: "list_candidates".to_string(),
+        name: "catalog.discover".to_string(),
         arguments: json!({}),
     };
     let list_result = decode_segmented_tool_call(
@@ -1184,7 +1196,7 @@ fn decode_segmented_tool_call_large_catalog_stays_compact_and_budgeted() {
 
     let search_call = ToolCall {
         id: "tool-search".to_string(),
-        name: "catalog.search".to_string(),
+        name: "catalog.discover".to_string(),
         arguments: json!({
             "query":"query-1",
             "kind":"query",
@@ -1277,7 +1289,7 @@ fn catalog_search_control_semantics_query_returns_guide_hint() {
     let context = large_catalog_candidate_context(8, 8);
     let call = ToolCall {
         id: "tool-search-control".to_string(),
-        name: "catalog.search".to_string(),
+        name: "catalog.discover".to_string(),
         arguments: json!({
             "query":"assert",
             "limit":12
@@ -1402,11 +1414,50 @@ fn resolve_missing_facts_for_refs_exposes_host_facing_resolution() {
 }
 
 #[test]
-fn list_candidates_cards_include_minimum_ref_metadata() {
+fn resolve_missing_facts_for_refs_preserves_namespace_canonicalization() {
+    let mut context = CandidateContext::default();
+    context.executable_candidates.queries.push(json!({
+        "ref": "erc20@0.0.2/decimals",
+        "kind": "query"
+    }));
+    context.detail_by_ref.insert(
+        "erc20@0.0.2/decimals".to_string(),
+        json!({
+            "ref":"erc20@0.0.2/decimals",
+            "kind":"query",
+            "returns":[{"name":"decimals","type":"uint8"}]
+        }),
+    );
+
+    let payload = resolve_missing_facts_for_refs(
+        &context,
+        &[
+            String::from("runtime.inputs.token.decimals"),
+            String::from("facts.quote.price"),
+            String::from("nodes.q_balance.outputs.balance"),
+        ],
+        2,
+    );
+    assert_eq!(
+        payload.pointer("/normalized_missing_refs/0"),
+        Some(&json!("facts.quote.price"))
+    );
+    assert_eq!(
+        payload.pointer("/normalized_missing_refs/1"),
+        Some(&json!("inputs.token.decimals"))
+    );
+    assert_eq!(
+        payload.pointer("/normalized_missing_refs/2"),
+        Some(&json!("nodes.q_balance.outputs.balance"))
+    );
+}
+
+#[test]
+fn catalog_discover_cards_include_minimum_ref_metadata() {
     let context = large_catalog_candidate_context(2, 2);
     let list_call = ToolCall {
         id: "tool-list-meta".to_string(),
-        name: "list_candidates".to_string(),
+        name: "catalog.discover".to_string(),
         arguments: json!({}),
     };
     let list_result = decode_segmented_tool_call(
@@ -1440,12 +1491,12 @@ fn list_candidates_cards_include_minimum_ref_metadata() {
 }
 
 #[test]
-fn list_candidates_filters_by_exact_chain() {
+fn catalog_discover_filters_by_exact_chain() {
     let context = filtered_list_candidate_context();
     let list_call = ToolCall {
         id: "tool-list-chain-exact".to_string(),
-        name: "list_candidates".to_string(),
-        arguments: json!({"filter":{"chain":"eip155:31338"}}),
+        name: "catalog.discover".to_string(),
+        arguments: json!({"chain":"eip155:31338"}),
     };
     let list_result = decode_segmented_tool_call(
         &list_call,
@@ -1470,11 +1521,11 @@ fn list_candidates_filters_by_exact_chain() {
 }
 
 #[test]
-fn list_candidates_filters_by_chain_namespace_wildcard() {
+fn catalog_discover_filters_by_chain_namespace_wildcard() {
     let context = filtered_list_candidate_context();
     let list_call = ToolCall {
         id: "tool-list-chain-wildcard".to_string(),
-        name: "list_candidates".to_string(),
+        name: "catalog.discover".to_string(),
         arguments: json!({"chain":"eip155:*"}),
     };
     let list_result = decode_segmented_tool_call(
@@ -1498,11 +1549,11 @@ fn list_candidates_filters_by_chain_namespace_wildcard() {
 }
 
 #[test]
-fn list_candidates_filters_by_protocol_contains_case_insensitive() {
+fn catalog_discover_filters_by_protocol_contains_case_insensitive() {
     let context = filtered_list_candidate_context();
     let list_call = ToolCall {
         id: "tool-list-protocol".to_string(),
-        name: "list_candidates".to_string(),
+        name: "catalog.discover".to_string(),
         arguments: json!({"protocol":"LEND"}),
     };
     let list_result = decode_segmented_tool_call(
@@ -1526,12 +1577,12 @@ fn list_candidates_filters_by_protocol_contains_case_insensitive() {
 }
 
 #[test]
-fn list_candidates_filters_with_combined_chain_and_protocol() {
+fn catalog_discover_filters_with_combined_chain_and_protocol() {
     let context = filtered_list_candidate_context();
     let list_call = ToolCall {
         id: "tool-list-combined".to_string(),
-        name: "list_candidates".to_string(),
-        arguments: json!({"filter":{"chain":"eip155:31338","protocol":"DeX"}}),
+        name: "catalog.discover".to_string(),
+        arguments: json!({"chain":"eip155:31338","protocol":"DeX"}),
     };
     let list_result = decode_segmented_tool_call(
         &list_call,
@@ -1550,11 +1601,11 @@ fn list_candidates_filters_with_combined_chain_and_protocol() {
 }
 
 #[test]
-fn planning_memory_caches_list_candidates_per_snapshot_scope() {
+fn planning_memory_caches_catalog_discover_per_snapshot_scope() {
     let context = large_catalog_candidate_context(8, 8);
     let call = ToolCall {
         id: "tool-list".to_string(),
-        name: "list_candidates".to_string(),
+        name: "catalog.discover".to_string(),
         arguments: json!({}),
     };
     let mut memory = PlanningMemory::default();
@@ -1569,6 +1620,7 @@ fn planning_memory_caches_list_candidates_per_snapshot_scope() {
         Some(&mut memory),
         None,
         None,
+        None,
     )
     .expect("first list");
     let second = decode_segmented_tool_call_with_memory(
@@ -1578,6 +1630,7 @@ fn planning_memory_caches_list_candidates_per_snapshot_scope() {
         Some(&context),
         None,
         Some(&mut memory),
+        None,
         None,
         None,
     )
@@ -1609,6 +1662,7 @@ fn planning_memory_caches_list_candidates_per_snapshot_scope() {
         Some(&mut memory),
         None,
         None,
+        None,
     )
     .expect("third list in same snapshot");
     match third_same_snapshot {
@@ -1624,6 +1678,7 @@ fn planning_memory_caches_list_candidates_per_snapshot_scope() {
         Some(&context),
         None,
         Some(&mut memory),
+        None,
         None,
         None,
     )
@@ -1663,6 +1718,7 @@ fn planning_memory_normalizes_detail_ref_order_for_cache_key() {
         Some(&mut memory),
         None,
         None,
+        None,
     )
     .expect("first detail");
     let second = decode_segmented_tool_call_with_memory(
@@ -1672,6 +1728,7 @@ fn planning_memory_normalizes_detail_ref_order_for_cache_key() {
         Some(&context),
         None,
         Some(&mut memory),
+        None,
         None,
         None,
     )
@@ -1723,6 +1780,7 @@ fn planning_memory_guide_get_full_request_refreshes_digest_cache_entry() {
         Some(&mut memory),
         None,
         None,
+        None,
     )
     .expect("digest schema lookup");
     let second = decode_segmented_tool_call_with_memory(
@@ -1734,6 +1792,7 @@ fn planning_memory_guide_get_full_request_refreshes_digest_cache_entry() {
         Some(&mut memory),
         None,
         None,
+        None,
     )
     .expect("full schema lookup");
     let third = decode_segmented_tool_call_with_memory(
@@ -1743,6 +1802,7 @@ fn planning_memory_guide_get_full_request_refreshes_digest_cache_entry() {
         None,
         None,
         Some(&mut memory),
+        None,
         None,
         None,
     )
@@ -1796,11 +1856,11 @@ fn phase_tools_are_scoped_by_round() {
         .into_iter()
         .map(|tool| tool.name)
         .collect::<BTreeSet<_>>();
-    assert!(grounding_tools.contains("list_candidates"));
-    assert!(grounding_tools.contains("catalog.search"));
+    assert!(grounding_tools.contains("catalog.discover"));
     assert!(grounding_tools.contains("catalog.resolve_missing_facts"));
     assert!(grounding_tools.contains("get_candidate_detail"));
     assert!(grounding_tools.contains("guide.get"));
+    assert!(grounding_tools.contains("plan.abort_intent"));
     assert!(grounding_tools.contains("plan.ground_intent"));
     assert!(!grounding_tools.contains("plan.begin"));
     assert!(!grounding_tools.contains("plan.propose_todos"));
@@ -1811,11 +1871,11 @@ fn phase_tools_are_scoped_by_round() {
         .into_iter()
         .map(|tool| tool.name)
         .collect::<BTreeSet<_>>();
-    assert!(todos_tools.contains("list_candidates"));
-    assert!(todos_tools.contains("catalog.search"));
+    assert!(todos_tools.contains("catalog.discover"));
     assert!(todos_tools.contains("catalog.resolve_missing_facts"));
     assert!(todos_tools.contains("get_candidate_detail"));
     assert!(todos_tools.contains("guide.get"));
+    assert!(todos_tools.contains("plan.abort_intent"));
     assert!(todos_tools.contains("plan.propose_todos"));
     assert!(!todos_tools.contains("plan.begin"));
     assert!(!todos_tools.contains("plan.propose_segment"));
@@ -1825,12 +1885,12 @@ fn phase_tools_are_scoped_by_round() {
         .into_iter()
         .map(|tool| tool.name)
         .collect::<BTreeSet<_>>();
-    assert!(propose_tools.contains("list_candidates"));
-    assert!(propose_tools.contains("catalog.search"));
+    assert!(propose_tools.contains("catalog.discover"));
     assert!(propose_tools.contains("catalog.resolve_missing_facts"));
     assert!(propose_tools.contains("get_candidate_detail"));
     assert!(propose_tools.contains("guide.get"));
     assert!(propose_tools.contains("plan.check_segment"));
+    assert!(propose_tools.contains("plan.abort_intent"));
     assert!(propose_tools.contains("plan.propose_segment"));
     assert!(!propose_tools.contains("plan.propose_todos"));
     assert!(!propose_tools.contains("plan.begin"));
@@ -1840,12 +1900,12 @@ fn phase_tools_are_scoped_by_round() {
         .into_iter()
         .map(|tool| tool.name)
         .collect::<BTreeSet<_>>();
-    assert!(revise_tools.contains("list_candidates"));
-    assert!(revise_tools.contains("catalog.search"));
+    assert!(revise_tools.contains("catalog.discover"));
     assert!(revise_tools.contains("catalog.resolve_missing_facts"));
     assert!(revise_tools.contains("get_candidate_detail"));
     assert!(revise_tools.contains("guide.get"));
     assert!(revise_tools.contains("plan.check_segment"));
+    assert!(revise_tools.contains("plan.abort_intent"));
     assert!(revise_tools.contains("plan.revise_segment"));
     assert!(!revise_tools.contains("plan.propose_todos"));
     assert!(!revise_tools.contains("plan.begin"));
@@ -1855,18 +1915,17 @@ fn phase_tools_are_scoped_by_round() {
 #[test]
 fn default_prompt_rules_keep_candidate_ref_optional_for_control_steps() {
     let builder = SegmentedPromptContextBuilder::default();
-    let expected =
-            "candidate_ref is required for query/action steps and optional for assert/branch control steps.";
-
-    assert!(builder.base_rules.iter().any(|rule| rule == expected));
+    assert!(builder.base_rules.iter().any(|rule| rule
+        .contains("candidate_ref is required for query/action")
+        && rule.contains("optional for assert/branch")));
     assert!(!builder
         .phase_rules_propose
         .iter()
-        .any(|rule| rule == expected));
+        .any(|rule| rule.contains("candidate_ref is required")));
     assert!(!builder
         .phase_rules_revise
         .iter()
-        .any(|rule| rule == expected));
+        .any(|rule| rule.contains("candidate_ref is required")));
 }
 
 #[test]
@@ -1891,14 +1950,17 @@ fn fixture_prompt_rules_align_with_runtime_prompt_sources_of_truth() {
         &["candidate_ref", "query/action", "optional", "assert/branch"],
     );
 
-    let list_candidates_policy_rule = builder
+    let discover_policy_rule = builder
         .base_rules
         .iter()
-        .find(|rule| rule.contains("list_candidates policy template (filter-first):"))
-        .expect("default base list_candidates policy rule");
-    assert!(list_candidates_policy_rule
+        .find(|rule| {
+            rule.contains("Discovery basis contract")
+                && rule.contains("catalog.discover/get_candidate_detail")
+        })
+        .expect("default base catalog.discover discovery basis rule");
+    assert!(discover_policy_rule
         .contains("exact chain+protocol -> exact chain -> chain namespace wildcard"));
-    assert!(base_fixture.contains("`list_candidates` policy template (filter-first):"));
+    assert!(base_fixture.contains("`catalog.discover` policy template (filter-first):"));
     assert!(
         base_fixture.contains("exact chain+protocol -> exact chain -> chain namespace wildcard")
     );
@@ -1972,18 +2034,8 @@ fn assert_phase_anchor_alignment(
             phase_name(phase)
         );
     }
-    assert!(
-        default_phase_rules
-            .iter()
-            .any(|rule| rule.contains("follows the base-rules filter-first policy template")),
-        "default phase rules for `{}` must reference shared list_candidates template",
-        phase_name(phase)
-    );
-    assert!(
-        fixture_prompt.contains("follows the base-rules filter-first policy template"),
-        "fixture phase rules for `{}` must reference shared list_candidates template",
-        phase_name(phase)
-    );
+    // Discovery basis and filter-first rules are now consolidated in base_rules only,
+    // not duplicated in each phase.
 }
 
 fn assert_anchor_tokens(text: &str, tokens: &[&str]) {
@@ -2185,6 +2237,39 @@ fn grounding_draft_infers_ready_when_flag_missing_and_no_questions() {
 }
 
 #[test]
+fn grounding_draft_infers_ready_from_intent_facts_only() {
+    let call = ToolCall {
+        id: "tool-grounding-final".to_string(),
+        name: "plan.ground_intent".to_string(),
+        arguments: json!({
+            "status": "proposed",
+            "summary": "facts are sufficient",
+            "resolved_inputs": {},
+            "intent_facts": {
+                "quote.price": "1.01"
+            }
+        }),
+    };
+    let result = decode_segmented_tool_call(
+        &call,
+        "plan.ground_intent",
+        PlannerRoundPhase::GroundIntent,
+        None,
+    )
+    .expect("grounding finalize call");
+    match result {
+        DecodedSegmentedToolCall::Final(PlannerToolOutput::IntentGrounding(
+            IntentGroundingDraft::Proposed {
+                ready_for_todos, ..
+            },
+        )) => {
+            assert!(ready_for_todos);
+        }
+        _ => panic!("expected proposed grounding draft"),
+    }
+}
+
+#[test]
 fn grounding_draft_keeps_not_ready_when_flag_missing_and_questions_exist() {
     let call = ToolCall {
         id: "tool-grounding-final".to_string(),
@@ -2213,10 +2298,13 @@ fn grounding_draft_keeps_not_ready_when_flag_missing_and_questions_exist() {
     match result {
         DecodedSegmentedToolCall::Final(PlannerToolOutput::IntentGrounding(
             IntentGroundingDraft::Proposed {
-                ready_for_todos, ..
+                ready_for_todos,
+                missing_refs,
+                ..
             },
         )) => {
             assert!(!ready_for_todos);
+            assert!(missing_refs.is_empty());
         }
         _ => panic!("expected proposed grounding draft"),
     }
@@ -2273,10 +2361,57 @@ fn grounding_draft_accepts_not_ready_with_missing_refs_only() {
     match result {
         DecodedSegmentedToolCall::Final(PlannerToolOutput::IntentGrounding(
             IntentGroundingDraft::Proposed {
-                ready_for_todos, ..
+                ready_for_todos,
+                missing_refs,
+                ..
             },
         )) => {
             assert!(!ready_for_todos);
+            assert_eq!(missing_refs, vec!["inputs.token.decimals".to_string()]);
+        }
+        _ => panic!("expected proposed grounding draft"),
+    }
+}
+
+#[test]
+fn grounding_draft_canonicalizes_and_dedups_missing_refs() {
+    let call = ToolCall {
+        id: "tool-grounding-final".to_string(),
+        name: "plan.ground_intent".to_string(),
+        arguments: json!({
+            "status": "proposed",
+            "ready_for_todos": false,
+            "summary": "need more refs",
+            "missing_refs": [
+                "runtime.inputs.token.decimals",
+                "token.decimals",
+                "fact:quote.price",
+                "nodes.q_balance.outputs.balance"
+            ],
+            "resolved_inputs": {
+                "owner": "0x1111"
+            }
+        }),
+    };
+    let result = decode_segmented_tool_call(
+        &call,
+        "plan.ground_intent",
+        PlannerRoundPhase::GroundIntent,
+        None,
+    )
+    .expect("grounding finalize call");
+    match result {
+        DecodedSegmentedToolCall::Final(PlannerToolOutput::IntentGrounding(
+            IntentGroundingDraft::Proposed { missing_refs, .. },
+        )) => {
+            assert_eq!(
+                missing_refs,
+                vec![
+                    "facts.quote.price".to_string(),
+                    "inputs.token.decimals".to_string(),
+                    "nodes.q_balance.outputs.balance".to_string()
+                ]
+            );
         }
         _ => panic!("expected proposed grounding draft"),
     }
@@ -2445,9 +2580,10 @@ fn plan_check_segment_tool_returns_compile_issues_without_candidate_match() {
         cursor: "0".to_string(),
         pack_snapshot_hash: "a".repeat(64),
         chain_scope: vec!["eip155:1".to_string()],
+        volatile_facts_policy: crate::policy::VolatileFactsPolicy::default(),
         known_input_refs: vec![],
         grounding_fact_keys: vec![],
-        current_todo: None,
+        current_todo_scope: None,
     };
     let result = decode_segmented_tool_call_with_memory(
         &call,
@@ -2455,6 +2591,7 @@ fn plan_check_segment_tool_returns_compile_issues_without_candidate_match() {
         PlannerRoundPhase::ProposeSegment,
         Some(&CandidateContext::default()),
         Some(&check_context),
+        None,
         None,
         None,
         None,
@@ -2548,8 +2685,16 @@ fn guide_get_tool_returns_topic_guide() {
     assert_eq!(value.get("kind"), Some(&json!("topic")));
     assert_eq!(value.pointer("/topic/topic"), Some(&json!("cel")));
     assert_eq!(
-        value.pointer("/topic/allowed_namespaces/0"),
+        value.pointer("/topic/common_runtime_roots/0"),
         Some(&json!("inputs"))
+    );
+    assert_eq!(
+        value.pointer("/topic/common_helpers/0"),
+        Some(&json!("to_atomic(amount, decimals)"))
+    );
+    assert_eq!(
+        value.pointer("/topic/runtime_root_contract"),
+        Some(&json!("CEL can read host-exposed runtime roots from ResolverContext.runtime plus root_overrides. In segmented planning the common roots are inputs, params, nodes, and other host-projected runtime roots when present. Do not invent roots that are not present in host context."))
     );
 }
 
@@ -2719,19 +2864,27 @@ fn guide_get_tool_schema_prefers_canonical_string_request_shape() {
         schema.pointer("/oneOf/1/properties/topic/enum/1"),
         Some(&json!("valueref"))
     );
+    assert_eq!(
+        schema.pointer("/oneOf/1/properties/topic/enum/2"),
+        Some(&json!("typing"))
+    );
+    assert_eq!(
+        schema.pointer("/oneOf/1/properties/topic/enum/3"),
+        Some(&json!("failure"))
+    );
     assert!(
-        schema.pointer("/oneOf/1/properties/topic/enum/2").is_none(),
-        "guide topic enum should not expose constraint_templates"
+        schema.pointer("/oneOf/1/properties/topic/enum/4").is_none(),
+        "guide topic enum should have exactly 4 entries"
     );
 }
 
 #[test]
-fn list_candidates_tool_schema_exposes_optional_filters() {
+fn catalog_discover_tool_schema_exposes_optional_filters() {
     let schema = segmented_planner_tools()
         .into_iter()
-        .find(|tool| tool.name == "list_candidates")
+        .find(|tool| tool.name == "catalog.discover")
         .map(|tool| tool.input_schema)
-        .expect("list_candidates schema");
+        .expect("catalog.discover schema");
     assert_eq!(
         schema.pointer("/properties/chain/type"),
         Some(&json!("string"))
@@ -2741,11 +2894,7 @@ fn list_candidates_tool_schema_exposes_optional_filters() {
         Some(&json!("string"))
     );
     assert_eq!(
-        schema.pointer("/properties/filter/properties/chain/type"),
-        Some(&json!("string"))
-    );
-    assert_eq!(
-        schema.pointer("/properties/filter/properties/protocol/type"),
+        schema.pointer("/properties/query/type"),
         Some(&json!("string"))
     );
 }
@@ -2797,7 +2946,7 @@ fn tool_arg_normalization_for_validation_is_strictly_whitelisted() {
     );
 
     let unrelated = normalize_tool_args_for_validation(
-        "catalog.search",
+        "catalog.discover",
         &json!({"query":"erc20","full":"true"}),
     );
     assert!(!unrelated.changed());
@@ -2807,17 +2956,17 @@ fn tool_arg_normalization_for_validation_is_strictly_whitelisted() {
 #[test]
 fn catalog_search_cache_key_normalizes_synonyms_and_token_order() {
     let first = super::super::tools::cache::tool_cache_key(
-        "catalog.search",
+        "catalog.discover",
         &json!({"kind":"query","query":"erc20 balance"}),
     )
     .expect("first cache key");
     let second = super::super::tools::cache::tool_cache_key(
-        "catalog.search",
+        "catalog.discover",
         &json!({"kind":"query","query":"token   balance"}),
     )
     .expect("second cache key");
     let third = super::super::tools::cache::tool_cache_key(
-        "catalog.search",
+        "catalog.discover",
         &json!({"kind":"query","query":"balance token"}),
     )
     .expect("third cache key");
@@ -2847,6 +2996,27 @@ fn resolve_missing_facts_cache_key_normalizes_missing_refs() {
 }
 
 #[test]
+fn resolve_missing_facts_cache_key_keeps_facts_and_nodes_namespaces() {
+    let first = super::super::tools::cache::tool_cache_key(
+        "catalog.resolve_missing_facts",
+        &json!({
+            "missing_refs": ["fact:quote.price", "nodes.q_balance.outputs.balance"],
+            "limit_per_ref": 3
+        }),
+    )
+    .expect("first cache key");
+    let second = super::super::tools::cache::tool_cache_key(
+        "catalog.resolve_missing_facts",
+        &json!({
+            "missing_refs": ["facts.quote.price", "runtime.nodes.q_balance.outputs.balance"],
+            "limit_per_ref": 3
+        }),
+    )
+    .expect("second cache key");
+    assert_eq!(first, second);
+}
+
+#[test]
 fn requires_successful_check_only_for_segment_finalize_with_context() {
     assert!(!requires_successful_check_before_finalize(
         PlannerRoundPhase::Begin,
@@ -2862,9 +3032,10 @@ fn requires_successful_check_only_for_segment_finalize_with_context() {
         cursor: "0".to_string(),
         pack_snapshot_hash: "a".repeat(64),
         chain_scope: vec!["eip155:1".to_string()],
+        volatile_facts_policy: crate::policy::VolatileFactsPolicy::default(),
         known_input_refs: vec![],
         grounding_fact_keys: vec![],
-        current_todo: None,
+        current_todo_scope: None,
     };
     assert!(requires_successful_check_before_finalize(
         PlannerRoundPhase::ProposeSegment,
@@ -2903,10 +3074,17 @@ fn unavailable_draft_extracts_missing_input_questions_from_error_details() {
                         ]
                     }
                 ],
+                "decisions": [
+                    {
+                        "kind": "run_producer",
+                        "target": "inputs.owner",
+                        "query_ref": "wallet@0.0.1/defaultOwner"
+                    }
+                ],
                 "recovery_exhaustion": {
                     "unresolved_refs": ["inputs.owner"],
                     "reasons": ["no_query_candidates", "no_binding_candidates"],
-                    "attempt_trace_id": "missing_ref_recovery:grounding:todo_1:user_input:2"
+                    "attempt_trace_id": "missing_resolution:grounding:todo_1:user_input:2"
                 }
             }))),
         }),
@@ -2917,6 +3095,7 @@ fn unavailable_draft_extracts_missing_input_questions_from_error_details() {
         SegmentDraft::Unavailable {
             reason_code,
             questions,
+            error_details,
             ..
         } => {
             assert_eq!(reason_code, "missing_required_input");
@@ -2930,6 +3109,13 @@ fn unavailable_draft_extracts_missing_input_questions_from_error_details() {
             assert_eq!(
                 questions[0].pointer("/options/0/confidence"),
                 Some(&json!(90))
+            );
+            assert_eq!(
+                error_details
+                    .as_ref()
+                    .and_then(|details| details.pointer("/decisions/0/query_ref"))
+                    .and_then(Value::as_str),
+                Some("wallet@0.0.1/defaultOwner")
             );
         }
         _ => panic!("draft must be unavailable"),
@@ -2958,14 +3144,16 @@ fn unavailable_draft_rejects_params_question_id_for_missing_required_input() {
                 "recovery_exhaustion": {
                     "unresolved_refs": ["inputs.token.address"],
                     "reasons": ["no_query_candidates"],
-                    "attempt_trace_id": "missing_ref_recovery:grounding:todo_1:user_input:1"
+                    "attempt_trace_id": "missing_resolution:grounding:todo_1:user_input:1"
                 }
             }))),
         }),
         questions: PlannerQuestionList::default(),
     })
     .expect_err("params.* question id must be rejected");
-    assert!(error.to_string().contains("question.id must be canonical source ref"));
+    assert!(error
+        .to_string()
+        .contains("question.id must be canonical source ref"));
 }
 
 #[test]
@@ -2990,7 +3178,7 @@ fn unavailable_draft_rejects_params_unresolved_refs_for_missing_required_input()
                 "recovery_exhaustion": {
                     "unresolved_refs": ["params.token.address"],
                     "reasons": ["no_query_candidates"],
-                    "attempt_trace_id": "missing_ref_recovery:grounding:todo_1:user_input:1"
+                    "attempt_trace_id": "missing_resolution:grounding:todo_1:user_input:1"
                 }
             }))),
         }),
@@ -3074,6 +3262,28 @@ fn decode_segment_tool_args_preserves_issue_question_and_error_details_json() {
 }
 
 #[test]
+fn decode_segment_tool_args_accepts_stringified_error_object() {
+    let args = decode_segment_tool_args(
+        json!({
+            "status": "unavailable",
+            "done": false,
+            "error": "{\"reason_code\":\"missing_required_input\",\"message\":\"need owner\",\"details\":{\"questions\":[{\"id\":\"inputs.owner\",\"question\":\"owner?\"}],\"recovery_exhaustion\":{\"unresolved_refs\":[\"inputs.owner\"],\"reasons\":[\"no_query_candidates\"],\"attempt_trace_id\":\"missing_resolution:todo_2:user_input:1\"}}}"
+        }),
+        "plan.revise_segment",
+    )
+    .expect("decode segment args");
+    let error = args.error.expect("error object");
+    assert_eq!(error.reason_code, "missing_required_input");
+    let details = error.details.expect("error details");
+    assert_eq!(
+        details
+            .to_value()
+            .pointer("/recovery_exhaustion/attempt_trace_id"),
+        Some(&json!("missing_resolution:todo_2:user_input:1"))
+    );
+}
+
+#[test]
 fn todo_unavailable_prefers_top_level_questions_over_error_details() {
     let draft = parse_todo_draft(
         decode_todo_tool_args(
@@ -3097,7 +3307,7 @@ fn todo_unavailable_prefers_top_level_questions_over_error_details() {
                         "recovery_exhaustion": {
                             "unresolved_refs": ["inputs.owner"],
                             "reasons": ["no_query_candidates"],
-                            "attempt_trace_id": "missing_ref_recovery:todo:todo_1:user_input:1"
+                            "attempt_trace_id": "missing_resolution:todo:todo_1:user_input:1"
                         }
                     }
                 }
@@ -3113,6 +3323,7 @@ fn todo_unavailable_prefers_top_level_questions_over_error_details() {
             reason_code,
             issues,
             questions,
+            error_details,
             ..
         } => {
             assert_eq!(reason_code, "missing_required_input");
@@ -3122,6 +3333,13 @@ fn todo_unavailable_prefers_top_level_questions_over_error_details() {
             assert_eq!(
                 questions[0].pointer("/options/0/label"),
                 Some(&json!("wallet-2"))
+            );
+            assert_eq!(
+                error_details
+                    .as_ref()
+                    .and_then(|details| details.pointer("/questions/0/id"))
+                    .and_then(Value::as_str),
+                Some("owner")
             );
         }
         _ => panic!("draft must be unavailable"),
@@ -3142,126 +3360,89 @@ fn render_segment_prompt_uses_detect_free_valueref_and_contracts() {
                 max_segments: 8,
             },
             state_summary: None,
+            typed_summary: None,
             previous_error: None,
             last_segment: None,
         },
     );
     let value: Value = serde_json::from_str(prompt.as_str()).expect("prompt json");
-    let allowed = value
-        .pointer("/value_ref_contract/allowed")
-        .and_then(Value::as_array)
-        .expect("allowed ValueRef kinds");
-    assert!(!allowed.iter().any(|item| item == "detect"));
-    assert_eq!(
-        value.pointer("/asset_param_contract/rule"),
-        Some(&json!(
-            "for param type=asset, input must resolve to object with address"
-        ))
-    );
-    assert_eq!(
-        value.pointer("/segment_contract/optional_runtime_controls/0"),
-        Some(&json!("until"))
-    );
-    assert_eq!(
-        value.pointer("/segment_contract/candidate_ref_rule"),
-        Some(&json!(
-            "required for query/action; optional for assert/branch control steps"
-        ))
-    );
-    assert_eq!(
-        value.pointer("/segment_contract/kind_enum/2"),
-        Some(&json!("assert"))
-    );
-    assert_eq!(
-        value.pointer("/segment_contract/kind_enum/3"),
-        Some(&json!("branch"))
-    );
-    assert_eq!(
-        value.pointer("/depends_on_contract/rule"),
-        Some(&json!(
-            "depends_on items must reference known step ids in the same segment"
-        ))
-    );
-    assert_eq!(
-        value.pointer("/depends_on_contract/examples/1"),
-        Some(&json!("q_token_balance"))
+    // High-frequency contracts moved to system prompt contracts_summary
+    assert!(
+        value.get("segment_contract").is_none(),
+        "segment_contract should be in system prompt, not user prompt"
     );
     assert!(
-        value.get("adjudicate_recovery_contract").is_none(),
-        "prompt payload should not include legacy adjudicate_recovery_contract block"
+        value.get("value_ref_contract").is_none(),
+        "value_ref_contract should be in system prompt, not user prompt"
     );
-    assert_eq!(
-            value.pointer("/input_ref_semantic_contract/rule"),
-            Some(&json!(
-                "For unknown_input_ref repair, preserve slot semantics: token/address params map to address-like refs (for example *.address); *.decimals refs are only for decimal slots."
-            ))
-        );
-    assert_eq!(
-        value.pointer("/input_ref_semantic_contract/negative_examples/0/invalid_ref"),
-        Some(&json!("inputs.token.decimals"))
+    assert!(
+        value.get("asset_param_contract").is_none(),
+        "asset_param_contract should be in system prompt, not user prompt"
     );
-    assert_eq!(
-        value.pointer("/input_ref_semantic_contract/negative_examples/0/expected_ref_like"),
-        Some(&json!("*.address"))
+    assert!(
+        value.get("write_gate_contract").is_none(),
+        "write_gate_contract should be in system prompt, not user prompt"
     );
+    // Low-frequency contracts moved to guide.get topics
+    assert!(
+        value.get("schema_lookup_contract").is_none(),
+        "schema_lookup_contract moved to guide.get(topic=typing)"
+    );
+    assert!(
+        value.get("tool_call_typing_contract").is_none(),
+        "tool_call_typing_contract moved to guide.get(topic=typing)"
+    );
+    assert!(
+        value.get("failure_contract").is_none(),
+        "failure_contract moved to guide.get(topic=failure)"
+    );
+    assert!(
+        value.get("input_ref_semantic_contract").is_none(),
+        "input_ref_semantic_contract moved to guide.get(topic=failure)"
+    );
+    assert!(
+        value.get("depends_on_contract").is_none(),
+        "depends_on_contract merged into system prompt segment contract"
+    );
+    // Contracts that remain in user prompt
     let repair_rules = value
         .pointer("/repair_instructions/rules")
         .and_then(Value::as_array)
         .expect("repair rules");
     assert!(repair_rules.iter().any(|rule| {
-            rule.as_str()
-                == Some(
-                    "For unknown_input_ref repair, token/address params should map to address-like refs (for example *.address); *.decimals refs cannot substitute token/address slots.",
-                )
-        }));
-    assert_eq!(
-        value.pointer("/schema_lookup_contract/examples/0/schema"),
-        Some(&json!("ais-plan-sketch/0.1.0"))
-    );
-    assert_eq!(
-        value.pointer("/schema_lookup_contract/examples/2/topic"),
-        Some(&json!("cel"))
-    );
-    assert_eq!(
-        value.pointer("/schema_lookup_contract/typing_examples/good/1/full"),
-        Some(&json!(true))
-    );
-    assert_eq!(
-        value.pointer("/schema_lookup_contract/typing_examples/bad/2/full"),
-        Some(&json!("true"))
-    );
-    assert_eq!(
-        value.pointer("/tool_call_typing_contract/examples/good/2/limit"),
-        Some(&json!(5))
-    );
-    assert_eq!(
-        value.pointer("/tool_call_typing_contract/examples/bad/2/limit"),
-        Some(&json!("5"))
-    );
+        rule.as_str()
+            .map(|s| s.contains("unknown_input_ref"))
+            .unwrap_or(false)
+    }));
     assert_eq!(
         value.pointer("/self_check_before_tool_or_finalize/checklist/2"),
         Some(&json!(
             "JSON types exactly match schema (bool/number are not quoted strings)."
         ))
     );
-    assert_eq!(
-        value.pointer("/failure_contract/missing_required_input/required_fields/0"),
-        Some(&json!("error.details.questions"))
-    );
-    assert_eq!(
-        value.pointer("/failure_contract/missing_required_input/question_shape/options/0/label"),
-        Some(&json!("string"))
-    );
+    assert!(value.get("check_segment_contract").is_some());
+    assert!(value.get("todo_contract").is_some());
     assert!(
-        value
-            .pointer("/schema_lookup_contract/examples/0/schema/id")
-            .is_none(),
-        "schema lookup examples must use canonical string shape"
+        value.get("adjudicate_recovery_contract").is_none(),
+        "prompt payload should not include legacy adjudicate_recovery_contract block"
     );
     assert!(
         !prompt.contains("seg_1/"),
         "prompt must not encourage cross-segment depends_on references"
     );
+
+    // Verify guide.get returns the low-frequency contracts
+    let typing_payload = schema_guide_payload("typing");
+    assert!(typing_payload.is_some());
+    let typing = typing_payload.unwrap();
+    assert!(typing.get("tool_call_typing_contract").is_some());
+    assert!(typing.get("schema_lookup_contract").is_some());
+
+    let failure_payload = schema_guide_payload("failure");
+    assert!(failure_payload.is_some());
+    let failure = failure_payload.unwrap();
+    assert!(failure.get("failure_contract").is_some());
+    assert!(failure.get("input_ref_semantic_contract").is_some());
 }
 
 #[test]
@@ -3278,6 +3459,7 @@ fn render_grounding_prompt_includes_actionable_not_ready_examples() {
                 max_segments: 8,
             },
             state_summary: None,
+            typed_summary: None,
         },
         None,
     );
@@ -3297,20 +3479,33 @@ fn render_grounding_prompt_includes_actionable_not_ready_examples() {
 }
 
 #[test]
-fn prompt_renderers_use_prompt_compact_state_summary_when_available() {
+fn prompt_renderers_build_prompt_compact_at_render_time() {
     let state_summary = json!({
         "full_only": "must_not_enter_prompt",
-        "context_budget": {
-            "pack_trace": [{"block_id":"tool_memory_projection","action":"compress"}]
+        "todo_state": {
+            "current_todo": {
+                "title": "bridge"
+            }
         },
-        "prompt_compact": {
-            "schema": "ais-agent-state-summary-prompt-compact/0.0.1",
-            "compact_marker": true,
-            "context_budget": {
-                "pack_overflow_reason": "budget_exceeded_no_further_actions",
-                "pack_diagnostics": {
-                    "packed_blocks_total": 4
-                }
+        "input_registry": {
+            "counts": {
+                "missing": 2
+            }
+        },
+        "reusable_outputs": {
+            "summary": {
+                "reusable_refs": 4
+            }
+        },
+        "previous_error": {
+            "reason_code": "missing_required_input"
+        },
+        "context_budget": {
+            "pressure_mode": "critical",
+            "pack_trace": [{"block_id":"tool_memory_projection","action":"compress"}],
+            "pack_overflow_reason": "budget_exceeded_no_further_actions",
+            "pack_diagnostics": {
+                "packed_blocks_total": 4
             }
         }
     });
@@ -3328,13 +3523,14 @@ fn prompt_renderers_use_prompt_compact_state_summary_when_available() {
             intent: "transfer".to_string(),
             session: session.clone(),
             state_summary: Some(state_summary.clone()),
+            typed_summary: None,
         },
         None,
     );
     let todos_payload: Value = serde_json::from_str(&todos_prompt).expect("todos prompt");
     assert_eq!(
-        todos_payload.pointer("/state_summary/compact_marker"),
-        Some(&json!(true))
+        todos_payload.pointer("/state_summary/schema"),
+        Some(&json!("ais-agent-state-summary-prompt-compact/0.0.1"))
     );
     assert!(
         todos_payload.pointer("/state_summary/full_only").is_none(),
@@ -3346,20 +3542,29 @@ fn prompt_renderers_use_prompt_compact_state_summary_when_available() {
             .is_none(),
         "todos prompt must not include pack_trace"
     );
+    assert_eq!(
+        todos_payload.pointer("/state_summary/context_budget/pack_overflow_reason"),
+        Some(&json!("budget_exceeded_no_further_actions"))
+    );
+    assert!(todos_payload
+        .pointer("/state_summary/summary_text")
+        .and_then(Value::as_str)
+        .is_some());
 
     let grounding_prompt = render_grounding_prompt_with_patch(
         &IntentGroundingRequest {
             intent: "transfer".to_string(),
             session: session.clone(),
             state_summary: Some(state_summary.clone()),
+            typed_summary: None,
         },
         None,
     );
     let grounding_payload: Value =
         serde_json::from_str(&grounding_prompt).expect("grounding prompt");
     assert_eq!(
-        grounding_payload.pointer("/state_summary/compact_marker"),
-        Some(&json!(true))
+        grounding_payload.pointer("/state_summary/schema"),
+        Some(&json!("ais-agent-state-summary-prompt-compact/0.0.1"))
     );
     assert!(
         grounding_payload
@@ -3374,14 +3579,15 @@ fn prompt_renderers_use_prompt_compact_state_summary_when_available() {
             intent: "transfer".to_string(),
             session,
             state_summary: Some(state_summary),
+            typed_summary: None,
             previous_error: None,
             last_segment: None,
         },
     );
     let segment_payload: Value = serde_json::from_str(&segment_prompt).expect("segment prompt");
     assert_eq!(
-        segment_payload.pointer("/state_summary/compact_marker"),
-        Some(&json!(true))
+        segment_payload.pointer("/state_summary/schema"),
+        Some(&json!("ais-agent-state-summary-prompt-compact/0.0.1"))
     );
     assert!(
         segment_payload
@@ -3423,6 +3629,7 @@ fn render_segment_prompt_with_patch_overrides_nested_fields() {
             max_segments: 8,
         },
         state_summary: None,
+        typed_summary: None,
         previous_error: None,
         last_segment: None,
     };
@@ -3450,12 +3657,19 @@ fn system_prompt_builder_emits_stable_version_and_hash() {
     assert_eq!(rendered_a.hash, rendered_b.hash);
     assert!(rendered_a
         .prompt
-        .contains("Prompt-Version: aisrs-segmented-planner-v2"));
+        .contains("Prompt-Version: aisrs-segmented-planner-v3"));
     assert!(rendered_a.prompt.contains("Prompt-Hash: "));
+    assert!(rendered_a.prompt.contains("Emit schema-typed JSON only"));
+    assert!(rendered_a.prompt.contains("digest-first"));
     assert!(rendered_a
-            .prompt
-            .contains("Emit schema-typed JSON only: when schema expects boolean/number, send JSON bool/number (never quoted strings)."));
-    assert!(rendered_a.prompt.contains("guide.get examples: good"));
+        .prompt
+        .contains("Post-write invalidation is real"));
+    assert!(rendered_a
+        .prompt
+        .contains("same-segment scheduling/gate reachability only"));
+    assert!(rendered_a
+        .prompt
+        .contains("follow-up writes must query again"));
 }
 
 #[test]
@@ -3490,7 +3704,7 @@ fn usage_tracker_records_estimated_tokens() {
     assert_eq!(value.pointer("/calls"), Some(&json!(1)));
     assert_eq!(
         value.pointer("/source"),
-        Some(&json!("estimated(chars_div_4)"))
+        Some(&json!("tiktoken(o200k_base)"))
     );
     assert_eq!(value.pointer("/context_limit_tokens"), Some(&json!(1000)));
     assert_eq!(
@@ -3534,6 +3748,132 @@ fn extract_round_context_signal_reads_pressure_and_compression_flags() {
 }
 
 #[test]
+fn planner_diagnostics_track_reusable_inventory_and_redundant_query_rejections() {
+    let mut tracker = super::PlannerDiagnosticsTracker::default();
+    tracker.observe_reusable_inventory_summary(
+        None,
+        Some(&json!({
+            "reusable_outputs": {
+                "summary": {
+                    "total_refs": 4,
+                    "reusable_refs": 3,
+                    "fresh_volatile_refs": 1,
+                    "stale_volatile_refs": 1
+                }
+            }
+        })),
+    );
+    tracker.observe_check_segment_redundant_query_rejections(
+        json!({
+            "ok": false,
+            "issues": [
+                {"reason_code":"redundant_query_step","step_id":"q_balance"},
+                {"reason_code":"todo_scope_violation","step_id":"a1"}
+            ]
+        })
+        .to_string()
+        .as_str(),
+    );
+
+    let value = tracker.to_value();
+    assert_eq!(
+        value.pointer("/reusable_inventory/total_refs"),
+        Some(&json!(4))
+    );
+    assert_eq!(
+        value.pointer("/reusable_inventory/reusable_refs"),
+        Some(&json!(3))
+    );
+    assert_eq!(
+        value.pointer("/redundant_query_rejections/total"),
+        Some(&json!(1))
+    );
+    assert_eq!(
+        value.pointer("/redundant_query_rejections/steps_total"),
+        Some(&json!(1))
+    );
+}
+
+#[test]
+fn planner_diagnostics_reusable_inventory_prefers_typed_summary_over_raw_projection() {
+    let mut tracker = super::PlannerDiagnosticsTracker::default();
+    let typed = super::StateSummary {
+        completed_segments: 0,
+        completed_nodes: 0,
+        plan_epoch: 0,
+        paused_reason: None,
+        done: false,
+        previous_error: None,
+        input_store: Some(json!({
+            "facts": {
+                "token": {"address":"0xabc"}
+            },
+            "meta": {
+                "token.address": {
+                    "source":"user",
+                    "source_kind":"user",
+                    "source_priority": 100,
+                    "stability":"stable"
+                }
+            }
+        })),
+        runtime_facts: Some(json!({
+            "facts": {
+                "quote": {"price":"10"}
+            },
+            "meta": {
+                "quote.price": {
+                    "source":"query",
+                    "source_priority": 50,
+                    "stability":"volatile"
+                }
+            }
+        })),
+        input_binding: crate::agent::state_summary::InputBindingContract {
+            schema: "ais-agent-input-binding-contract/0.0.1",
+            bindable_namespace: "inputs",
+            bindable_refs_source: "state_summary.input_store",
+            bindable_refs_projection: "state_summary.input_registry.known_refs",
+            known_refs_only: true,
+            facts_bindable: false,
+        },
+        input_registry: json!({"known_refs":["inputs.token.address"]}),
+        node_output_refs: json!({"known_refs":[]}),
+        reusable_outputs: None,
+        tool_memory_projection: None,
+        intent_slots: None,
+        intent_context: None,
+        capability_view: None,
+        capability_ready: None,
+        side_effect_lifecycle: None,
+        todo_state: None,
+        recovery_diagnostics: None,
+    };
+    let raw_summary = json!({
+        "reusable_outputs": {
+            "summary": {
+                "total_refs": 99,
+                "reusable_refs": 88,
+                "fresh_volatile_refs": 77,
+                "stale_volatile_refs": 66
+            }
+        }
+    });
+
+    tracker.observe_reusable_inventory_summary(Some(&typed), Some(&raw_summary));
+
+    let value = tracker.to_value();
+    assert_ne!(
+        value.pointer("/reusable_inventory/total_refs"),
+        Some(&json!(99))
+    );
+    assert_ne!(
+        value.pointer("/reusable_inventory/reusable_refs"),
+        Some(&json!(88))
+    );
+}
+
+#[test]
 fn extract_round_context_signal_detects_host_binding_adjudicate_mode() {
     let signal = extract_round_context_signal(
         json!({
@@ -3550,6 +3890,46 @@ fn extract_round_context_signal_detects_host_binding_adjudicate_mode() {
 }
 
 #[test]
+fn extract_round_context_signal_detects_discovery_basis_from_memory_projection() {
+    let signal = extract_round_context_signal(
+        json!({
+            "state_summary": {
+                "tool_memory_projection": {
+                    "recent": {
+                        "list_inventory": [
+                            {"filters":{"chain":"eip155:1"}}
+                        ]
+                    }
+                }
+            }
+        })
+        .to_string()
+        .as_str(),
+    );
+    assert!(!signal.compressed);
+}
+
+#[test]
+fn extract_round_context_signal_detects_discovery_basis_from_candidate_refs() {
+    let signal = extract_round_context_signal(
+        json!({
+            "state_summary": {
+                "tool_memory_projection": {
+                    "recent": {
+                        "candidate_detail": [
+                            {"signatures":[{"ref":"erc20@0.0.2/balance-of"}]}
+                        ]
+                    }
+                }
+            }
+        })
+        .to_string()
+        .as_str(),
+    );
+    assert!(!signal.compressed);
+}
+
+#[test]
 fn diagnostics_tracker_reports_duplicate_and_empty_search_streak_metrics() {
     let context = large_catalog_candidate_context(2, 2);
     let provider = ScriptedLlmProvider::from_responses(vec![
@@ -3557,7 +3937,7 @@ fn diagnostics_tracker_reports_duplicate_and_empty_search_streak_metrics() {
             assistant_content: Some("search-1".to_string()),
             tool_calls: vec![ToolCall {
                 id: "tool-search-1".to_string(),
-                name: "catalog.search".to_string(),
+                name: "catalog.discover".to_string(),
                 arguments: json!({"query":"unknown-thing","kind":"query"}),
             }],
         }),
@@ -3565,7 +3945,7 @@ fn diagnostics_tracker_reports_duplicate_and_empty_search_streak_metrics() {
             assistant_content: Some("search-2".to_string()),
             tool_calls: vec![ToolCall {
                 id: "tool-search-2".to_string(),
-                name: "catalog.search".to_string(),
+                name: "catalog.discover".to_string(),
                 arguments: json!({"query":"unknown-thing","kind":"query"}),
             }],
         }),
@@ -3595,6 +3975,7 @@ fn diagnostics_tracker_reports_duplicate_and_empty_search_streak_metrics() {
             max_rounds: 8,
             max_segments: 8,
         },
+        typed_summary: None,
         state_summary: Some(json!({
             "context_budget": {
                 "pressure_mode": "light",
@@ -3613,7 +3994,7 @@ fn diagnostics_tracker_reports_duplicate_and_empty_search_streak_metrics() {
         Some(&json!(3))
     );
     assert_eq!(
-        usage.pointer("/diagnostics/tool_call_count_by_tool/catalog.search"),
+        usage.pointer("/diagnostics/tool_call_count_by_tool/catalog.discover"),
         Some(&json!(2))
     );
     assert_eq!(
@@ -3625,7 +4006,7 @@ fn diagnostics_tracker_reports_duplicate_and_empty_search_streak_metrics() {
         Some(&json!(2))
     );
     assert_eq!(
-        usage.pointer("/diagnostics/memory_hit_rate_by_tool/catalog.search/hits"),
+        usage.pointer("/diagnostics/memory_hit_rate_by_tool/catalog.discover/hits"),
         Some(&json!(1))
     );
     assert_eq!(
@@ -3710,11 +4091,27 @@ fn begin_session_resets_usage_and_diagnostics_trackers() {
 fn begin_phase_rejects_discovery_tools() {
     let calls = vec![ToolCall {
         id: "tool-1".to_string(),
-        name: "list_candidates".to_string(),
+        name: "catalog.discover".to_string(),
         arguments: json!({}),
     }];
     let error = validate_tool_calls_for_phase(&calls, PlannerRoundPhase::Begin)
         .expect_err("begin phase should reject discovery tools");
+    assert!(error.to_string().contains("not allowed"));
+}
+
+#[test]
+fn begin_phase_rejects_abort_intent() {
+    let calls = vec![ToolCall {
+        id: "tool-1".to_string(),
+        name: "plan.abort_intent".to_string(),
+        arguments: json!({
+            "reason_code":"recovery_exhausted",
+            "summary":"cannot continue with current intent",
+            "evidence":{"attempted_recovery":["runtime.query.resolve"]}
+        }),
+    }];
+    let error = validate_tool_calls_for_phase(&calls, PlannerRoundPhase::Begin)
+        .expect_err("begin phase should reject abort tool");
     assert!(error.to_string().contains("not allowed"));
 }
 
@@ -3755,7 +4152,7 @@ fn todo_phase_allows_discovery_then_finalize() {
     let calls = vec![
         ToolCall {
             id: "tool-1".to_string(),
-            name: "list_candidates".to_string(),
+            name: "catalog.discover".to_string(),
             arguments: json!({}),
         },
         ToolCall {
@@ -3769,6 +4166,43 @@ fn todo_phase_allows_discovery_then_finalize() {
     ];
     validate_tool_calls_for_phase(&calls, PlannerRoundPhase::ProposeTodos)
         .expect("todo phase should allow discovery + finalize");
+}
+
+#[test]
+fn phase_policy_allows_catalog_discover_without_discovery_basis() {
+    let calls = vec![ToolCall {
+        id: "tool-1".to_string(),
+        name: "catalog.discover".to_string(),
+        arguments: json!({"query":"balance"}),
+    }];
+    validate_tool_calls_for_phase_with_context(
+        &calls,
+        PlannerRoundPhase::ProposeSegment,
+        ToolCallValidationContext::default(),
+    )
+    .expect("catalog.discover should be allowed without discovery basis gate");
+}
+
+#[test]
+fn phase_policy_allows_catalog_discover_with_in_round_discovery() {
+    let calls = vec![
+        ToolCall {
+            id: "tool-1".to_string(),
+            name: "catalog.discover".to_string(),
+            arguments: json!({"chain":"eip155:1"}),
+        },
+        ToolCall {
+            id: "tool-2".to_string(),
+            name: "catalog.discover".to_string(),
+            arguments: json!({"query":"transfer"}),
+        },
+    ];
+    validate_tool_calls_for_phase_with_context(
+        &calls,
+        PlannerRoundPhase::ProposeSegment,
+        ToolCallValidationContext::default(),
+    )
+    .expect("in-round catalog.discover should be allowed");
 }
 
 #[test]
@@ -3840,6 +4274,473 @@ fn finalize_tool_at_most_once_per_round() {
 }
 
 #[test]
+fn abort_tool_must_be_last_in_round() {
+    let calls = vec![
+        ToolCall {
+            id: "tool-1".to_string(),
+            name: "plan.abort_intent".to_string(),
+            arguments: json!({
+                "reason_code":"recovery_exhausted",
+                "summary":"cannot continue with current intent",
+                "evidence":{"attempted_recovery":["runtime.query.resolve"]}
+            }),
+        },
+        ToolCall {
+            id: "tool-2".to_string(),
+            name: "guide.get".to_string(),
+            arguments: json!({"topic":"failure"}),
+        },
+    ];
+    let error = validate_tool_calls_for_phase(&calls, PlannerRoundPhase::ProposeSegment)
+        .expect_err("abort tool should be last");
+    assert!(error
+        .to_string()
+        .contains("terminal tool `plan.abort_intent` must be the last"));
+}
+
+#[test]
+fn finalize_and_abort_cannot_coexist_in_same_round() {
+    let calls = vec![
+        ToolCall {
+            id: "tool-1".to_string(),
+            name: "plan.propose_segment".to_string(),
+            arguments: json!({
+                "status":"invalid",
+                "done":false,
+                "error":{"reason_code":"x"}
+            }),
+        },
+        ToolCall {
+            id: "tool-2".to_string(),
+            name: "plan.abort_intent".to_string(),
+            arguments: json!({
+                "reason_code":"recovery_exhausted",
+                "summary":"cannot continue with current intent",
+                "evidence":{"attempted_recovery":["runtime.query.resolve"]}
+            }),
+        },
+    ];
+    let error = validate_tool_calls_for_phase(&calls, PlannerRoundPhase::ProposeSegment)
+        .expect_err("finalize + abort must not coexist");
+    assert!(error.to_string().contains("cannot emit both"));
+}
+
+#[test]
+fn abort_intent_tool_schema_requires_reason_summary_and_evidence() {
+    let schema = segmented_planner_tools()
+        .into_iter()
+        .find(|tool| tool.name == "plan.abort_intent")
+        .map(|tool| tool.input_schema)
+        .expect("plan.abort_intent schema");
+    assert_eq!(
+        schema.pointer("/properties/reason_code/type"),
+        Some(&json!("string"))
+    );
+    assert_eq!(
+        schema.pointer("/properties/summary/minLength"),
+        Some(&json!(10))
+    );
+    assert_eq!(
+        schema.pointer("/properties/evidence/required/0"),
+        Some(&json!("attempted_recovery"))
+    );
+}
+
+#[test]
+fn decode_abort_intent_requires_attempted_recovery() {
+    let abort_call = ToolCall {
+        id: "tool-abort".to_string(),
+        name: "plan.abort_intent".to_string(),
+        arguments: json!({
+            "reason_code":"recovery_exhausted",
+            "summary":"cannot continue with current intent",
+            "evidence":{"attempted_recovery":[]}
+        }),
+    };
+    let error = decode_segmented_tool_call(
+        &abort_call,
+        "plan.propose_segment",
+        PlannerRoundPhase::ProposeSegment,
+        None,
+    )
+    .expect_err("empty attempted_recovery should be rejected");
+    assert!(error
+        .to_string()
+        .contains("requires non-empty evidence.attempted_recovery"));
+}
+
+#[test]
+fn decode_abort_intent_rejects_when_recovery_candidates_exist() {
+    let mut context = CandidateContext::default();
+    context.executable_candidates.queries.push(json!({
+        "ref": "erc20@0.0.2/decimals",
+        "kind": "query"
+    }));
+    context.detail_by_ref.insert(
+        "erc20@0.0.2/decimals".to_string(),
+        json!({
+            "ref":"erc20@0.0.2/decimals",
+            "kind":"query",
+            "returns":[{"name":"decimals","type":"uint8"}]
+        }),
+    );
+    let abort_call = ToolCall {
+        id: "tool-abort".to_string(),
+        name: "plan.abort_intent".to_string(),
+        arguments: json!({
+            "reason_code":"recovery_exhausted",
+            "summary":"cannot continue with current intent",
+            "evidence":{
+              "attempted_recovery":["runtime.query.resolve"],
+              "missing_refs":["inputs.token.decimals"]
+            }
+        }),
+    };
+    let typed_summary = super::StateSummary {
+        completed_segments: 0,
+        completed_nodes: 0,
+        plan_epoch: 0,
+        paused_reason: None,
+        done: false,
+        previous_error: None,
+        input_store: None,
+        runtime_facts: None,
+        input_binding: crate::agent::state_summary::InputBindingContract {
+            schema: "ais-agent-input-binding-contract/0.0.1",
+            bindable_namespace: "inputs",
+            bindable_refs_source: "state_summary.input_store",
+            bindable_refs_projection: "state_summary.input_registry.known_refs",
+            known_refs_only: true,
+            facts_bindable: false,
+        },
+        input_registry: json!({"known_refs":[]}),
+        node_output_refs: json!({"known_refs":[]}),
+        reusable_outputs: None,
+        tool_memory_projection: None,
+        intent_slots: None,
+        intent_context: None,
+        capability_view: None,
+        capability_ready: None,
+        side_effect_lifecycle: None,
+        todo_state: None,
+        recovery_diagnostics: Some(json!({
+            "available_attempt_keys": ["runtime.query.resolve"]
+        })),
+    };
+    let error = decode_segmented_tool_call_with_memory_and_summary(
+        &abort_call,
+        "plan.propose_segment",
+        PlannerRoundPhase::ProposeSegment,
+        Some(&context),
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(&typed_summary),
+    )
+    .expect_err("recoverable refs should reject abort");
+    assert!(error
+        .to_string()
+        .contains("still have recoverable query candidates"));
+}
+
+#[test]
+fn decode_abort_intent_rejects_without_host_recovery_history() {
+    let abort_call = ToolCall {
+        id: "tool-abort".to_string(),
+        name: "plan.abort_intent".to_string(),
+        arguments: json!({
+            "reason_code":"recovery_exhausted",
+            "summary":"cannot continue with current intent",
+            "evidence":{
+              "attempted_recovery":["runtime.query.resolve"],
+              "missing_refs":["inputs.token.decimals"]
+            }
+        }),
+    };
+    let error = decode_segmented_tool_call_with_memory_and_summary(
+        &abort_call,
+        "plan.propose_segment",
+        PlannerRoundPhase::ProposeSegment,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .expect_err("abort should be rejected without host recovery history");
+    assert!(error
+        .to_string()
+        .contains("host recovery history is unavailable"));
+}
+
+#[test]
+fn decode_abort_intent_rejects_unknown_attempted_recovery_entries() {
+    let abort_call = ToolCall {
+        id: "tool-abort".to_string(),
+        name: "plan.abort_intent".to_string(),
+        arguments: json!({
+            "reason_code":"recovery_exhausted",
+            "summary":"cannot continue with current intent",
+            "evidence":{
+              "attempted_recovery":["unknown.recovery.path"],
+              "missing_refs":["inputs.token.decimals"]
+            }
+        }),
+    };
+    let typed_summary = super::StateSummary {
+        completed_segments: 0,
+        completed_nodes: 0,
+        plan_epoch: 0,
+        paused_reason: None,
+        done: false,
+        previous_error: None,
+        input_store: None,
+        runtime_facts: None,
+        input_binding: crate::agent::state_summary::InputBindingContract {
+            schema: "ais-agent-input-binding-contract/0.0.1",
+            bindable_namespace: "inputs",
+            bindable_refs_source: "state_summary.input_store",
+            bindable_refs_projection: "state_summary.input_registry.known_refs",
+            known_refs_only: true,
+            facts_bindable: false,
+        },
+        input_registry: json!({"known_refs":[]}),
+        node_output_refs: json!({"known_refs":[]}),
+        reusable_outputs: None,
+        tool_memory_projection: None,
+        intent_slots: None,
+        intent_context: None,
+        capability_view: None,
+        capability_ready: None,
+        side_effect_lifecycle: None,
+        todo_state: None,
+        recovery_diagnostics: Some(json!({
+            "available_attempt_keys": ["runtime.query.resolve"]
+        })),
+    };
+    let error = decode_segmented_tool_call_with_memory_and_summary(
+        &abort_call,
+        "plan.propose_segment",
+        PlannerRoundPhase::ProposeSegment,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(&typed_summary),
+    )
+    .expect_err("unknown attempted_recovery entries should be rejected");
+    assert!(error.to_string().contains("unknown entry"));
+}
+
+#[test]
+fn decode_abort_intent_accepts_when_history_matches_and_no_recoverable_candidates() {
+    let abort_call = ToolCall {
+        id: "tool-abort".to_string(),
+        name: "plan.abort_intent".to_string(),
+        arguments: json!({
+            "reason_code":"recovery_exhausted",
+            "summary":"cannot continue with current intent",
+            "evidence":{
+              "attempted_recovery":["runtime.query.resolve"],
+              "missing_refs":["inputs.unresolvable.ref"]
+            },
+            "user_fix_hint":"please provide a valid token contract"
+        }),
+    };
+    let typed_summary = super::StateSummary {
+        completed_segments: 0,
+        completed_nodes: 0,
+        plan_epoch: 0,
+        paused_reason: None,
+        done: false,
+        previous_error: None,
+        input_store: None,
+        runtime_facts: None,
+        input_binding: crate::agent::state_summary::InputBindingContract {
+            schema: "ais-agent-input-binding-contract/0.0.1",
+            bindable_namespace: "inputs",
+            bindable_refs_source: "state_summary.input_store",
+            bindable_refs_projection: "state_summary.input_registry.known_refs",
+            known_refs_only: true,
+            facts_bindable: false,
+        },
+        input_registry: json!({"known_refs":[]}),
+        node_output_refs: json!({"known_refs":[]}),
+        reusable_outputs: None,
+        tool_memory_projection: None,
+        intent_slots: None,
+        intent_context: None,
+        capability_view: None,
+        capability_ready: None,
+        side_effect_lifecycle: None,
+        todo_state: None,
+        recovery_diagnostics: Some(json!({
+            "available_attempt_keys": ["runtime.query.resolve"]
+        })),
+    };
+    let decoded = decode_segmented_tool_call_with_memory_and_summary(
+        &abort_call,
+        "plan.propose_segment",
+        PlannerRoundPhase::ProposeSegment,
+        Some(&CandidateContext::default()),
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(&typed_summary),
+    )
+    .expect("abort should be accepted with matched host history and no recoverable refs");
+    assert!(matches!(
+        decoded,
+        DecodedSegmentedToolCall::Final(PlannerToolOutput::AbortIntent(_))
+    ));
+}
+
+#[test]
+fn plan_check_segment_uses_typed_summary_store_projections_for_write_gate_validation() {
+    let mut context = CandidateContext::default();
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let protocol_path = format!("{manifest_dir}/../../fixtures/runner-local/intent-native-erc20-transfer/workspace/erc20.ais.yaml");
+    let protocol_text = std::fs::read_to_string(protocol_path).expect("erc20 protocol fixture");
+    let protocol: ais_sdk::ProtocolDocument =
+        serde_yaml::from_str(protocol_text.as_str()).expect("protocol yaml");
+    context.protocols.push(protocol);
+
+    context.executable_candidates.queries.push(json!({
+        "ref":"erc20@0.0.2/balance-of",
+        "kind":"query"
+    }));
+    context.executable_candidates.actions.push(json!({
+        "ref":"erc20@0.0.2/transfer",
+        "kind":"action"
+    }));
+
+    context.detail_by_ref.insert(
+        "erc20@0.0.2/balance-of".to_string(),
+        json!({
+            "ref":"erc20@0.0.2/balance-of",
+            "kind":"query",
+            "returns":[{"name":"balance","type":"uint256"}]
+        }),
+    );
+    context.detail_by_ref.insert(
+        "erc20@0.0.2/transfer".to_string(),
+        json!({
+            "ref":"erc20@0.0.2/transfer",
+            "kind":"action",
+            "risk_tags":["transfer"],
+            "params":[
+                {"name":"token","type":"asset","required":true},
+                {"name":"to","type":"address","required":true},
+                {"name":"amount","type":"uint256","required":true}
+            ]
+        }),
+    );
+
+    let check_call = ToolCall {
+        id: "tool-check".to_string(),
+        name: "plan.check_segment".to_string(),
+        arguments: json!({
+            "segment": {
+                "segment_id":"seg-transfer",
+                "cursor_in":"0",
+                "cursor_out":"1",
+                "done":false,
+                "summary":"transfer erc20 using inputs.token",
+                "steps":[
+                    {"id":"q_balance","kind":"query","candidate_ref":"erc20@0.0.2/balance-of","inputs":{"owner":{"lit":"0xabc"},"token":{"lit":"0xdef"}}},
+                    {"id":"g_assert","kind":"assert","depends_on":["q_balance"],"inputs":{"condition":{"lit":true}}},
+                    {"id":"a_transfer","kind":"action","candidate_ref":"erc20@0.0.2/transfer","depends_on":["g_assert"],"inputs":{"token":{"ref":"inputs.token"},"to":{"lit":"0xabc"},"amount":{"lit":"1000"}}}
+                ]
+            }
+        }),
+    };
+
+    let mut input_store = crate::agent::input_store::InputStore::default();
+    input_store.upsert_user(
+        "inputs.token",
+        json!({
+            "address": {"lit":"0x8464135c8F25Da09e49BC8782676a84730C318bC"},
+            "decimals": "6"
+        }),
+        "test.prefilled.token",
+    );
+
+    let typed_summary = super::StateSummary {
+        completed_segments: 0,
+        completed_nodes: 0,
+        plan_epoch: 0,
+        paused_reason: None,
+        done: false,
+        previous_error: None,
+        input_store: Some(input_store.to_projected_planning_value()),
+        runtime_facts: None,
+        input_binding: crate::agent::state_summary::InputBindingContract {
+            schema: "ais-agent-input-binding-contract/0.0.1",
+            bindable_namespace: "inputs",
+            bindable_refs_source: "state_summary.input_store",
+            bindable_refs_projection: "state_summary.input_registry.known_refs",
+            known_refs_only: true,
+            facts_bindable: false,
+        },
+        input_registry: json!({"known_refs":["inputs.token"]}),
+        node_output_refs: json!({"known_refs":[]}),
+        reusable_outputs: None,
+        tool_memory_projection: None,
+        intent_slots: None,
+        intent_context: None,
+        capability_view: None,
+        capability_ready: None,
+        side_effect_lifecycle: None,
+        todo_state: None,
+        recovery_diagnostics: Some(json!({
+            "available_attempt_keys": []
+        })),
+    };
+
+    let check_context = SegmentCheckContext {
+        intent: "x".to_string(),
+        session_id: "sess".to_string(),
+        cursor: "0".to_string(),
+        pack_snapshot_hash: "packhash".to_string(),
+        chain_scope: vec!["eip155:1".to_string()],
+        volatile_facts_policy: crate::policy::VolatileFactsPolicy::default(),
+        known_input_refs: vec!["inputs.token".to_string()],
+        grounding_fact_keys: vec![],
+        current_todo_scope: None,
+    };
+
+    let decoded = decode_segmented_tool_call_with_memory_and_summary(
+        &check_call,
+        "plan.propose_segment",
+        PlannerRoundPhase::ProposeSegment,
+        Some(&context),
+        Some(&check_context),
+        None,
+        None,
+        None,
+        None,
+        Some(&typed_summary),
+    )
+    .expect("plan.check_segment should succeed using typed_summary store projections");
+
+    let DecodedSegmentedToolCall::ToolMessage { content, .. } = decoded else {
+        panic!("expected ToolMessage, got {decoded:?}");
+    };
+    let payload: Value = serde_json::from_str(content.as_str()).expect("payload json");
+    if payload.get("ok").and_then(Value::as_bool) != Some(true) {
+        panic!("expected ok=true, got payload={payload}");
+    }
+}
+
+#[test]
 fn begin_prompt_includes_snapshot_hash_for_plan_begin_echo() {
     let payload = render_begin_prompt_with_patch(
         &SegmentBeginRequest {
@@ -3874,10 +4775,10 @@ fn repeated_plan_check_failure_payload_is_structured() {
             "reason_code": "write_gate_missing",
             "issues": [
                 {
-                    "reason_code": "missing_query_assert_branch_chain",
-                    "gate_reason_code": "missing_gate_query_dep",
+                    "reason_code": "missing_gate_data_backing",
+                    "family_reason_code": "missing_query_assert_branch_chain",
                     "step_id": "a_transfer",
-                    "message": "write action must depend on assert/branch gate backed by query facts in the same segment"
+                    "message": "write action must depend on assert/branch gate backed by query ancestry or explicit node outputs"
                 }
             ]
         })
@@ -3939,7 +4840,8 @@ fn plan_check_failure_loop_guard_triggers_on_same_signature() {
         "reason_code": "write_gate_missing",
         "issues": [
             {
-                "reason_code": "missing_query_assert_branch_chain",
+                "reason_code": "missing_gate_data_backing",
+                "family_reason_code": "missing_query_assert_branch_chain",
                 "step_id": "a_transfer",
                 "message": "missing"
             }
@@ -4163,6 +5065,7 @@ fn planner_llm_transcript_writes_full_request_and_response() {
                 max_segments: 8,
             },
             state_summary: Some(json!({})),
+            typed_summary: None,
         })
         .expect("planner run");
     let text = fs::read_to_string(&path).expect("transcript text");
@@ -4207,6 +5110,7 @@ fn planner_llm_transcript_append_mode_keeps_existing_content() {
                 max_segments: 8,
             },
             state_summary: Some(json!({})),
+            typed_summary: None,
         })
         .expect("planner run");
     let text = fs::read_to_string(&path).expect("transcript text");

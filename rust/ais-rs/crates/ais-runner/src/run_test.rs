@@ -57,6 +57,34 @@ fn run_plan_dry_run_json_includes_nodes_and_issues() {
 }
 
 #[test]
+fn write_event_sinks_without_persisted_engine_sink_does_not_advance_watermark() {
+    let command = PlanCommand {
+        plan: PathBuf::from("ignored.plan.json"),
+        config: None,
+        runtime: None,
+        dry_run: false,
+        events_jsonl: None,
+        trace: None,
+        checkpoint: None,
+        commands_stdin_jsonl: false,
+        verbose: false,
+        format: OutputFormat::Text,
+    };
+    let events = vec![EngineEventRecord::new(
+        "run-test",
+        3,
+        "2026-03-07T00:00:00Z",
+        EngineEvent::new(EngineEventType::EnginePaused),
+    )];
+    let mut audit_attempt = crate::audit_contract::AuditStreamAttempt::fresh();
+
+    super::write_event_sinks(&command, &events, &mut audit_attempt).expect("write events");
+
+    assert_eq!(audit_attempt.last_event_seq, None);
+    assert_eq!(audit_attempt.last_event_ts, None);
+}
+
+#[test]
 fn run_plan_dry_run_text_is_stable_and_readable() {
     let plan_path = write_temp_file(
         "plan-text",
@@ -1040,6 +1068,151 @@ chains:
 }
 
 #[test]
+fn checkpoint_resume_appends_attempt_scoped_event_identity_to_same_events_file() {
+    let plan_path = write_temp_file(
+        "plan-attempt-seq-stable",
+        r#"{
+  "schema":"ais-plan/0.0.3",
+  "meta": {},
+  "nodes":[
+    {
+      "id":"swap-1",
+      "chain":"eip155:1",
+      "kind":"execution",
+      "execution":{
+        "type":"evm_call",
+        "to":{"lit":"0x0000000000000000000000000000000000000001"},
+        "abi":{"name":"swapExactTokensForTokens","inputs":[],"outputs":[]},
+        "args":{}
+      },
+      "bindings":{
+        "params":{
+          "spend_amount":{"lit":"10"}
+        }
+      },
+      "extensions":{
+        "policy":{
+          "constraint_templates":[
+            {"name":"max_spend","params":{"amount_atomic":"1"}}
+          ]
+        }
+      }
+    }
+  ]
+}"#,
+    );
+    let config_path = write_temp_file(
+        "runner-config-attempt-seq-stable",
+        r#"
+schema: ais-runner/0.0.1
+chains:
+  eip155:1:
+    rpc_url: https://rpc.evm.example
+"#,
+    );
+    let checkpoint_path = write_temp_file("checkpoint-attempt-seq-stable", "");
+    let events_path = write_temp_file("events-attempt-seq-stable", "");
+
+    let _first = execute_run_plan(&PlanCommand {
+        plan: plan_path.clone(),
+        config: Some(config_path.clone()),
+        runtime: None,
+        dry_run: false,
+        events_jsonl: Some(events_path.display().to_string()),
+        trace: None,
+        checkpoint: Some(checkpoint_path.clone()),
+        commands_stdin_jsonl: false,
+        verbose: false,
+        format: OutputFormat::Json,
+    })
+    .expect("first run must pause for confirm");
+    let _second = execute_run_plan(&PlanCommand {
+        plan: plan_path,
+        config: Some(config_path),
+        runtime: None,
+        dry_run: false,
+        events_jsonl: Some(events_path.display().to_string()),
+        trace: None,
+        checkpoint: Some(checkpoint_path.clone()),
+        commands_stdin_jsonl: false,
+        verbose: false,
+        format: OutputFormat::Json,
+    })
+    .expect("second run must resume and append");
+
+    let records = fs::read_to_string(events_path)
+        .expect("events")
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("jsonl"))
+        .collect::<Vec<_>>();
+    let confirm_records = records
+        .iter()
+        .filter(|record| {
+            record.get("type").and_then(Value::as_str) == Some("need_user_confirm")
+                || record.pointer("/event/type").and_then(Value::as_str)
+                    == Some("need_user_confirm")
+        })
+        .collect::<Vec<_>>();
+    assert!(confirm_records.len() >= 2);
+    assert_eq!(
+        confirm_records[0].get("attempt_id"),
+        Some(&json!("attempt-1"))
+    );
+    assert_eq!(
+        confirm_records[1].get("attempt_id"),
+        Some(&json!("attempt-2"))
+    );
+    assert_eq!(
+        confirm_records[0].get("seq_scope"),
+        Some(&json!("attempt_local"))
+    );
+    assert_eq!(
+        confirm_records[1].get("seq_scope"),
+        Some(&json!("attempt_local"))
+    );
+    assert_eq!(confirm_records[0].get("seq"), confirm_records[1].get("seq"));
+
+    let last_record = records.last().expect("last event");
+    let checkpoint = load_checkpoint_from_path(&checkpoint_path).expect("checkpoint");
+    assert_eq!(
+        checkpoint
+            .extensions
+            .get("resume_core")
+            .and_then(|value| value.get("audit_stream"))
+            .and_then(|value| value.get("last_event_attempt_id"))
+            .and_then(Value::as_str),
+        last_record.get("attempt_id").and_then(Value::as_str)
+    );
+    assert_eq!(
+        checkpoint
+            .extensions
+            .get("resume_core")
+            .and_then(|value| value.get("audit_stream"))
+            .and_then(|value| value.get("last_event_seq"))
+            .and_then(Value::as_u64),
+        last_record.get("seq").and_then(Value::as_u64)
+    );
+    assert_eq!(
+        checkpoint
+            .extensions
+            .get("resume_core")
+            .and_then(|value| value.get("audit_stream"))
+            .and_then(|value| value.get("last_event_ts"))
+            .and_then(Value::as_str),
+        last_record.get("ts").and_then(Value::as_str)
+    );
+    assert_eq!(
+        checkpoint
+            .extensions
+            .get("resume_core")
+            .and_then(|value| value.get("audit_stream"))
+            .and_then(|value| value.get("last_event_run_id"))
+            .and_then(Value::as_str),
+        last_record.get("run_id").and_then(Value::as_str)
+    );
+}
+
+#[test]
 fn checkpoint_save_persists_approval_and_side_effect_ledgers() {
     let checkpoint_path = write_temp_file("checkpoint-ledger", "");
     let command = PlanCommand {
@@ -1125,10 +1298,29 @@ fn checkpoint_save_persists_approval_and_side_effect_ledgers() {
         &plan,
         &state,
         &ledger,
+        &crate::audit_contract::AuditStreamAttempt::fresh(),
     )
     .expect("checkpoint save must succeed");
 
     let checkpoint = load_checkpoint_from_path(&checkpoint_path).expect("checkpoint load");
+    assert_eq!(
+        checkpoint
+            .extensions
+            .get("resume_core")
+            .and_then(|value| value.get("audit_stream"))
+            .and_then(|value| value.get("attempt_id"))
+            .and_then(Value::as_str),
+        Some("attempt-1")
+    );
+    assert_eq!(
+        checkpoint
+            .extensions
+            .get("resume_core")
+            .and_then(|value| value.get("audit_stream"))
+            .and_then(|value| value.get("seq_scope"))
+            .and_then(Value::as_str),
+        Some("attempt_local")
+    );
     assert!(!checkpoint.approvals_ledger.is_empty());
     assert!(checkpoint
         .approvals_ledger

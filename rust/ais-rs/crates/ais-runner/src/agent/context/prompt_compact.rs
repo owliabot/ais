@@ -21,20 +21,6 @@ pub(in super::super) fn build_prompt_compact(summary: &Value) -> Value {
             .unwrap_or(Value::Null),
     );
     compact.insert(
-        "input_slots".to_string(),
-        summary
-            .pointer("/input_slots")
-            .cloned()
-            .unwrap_or(Value::Null),
-    );
-    compact.insert(
-        "canonical_context".to_string(),
-        summary
-            .pointer("/canonical_context")
-            .cloned()
-            .unwrap_or(Value::Null),
-    );
-    compact.insert(
         "intent_slots".to_string(),
         summary
             .pointer("/intent_slots")
@@ -59,6 +45,13 @@ pub(in super::super) fn build_prompt_compact(summary: &Value) -> Value {
         "node_output_refs".to_string(),
         summary
             .pointer("/node_output_refs")
+            .cloned()
+            .unwrap_or(Value::Null),
+    );
+    compact.insert(
+        "reusable_outputs".to_string(),
+        summary
+            .pointer("/reusable_outputs")
             .cloned()
             .unwrap_or(Value::Null),
     );
@@ -135,20 +128,23 @@ fn build_summary_text(summary: &Value) -> String {
         })
         .unwrap_or("-");
     let missing_inputs = summary
-        .pointer("/input_slots/missing")
-        .and_then(Value::as_array)
-        .map(Vec::len)
+        .pointer("/input_registry/counts/missing")
+        .and_then(Value::as_u64)
         .unwrap_or(0);
     let previous_error = summary
         .pointer("/previous_error/reason_code")
         .and_then(Value::as_str)
         .unwrap_or("none");
+    let reusable_refs = summary
+        .pointer("/reusable_outputs/summary/reusable_refs")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     let pressure_mode = summary
         .pointer("/context_budget/pressure_mode")
         .and_then(Value::as_str)
         .unwrap_or("normal");
 
     format!(
-        "todo={todo_title}; missing_inputs={missing_inputs}; previous_error={previous_error}; pressure_mode={pressure_mode}"
+        "todo={todo_title}; missing_inputs={missing_inputs}; reusable_refs={reusable_refs}; previous_error={previous_error}; pressure_mode={pressure_mode}"
     )
 }

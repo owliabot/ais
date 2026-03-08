@@ -19,6 +19,7 @@ fn test_agent_command() -> AgentCommand {
         runtime: None,
         events_jsonl: None,
         trace: None,
+        agent_trace_jsonl: None,
         checkpoint: None,
         profile: AgentProfile::Standard,
         llm_script_jsonl: None,
@@ -48,6 +49,7 @@ fn test_segmented_context() -> SegmentedAgentContext {
             max_segments: 4,
         },
         InputStore::default(),
+        super::super::runtime_facts_store::RuntimeFactsStore::default(),
         TodoBoard::bootstrap("check balances and transfer"),
         4,
         4,
@@ -99,6 +101,7 @@ fn native_erc20_fixture_command_for_candidates() -> AgentCommand {
         runtime: None,
         events_jsonl: None,
         trace: None,
+        agent_trace_jsonl: None,
         checkpoint: None,
         profile: AgentProfile::DemoScripted,
         llm_script_jsonl: None,
@@ -116,11 +119,281 @@ fn native_erc20_fixture_command_for_candidates() -> AgentCommand {
     }
 }
 
+fn conditional_transfer_segment() -> PlanSketchSegment {
+    serde_json::from_value(json!({
+        "segment_id":"seg-conditional-transfer",
+        "cursor_in":"c2",
+        "cursor_out":"c3",
+        "done":false,
+        "steps":[
+            {
+                "id":"q_native_balance",
+                "kind":"query",
+                "candidate_ref":"evm-native-utils@0.0.1/native-balance",
+                "inputs":{"addr":{"ref":"inputs.owner"}}
+            },
+            {
+                "id":"q_token_balance",
+                "kind":"query",
+                "candidate_ref":"erc20@0.0.2/balance-of",
+                "inputs":{
+                    "owner":{"ref":"inputs.owner"},
+                    "token":{"object":{
+                        "address":{"lit":"0x8464135c8F25Da09e49BC8782676a84730C318bC"},
+                        "chain_ref":{"lit":"eip155:31338"}
+                    }}
+                }
+            },
+            {
+                "id":"check_balance_condition",
+                "kind":"assert",
+                "depends_on":["q_native_balance","q_token_balance"],
+                "inputs":{},
+                "when":{"cel":"nodes.q_native_balance.outputs.balance > to_atomic(100, 18) && nodes.q_token_balance.outputs.balance > to_atomic(100, inputs.token.decimals)"}
+            },
+            {
+                "id":"a_native_transfer",
+                "kind":"action",
+                "candidate_ref":"evm-native-utils@0.0.1/native-transfer",
+                "depends_on":["check_balance_condition"],
+                "inputs":{
+                    "amount":{"lit":5000000000000000000u64},
+                    "to":{"ref":"inputs.recipient"}
+                }
+            },
+            {
+                "id":"a_token_transfer",
+                "kind":"action",
+                "candidate_ref":"erc20@0.0.2/transfer",
+                "depends_on":["check_balance_condition"],
+                "inputs":{
+                    "amount":{"lit":10000000},
+                    "to":{"ref":"inputs.recipient"},
+                    "token":{"object":{
+                        "address":{"lit":"0x8464135c8F25Da09e49BC8782676a84730C318bC"},
+                        "chain_ref":{"lit":"eip155:31338"}
+                    }}
+                }
+            }
+        ],
+        "extensions":{}
+    }))
+    .expect("segment")
+}
+
+fn conditional_transfer_planned_segment() -> PlannedSegment {
+    PlannedSegment {
+        todo_id: "todo.transfer".to_string(),
+        summary: Some("conditional transfer".to_string()),
+        segment: conditional_transfer_segment(),
+        cursor_next: "c3".to_string(),
+        done: false,
+        issues: vec![],
+    }
+}
+
+fn scripted_grounding_unavailable_missing_input_response(
+    question_id: &str,
+    question_text: &str,
+    message: &str,
+) -> CompleteWithToolsResponse {
+    CompleteWithToolsResponse {
+        assistant_content: Some("grounding unavailable".to_string()),
+        tool_calls: vec![ToolCall {
+            id: "tool-ground-unavailable".to_string(),
+            name: "plan.ground_intent".to_string(),
+            arguments: json!({
+                "status":"unavailable",
+                "issues":[],
+                "error": {
+                    "reason_code":"missing_required_input",
+                    "message": message,
+                    "details": {
+                        "questions":[
+                            {
+                                "id": question_id,
+                                "question": question_text,
+                                "required": true,
+                                "options": []
+                            }
+                        ],
+                        "recovery_exhaustion": {
+                            "unresolved_refs": [question_id],
+                            "reasons": ["no_query_candidates"],
+                            "attempt_trace_id": "missing_resolution:grounding:grounding:need_user_input"
+                        }
+                    }
+                }
+            }),
+        }],
+    }
+}
+
+#[test]
+fn compile_guard_matches_store_aware_segment_compile_for_bound_decimals() {
+    let command = native_erc20_fixture_command_for_candidates();
+    let pack = crate::policy::load_pack_document(command.pack.as_ref().expect("fixture pack path"))
+        .expect("pack");
+    let candidate_context = super::super::candidates::build_candidate_context_for_agent(
+        &command,
+        Some(&pack),
+        super::super::candidates::DEFAULT_MAX_INDEX_CANDIDATES,
+    )
+    .expect("candidate context build")
+    .expect("workspace candidates");
+    let mut context = test_segmented_context();
+    let state = EngineRunnerState::default();
+
+    let _ = super::upsert_store_value_with_source(
+        context.input_store_mut(),
+        "owner",
+        json!("0x70997970c51812dc3a010c7d01b50e0d17dc79c8"),
+        InputValueLayer::Seed,
+        "user",
+        100,
+        "test.owner",
+    );
+    let _ = super::upsert_store_value_with_source(
+        context.input_store_mut(),
+        "recipient",
+        json!("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"),
+        InputValueLayer::Seed,
+        "user",
+        100,
+        "test.recipient",
+    );
+    let _ = super::upsert_store_value_with_source(
+        context.input_store_mut(),
+        "token.decimals",
+        json!(6),
+        InputValueLayer::Seed,
+        "user",
+        100,
+        "test.token.decimals",
+    );
+    context.refresh_state_summary(&state, false);
+
+    let mut planned = conditional_transfer_planned_segment();
+    let chain_scope = ["eip155:31338".to_string()];
+    let guard_plan = compile_guard(
+        &mut planned,
+        &context,
+        &candidate_context,
+        None,
+        &chain_scope,
+        crate::policy::VolatileFactsPolicy::default(),
+    )
+    .expect("compile_guard should accept store-backed decimals");
+
+    let known_refs = super::super::known_input_refs_from_typed_summary(context.typed_summary());
+    let compile_plan = super::super::compile_segment_plan_with_snapshot_hash(
+        context.intent(),
+        context.session().session_id.as_str(),
+        context.session().cursor.as_str(),
+        &planned.segment,
+        &candidate_context,
+        context.session().snapshot_hash.as_str(),
+        &chain_scope,
+        known_refs.as_slice(),
+        Some(context.runtime_facts_store()),
+        Some(context.input_store()),
+    )
+    .expect("direct compile should match compile_guard");
+
+    let guard_node_ids = guard_plan
+        .nodes
+        .iter()
+        .filter_map(|node| node.get("id").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    let compile_node_ids = compile_plan
+        .nodes
+        .iter()
+        .filter_map(|node| node.get("id").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    assert_eq!(guard_node_ids, compile_node_ids);
+}
+
+#[test]
+fn compile_guard_and_segment_compile_fail_identically_when_decimals_are_absent() {
+    let command = native_erc20_fixture_command_for_candidates();
+    let pack = crate::policy::load_pack_document(command.pack.as_ref().expect("fixture pack path"))
+        .expect("pack");
+    let candidate_context = super::super::candidates::build_candidate_context_for_agent(
+        &command,
+        Some(&pack),
+        super::super::candidates::DEFAULT_MAX_INDEX_CANDIDATES,
+    )
+    .expect("candidate context build")
+    .expect("workspace candidates");
+    let mut context = test_segmented_context();
+    let state = EngineRunnerState::default();
+
+    let _ = super::upsert_store_value_with_source(
+        context.input_store_mut(),
+        "owner",
+        json!("0x70997970c51812dc3a010c7d01b50e0d17dc79c8"),
+        InputValueLayer::Seed,
+        "user",
+        100,
+        "test.owner",
+    );
+    let _ = super::upsert_store_value_with_source(
+        context.input_store_mut(),
+        "recipient",
+        json!("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"),
+        InputValueLayer::Seed,
+        "user",
+        100,
+        "test.recipient",
+    );
+    context.refresh_state_summary(&state, false);
+
+    let chain_scope = ["eip155:31338".to_string()];
+    let mut planned = conditional_transfer_planned_segment();
+    let guard_error = compile_guard(
+        &mut planned,
+        &context,
+        &candidate_context,
+        None,
+        &chain_scope,
+        crate::policy::VolatileFactsPolicy::default(),
+    )
+    .expect_err("compile_guard should reject missing decimals");
+    let known_refs = super::super::known_input_refs_from_typed_summary(context.typed_summary());
+    let compile_error = super::super::compile_segment_plan_with_snapshot_hash(
+        context.intent(),
+        context.session().session_id.as_str(),
+        context.session().cursor.as_str(),
+        &planned.segment,
+        &candidate_context,
+        context.session().snapshot_hash.as_str(),
+        &chain_scope,
+        known_refs.as_slice(),
+        Some(context.runtime_facts_store()),
+        Some(context.input_store()),
+    )
+    .expect_err("direct compile should reject missing decimals too");
+
+    assert_eq!(
+        guard_error.pointer("/reason_code"),
+        compile_error.pointer("/reason_code")
+    );
+    assert_eq!(
+        guard_error.pointer("/issues/0/reason_code"),
+        compile_error.pointer("/issues/0/reason_code")
+    );
+    assert_eq!(
+        guard_error.pointer("/issues/0/required_fact"),
+        compile_error.pointer("/issues/0/required_fact")
+    );
+}
+
 #[test]
 fn precheck_missing_input_refs_for_current_todo_uses_required_facts_and_state_summary() {
     let mut context = test_segmented_context();
-    context.todo_board.replace_from_specs(
-        context.intent.as_str(),
+    let intent = context.intent.clone();
+    context.todo_board_mut().replace_from_specs(
+        intent.as_str(),
         &[TodoSpec {
             title: "todo".to_string(),
             required_facts: vec![
@@ -132,13 +405,45 @@ fn precheck_missing_input_refs_for_current_todo_uses_required_facts_and_state_su
             acceptance: vec![],
         }],
     );
-    context.state_summary = Some(json!({
+    *context.packed_summary_mut() = Some(json!({
         "input_registry": {
             "known_refs": ["inputs.owner"]
         }
     }));
+    *context.typed_summary_mut() = Some(super::super::state_summary::StateSummary {
+        completed_segments: 0,
+        completed_nodes: 0,
+        plan_epoch: 0,
+        paused_reason: None,
+        done: false,
+        previous_error: None,
+        input_store: None,
+        runtime_facts: None,
+        input_binding: super::super::state_summary::InputBindingContract {
+            schema: "ais-agent-input-binding-contract/0.0.1",
+            bindable_namespace: "inputs",
+            bindable_refs_source: "state_summary.input_store",
+            bindable_refs_projection: "state_summary.input_registry.known_refs",
+            known_refs_only: true,
+            facts_bindable: false,
+        },
+        input_registry: json!({"known_refs": ["inputs.owner"]}),
+        node_output_refs: json!({"known_refs": []}),
+        reusable_outputs: None,
+        tool_memory_projection: None,
+        intent_slots: None,
+        intent_context: None,
+        capability_view: None,
+        capability_ready: None,
+        side_effect_lifecycle: None,
+        todo_state: None,
+        recovery_diagnostics: None,
+    });
 
-    let refs = precheck_missing_input_refs_for_current_todo(&context, context.state_summary().as_ref());
+    let refs = super::missing_resolution::precheck_missing_input_refs_for_current_todo(
+        &context,
+        context.typed_summary(),
+    );
     assert_eq!(
         refs,
         vec![
@@ -379,21 +684,21 @@ fn refresh_tool_memory_projection_keeps_planning_memory_entries() {
             snapshot_hash: "snap-prune".to_string(),
             tool_cache: vec![
                 super::super::planning_memory::PlanningMemoryCacheEntry {
-                    key: "list_candidates:1".to_string(),
+                    key: "catalog.discover:1".to_string(),
                     content: json!({
                         "protocols":[{"protocol":"erc20","actions":[{"ref":"a"}],"queries":[{"ref":"q"}],"chains":["eip155:*"]}]
                     })
                     .to_string(),
                 },
                 super::super::planning_memory::PlanningMemoryCacheEntry {
-                    key: "list_candidates:2".to_string(),
+                    key: "catalog.discover:2".to_string(),
                     content: json!({
                         "protocols":[{"protocol":"uniswap","actions":[{"ref":"b"}],"queries":[{"ref":"q2"}],"chains":["eip155:*"]}]
                     })
                     .to_string(),
                 },
                 super::super::planning_memory::PlanningMemoryCacheEntry {
-                    key: "catalog.search:1".to_string(),
+                    key: "catalog.discover:1".to_string(),
                     content: json!({
                         "query":"transfer",
                         "returned_matches":0,
@@ -402,7 +707,7 @@ fn refresh_tool_memory_projection_keeps_planning_memory_entries() {
                     .to_string(),
                 },
                 super::super::planning_memory::PlanningMemoryCacheEntry {
-                    key: "catalog.search:2".to_string(),
+                    key: "catalog.discover:2".to_string(),
                     content: json!({
                         "query":"transfer",
                         "returned_matches":4,
@@ -414,7 +719,7 @@ fn refresh_tool_memory_projection_keeps_planning_memory_entries() {
                     .to_string(),
                 },
                 super::super::planning_memory::PlanningMemoryCacheEntry {
-                    key: "catalog.search:3".to_string(),
+                    key: "catalog.discover:3".to_string(),
                     content: json!({
                         "query":"swap",
                         "returned_matches":1,
@@ -466,7 +771,7 @@ fn refresh_tool_memory_projection_keeps_planning_memory_entries() {
     .len();
 
     let mut context = test_segmented_context();
-    context.state_summary = Some(json!({
+    *context.packed_summary_mut() = Some(json!({
         "context_budget": {
             "pressure_mode": "critical"
         }
@@ -497,7 +802,10 @@ fn refresh_tool_memory_projection_keeps_planning_memory_entries() {
             .unwrap_or(0)
             > 0
     );
-    let projection = context.tool_memory_projection.clone().expect("projection");
+    let projection = context
+        .tool_memory_projection()
+        .clone()
+        .expect("projection");
     assert!(
         projection.get("recent").is_some() || projection.get("cached_refs").is_some(),
         "expected projection to include either full/summary recent entries or skeleton cached_refs; projection={projection:?}"
@@ -517,7 +825,7 @@ fn refresh_tool_memory_projection_records_empty_projection_estimate() {
                 content: "{unparseable}".to_string(),
             },
             super::super::planning_memory::PlanningMemoryCacheEntry {
-                key: "catalog.search:legacy".to_string(),
+                key: "catalog.discover:legacy".to_string(),
                 content: "{unparseable}".to_string(),
             },
         ],
@@ -527,7 +835,7 @@ fn refresh_tool_memory_projection_records_empty_projection_estimate() {
     )));
 
     let mut context = test_segmented_context();
-    context.state_summary = Some(json!({
+    *context.packed_summary_mut() = Some(json!({
         "context_budget": {
             "pressure_mode": "critical"
         }
@@ -542,7 +850,7 @@ fn refresh_tool_memory_projection_records_empty_projection_estimate() {
         usage.pointer("/diagnostics/memory_projection_estimated_tokens"),
         Some(&json!(0))
     );
-    assert!(context.tool_memory_projection.is_none());
+    assert!(context.tool_memory_projection().is_none());
 }
 
 #[test]
@@ -580,15 +888,23 @@ fn apply_segment_stores_projects_query_and_action_outputs() {
         ..EngineRunnerState::default()
     };
     let mut input_store = InputStore::default();
+    let mut runtime_facts_store = super::super::runtime_facts_store::RuntimeFactsStore::default();
 
-    super::phase_machine::segment_exec::apply_segment_stores_from_runtime(
+    super::phase_machine::segment_exec::apply_segment_stores_from_runtime_with_runtime_facts(
         &segment,
         &state,
+        &mut runtime_facts_store,
         &mut input_store,
         false,
     );
 
     assert!(input_store.get("facts.balance").is_none());
+    assert_eq!(
+        runtime_facts_store
+            .get("facts.balance")
+            .and_then(|entry| entry.value.as_str()),
+        Some("100")
+    );
     assert_eq!(
         input_store
             .get("inputs.tx.hash")
@@ -677,7 +993,7 @@ fn build_todo_receipt_collects_completed_nodes_and_tx_hashes() {
         done: false,
         issues: Vec::new(),
     };
-    let mut state = EngineRunnerState {
+    let state = EngineRunnerState {
         completed_node_ids: vec!["seg_1/q1".to_string()],
         paused_reason: Some("need_user_confirm:seg_1/a1".to_string()),
         runtime: json!({
@@ -713,12 +1029,13 @@ fn build_todo_receipt_collects_completed_nodes_and_tx_hashes() {
     ];
     let mut checkpoint_ledger = RunnerCheckpointLedger::default();
     checkpoint_ledger.absorb_events(events.as_slice());
-    let receipt = build_todo_receipt(
-        &planned,
+    let receipt = super::receipt_view::build_segment_todo_receipt(
+        planned.todo_id.as_str(),
+        &planned.segment,
         EngineRunStatus::Paused,
-        &mut state,
-        &checkpoint_ledger,
+        &state,
         events.as_slice(),
+        Some(&checkpoint_ledger),
     );
     assert_eq!(receipt.todo_id, "todo_1");
     assert_eq!(receipt.segment_id, "seg_1");
@@ -727,7 +1044,7 @@ fn build_todo_receipt_collects_completed_nodes_and_tx_hashes() {
     assert_eq!(receipt.tx_hashes, vec!["0xabc".to_string()]);
     assert_eq!(
         state.runtime.pointer("/nodes/seg_1~1a1/outputs/tx_hash"),
-        Some(&json!("0xabc"))
+        Some(&json!("0xruntime_should_be_ignored"))
     );
     assert_eq!(
         checkpoint_ledger.side_effects()[0].tx_hash,
@@ -764,7 +1081,7 @@ fn build_todo_receipt_collects_ledger_tx_hashes_for_native_and_erc20_writes() {
         done: false,
         issues: Vec::new(),
     };
-    let mut state = EngineRunnerState {
+    let state = EngineRunnerState {
         completed_node_ids: vec![
             "seg_1/native_send".to_string(),
             "seg_1/erc20_send".to_string(),
@@ -814,12 +1131,13 @@ fn build_todo_receipt_collects_ledger_tx_hashes_for_native_and_erc20_writes() {
     let mut checkpoint_ledger = RunnerCheckpointLedger::default();
     checkpoint_ledger.absorb_events(events.as_slice());
 
-    let receipt = build_todo_receipt(
-        &planned,
+    let receipt = super::receipt_view::build_segment_todo_receipt(
+        planned.todo_id.as_str(),
+        &planned.segment,
         EngineRunStatus::Completed,
-        &mut state,
-        &checkpoint_ledger,
+        &state,
         events.as_slice(),
+        Some(&checkpoint_ledger),
     );
     assert_eq!(
         receipt.tx_hashes,
@@ -829,13 +1147,13 @@ fn build_todo_receipt_collects_ledger_tx_hashes_for_native_and_erc20_writes() {
         state
             .runtime
             .pointer("/nodes/seg_1~1native_send/outputs/tx_hash"),
-        Some(&json!("0xnative"))
+        Some(&json!("0xruntime_native"))
     );
     assert_eq!(
         state
             .runtime
             .pointer("/nodes/seg_1~1erc20_send/outputs/tx_hash"),
-        Some(&json!("0xerc20"))
+        Some(&json!("0xruntime_erc20"))
     );
 }
 
@@ -908,7 +1226,10 @@ fn sync_todo_progress_receipt_tx_hashes_from_ledger_updates_runtime_on_restore()
         EngineEventRecord::new("run-1", 4, "1970-01-01T00:00:01Z", erc20_event),
     ]);
 
-    sync_todo_progress_receipt_tx_hashes_from_ledger(&mut state, &checkpoint_ledger);
+    super::receipt_view::project_todo_progress_receipts_from_ledger(
+        &mut state.runtime,
+        &checkpoint_ledger,
+    );
 
     assert_eq!(
         state
@@ -926,18 +1247,18 @@ fn sync_todo_progress_receipt_tx_hashes_from_ledger_updates_runtime_on_restore()
         state
             .runtime
             .pointer("/nodes/seg_1~1native_send/outputs/tx_hash"),
-        Some(&json!("0xnative"))
+        Some(&json!("0xruntime_native"))
     );
     assert_eq!(
         state
             .runtime
             .pointer("/nodes/seg_1~1erc20_send/outputs/tx_hash"),
-        Some(&json!("0xerc20"))
+        Some(&json!("0xruntime_erc20"))
     );
 }
 
 #[test]
-fn completion_gate_stops_after_last_todo_when_acceptance_is_satisfied() {
+fn completion_gate_does_not_treat_intent_context_as_acceptance_source() {
     let mut board = TodoBoard::bootstrap("native + erc20 conditional transfer");
     board.replace_from_specs(
         "native + erc20 conditional transfer",
@@ -958,23 +1279,52 @@ fn completion_gate_stops_after_last_todo_when_acceptance_is_satisfied() {
     );
     board.mark_current_done();
 
-    let state_summary = json!({
-        "intent_context": {
+    let typed_summary = super::super::state_summary::StateSummary {
+        completed_segments: 0,
+        completed_nodes: 0,
+        plan_epoch: 0,
+        paused_reason: None,
+        done: false,
+        previous_error: None,
+        input_store: None,
+        runtime_facts: None,
+        input_binding: super::super::state_summary::InputBindingContract {
+            schema: "ais-agent-input-binding-contract/0.0.1",
+            bindable_namespace: "inputs",
+            bindable_refs_source: "state_summary.input_store",
+            bindable_refs_projection: "state_summary.input_registry.known_refs",
+            known_refs_only: true,
+            facts_bindable: false,
+        },
+        input_registry: json!({"known_refs": []}),
+        node_output_refs: json!({"known_refs": []}),
+        reusable_outputs: None,
+        tool_memory_projection: None,
+        intent_slots: None,
+        intent_context: Some(json!({
             "facts": {
                 "facts": {
                     "native": {"transfer_done": true},
                     "erc20": {"transfer_done": true}
                 }
             }
-        }
-    });
+        })),
+        capability_view: None,
+        capability_ready: None,
+        side_effect_lifecycle: None,
+        todo_state: None,
+        recovery_diagnostics: None,
+    };
 
-    let done = advance_todo_after_execute_completion(&mut board, Some(&state_summary), false);
+    let done = advance_todo_after_execute_completion(&mut board, Some(&typed_summary), false);
     let runtime = board.to_runtime_value();
-    assert!(done);
-    assert!(board.current().is_none());
-    assert_eq!(runtime.pointer("/next_seq"), Some(&json!(3)));
-    assert!(runtime.pointer("/todos/2").is_none());
+    assert!(!done);
+    assert!(board.current().is_some());
+    assert_eq!(runtime.pointer("/next_seq"), Some(&json!(4)));
+    assert_eq!(
+        runtime.pointer("/todos/2/title"),
+        Some(&json!("Continue intent segment 3"))
+    );
 }
 
 #[test]
@@ -999,17 +1349,43 @@ fn completion_gate_opens_follow_up_when_acceptance_is_not_satisfied() {
     );
     board.mark_current_done();
 
-    let state_summary = json!({
-        "intent_context": {
+    let typed_summary = super::super::state_summary::StateSummary {
+        completed_segments: 0,
+        completed_nodes: 0,
+        plan_epoch: 0,
+        paused_reason: None,
+        done: false,
+        previous_error: None,
+        input_store: None,
+        runtime_facts: None,
+        input_binding: super::super::state_summary::InputBindingContract {
+            schema: "ais-agent-input-binding-contract/0.0.1",
+            bindable_namespace: "inputs",
+            bindable_refs_source: "state_summary.input_store",
+            bindable_refs_projection: "state_summary.input_registry.known_refs",
+            known_refs_only: true,
+            facts_bindable: false,
+        },
+        input_registry: json!({"known_refs": []}),
+        node_output_refs: json!({"known_refs": []}),
+        reusable_outputs: None,
+        tool_memory_projection: None,
+        intent_slots: None,
+        intent_context: Some(json!({
             "facts": {
                 "facts": {
                     "native": {"transfer_done": true}
                 }
             }
-        }
-    });
+        })),
+        capability_view: None,
+        capability_ready: None,
+        side_effect_lifecycle: None,
+        todo_state: None,
+        recovery_diagnostics: None,
+    };
 
-    let done = advance_todo_after_execute_completion(&mut board, Some(&state_summary), false);
+    let done = advance_todo_after_execute_completion(&mut board, Some(&typed_summary), false);
     let runtime = board.to_runtime_value();
     assert!(!done);
     assert_eq!(runtime.pointer("/current_todo/id"), Some(&json!("todo_3")));
@@ -1060,7 +1436,10 @@ fn missing_required_input_payload_from_pause_maps_need_user_input_event() {
         payload.pointer("/suggested_paths/0"),
         Some(&json!("inputs.owner"))
     );
-    assert_eq!(payload.pointer("/questions/0/id"), Some(&json!("inputs.owner")));
+    assert_eq!(
+        payload.pointer("/questions/0/id"),
+        Some(&json!("inputs.owner"))
+    );
 }
 
 #[test]
@@ -1105,11 +1484,14 @@ fn apply_intent_grounding_normalizes_prefixed_keys_and_wrapped_values() {
         Some("0xabc")
     );
     assert_eq!(
-        input_store
-            .get("inputs.token")
-            .and_then(|entry| entry.value.pointer("/address"))
-            .and_then(Value::as_str),
-        Some("0xtoken")
+        input_store.get_projected("inputs.token").and_then(|entry| {
+            entry
+                .value
+                .pointer("/address")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        }),
+        Some("0xtoken".to_string())
     );
     assert!(summary.applied.iter().any(|item| item == "inputs.owner:95"));
 }
@@ -1307,6 +1689,15 @@ fn grounding_planner_call_failed_falls_back_instead_of_hard_fail() {
     let command = test_agent_command();
     let mut state = EngineRunnerState::default();
     let mut context = test_segmented_context();
+    let _ = super::upsert_store_value_with_source(
+        context.input_store_mut(),
+        "token.address",
+        json!("0x8464135c8F25Da09e49BC8782676a84730C318bC"),
+        InputValueLayer::Derived,
+        "test_seed",
+        90,
+        "test.seed.token.address",
+    );
     context.refresh_state_summary(&state, false);
     let provider = ScriptedLlmProvider::from_responses(vec![Err(LlmProviderError::CallFailed {
         reason: "grounding transport unavailable".to_string(),
@@ -1443,41 +1834,50 @@ fn planning_failure_checkpoint_save_error_preserves_primary_error() {
 
     let active_plan = super::empty_plan_document();
     let active_plan_hash = super::hash_plan(&active_plan).expect("hash active plan");
-    let checkpoint_ledger = RunnerCheckpointLedger::default();
+    let mut checkpoint_ledger = RunnerCheckpointLedger::default();
     let checkpoint_extensions = checkpoint_ext::AgentCheckpointExtensions::default();
     let input_store = InputStore::default();
+    let runtime_facts_store = super::super::runtime_facts_store::RuntimeFactsStore::default();
     let planning_error = RunnerError::Llm("primary planner failure".to_string());
 
     let mut probe_state = EngineRunnerState::default();
+    let mut audit_attempt = crate::audit_contract::AuditStreamAttempt::fresh();
     let probe_error = super::checkpoint_flow::record_planning_failure_event_and_checkpoint(
         &command,
         "run-probe",
         &active_plan_hash,
         &active_plan,
         &mut probe_state,
-        &checkpoint_ledger,
+        &mut checkpoint_ledger,
         None,
         &input_store,
+        &runtime_facts_store,
         &checkpoint_extensions,
         &planning_error,
         1,
+        &mut audit_attempt,
     )
     .expect_err("checkpoint write should fail when path is a directory");
     assert!(matches!(probe_error, RunnerError::CheckpointSave { .. }));
 
     let mut state = EngineRunnerState::default();
+    let ckpt = super::checkpoint_flow::CheckpointGuard {
+        command: &command,
+        run_id: "run-main",
+        active_plan_hash: &active_plan_hash,
+        active_plan: &active_plan,
+    };
     let returned = record_planning_failure_preserving_primary_error(
-        &command,
-        "run-main",
-        &active_plan_hash,
-        &active_plan,
+        &ckpt,
         &mut state,
-        &checkpoint_ledger,
+        &mut checkpoint_ledger,
         None,
         &input_store,
+        &runtime_facts_store,
         &checkpoint_extensions,
         1,
         planning_error,
+        &mut audit_attempt,
     );
 
     assert_eq!(state.next_seq, 1);
@@ -1678,7 +2078,7 @@ fn missing_required_input_refs_keep_object_ref_generic() {
     let payload = json!({
         "missing_refs": ["inputs.owner", "inputs.token"]
     });
-    let refs = super::super::missing_ref_recovery::missing_required_input_refs(&payload);
+    let refs = super::super::missing_resolution::missing_required_input_refs(&payload);
     assert_eq!(
         refs,
         vec!["inputs.owner".to_string(), "inputs.token".to_string()]
@@ -1837,23 +2237,24 @@ fn seed_grounding_non_actionable_repair_context_clears_pause_and_runtime_marker(
 
 #[test]
 fn selected_query_refs_from_missing_resolution_picks_first_candidate_per_ref() {
-    let refs = super::super::missing_ref_recovery::selected_query_refs_from_missing_resolution(&json!({
-        "resolved": [
-            {
-                "missing_ref": "inputs.token.decimals",
-                "query_candidates": [
-                    {"query_ref":"erc20@0.0.2/decimals","score":120},
-                    {"query_ref":"erc20@0.0.2/balanceOf","score":40}
-                ]
-            },
-            {
-                "missing_ref": "inputs.token.address",
-                "query_candidates": [
-                    {"query_ref":"erc20@0.0.2/token","score":100}
-                ]
-            }
-        ]
-    }));
+    let refs =
+        super::super::missing_resolution::selected_query_refs_from_missing_resolution(&json!({
+            "resolved": [
+                {
+                    "missing_ref": "inputs.token.decimals",
+                    "query_candidates": [
+                        {"query_ref":"erc20@0.0.2/decimals","score":120},
+                        {"query_ref":"erc20@0.0.2/balanceOf","score":40}
+                    ]
+                },
+                {
+                    "missing_ref": "inputs.token.address",
+                    "query_candidates": [
+                        {"query_ref":"erc20@0.0.2/token","score":100}
+                    ]
+                }
+            ]
+        }));
     assert_eq!(
         refs,
         vec![
@@ -1892,7 +2293,7 @@ fn missing_input_query_autofill_round_schedules_from_question_options() {
         ]
     });
 
-    let first = recover_missing_refs(
+    let first = super::super::missing_resolution::missing_resolution_recover_missing_refs(
         &command,
         &mut state,
         &mut context,
@@ -1909,17 +2310,16 @@ fn missing_input_query_autofill_round_schedules_from_question_options() {
         context
             .previous_error
             .as_ref()
-            .and_then(|value| value.pointer("/autofill/query_candidate_pool/0/query_candidates/0/query_ref")),
+            .and_then(|value| value
+                .pointer("/autofill/query_candidate_pool/0/query_candidates/0/query_ref")),
         Some(&json!("erc20@0.0.2/decimals"))
     );
     assert_eq!(
-        state
-            .runtime
-            .pointer("/agent/missing_ref_refill/status"),
+        state.runtime.pointer("/agent/missing_ref_refill/status"),
         Some(&json!("adjudicate_scheduled"))
     );
 
-    let second = recover_missing_refs(
+    let second = super::super::missing_resolution::missing_resolution_recover_missing_refs(
         &command,
         &mut state,
         &mut context,
@@ -1938,26 +2338,28 @@ fn missing_input_query_autofill_round_schedules_from_question_options() {
             .pointer("/agent/missing_input_autofill/reason"),
         Some(&json!("router_unavailable"))
     );
+    assert_eq!(
+        state
+            .runtime
+            .pointer("/agent/missing_ref_termination/reason"),
+        Some(&json!("router_unavailable"))
+    );
 }
 
 #[test]
 fn missing_input_query_autofill_round_applies_static_refill_before_query() {
     let command = test_agent_command();
-    let mut state = EngineRunnerState {
-        runtime: json!({
-            "agent": {
-                "intent_grounding": {
-                    "status":"proposed",
-                    "ready_for_todos": true,
-                    "intent_facts": {
-                        "native_amount": 5
-                    }
-                }
-            }
-        }),
-        ..EngineRunnerState::default()
-    };
+    let mut state = EngineRunnerState::default();
     let mut context = test_segmented_context();
+    let _ = super::super::upsert_store_value_with_source(
+        context.input_store_mut(),
+        "native_amount",
+        json!(5),
+        super::super::input_store::InputValueLayer::Derived,
+        "seed",
+        25,
+        "test.native_amount",
+    );
     context.refresh_state_summary(&state, false);
     let candidate_context = CandidateContext::default();
     let missing_payload = json!({
@@ -1971,7 +2373,7 @@ fn missing_input_query_autofill_round_applies_static_refill_before_query() {
         ]
     });
 
-    let scheduled = recover_missing_refs(
+    let outcome = super::super::missing_resolution::missing_resolution_recover_missing_refs(
         &command,
         &mut state,
         &mut context,
@@ -1981,9 +2383,8 @@ fn missing_input_query_autofill_round_applies_static_refill_before_query() {
         "grounding",
         false,
         "grounding",
-    )
-    .should_retry_round();
-    assert!(scheduled);
+    );
+    assert!(outcome.should_retry_round());
     assert_eq!(
         context
             .previous_error
@@ -2158,7 +2559,7 @@ fn missing_input_autofill_schedules_llm_adjudicate_for_ambiguous_binding() {
         ]
     });
 
-    let scheduled = recover_missing_refs(
+    let scheduled = super::super::missing_resolution::missing_resolution_recover_missing_refs(
         &command,
         &mut state,
         &mut context,
@@ -2207,7 +2608,11 @@ fn grounding_query_recoverable_decimals_prefers_host_query_over_user_prompt() {
     context.refresh_state_summary(&state, false);
 
     let mut readonly_router = RouterExecutor::new();
-    readonly_router.register("evm_read", "eip155:1", Box::new(QueryAutofillSuccessExecutor));
+    readonly_router.register(
+        "evm_read",
+        "eip155:1",
+        Box::new(QueryAutofillSuccessExecutor),
+    );
     readonly_router.register(
         "evm_read",
         "eip155:31338",
@@ -2221,7 +2626,7 @@ fn grounding_query_recoverable_decimals_prefers_host_query_over_user_prompt() {
         ],
         "missing_refs":["inputs.token.decimals"]
     });
-    let outcome = recover_missing_refs(
+    let outcome = super::super::missing_resolution::missing_resolution_recover_missing_refs(
         &command,
         &mut state,
         &mut context,
@@ -2235,15 +2640,15 @@ fn grounding_query_recoverable_decimals_prefers_host_query_over_user_prompt() {
     assert!(
         matches!(
             outcome,
-            super::super::missing_ref_recovery::RecoveryOutcome::Recovered
-                | super::super::missing_ref_recovery::RecoveryOutcome::RetryScheduled
+            super::super::missing_resolution::MissingResolutionOutcome::Recovered
+                | super::super::missing_resolution::MissingResolutionOutcome::RetryScheduled
         ),
         "expected machine-first recovery path, got {outcome:?}"
     );
     assert!(
         !matches!(
             outcome,
-            super::super::missing_ref_recovery::RecoveryOutcome::NeedUserInput { .. }
+            super::super::missing_resolution::MissingResolutionOutcome::NeedUserInput { .. }
         ),
         "query-recoverable grounding should not directly ask user"
     );
@@ -2256,6 +2661,178 @@ fn grounding_query_recoverable_decimals_prefers_host_query_over_user_prompt() {
             .is_some(),
         "expected autofill envelope to be set for follow-up round"
     );
+}
+
+#[test]
+fn missing_resolution_recovers_stale_input_question_from_true_input_store_value() {
+    let command = test_agent_command();
+    let candidate_context = CandidateContext::default();
+    let mut state = EngineRunnerState::default();
+    let mut context = test_segmented_context();
+    let _ = super::upsert_seed_input_value(
+        &mut state.runtime,
+        "token.decimals",
+        json!(18),
+        "test.seed.token.decimals",
+    );
+    let _ = super::upsert_store_value_with_source(
+        context.input_store_mut(),
+        "token.decimals",
+        json!(18),
+        InputValueLayer::Seed,
+        "user",
+        100,
+        "test.seed.token.decimals",
+    );
+    context.refresh_state_summary(&state, false);
+
+    let payload = json!({
+        "reason_code":"missing_required_input",
+        "questions":[
+            {"id":"inputs.token.decimals","question":"Provide token decimals"}
+        ]
+    });
+
+    let outcome = super::super::missing_resolution::missing_resolution_recover_missing_refs(
+        &command,
+        &mut state,
+        &mut context,
+        &payload,
+        &candidate_context,
+        None,
+        "grounding",
+        false,
+        "grounding",
+    );
+
+    assert!(matches!(
+        outcome,
+        super::super::missing_resolution::MissingResolutionOutcome::Recovered
+    ));
+}
+
+#[test]
+fn missing_resolution_recovers_stale_input_question_from_input_store_value() {
+    let command = test_agent_command();
+    let candidate_context = CandidateContext::default();
+    let mut state = EngineRunnerState::default();
+    let mut input_store = InputStore::default();
+    let _ = input_store.upsert(
+        "inputs.token.decimals",
+        json!(18),
+        super::super::input_store::InputValueMeta {
+            source: "query".to_string(),
+            source_priority: 90,
+            provenance: Some("test.input_store.token.decimals".to_string()),
+            confidence: None,
+            layer: InputValueLayer::Observed,
+            stability: super::super::input_store::InputValueStability::Stable,
+            observed_at_ms: Some(123),
+        },
+    );
+    let mut context = SegmentedAgentContext::new(
+        "check balances and transfer".to_string(),
+        intent_segmented::SegmentPlanningSession {
+            session_id: "sess-1".to_string(),
+            snapshot_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string(),
+            cursor: "cursor-0".to_string(),
+            max_rounds: 4,
+            max_segments: 4,
+        },
+        input_store,
+        super::super::runtime_facts_store::RuntimeFactsStore::default(),
+        TodoBoard::bootstrap("check balances and transfer"),
+        4,
+        4,
+        ToolMemoryBudgetPolicy::TOOL_MEMORY_PROJECTION_DEFAULT_TOKENS,
+        checkpoint_ext::AgentCheckpointExtensions::default(),
+    );
+    context.refresh_state_summary(&state, false);
+
+    let payload = json!({
+        "reason_code":"missing_required_input",
+        "questions":[
+            {"id":"inputs.token.decimals","question":"Provide token decimals"}
+        ]
+    });
+
+    let outcome = super::super::missing_resolution::missing_resolution_recover_missing_refs(
+        &command,
+        &mut state,
+        &mut context,
+        &payload,
+        &candidate_context,
+        None,
+        "grounding",
+        false,
+        "grounding",
+    );
+
+    assert!(matches!(
+        outcome,
+        super::super::missing_resolution::MissingResolutionOutcome::Recovered
+    ));
+}
+
+#[test]
+fn unavailable_recovery_backflow_retries_when_question_ref_is_already_satisfied() {
+    let command = native_erc20_fixture_command_for_candidates();
+    let pack_path = command.pack.clone().expect("pack");
+    let pack = load_pack_document(pack_path.as_path()).expect("pack");
+    let candidate_context = build_candidate_context_for_agent(&command, Some(&pack), 128)
+        .expect("candidate context")
+        .expect("workspace candidates");
+    let mut state = EngineRunnerState::default();
+    let mut context = test_segmented_context();
+    let _ = super::upsert_seed_input_value(
+        &mut state.runtime,
+        "token.decimals",
+        json!(18),
+        "test.seed.token.decimals",
+    );
+    let _ = super::upsert_store_value_with_source(
+        context.input_store_mut(),
+        "token.decimals",
+        json!(18),
+        InputValueLayer::Seed,
+        "user",
+        100,
+        "test.seed.token.decimals",
+    );
+    context.refresh_state_summary(&state, false);
+
+    let payload = json!({
+        "reason_code":"missing_required_input",
+        "message":"Need token decimals before todo planning",
+        "questions":[
+            {"id":"inputs.token.decimals","question":"Provide token decimals","required":true,"options":[]}
+        ],
+        "issues":[]
+    });
+
+    let outcome = super::super::phase_machine::pause::recover_missing_required_input_payload(
+        &command,
+        &mut state,
+        &mut context,
+        &candidate_context,
+        None,
+        &payload,
+        "grounding",
+        false,
+        "grounding",
+        false,
+        true,
+    )
+    .expect("recovery backflow");
+
+    assert!(matches!(
+        outcome,
+        super::super::phase_machine::pause::MissingRequiredInputRecoveryBackflow::Retry {
+            state_changed: true,
+            answers: None,
+        }
+    ));
 }
 
 #[test]
@@ -2296,7 +2873,7 @@ fn host_query_autofill_exhausts_then_stops_with_retry_limited() {
         "missing_refs":["inputs.token.decimals"]
     });
 
-    let first = recover_missing_refs(
+    let first = super::super::missing_resolution::missing_resolution_recover_missing_refs(
         &command,
         &mut state,
         &mut context,
@@ -2309,7 +2886,7 @@ fn host_query_autofill_exhausts_then_stops_with_retry_limited() {
     );
     assert_eq!(
         first,
-        super::super::missing_ref_recovery::RecoveryOutcome::RetryScheduled
+        super::super::missing_resolution::MissingResolutionOutcome::RetryScheduled
     );
     assert_eq!(state.runtime.pointer("/inputs/token/decimals"), None);
     assert!(
@@ -2322,7 +2899,7 @@ fn host_query_autofill_exhausts_then_stops_with_retry_limited() {
         "first round should schedule machine recovery follow-up"
     );
 
-    let second = recover_missing_refs(
+    let second = super::super::missing_resolution::missing_resolution_recover_missing_refs(
         &command,
         &mut state,
         &mut context,
@@ -2336,10 +2913,208 @@ fn host_query_autofill_exhausts_then_stops_with_retry_limited() {
     assert!(
         matches!(
             second,
-            super::super::missing_ref_recovery::RecoveryOutcome::ExhaustedUnavailable { .. }
-                | super::super::missing_ref_recovery::RecoveryOutcome::NeedUserInput { .. }
+            super::super::missing_resolution::MissingResolutionOutcome::ExhaustedUnavailable { .. }
+                | super::super::missing_resolution::MissingResolutionOutcome::NeedUserInput { .. }
         ),
         "second round should stop retrying and surface unresolved state, got {second:?}"
+    );
+}
+
+#[test]
+fn missing_resolution_policy_partial_keeps_valid_subset_instead_of_full_reject() {
+    let command = test_agent_command();
+    let mut state = EngineRunnerState::default();
+    let mut context = test_segmented_context();
+    context.refresh_state_summary(&state, false);
+    let candidate_context = CandidateContext::default();
+    let missing_payload = json!({
+        "reason_code":"missing_required_input",
+        "missing_refs":["inputs.token.decimals", "inputs.owner"],
+        "questions":[
+            {"id":"inputs.token.decimals","question":"token decimals?"},
+            {"id":"inputs.owner","question":"owner?"}
+        ],
+        "decisions":[
+            {
+                "kind":"run_producer",
+                "target":"inputs.token.decimals",
+                "query_ref":""
+            },
+            {
+                "kind":"run_producer",
+                "target":"inputs.owner",
+                "query_ref":"wallet@0.0.1/defaultOwner"
+            }
+        ]
+    });
+
+    let outcome = super::super::missing_resolution::missing_resolution_recover_missing_refs(
+        &command,
+        &mut state,
+        &mut context,
+        &missing_payload,
+        &candidate_context,
+        None,
+        "grounding",
+        false,
+        "grounding",
+    );
+
+    match &outcome {
+        super::super::missing_resolution::MissingResolutionOutcome::RetryScheduled => {}
+        super::super::missing_resolution::MissingResolutionOutcome::ExhaustedUnavailable {
+            reason,
+            ..
+        } if reason == "router_unavailable" => {}
+        _ => panic!("policy should keep valid subset and continue machine flow, got {outcome:?}"),
+    }
+    assert_eq!(
+        state
+            .runtime
+            .pointer("/agent/missing_ref_policy_validation/status"),
+        Some(&json!("partial"))
+    );
+    assert_eq!(
+        state
+            .runtime
+            .pointer("/agent/missing_ref_policy_validation/accepted_decisions")
+            .and_then(Value::as_array)
+            .map(|items| items.len()),
+        Some(1)
+    );
+    assert_eq!(
+        state
+            .runtime
+            .pointer("/agent/missing_ref_policy_validation/rejected_decisions")
+            .and_then(Value::as_array)
+            .map(|items| items.len()),
+        Some(1)
+    );
+    assert!(state
+        .runtime
+        .pointer("/agent/missing_ref_policy_validation/rejected_decisions/0/issues")
+        .and_then(Value::as_array)
+        .is_some_and(|items| items
+            .iter()
+            .any(|item| item.get("code") == Some(&json!("run_producer_query_ref_empty")))));
+}
+
+#[test]
+fn missing_resolution_policy_validation_failed_emits_termination_telemetry() {
+    let command = test_agent_command();
+    let mut state = EngineRunnerState::default();
+    let mut context = test_segmented_context();
+    context.refresh_state_summary(&state, false);
+    let candidate_context = CandidateContext::default();
+    let missing_payload = json!({
+        "reason_code":"missing_required_input",
+        "missing_refs":["inputs.token.decimals"],
+        "questions":[
+            {"id":"inputs.token.decimals","question":"token decimals?"}
+        ],
+        "decisions":[
+            {
+                "kind":"run_producer",
+                "target":"inputs.token.decimals",
+                "query_ref":""
+            }
+        ]
+    });
+
+    let outcome = super::super::missing_resolution::missing_resolution_recover_missing_refs(
+        &command,
+        &mut state,
+        &mut context,
+        &missing_payload,
+        &candidate_context,
+        None,
+        "grounding",
+        false,
+        "grounding",
+    );
+    assert!(
+        matches!(
+            outcome,
+            super::super::missing_resolution::MissingResolutionOutcome::NeedUserInput {
+                ref reason,
+                ..
+            } if reason == "policy_validation_failed"
+        ),
+        "expected policy_validation_failed fallback, got {outcome:?}"
+    );
+    assert_eq!(
+        state
+            .runtime
+            .pointer("/agent/missing_ref_policy_validation/status"),
+        Some(&json!("rejected"))
+    );
+    assert_eq!(
+        state
+            .runtime
+            .pointer("/agent/missing_ref_termination/reason"),
+        Some(&json!("policy_validation_failed"))
+    );
+    assert_eq!(
+        state
+            .runtime
+            .pointer("/agent/missing_ref_termination/phase_hint"),
+        Some(&json!("grounding"))
+    );
+}
+
+#[test]
+fn missing_resolution_policy_abort_emits_termination_telemetry() {
+    let command = test_agent_command();
+    let mut state = EngineRunnerState::default();
+    let mut context = test_segmented_context();
+    context.refresh_state_summary(&state, false);
+    let candidate_context = CandidateContext::default();
+    let missing_payload = json!({
+        "reason_code":"missing_required_input",
+        "missing_refs":["inputs.owner"],
+        "questions":[
+            {"id":"inputs.owner","question":"owner?"}
+        ],
+        "decisions":[
+            {
+                "kind":"abort",
+                "reason":"user_required_for_owner"
+            }
+        ]
+    });
+
+    let outcome = super::super::missing_resolution::missing_resolution_recover_missing_refs(
+        &command,
+        &mut state,
+        &mut context,
+        &missing_payload,
+        &candidate_context,
+        None,
+        "grounding",
+        false,
+        "grounding",
+    );
+    assert!(
+        matches!(
+            outcome,
+            super::super::missing_resolution::MissingResolutionOutcome::NeedUserInput {
+                ref reason,
+                ..
+            } if reason == "policy_abort:user_required_for_owner"
+        ),
+        "expected policy_abort path, got {outcome:?}"
+    );
+    assert_eq!(
+        state
+            .runtime
+            .pointer("/agent/missing_ref_policy_validation/status"),
+        Some(&json!("accepted"))
+    );
+    assert_eq!(
+        state
+            .runtime
+            .pointer("/agent/missing_ref_termination/reason"),
+        Some(&json!("policy_abort:user_required_for_owner"))
     );
 }
 
@@ -2374,9 +3149,8 @@ fn planner_no_toolcall_repair_keeps_previous_error_autofill_context_sticky() {
             }],
         }),
     ]);
-    let mut planner =
-        super::super::intent_segmented::LlmSegmentedIntentPlanner::new(provider)
-            .with_candidate_context(Some(CandidateContext::default()));
+    let mut planner = super::super::intent_segmented::LlmSegmentedIntentPlanner::new(provider)
+        .with_candidate_context(Some(CandidateContext::default()));
     let state = EngineRunnerState::default();
     let mut context = test_segmented_context();
     context.refresh_state_summary(&state, false);
@@ -2393,12 +3167,9 @@ fn planner_no_toolcall_repair_keeps_previous_error_autofill_context_sticky() {
         }),
     );
 
-    let _ = super::super::phase_machine::segment_plan::plan_round(
-        &mut planner,
-        &state,
-        &mut context,
-    )
-    .expect("plan round should recover after planner-output repair");
+    let _ =
+        super::super::phase_machine::segment_plan::plan_round(&mut planner, &state, &mut context)
+            .expect("plan round should recover after planner-output repair");
 
     assert_eq!(
         context
@@ -2421,6 +3192,393 @@ fn planner_no_toolcall_repair_keeps_previous_error_autofill_context_sticky() {
             .and_then(|value| value.pointer("/reason_code"))
             .and_then(Value::as_str),
         Some("missing_required_input")
+    );
+}
+
+#[test]
+fn grounding_abort_intent_accepts_and_short_circuits_to_stopped() {
+    let command = test_agent_command();
+    let mut state = EngineRunnerState::default();
+    let mut context = test_segmented_context();
+    context.set_previous_error_and_refresh(
+        &state,
+        false,
+        json!({
+            "reason_code":"missing_required_input",
+            "autofill_history":{
+                "attempt_keys":["runtime.query.resolve"]
+            }
+        }),
+    );
+    let provider = ScriptedLlmProvider::from_responses(vec![Ok(CompleteWithToolsResponse {
+        assistant_content: Some("abort intent".to_string()),
+        tool_calls: vec![ToolCall {
+            id: "tool-abort".to_string(),
+            name: "plan.abort_intent".to_string(),
+            arguments: json!({
+                "reason_code":"recovery_exhausted",
+                "summary":"unable to complete intent with current evidence",
+                "evidence":{
+                    "attempted_recovery":["runtime.query.resolve"],
+                    "missing_refs":["inputs.token.decimals"]
+                }
+            }),
+        }],
+    })]);
+    let mut planner = super::super::intent_segmented::LlmSegmentedIntentPlanner::new(provider)
+        .with_candidate_context(Some(CandidateContext::default()));
+
+    let ready = super::super::phase_machine::grounding::bootstrap_intent_grounding_if_needed(
+        &command,
+        &mut planner,
+        &mut state,
+        &mut context,
+        &CandidateContext::default(),
+        None,
+        false,
+    )
+    .expect("grounding bootstrap should succeed");
+    assert!(!ready, "abort should stop grounding progression");
+    assert_eq!(context.final_status(), EngineRunStatus::Stopped);
+    assert_eq!(
+        state.runtime.pointer("/agent/abort_intent/accepted"),
+        Some(&json!(true))
+    );
+}
+
+#[test]
+fn grounding_abort_intent_reject_falls_back_to_planner_call_failed() {
+    let command = test_agent_command();
+    let mut state = EngineRunnerState::default();
+    let mut context = test_segmented_context();
+    context.set_previous_error_and_refresh(
+        &state,
+        false,
+        json!({
+            "reason_code":"missing_required_input",
+            "autofill_history":{
+                "attempt_keys":["runtime.query.resolve"]
+            }
+        }),
+    );
+    let provider = ScriptedLlmProvider::from_responses(vec![Ok(CompleteWithToolsResponse {
+        assistant_content: Some("abort intent".to_string()),
+        tool_calls: vec![ToolCall {
+            id: "tool-abort".to_string(),
+            name: "plan.abort_intent".to_string(),
+            arguments: json!({
+                "reason_code":"recovery_exhausted",
+                "summary":"unable to complete intent with current evidence",
+                "evidence":{
+                    "attempted_recovery":["unknown.recovery.key"],
+                    "missing_refs":["inputs.token.decimals"]
+                }
+            }),
+        }],
+    })]);
+    let mut planner = super::super::intent_segmented::LlmSegmentedIntentPlanner::new(provider)
+        .with_candidate_context(Some(CandidateContext::default()));
+
+    let ready = super::super::phase_machine::grounding::bootstrap_intent_grounding_if_needed(
+        &command,
+        &mut planner,
+        &mut state,
+        &mut context,
+        &CandidateContext::default(),
+        None,
+        false,
+    )
+    .expect("grounding bootstrap should fallback");
+    assert!(
+        ready,
+        "rejected abort should fallback to ready-for-todos path"
+    );
+    assert_ne!(context.final_status(), EngineRunStatus::Stopped);
+    assert_eq!(
+        state.runtime.pointer("/agent/intent_grounding/reason_code"),
+        Some(&json!("planner_call_failed"))
+    );
+}
+
+#[test]
+fn grounding_ignores_stale_missing_refs_when_input_store_already_has_value() {
+    let command = test_agent_command();
+    let mut state = EngineRunnerState {
+        runtime: json!({
+            "inputs": {
+                "token": {
+                    "decimals": 18
+                }
+            }
+        }),
+        ..EngineRunnerState::default()
+    };
+    let mut context = test_segmented_context();
+    let _ = super::upsert_store_value_with_source(
+        context.input_store_mut(),
+        "token.decimals",
+        json!(18),
+        super::InputValueLayer::Seed,
+        "user",
+        100,
+        "user.prompt.token.decimals",
+    );
+    context.refresh_state_summary(&state, false);
+    let provider = ScriptedLlmProvider::from_responses(vec![Ok(CompleteWithToolsResponse {
+        assistant_content: Some("stale missing refs".to_string()),
+        tool_calls: vec![ToolCall {
+            id: "tool-ground".to_string(),
+            name: "plan.ground_intent".to_string(),
+            arguments: json!({
+                "status":"proposed",
+                "ready_for_todos":false,
+                "resolved_inputs":{
+                    "owner":"0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+                    "recipient":"0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+                    "chain":"eip155:31338",
+                    "token.address":"0x8464135c8F25Da09e49BC8782676a84730C318bC",
+                    "native_amount":5,
+                    "token_amount":10
+                },
+                "intent_facts":{
+                    "owner":"0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+                    "recipient":"0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+                    "chain":"eip155:31338",
+                    "token.address":"0x8464135c8F25Da09e49BC8782676a84730C318bC",
+                    "native_amount":5,
+                    "token_amount":10
+                },
+                "confidence":{
+                    "owner":100,
+                    "recipient":100,
+                    "chain":100,
+                    "token.address":100,
+                    "native_amount":100,
+                    "token_amount":100
+                },
+                "missing_refs":["inputs.token.decimals"]
+            }),
+        }],
+    })]);
+    let mut planner = LlmSegmentedIntentPlanner::new(provider);
+
+    let ready = bootstrap_intent_grounding_if_needed(
+        &command,
+        &mut planner,
+        &mut state,
+        &mut context,
+        &CandidateContext::default(),
+        None,
+        false,
+    )
+    .expect("stale missing refs should be filtered");
+    assert!(ready);
+    assert_eq!(state.paused_reason, None);
+}
+
+#[test]
+fn scripted_grounding_unavailable_helper_decodes_with_single_planner_call() {
+    let command = native_erc20_fixture_command_for_candidates();
+    let pack_path = command.pack.clone().expect("pack");
+    let pack = load_pack_document(pack_path.as_path()).expect("pack");
+    let candidate_context = build_candidate_context_for_agent(&command, Some(&pack), 128)
+        .expect("candidate context")
+        .expect("workspace candidates");
+    let provider = ScriptedLlmProvider::from_responses(vec![Ok(
+        scripted_grounding_unavailable_missing_input_response(
+            "inputs.token.decimals",
+            "Provide token decimals",
+            "Need token decimals before todo planning",
+        ),
+    )]);
+    let mut planner =
+        LlmSegmentedIntentPlanner::new(provider).with_candidate_context(Some(candidate_context));
+    let mut context = test_segmented_context();
+    let state = EngineRunnerState::default();
+    context.refresh_state_summary(&state, false);
+
+    let draft = planner
+        .ground_intent(IntentGroundingRequest {
+            intent: context.intent().to_string(),
+            session: context.session().clone(),
+            state_summary: context.packed_summary().clone(),
+            typed_summary: None,
+        })
+        .expect("unavailable draft should decode");
+
+    match draft {
+        IntentGroundingDraft::Unavailable {
+            reason_code,
+            questions,
+            ..
+        } => {
+            assert_eq!(reason_code, "missing_required_input");
+            assert_eq!(questions.len(), 1);
+            assert_eq!(
+                questions[0].get("id").and_then(Value::as_str),
+                Some("inputs.token.decimals")
+            );
+        }
+        other => panic!("expected unavailable draft, got {other:?}"),
+    }
+}
+
+#[test]
+fn grounding_post_recovery_fast_path_skips_second_planner_call_after_query_autofill() {
+    let command = native_erc20_fixture_command_for_candidates();
+    let pack_path = command.pack.clone().expect("pack");
+    let pack = load_pack_document(pack_path.as_path()).expect("pack");
+    let candidate_context = build_candidate_context_for_agent(&command, Some(&pack), 128)
+        .expect("candidate context")
+        .expect("workspace candidates");
+
+    let mut state = EngineRunnerState::default();
+    let mut context = test_segmented_context();
+    context.refresh_state_summary(&state, false);
+
+    let provider = ScriptedLlmProvider::from_responses(vec![Ok(CompleteWithToolsResponse {
+        assistant_content: Some("grounding draft".to_string()),
+        tool_calls: vec![ToolCall {
+            id: "tool-ground".to_string(),
+            name: "plan.ground_intent".to_string(),
+            arguments: json!({
+                "status":"proposed",
+                "summary":"Need token decimals before todo planning",
+                "ready_for_todos":false,
+                "resolved_inputs":{
+                    "owner":"0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+                    "recipient":"0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+                    "chain":"eip155:31338",
+                    "token.address":"0x8464135c8F25Da09e49BC8782676a84730C318bC",
+                    "native_amount":5,
+                    "token_amount":10
+                },
+                "intent_facts":{
+                    "owner":"0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+                    "recipient":"0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+                    "chain":"eip155:31338",
+                    "token.address":"0x8464135c8F25Da09e49BC8782676a84730C318bC",
+                    "native_amount":5,
+                    "token_amount":10
+                },
+                "confidence":{
+                    "owner":100,
+                    "recipient":100,
+                    "chain":100,
+                    "token.address":100,
+                    "native_amount":100,
+                    "token_amount":100
+                },
+                "missing_refs":["inputs.token.decimals"],
+                "questions":[]
+            }),
+        }],
+    })]);
+    let mut planner = LlmSegmentedIntentPlanner::new(provider)
+        .with_candidate_context(Some(candidate_context.clone()));
+
+    let mut readonly_router = RouterExecutor::new();
+    readonly_router.register(
+        "evm_read",
+        "eip155:31338",
+        Box::new(QueryAutofillSuccessExecutor),
+    );
+
+    let ready = bootstrap_intent_grounding_if_needed(
+        &command,
+        &mut planner,
+        &mut state,
+        &mut context,
+        &candidate_context,
+        Some(&readonly_router),
+        false,
+    )
+    .expect("grounding fast path should complete with a single planner response");
+
+    assert!(ready, "post-recovery fast path should mark grounding ready");
+    assert_eq!(
+        state.runtime.pointer("/inputs/token/decimals"),
+        Some(&json!(18))
+    );
+    assert_eq!(
+        state
+            .runtime
+            .pointer("/agent/intent_grounding/ready_for_todos"),
+        Some(&json!(true))
+    );
+    assert_eq!(
+        state
+            .runtime
+            .pointer("/agent/intent_grounding/resolution_state"),
+        Some(&json!("ready"))
+    );
+}
+
+#[test]
+fn grounding_unavailable_post_recovery_fast_path_skips_second_planner_call() {
+    let command = native_erc20_fixture_command_for_candidates();
+    let pack_path = command.pack.clone().expect("pack");
+    let pack = load_pack_document(pack_path.as_path()).expect("pack");
+    let candidate_context = build_candidate_context_for_agent(&command, Some(&pack), 128)
+        .expect("candidate context")
+        .expect("workspace candidates");
+
+    let mut state = EngineRunnerState::default();
+    let mut context = test_segmented_context();
+    let _ = super::upsert_seed_input_value(
+        &mut state.runtime,
+        "token.decimals",
+        json!(18),
+        "test.seed.token.decimals",
+    );
+    let _ = super::upsert_store_value_with_source(
+        context.input_store_mut(),
+        "token.decimals",
+        json!(18),
+        InputValueLayer::Seed,
+        "user",
+        100,
+        "test.seed.token.decimals",
+    );
+    context.refresh_state_summary(&state, false);
+
+    let provider = ScriptedLlmProvider::from_responses(vec![Ok(
+        scripted_grounding_unavailable_missing_input_response(
+            "inputs.token.decimals",
+            "Provide token decimals",
+            "Need token decimals before todo planning",
+        ),
+    )]);
+    let mut planner = LlmSegmentedIntentPlanner::new(provider)
+        .with_candidate_context(Some(candidate_context.clone()));
+
+    let ready = bootstrap_intent_grounding_if_needed(
+        &command,
+        &mut planner,
+        &mut state,
+        &mut context,
+        &candidate_context,
+        None,
+        false,
+    )
+    .expect("unavailable fast path should complete with a single planner response");
+
+    assert!(ready, "stale unavailable payload should collapse to ready");
+    assert_eq!(
+        state.runtime.pointer("/agent/intent_grounding/status"),
+        Some(&json!("unavailable_recovered"))
+    );
+    assert_eq!(
+        state
+            .runtime
+            .pointer("/agent/intent_grounding/ready_for_todos"),
+        Some(&json!(true))
+    );
+    assert_eq!(
+        state
+            .runtime
+            .pointer("/agent/intent_grounding/resolution_state"),
+        Some(&json!("ready"))
     );
 }
 

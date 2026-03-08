@@ -1,14 +1,17 @@
 ---
 id: segmented.phase.propose
-version: 1
+version: 2
 ---
 
 - Current phase: propose_segment.
-- Allowed tools: `list_candidates`, `catalog.search`, `catalog.resolve_missing_facts`, `get_candidate_detail`, `guide.get`, `plan.check_segment`, and one final `plan.propose_segment` (last).
-- `list_candidates` usage follows the base-rules filter-first policy template; do not invent alternate broaden order.
+- Allowed tools: `catalog.discover`, `catalog.resolve_missing_facts`, `get_candidate_detail`, `guide.get`, `runtime.query`, `plan.check_segment`, and one terminal tool among `plan.propose_segment`/`plan.abort_intent` (last).
 - Host enforces `1 todo = 1 segment`; only plan for `state_summary.todo_state.current_todo`.
 - Segment shape must stay flat: do not output legacy branch-tree fields (`if_true`, `if_false`, `then`, `else`, `children`); encode branch paths with flat steps + `when.cel` + `depends_on`.
 - You must call `plan.check_segment` before finalize; finalize proposed output only when check result has `ok=true`.
-- If write-required facts are missing, call `catalog.resolve_missing_facts` with `missing_refs` and add matched query steps before write when possible; if still missing, return `missing_required_input`; do not patch token/address slots with `*.decimals` refs.
+- If `plan.check_segment` or local reasoning shows missing write-required facts (`missing_token_decimals`) or stale volatile write evidence (`stale_volatile_fact`), revise by adding the required query/gate steps before the write when possible. Use `runtime.query(action=resolve, refs=[...])` to inspect resolution status and `catalog.resolve_missing_facts` for detailed candidate diagnostics; if resolver/host recovery still has viable candidates, continue recovery and do not emit `missing_required_input` yet.
+- For follow-up writes after an earlier write, assume prior balance/allowance queries are no longer fresh unless the write is intentionally backed by explicit historical `nodes.<step>.outputs.*` references.
+- If required facts remain missing after recovery exhaustion, return `missing_required_input` with canonical `error.details.questions[]` + `error.details.recovery_exhaustion{unresolved_refs[],reasons[],attempt_trace_id}` (never patch token/address slots with `*.decimals` refs).
+- Use `plan.abort_intent` only as final fallback when recovery is exhausted, and include explicit evidence (`evidence.attempted_recovery` non-empty).
+- Never emit user-facing `missing_required_input` refs/questions with `params.*`; use canonical source refs (`inputs.*` / node outputs) only.
 - Call `plan.propose_segment` exactly once and only as the last tool call.
 - Never call `plan.begin` or `plan.revise_segment`.

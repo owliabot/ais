@@ -82,6 +82,10 @@ Pure AIS SDK logic: document parsing, typed models, resolver context, and value-
   - `NodeRunState`
   - `NodeReadinessResult`
 
+## Recent changes
+
+- `F-PROJ-01`: `context::get_ref` now unwraps `_value` sentinel keys when resolution yields an object containing a `_value` field, supporting the InputStore leaf/subtree collision preservation pattern. Address bridge compatibility extended to handle `_value` sentinel in intermediate objects.
+
 ## Dependencies
 
 - `ais-core`: issues / field-path / patch primitives

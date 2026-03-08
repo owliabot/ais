@@ -1,11 +1,13 @@
-use ais_core::{stable_hash_hex, StableJsonOptions};
-use super::super::input_normalize::normalize_input_slot_key;
+use super::super::input_normalize::canonical_missing_ref;
+use super::super::ref_model::RefPath;
+use super::super::runtime_facts_store::RuntimeFactsStore;
 use super::super::*;
+use super::super::{candidates::CandidateContext, write_gates};
 use ais_engine::{
     DefaultSolver, EngineEventRecord, EngineRunStatus, EngineRunnerOptions, EngineRunnerState,
 };
 use ais_sdk::documents::PlanSketchSegment;
-use serde_json::{Map, Value};
+use serde_json::Map;
 use std::collections::BTreeSet;
 
 #[derive(Debug, Clone)]
@@ -14,14 +16,6 @@ pub(crate) struct ExecuteRoundOutcome {
     pub(crate) iterations: usize,
     pub(crate) round_events: Vec<EngineEventRecord>,
     pub(crate) last_iteration_events: Vec<EngineEventRecord>,
-}
-
-#[derive(Debug, Clone)]
-struct InputStoreSyncReport {
-    synced_refs: Vec<String>,
-    hash_changed: bool,
-    previous_hash: Option<String>,
-    current_hash: Option<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -38,9 +32,12 @@ pub(crate) fn execute_round(
     active_plan_hash: &mut String,
     segment: &PlanSketchSegment,
     segment_plan: &PlanDocument,
+    candidate_context: &CandidateContext,
     planning_memory: Option<Value>,
+    runtime_facts_store: &mut RuntimeFactsStore,
     fact_store: &mut InputStore,
     checkpoint_extensions: &checkpoint_ext::AgentCheckpointExtensions,
+    audit_attempt: &mut crate::audit_contract::AuditStreamAttempt,
     total_events: &mut usize,
     todo_id: &str,
 ) -> Result<ExecuteRoundOutcome, RunnerError> {
@@ -56,9 +53,7 @@ pub(crate) fn execute_round(
                 ("hash_changed", sync_report.hash_changed.to_string()),
                 (
                     "previous_hash",
-                    sync_report
-                        .previous_hash
-                        .unwrap_or_else(|| "-".to_string()),
+                    sync_report.previous_hash.unwrap_or_else(|| "-".to_string()),
                 ),
                 (
                     "current_hash",
@@ -87,7 +82,7 @@ pub(crate) fn execute_round(
     if !processed.events.is_empty() {
         let annotated = annotate_events_with_todo(processed.events.as_slice(), segment, todo_id);
         *total_events = total_events.saturating_add(annotated.len());
-        super::super::write_event_sinks(command, annotated.as_slice())?;
+        super::super::write_event_sinks(command, annotated.as_slice(), audit_attempt)?;
         checkpoint_ledger.absorb_events(annotated.as_slice());
         checkpoint_ledger.mark_approved_nodes(
             &state.approved_node_ids,
@@ -104,12 +99,12 @@ pub(crate) fn execute_round(
             checkpoint_ledger,
             planning_memory.clone(),
             fact_store,
+            runtime_facts_store,
             checkpoint_extensions,
+            audit_attempt,
         )?;
     }
-    if !processed.plan_replaced
-        && has_duplicate_command_id_rejection(processed.events.as_slice())
-    {
+    if !processed.plan_replaced && has_duplicate_command_id_rejection(processed.events.as_slice()) {
         super::super::trace::emit(
             command.verbose || command.verbose_llm,
             "execute_round",
@@ -134,9 +129,10 @@ pub(crate) fn execute_round(
             active_plan_hash,
         )?;
         if !retry_processed.events.is_empty() {
-            let annotated = annotate_events_with_todo(retry_processed.events.as_slice(), segment, todo_id);
+            let annotated =
+                annotate_events_with_todo(retry_processed.events.as_slice(), segment, todo_id);
             *total_events = total_events.saturating_add(annotated.len());
-            super::super::write_event_sinks(command, annotated.as_slice())?;
+            super::super::write_event_sinks(command, annotated.as_slice(), audit_attempt)?;
             checkpoint_ledger.absorb_events(annotated.as_slice());
             checkpoint_ledger.mark_approved_nodes(
                 &state.approved_node_ids,
@@ -153,7 +149,9 @@ pub(crate) fn execute_round(
                 checkpoint_ledger,
                 planning_memory.clone(),
                 fact_store,
+                runtime_facts_store,
                 checkpoint_extensions,
+                audit_attempt,
             )?;
         }
         processed = retry_processed;
@@ -173,6 +171,9 @@ pub(crate) fn execute_round(
         .unwrap_or_else(|| active_plan.nodes.len().saturating_mul(8).max(16));
     let loop_config = AgentLoopConfig { max_iterations };
     let mut last_iteration_events = Vec::<EngineEventRecord>::new();
+    let mut invalidated_completed_write_nodes = segment_completed_write_node_ids(segment, state)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
     let loop_result = run_agent_loop(
         run_id,
         active_plan,
@@ -188,13 +189,50 @@ pub(crate) fn execute_round(
             *total_events = total_events.saturating_add(annotated.len());
             last_iteration_events = annotated.clone();
             round_events.extend(annotated.clone());
-            super::super::write_event_sinks(command, annotated.as_slice())?;
-            apply_segment_stores_from_runtime(segment, state, fact_store, command.verbose_llm);
+            super::super::write_event_sinks(command, annotated.as_slice(), audit_attempt)?;
+            apply_segment_stores_from_runtime_with_runtime_facts(
+                segment,
+                state,
+                runtime_facts_store,
+                fact_store,
+                command.verbose_llm,
+            );
             checkpoint_ledger.absorb_events(annotated.as_slice());
             checkpoint_ledger.mark_approved_nodes(
                 &state.approved_node_ids,
                 wall_clock_timestamp_rfc3339().as_str(),
             );
+            let invalidation_report = invalidate_post_write_volatile_facts(
+                segment,
+                state,
+                candidate_context,
+                runtime_facts_store,
+                fact_store,
+                &mut invalidated_completed_write_nodes,
+            );
+            if invalidation_report.has_effect() && (command.verbose || command.verbose_llm) {
+                super::super::trace::emit(
+                    true,
+                    "execute_round",
+                    "post_write_volatile_facts_invalidated",
+                    &[
+                        ("segment_id", segment.segment_id.clone()),
+                        (
+                            "completed_nodes",
+                            invalidation_report.completed_write_node_ids.join(","),
+                        ),
+                        ("signals", invalidation_report.invalidated_signals.join(",")),
+                        (
+                            "input_refs",
+                            invalidation_report.invalidated_input_refs.join(","),
+                        ),
+                        (
+                            "runtime_fact_refs",
+                            invalidation_report.invalidated_runtime_fact_refs.join(","),
+                        ),
+                    ],
+                );
+            }
             super::super::checkpoint_flow::checkpoint_round(
                 command,
                 run_id,
@@ -204,7 +242,9 @@ pub(crate) fn execute_round(
                 checkpoint_ledger,
                 planning_memory.clone(),
                 fact_store,
+                runtime_facts_store,
                 checkpoint_extensions,
+                audit_attempt,
             )?;
             Ok(())
         },
@@ -234,109 +274,98 @@ fn has_duplicate_command_id_rejection(events: &[EngineEventRecord]) -> bool {
 fn sync_runtime_inputs_from_input_store(
     runtime: &mut Value,
     fact_store: &InputStore,
-) -> InputStoreSyncReport {
-    let previous_hash = stable_inputs_hash(runtime.pointer("/inputs"));
-    if !runtime.is_object() {
-        *runtime = Value::Object(Map::new());
-    }
-    if let Some(root) = runtime.as_object_mut() {
-        root.insert("inputs".to_string(), Value::Object(Map::new()));
-    }
-    let mut synced_refs = Vec::<String>::new();
-    for slot in fact_store.list_ref_strings() {
-        let Some(value) = fact_store.get(slot.as_str()).map(|entry| entry.value.clone()) else {
-            continue;
-        };
-        super::super::input_normalize::set_runtime_input_value(runtime, slot.as_str(), value);
-        synced_refs.push(format!("inputs.{slot}"));
-    }
-    let current_hash = stable_inputs_hash(runtime.pointer("/inputs"));
-    InputStoreSyncReport {
-        synced_refs,
-        hash_changed: previous_hash != current_hash,
-        previous_hash,
-        current_hash,
-    }
+) -> super::store_projection::InputStoreSyncReport {
+    super::store_projection::sync_runtime_inputs_from_input_store(runtime, fact_store)
 }
 
-fn stable_inputs_hash(value: Option<&Value>) -> Option<String> {
-    stable_hash_hex(value?, &StableJsonOptions::default()).ok()
-}
-
-pub(crate) fn collect_segment_input_ref_closure(segment: &PlanSketchSegment) -> Vec<String> {
+pub(crate) fn collect_segment_ref_closure(segment: &PlanSketchSegment) -> Vec<String> {
     let mut refs = BTreeSet::<String>::new();
     for step in &segment.steps {
-        collect_input_refs_from_value(&Value::Object(step.inputs.clone()), &mut refs);
+        collect_refs_from_value(&Value::Object(step.inputs.clone()), &mut refs);
         if let Some(when) = step.when.as_ref() {
-            collect_input_refs_from_text(when.cel.as_str(), &mut refs);
+            collect_refs_from_text(when.cel.as_str(), &mut refs);
         }
         if let Some(until) = step.until.as_ref() {
-            collect_input_refs_from_value(until, &mut refs);
+            collect_refs_from_value(until, &mut refs);
         }
         for template in &step.constraint_templates {
-            collect_input_refs_from_value(&Value::Object(template.params.clone()), &mut refs);
+            collect_refs_from_value(&Value::Object(template.params.clone()), &mut refs);
         }
     }
     refs.into_iter().collect::<Vec<_>>()
 }
 
-pub(crate) fn collect_segment_missing_input_refs(
+pub(crate) fn collect_segment_missing_refs<F>(
     segment: &PlanSketchSegment,
-    fact_store: &InputStore,
-) -> Vec<String> {
-    collect_segment_input_ref_closure(segment)
+    mut has_ref: F,
+) -> Vec<String>
+where
+    F: FnMut(&str) -> bool,
+{
+    let in_segment_step_ids = segment
+        .steps
+        .iter()
+        .map(|step| step.id.as_str())
+        .collect::<BTreeSet<_>>();
+    collect_segment_ref_closure(segment)
         .into_iter()
         .filter(|reference| {
-            let Some(slot) = normalize_input_slot_key(reference.as_str()) else {
-                return false;
+            let Some(RefPath::NodeOutput { step_id, .. }) = RefPath::parse(reference) else {
+                return true;
             };
-            !fact_store.has(slot.as_str())
+            !in_segment_step_ids.contains(step_id.as_str())
         })
+        .filter(|reference| !has_ref(reference))
         .collect::<Vec<_>>()
 }
 
-fn collect_input_refs_from_value(value: &Value, refs: &mut BTreeSet<String>) {
+fn collect_refs_from_value(value: &Value, refs: &mut BTreeSet<String>) {
     match value {
         Value::Object(object) => {
             if let Some(reference) = object.get("ref").and_then(Value::as_str) {
-                let trimmed = reference.trim();
-                if trimmed.starts_with("inputs.") {
-                    refs.insert(trimmed.to_string());
+                if let Some(canonical_ref) = canonical_missing_ref(reference) {
+                    refs.insert(canonical_ref);
                 }
             }
             for nested in object.values() {
-                collect_input_refs_from_value(nested, refs);
+                collect_refs_from_value(nested, refs);
             }
         }
         Value::Array(items) => {
             for nested in items {
-                collect_input_refs_from_value(nested, refs);
+                collect_refs_from_value(nested, refs);
             }
         }
-        Value::String(text) => collect_input_refs_from_text(text.as_str(), refs),
+        Value::String(text) => collect_refs_from_text(text.as_str(), refs),
         _ => {}
     }
 }
 
-fn collect_input_refs_from_text(text: &str, refs: &mut BTreeSet<String>) {
+fn collect_refs_from_text(text: &str, refs: &mut BTreeSet<String>) {
+    for prefix in ["inputs.", "facts.", "nodes.", "fact:", "fact."] {
+        collect_refs_from_text_with_prefix(text, prefix, refs);
+    }
+}
+
+fn collect_refs_from_text_with_prefix(text: &str, prefix: &str, refs: &mut BTreeSet<String>) {
     let bytes = text.as_bytes();
     let mut offset = 0usize;
     while offset < bytes.len() {
-        let Some(relative) = text[offset..].find("inputs.") else {
+        let Some(relative) = text[offset..].find(prefix) else {
             break;
         };
         let start = offset + relative;
-        let mut end = start + "inputs.".len();
+        let mut end = start + prefix.len();
         while end < bytes.len() {
             let ch = bytes[end] as char;
-            if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | ':') {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':') {
                 end = end.saturating_add(1);
                 continue;
             }
             break;
         }
-        if let Some(slot) = normalize_input_slot_key(&text[start..end]) {
-            refs.insert(format!("inputs.{slot}"));
+        if let Some(canonical_ref) = canonical_missing_ref(&text[start..end]) {
+            refs.insert(canonical_ref);
         }
         offset = end;
     }
@@ -391,48 +420,82 @@ fn step_id_for_segment_node<'a>(node_id: Option<&'a str>, segment_id: &str) -> O
         .and_then(|value| (!value.trim().is_empty()).then_some(value))
 }
 
-pub(crate) fn build_todo_receipt(
-    todo_id: &str,
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct PostWriteInvalidationReport {
+    completed_write_node_ids: Vec<String>,
+    invalidated_signals: Vec<String>,
+    invalidated_input_refs: Vec<String>,
+    invalidated_runtime_fact_refs: Vec<String>,
+}
+
+impl PostWriteInvalidationReport {
+    fn has_effect(&self) -> bool {
+        !self.invalidated_input_refs.is_empty() || !self.invalidated_runtime_fact_refs.is_empty()
+    }
+}
+
+fn invalidate_post_write_volatile_facts(
     segment: &PlanSketchSegment,
-    status: EngineRunStatus,
     state: &EngineRunnerState,
-    round_events: &[EngineEventRecord],
-) -> super::super::todos::TodoReceipt {
-    let node_ids = segment
-        .steps
-        .iter()
-        .map(|step| format!("{}/{}", segment.segment_id, step.id))
-        .collect::<Vec<_>>();
-    let completed_node_set = state
+    candidate_context: &CandidateContext,
+    runtime_facts_store: &mut RuntimeFactsStore,
+    fact_store: &mut InputStore,
+    invalidated_completed_write_nodes: &mut BTreeSet<String>,
+) -> PostWriteInvalidationReport {
+    let mut report = PostWriteInvalidationReport::default();
+    let mut signals = BTreeSet::new();
+    let completed_node_ids = state
         .completed_node_ids
         .iter()
         .cloned()
         .collect::<BTreeSet<_>>();
-    let completed_node_ids = node_ids
-        .iter()
-        .filter(|node_id| completed_node_set.contains((*node_id).as_str()))
-        .cloned()
-        .collect::<Vec<_>>();
-    let tx_hashes = collect_segment_tx_hashes(state, node_ids.as_slice());
-    let event_types = round_events
-        .iter()
-        .map(event_type_name)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-
-    super::super::todos::TodoReceipt {
-        schema: "ais-agent-todo-receipt/0.0.1".to_string(),
-        todo_id: todo_id.to_string(),
-        segment_id: segment.segment_id.clone(),
-        status: run_status_name(status).to_string(),
-        paused_reason: state.paused_reason.clone(),
-        node_ids,
-        completed_node_ids,
-        tx_hashes,
-        event_types,
-        event_count: round_events.len() as u64,
+    for step in &segment.steps {
+        if step.kind != "action" {
+            continue;
+        }
+        let node_id = format!("{}/{}", segment.segment_id, step.id);
+        if !completed_node_ids.contains(node_id.as_str())
+            || !invalidated_completed_write_nodes.insert(node_id.clone())
+        {
+            continue;
+        }
+        report.completed_write_node_ids.push(node_id);
+        for signal in write_gates::required_action_volatile_signals(step, candidate_context) {
+            signals.insert(signal);
+        }
     }
+
+    let signals = signals.into_iter().collect::<Vec<_>>();
+    if signals.is_empty() {
+        return report;
+    }
+
+    report.invalidated_signals = signals
+        .iter()
+        .map(|signal| write_gates::volatile_signal_name(*signal).to_string())
+        .collect();
+    report.invalidated_input_refs = fact_store.invalidate_volatile_signals(signals.as_slice());
+    report.invalidated_runtime_fact_refs =
+        runtime_facts_store.invalidate_volatile_signals(signals.as_slice());
+    report
+}
+
+fn segment_completed_write_node_ids(
+    segment: &PlanSketchSegment,
+    state: &EngineRunnerState,
+) -> Vec<String> {
+    let completed_node_ids = state
+        .completed_node_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    segment
+        .steps
+        .iter()
+        .filter(|step| step.kind == "action")
+        .map(|step| format!("{}/{}", segment.segment_id, step.id))
+        .filter(|node_id| completed_node_ids.contains(node_id.as_str()))
+        .collect::<Vec<_>>()
 }
 
 pub(crate) fn run_status_name(status: EngineRunStatus) -> &'static str {
@@ -443,136 +506,27 @@ pub(crate) fn run_status_name(status: EngineRunStatus) -> &'static str {
     }
 }
 
-fn event_type_name(record: &EngineEventRecord) -> String {
-    serde_json::to_value(record.event.event_type)
-        .ok()
-        .and_then(|value| value.as_str().map(str::to_string))
-        .unwrap_or_else(|| format!("{:?}", record.event.event_type).to_lowercase())
-}
-
-fn collect_segment_tx_hashes(state: &EngineRunnerState, node_ids: &[String]) -> Vec<String> {
-    let mut tx_hashes = BTreeSet::<String>::new();
-    for node_id in node_ids {
-        let Some(outputs) = runtime_node_outputs(state, node_id.as_str()) else {
-            continue;
-        };
-        collect_tx_hash_like_strings(outputs, &mut tx_hashes, 0);
-    }
-    tx_hashes.into_iter().collect::<Vec<_>>()
-}
-
-fn collect_tx_hash_like_strings(value: &Value, output: &mut BTreeSet<String>, depth: usize) {
-    if depth > 8 {
-        return;
-    }
-    match value {
-        Value::Object(map) => {
-            for key in ["tx_hash", "signed_tx_hash", "signature"] {
-                if let Some(hash) = map.get(key).and_then(Value::as_str) {
-                    let trimmed = hash.trim();
-                    if !trimmed.is_empty() {
-                        output.insert(trimmed.to_string());
-                    }
-                }
-            }
-            for nested in map.values() {
-                collect_tx_hash_like_strings(nested, output, depth.saturating_add(1));
-            }
-        }
-        Value::Array(items) => {
-            for nested in items {
-                collect_tx_hash_like_strings(nested, output, depth.saturating_add(1));
-            }
-        }
-        _ => {}
-    }
-}
-
-pub(crate) fn apply_segment_stores_from_runtime(
+pub(crate) fn apply_segment_stores_from_runtime_with_runtime_facts(
     segment: &PlanSketchSegment,
     state: &EngineRunnerState,
+    runtime_facts_store: &mut RuntimeFactsStore,
     fact_store: &mut InputStore,
     verbose_llm: bool,
 ) {
-    for step in &segment.steps {
-        if step.stores.is_empty() {
-            continue;
-        }
-        let node_id = format!("{}/{}", segment.segment_id, step.id);
-        let Some(node_outputs) = runtime_node_outputs(state, node_id.as_str()) else {
-            continue;
-        };
-        for (return_field, slot_name) in &step.stores {
-            let Some(value) = extract_store_value(node_outputs, return_field.as_str()) else {
-                continue;
-            };
-            let provenance = format!("segment_store.{node_id}.{}", return_field.trim());
-            if let Some(canonical_slot) = normalize_input_slot_key(slot_name) {
-                let upsert_result = super::super::upsert_store_value_with_source(
-                    fact_store,
-                    canonical_slot.as_str(),
-                    value.clone(),
-                    super::super::input_store::InputValueLayer::Observed,
-                    "query",
-                    90,
-                    provenance.clone(),
-                );
-                if verbose_llm {
-                    eprintln!(
-                        "[agent] stores mapped node={} field={} -> slot=inputs.{} upsert={:?}",
-                        node_id, return_field, canonical_slot, upsert_result
-                    );
-                }
-                continue;
-            }
-            let upsert_result = super::super::upsert_store_value_with_source(
-                fact_store,
-                slot_name,
-                value.clone(),
-                super::super::input_store::InputValueLayer::Observed,
-                "query",
-                90,
-                provenance,
-            );
-            if verbose_llm {
-                eprintln!(
-                    "[agent] stores mapped node={} field={} -> slot={} upsert={:?}",
-                    node_id, return_field, slot_name, upsert_result
-                );
-            }
-        }
-    }
-}
-
-fn runtime_node_outputs<'a>(state: &'a EngineRunnerState, node_id: &str) -> Option<&'a Value> {
-    let escaped = node_id.replace('~', "~0").replace('/', "~1");
-    state
-        .runtime
-        .pointer(format!("/nodes/{escaped}/outputs").as_str())
-}
-
-fn extract_store_value(node_outputs: &Value, field: &str) -> Option<Value> {
-    let field = field.trim();
-    if field.is_empty() {
-        return None;
-    }
-    if let Some(value) = value_at_dot_path(node_outputs, field) {
-        return Some(value.clone());
-    }
-    if let Some(outputs_value) = node_outputs.get("outputs") {
-        if let Some(value) = value_at_dot_path(outputs_value, field) {
-            return Some(value.clone());
-        }
-    }
-    None
-}
-
-fn value_at_dot_path<'a>(value: &'a Value, dot_path: &str) -> Option<&'a Value> {
-    let mut current = value;
-    for segment in dot_path.split('.').filter(|item| !item.is_empty()) {
-        current = current.get(segment)?;
-    }
-    Some(current)
+    super::store_projection::apply_segment_stores_from_runtime(
+        segment,
+        state,
+        runtime_facts_store,
+        fact_store,
+        verbose_llm,
+    );
+    super::store_projection::auto_project_query_outputs_to_input_store(
+        segment,
+        state,
+        runtime_facts_store,
+        fact_store,
+        verbose_llm,
+    );
 }
 
 #[cfg(test)]

@@ -67,6 +67,20 @@ pub(super) fn grounding_fact_keys_from_state_summary(state_summary: Option<&Valu
     keys.into_iter().collect::<Vec<_>>()
 }
 
+pub(super) fn grounding_fact_keys_from_typed_summary(
+    state_summary: Option<&super::state_summary::StateSummary>,
+) -> Vec<String> {
+    let mut keys = BTreeSet::<String>::new();
+    for raw_key in state_summary
+        .and_then(|summary| summary.intent_context_facts())
+        .into_iter()
+        .flat_map(|entries| entries.keys())
+    {
+        keys.insert(raw_key.to_string());
+    }
+    keys.into_iter().collect::<Vec<_>>()
+}
+
 fn normalize_fact_confidence(confidence: Option<&Map<String, Value>>) -> Map<String, Value> {
     let mut fact_confidence = Map::<String, Value>::new();
     let Some(confidence) = confidence else {

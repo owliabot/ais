@@ -27,6 +27,7 @@ fn load_or_init_state_rejects_legacy_checkpoint_node_ids() {
         runtime: None,
         events_jsonl: None,
         trace: None,
+        agent_trace_jsonl: None,
         checkpoint: Some(checkpoint_path.clone()),
         profile: AgentProfile::Standard,
         llm_script_jsonl: None,
@@ -81,6 +82,7 @@ fn load_or_init_state_dedupes_checkpoint_plan_snapshot_nodes() {
         runtime: None,
         events_jsonl: None,
         trace: None,
+        agent_trace_jsonl: None,
         checkpoint: Some(checkpoint_path.clone()),
         profile: AgentProfile::Standard,
         llm_script_jsonl: None,
@@ -104,6 +106,7 @@ fn load_or_init_state_dedupes_checkpoint_plan_snapshot_nodes() {
         checkpoint_hash,
         _checkpoint_ledger,
         checkpoint_extensions,
+        pending_resume_traces,
     ) = super::load_or_init_state(&command, "current-plan-hash", json!({})).expect("load state");
     assert!(resumed);
     assert_eq!(checkpoint_hash.as_deref(), Some("checkpoint-plan-hash"));
@@ -113,6 +116,7 @@ fn load_or_init_state_dedupes_checkpoint_plan_snapshot_nodes() {
         vec!["checkpoint-plan-hash".to_string()]
     );
     assert!(checkpoint_extensions.is_none());
+    assert!(pending_resume_traces.is_empty());
     let checkpoint_plan = checkpoint_plan.expect("checkpoint plan");
     assert_eq!(checkpoint_plan.schema, "ais-plan/0.0.3");
     assert_eq!(checkpoint_plan.nodes.len(), 2);
@@ -142,7 +146,7 @@ fn load_or_init_state_dedupes_checkpoint_plan_snapshot_nodes() {
 }
 
 #[test]
-fn checkpoint_extensions_roundtrip_restores_input_store_todo_and_intent_facts() {
+fn checkpoint_extensions_resume_core_roundtrip_restores_input_store_only() {
     let mut store = super::InputStore::default();
     store.upsert_seed(
         "owner",
@@ -151,7 +155,7 @@ fn checkpoint_extensions_roundtrip_restores_input_store_todo_and_intent_facts() 
     );
     store.upsert_seed(
         "inputs.token.decimals",
-        json!(6),
+        json!("6"),
         "runtime.inputs.token.decimals",
     );
     store.upsert(
@@ -167,129 +171,37 @@ fn checkpoint_extensions_roundtrip_restores_input_store_todo_and_intent_facts() 
             observed_at_ms: Some(1_710_000_123_456),
         },
     );
-    let runtime = json!({
-        "agent": {
-            "intent_grounding": {
-                "intent_facts": {
-                    "recipient": "0x2222222222222222222222222222222222222222",
-                    "amount": "1"
-                }
-            },
-            "todo_progress": {
-                "schema": "ais-agent-todo-progress/0.0.1",
-                "current_todo": {
-                    "id":"todo_1",
-                    "status":"in_progress",
-                    "receipt": {
-                        "schema":"ais-agent-todo-receipt/0.0.1",
-                        "todo_id":"todo_1",
-                        "segment_id":"seg_1",
-                        "status":"paused",
-                        "tx_hashes":["0xabc","0xdef"]
-                    }
-                },
-                "todos": [],
-                "progress": {"todo":0,"in_progress":1,"done":0,"blocked":0,"total":1},
-                "next_seq": 2
-            }
-        }
-    });
-
     let decoded = super::checkpoint_ext::AgentCheckpointExtensions::decode(None);
-    let intent_facts = runtime
-        .pointer("/agent/intent_grounding/intent_facts")
-        .and_then(Value::as_object)
-        .map(|facts| {
-            facts
-                .iter()
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect::<std::collections::BTreeMap<String, Value>>()
-        });
-    let extensions = decoded.encode_updated(
+    let extensions = decoded.encode_updated_with_runtime_facts(
         None,
         &store,
-        runtime.pointer("/agent/todo_progress"),
-        intent_facts.as_ref(),
+        &super::runtime_facts_store::RuntimeFactsStore::default(),
     );
-    assert!(extensions.get("input_store").is_some());
+    let extensions_value = Value::Object(extensions.clone());
+    assert!(extensions.get("resume_core").is_some());
     assert_eq!(
-        extensions
-            .get("input_store")
-            .and_then(|value| value.pointer("/entries/token.decimals/value")),
+        extensions_value.pointer("/resume_core/input_store/entries/token.decimals/value"),
         Some(&json!(6))
     );
     assert_eq!(
-        extensions
-            .get("input_store")
-            .and_then(|value| value.pointer("/entries/token.decimals/meta/provenance")),
+        extensions_value.pointer("/resume_core/input_store/entries/token.decimals/meta/provenance"),
         Some(&json!("runtime.inputs.token.decimals"))
     );
     assert_eq!(
-        extensions
-            .get("input_store")
-            .and_then(|value| value.pointer("/entries/native_balance/meta/layer")),
+        extensions_value.pointer("/resume_core/input_store/entries/native_balance/meta/layer"),
         Some(&json!("observed"))
     );
     assert_eq!(
-        extensions
-            .get("input_store")
-            .and_then(|value| value.pointer("/entries/native_balance/meta/stability")),
+        extensions_value.pointer("/resume_core/input_store/entries/native_balance/meta/stability"),
         Some(&json!("volatile"))
     );
     assert_eq!(
-        extensions
-            .get("input_store")
-            .and_then(|value| value.pointer("/entries/native_balance/meta/observed_at_ms")),
+        extensions_value.pointer("/resume_core/input_store/entries/native_balance/meta/observed_at_ms"),
         Some(&json!(1_710_000_123_456u64))
     );
-    assert_eq!(
-        extensions
-            .get("todo_progress")
-            .and_then(|value| value.pointer("/schema")),
-        Some(&json!("ais-agent-todo-progress/0.0.1"))
-    );
-    assert_eq!(
-        extensions
-            .get("todo_progress")
-            .and_then(|value| value.pointer("/current_todo/status")),
-        Some(&json!("in_progress"))
-    );
-    assert_eq!(
-        extensions
-            .get("todo_progress")
-            .and_then(|value| value.pointer("/current_todo/receipt/tx_hashes/0")),
-        Some(&json!("0xabc"))
-    );
-    assert_eq!(
-        extensions
-            .get("todo_progress")
-            .and_then(|value| value.pointer("/current_todo/receipt/tx_hashes/1")),
-        Some(&json!("0xdef"))
-    );
-    assert_eq!(
-        extensions
-            .get("todo_progress")
-            .and_then(|value| value.pointer("/progress/in_progress")),
-        Some(&json!(1))
-    );
-    assert_eq!(
-        extensions
-            .get("todo_progress")
-            .and_then(|value| value.pointer("/next_seq")),
-        Some(&json!(2))
-    );
-    assert_eq!(
-        extensions
-            .get("intent_facts")
-            .and_then(|value| value.get("recipient")),
-        Some(&json!("0x2222222222222222222222222222222222222222"))
-    );
-    assert_eq!(
-        extensions
-            .get("intent_facts")
-            .and_then(|value| value.get("amount")),
-        Some(&json!("1"))
-    );
+    assert!(extensions.get("todo_progress").is_none());
+    assert!(extensions.get("intent_facts").is_none());
+    assert!(extensions.get("derived_projections").is_none());
 
     let mut restored_runtime = json!({});
     let restored_extensions =
@@ -338,54 +250,8 @@ fn checkpoint_extensions_roundtrip_restores_input_store_todo_and_intent_facts() 
             .and_then(|entry| entry.value.as_i64()),
         Some(6)
     );
-    assert_eq!(
-        restored_extensions
-            .todo_progress()
-            .and_then(|value| value.pointer("/schema")),
-        Some(&json!("ais-agent-todo-progress/0.0.1"))
-    );
-    assert_eq!(
-        restored_extensions
-            .intent_facts()
-            .and_then(|facts| facts.get("recipient")),
-        Some(&json!("0x2222222222222222222222222222222222222222"))
-    );
-    assert_eq!(
-        restored_runtime.pointer("/agent/todo_progress/schema"),
-        Some(&json!("ais-agent-todo-progress/0.0.1"))
-    );
-    assert_eq!(
-        restored_runtime.pointer("/agent/todo_progress/current_todo/id"),
-        Some(&json!("todo_1"))
-    );
-    assert_eq!(
-        restored_runtime.pointer("/agent/todo_progress/current_todo/status"),
-        Some(&json!("in_progress"))
-    );
-    assert_eq!(
-        restored_runtime.pointer("/agent/todo_progress/current_todo/receipt/tx_hashes/0"),
-        Some(&json!("0xabc"))
-    );
-    assert_eq!(
-        restored_runtime.pointer("/agent/todo_progress/current_todo/receipt/tx_hashes/1"),
-        Some(&json!("0xdef"))
-    );
-    assert_eq!(
-        restored_runtime.pointer("/agent/todo_progress/progress/in_progress"),
-        Some(&json!(1))
-    );
-    assert_eq!(
-        restored_runtime.pointer("/agent/todo_progress/next_seq"),
-        Some(&json!(2))
-    );
-    assert_eq!(
-        restored_runtime.pointer("/agent/intent_grounding/intent_facts/recipient"),
-        Some(&json!("0x2222222222222222222222222222222222222222"))
-    );
-    assert_eq!(
-        restored_runtime.pointer("/agent/intent_grounding/intent_facts/amount"),
-        Some(&json!("1"))
-    );
+    assert!(restored_runtime.pointer("/agent/todo_progress").is_none());
+    assert!(restored_runtime.pointer("/agent/intent_grounding/intent_facts").is_none());
     let projection = restored_store.to_runtime_projection();
     if let Some(inputs) = projection.pointer("/inputs") {
         restored_runtime
@@ -404,6 +270,203 @@ fn checkpoint_extensions_roundtrip_restores_input_store_todo_and_intent_facts() 
 }
 
 #[test]
+fn decode_agent_checkpoint_extensions_ignores_legacy_derived_projection_section() {
+    let mut runtime = json!({
+        "agent": {
+            "todo_progress": {
+                "current_todo": {"id": "todo_runtime"}
+            },
+            "intent_grounding": {
+                "intent_facts": {"recipient": "0xruntime"}
+            }
+        }
+    });
+    let extensions = Map::from_iter([(
+        "derived_projections".to_string(),
+        json!({
+            "todo_progress": {
+                "current_todo": {"id": "todo_derived"}
+            },
+            "intent_facts": {"recipient": "0xderived"}
+        }),
+    )]);
+
+    let decoded =
+        super::decode_agent_checkpoint_extensions(&mut runtime, Some(&extensions), false);
+
+    assert_eq!(
+        runtime.pointer("/agent/todo_progress/current_todo/id"),
+        Some(&json!("todo_runtime"))
+    );
+    assert_eq!(
+        runtime.pointer("/agent/intent_grounding/intent_facts/recipient"),
+        Some(&json!("0xruntime"))
+    );
+    assert!(decoded.input_store().is_none());
+    assert!(decoded.runtime_facts_store().is_none());
+}
+
+#[test]
+fn build_initial_input_store_does_not_treat_runtime_snapshot_intent_facts_as_inputs() {
+    let mut runtime = json!({
+        "agent": {
+            "intent_grounding": {
+                "intent_facts": {
+                    "recipient": "0xruntime",
+                    "amount": "5"
+                }
+            }
+        }
+    });
+    let extensions = Map::from_iter([(
+        "derived_projections".to_string(),
+        json!({
+            "intent_facts": {
+                "recipient": "0xderived",
+                "amount": "1"
+            }
+        }),
+    )]);
+    let _decoded =
+        super::decode_agent_checkpoint_extensions(&mut runtime, Some(&extensions), false);
+    let config = RunnerConfig {
+        schema: "ais-runner-config/test".to_string(),
+        engine: RunnerEngineConfig::default(),
+        llm: None,
+        chains: std::collections::BTreeMap::new(),
+        plugins: RunnerPluginsConfig::default(),
+    };
+    let input_store =
+        super::build_initial_input_store(&runtime, &config, &[]).expect("build input store");
+
+    assert!(input_store.get("recipient").is_none());
+    assert!(input_store.get("amount").is_none());
+}
+
+#[test]
+fn maybe_save_checkpoint_persists_inferred_missing_input_pause_reason() {
+    let checkpoint_path = write_temp_file("pause-contract-checkpoint", "");
+    let command = AgentCommand {
+        plan: None,
+        intent: Some("transfer".to_string()),
+        intent_file: None,
+        workspace: None,
+        config: PathBuf::from("ignored.config.yaml"),
+        pack: None,
+        runtime: None,
+        events_jsonl: None,
+        trace: None,
+        agent_trace_jsonl: None,
+        checkpoint: Some(checkpoint_path.clone()),
+        profile: AgentProfile::Standard,
+        llm_script_jsonl: None,
+        verbose: false,
+        verbose_llm: false,
+        approvals_mode: None,
+        max_iterations: None,
+        max_planner_rounds: None,
+        max_tool_rounds: None,
+        max_index_candidates: None,
+        planner_context_token_budget: None,
+        llm_transcript_path: None,
+        llm_transcript_append: false,
+        format: OutputFormat::Text,
+    };
+    let state = EngineRunnerState {
+        runtime: json!({
+            "agent": {
+                "missing_required_input": {
+                    "reason_code": "missing_required_input",
+                    "consumed": false,
+                    "questions": [{"id":"inputs.owner","question":"owner?","required":true}]
+                }
+            }
+        }),
+        ..EngineRunnerState::default()
+    };
+    let plan = super::empty_plan_document();
+
+    super::maybe_save_checkpoint(
+        &command,
+        "run-test",
+        "plan-hash",
+        &plan,
+        &state,
+        &state.runtime,
+        &RunnerCheckpointLedger::default(),
+        None,
+        &crate::audit_contract::AuditStreamAttempt::fresh(),
+    )
+    .expect("save checkpoint");
+
+    let checkpoint = load_checkpoint_from_path(&checkpoint_path).expect("load checkpoint");
+    assert_eq!(
+        checkpoint.engine_state.paused_reason.as_deref(),
+        Some("missing_required_input")
+    );
+    assert_eq!(
+        checkpoint
+            .extensions
+            .get("resume_core")
+            .and_then(|value| value.get("audit_stream"))
+            .and_then(|value| value.get("attempt_id"))
+            .and_then(Value::as_str),
+        Some("attempt-1")
+    );
+    assert_eq!(
+        checkpoint
+            .extensions
+            .get("resume_core")
+            .and_then(|value| value.get("audit_stream"))
+            .and_then(|value| value.get("seq_scope"))
+            .and_then(Value::as_str),
+        Some("attempt_local")
+    );
+}
+
+#[test]
+fn agent_write_event_sinks_without_persisted_engine_sink_does_not_advance_watermark() {
+    let command = AgentCommand {
+        plan: None,
+        intent: Some("transfer".to_string()),
+        intent_file: None,
+        workspace: None,
+        config: PathBuf::from("ignored.config.yaml"),
+        pack: None,
+        runtime: None,
+        events_jsonl: None,
+        trace: None,
+        agent_trace_jsonl: None,
+        checkpoint: None,
+        profile: AgentProfile::Standard,
+        llm_script_jsonl: None,
+        verbose: false,
+        verbose_llm: false,
+        approvals_mode: None,
+        max_iterations: None,
+        max_planner_rounds: None,
+        max_tool_rounds: None,
+        max_index_candidates: None,
+        planner_context_token_budget: None,
+        llm_transcript_path: None,
+        llm_transcript_append: false,
+        format: OutputFormat::Text,
+    };
+    let events = vec![ais_engine::EngineEventRecord::new(
+        "run-test",
+        7,
+        "2026-03-07T00:00:00Z",
+        ais_engine::EngineEvent::new(ais_engine::EngineEventType::EnginePaused),
+    )];
+    let mut audit_attempt = crate::audit_contract::AuditStreamAttempt::fresh();
+
+    super::write_event_sinks(&command, &events, &mut audit_attempt).expect("write events");
+
+    assert_eq!(audit_attempt.last_event_seq, None);
+    assert_eq!(audit_attempt.last_event_ts, None);
+}
+
+#[test]
 fn segmented_checkpoint_resume_keeps_need_user_confirm_pause_in_real_flow() {
     let plan = plan_requiring_user_confirm("transfer-1");
     let checkpoint_path = write_temp_file("agent-checkpoint-path", "");
@@ -417,6 +480,7 @@ fn segmented_checkpoint_resume_keeps_need_user_confirm_pause_in_real_flow() {
         runtime: None,
         events_jsonl: None,
         trace: None,
+        agent_trace_jsonl: None,
         checkpoint: Some(checkpoint_path.clone()),
         profile: AgentProfile::Standard,
         llm_script_jsonl: None,
@@ -459,11 +523,13 @@ fn segmented_checkpoint_resume_keeps_need_user_confirm_pause_in_real_flow() {
         plan_hash.as_str(),
         &plan,
         &state,
+        &state.runtime,
         &crate::checkpoint_ledger::RunnerCheckpointLedger::default(),
         None,
+        &crate::audit_contract::AuditStreamAttempt::fresh(),
     )
     .expect("save checkpoint");
-    let (restored_state, resumed, checkpoint_plan, checkpoint_hash, _, _) =
+    let (restored_state, resumed, checkpoint_plan, checkpoint_hash, _, _, _) =
         super::load_or_init_state(&command, plan_hash.as_str(), json!({}))
             .expect("load checkpoint");
     assert!(resumed);
@@ -515,6 +581,7 @@ fn load_or_init_state_restores_approved_nodes_and_skips_reconfirm_on_resume() {
         runtime: None,
         events_jsonl: None,
         trace: None,
+        agent_trace_jsonl: None,
         checkpoint: Some(checkpoint_path.clone()),
         profile: AgentProfile::Standard,
         llm_script_jsonl: None,
@@ -531,7 +598,7 @@ fn load_or_init_state_restores_approved_nodes_and_skips_reconfirm_on_resume() {
         format: OutputFormat::Text,
     };
 
-    let (mut restored_state, resumed, _, checkpoint_hash, _, _) =
+    let (mut restored_state, resumed, _, checkpoint_hash, _, _, _) =
         super::load_or_init_state(&command, "plan-hash-restore", json!({}))
             .expect("load checkpoint");
     assert!(resumed);
@@ -614,6 +681,7 @@ fn resume_skips_confirmed_write_with_same_confirmation_hash() {
         runtime: None,
         events_jsonl: None,
         trace: None,
+        agent_trace_jsonl: None,
         checkpoint: Some(checkpoint_path.clone()),
         profile: AgentProfile::Standard,
         llm_script_jsonl: None,
@@ -703,14 +771,23 @@ fn resume_skips_confirmed_write_with_same_confirmation_hash() {
         plan_hash.as_str(),
         &plan,
         &state,
+        &state.runtime,
         &ledger,
         None,
+        &crate::audit_contract::AuditStreamAttempt::fresh(),
     )
     .expect("save checkpoint");
 
-    let (mut restored_state, resumed, _, checkpoint_hash, restored_ledger, _) =
-        super::load_or_init_state(&command, plan_hash.as_str(), json!({}))
-            .expect("load checkpoint");
+    let (
+        mut restored_state,
+        resumed,
+        _,
+        checkpoint_hash,
+        restored_ledger,
+        _,
+        pending_resume_traces,
+    ) = super::load_or_init_state(&command, plan_hash.as_str(), json!({}))
+        .expect("load checkpoint");
     assert!(resumed);
     assert_eq!(checkpoint_hash.as_deref(), Some(plan_hash.as_str()));
     assert!(restored_state.approved_node_ids.is_empty());
@@ -727,6 +804,10 @@ fn resume_skips_confirmed_write_with_same_confirmation_hash() {
         restored_ledger.side_effects()[0].status,
         ais_engine::SIDE_EFFECT_STATUS_CONFIRMED
     );
+    assert_eq!(pending_resume_traces.len(), 2);
+    assert_eq!(pending_resume_traces[0].phase, "resume");
+    assert_eq!(pending_resume_traces[0].event, "side_effect_reused");
+    assert_eq!(pending_resume_traces[1].event, "resume_skip_confirmed_write");
 
     let resume = run_plan_once(
         "run-resume-skip-confirmed-write",

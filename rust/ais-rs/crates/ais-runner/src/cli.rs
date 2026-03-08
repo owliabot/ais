@@ -71,11 +71,25 @@ pub struct AgentCommand {
     pub pack: Option<PathBuf>,
     #[arg(long)]
     pub runtime: Option<PathBuf>,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Append-only engine-event JSONL sink; records ais-engine events only and excludes host decision traces"
+    )]
     pub events_jsonl: Option<String>,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Append-only redacted engine trace JSONL sink derived from the same engine events; not a host decision log"
+    )]
     pub trace: Option<PathBuf>,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Append-only host decision trace JSONL sink for agent reconciliation/control-flow events"
+    )]
+    pub agent_trace_jsonl: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "Resume snapshot checkpoint for restart/continue; not an audit log"
+    )]
     pub checkpoint: Option<PathBuf>,
     #[arg(long, value_enum, default_value_t = AgentProfile::Standard)]
     pub profile: AgentProfile,
@@ -120,11 +134,20 @@ pub struct PlanCommand {
     pub runtime: Option<PathBuf>,
     #[arg(long, default_value_t = false)]
     pub dry_run: bool,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Append-only engine-event JSONL sink; records ais-engine events only and excludes host decision traces"
+    )]
     pub events_jsonl: Option<String>,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Append-only redacted engine trace JSONL sink derived from the same engine events; not a host decision log"
+    )]
     pub trace: Option<PathBuf>,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Resume snapshot checkpoint for restart/continue; not an audit log"
+    )]
     pub checkpoint: Option<PathBuf>,
     #[arg(long, default_value_t = false)]
     pub commands_stdin_jsonl: bool,
@@ -146,11 +169,20 @@ pub struct WorkflowCommand {
     pub runtime: Option<PathBuf>,
     #[arg(long, default_value_t = false)]
     pub dry_run: bool,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Append-only engine-event JSONL sink; records ais-engine events only and excludes host decision traces"
+    )]
     pub events_jsonl: Option<String>,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Append-only redacted engine trace JSONL sink derived from the same engine events; not a host decision log"
+    )]
     pub trace: Option<PathBuf>,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Resume snapshot checkpoint for restart/continue; not an audit log"
+    )]
     pub checkpoint: Option<PathBuf>,
     #[arg(long)]
     pub outputs: Option<PathBuf>,

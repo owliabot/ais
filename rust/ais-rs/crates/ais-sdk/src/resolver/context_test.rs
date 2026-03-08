@@ -78,3 +78,61 @@ fn get_ref_non_address_suffix_still_rejects_string_slot() {
         ResolverError::NotFound("params.token.chain_id".to_string())
     );
 }
+
+#[test]
+fn get_ref_unwraps_value_sentinel_from_leaf_subtree_collision() {
+    let context = ResolverContext::with_runtime(json!({
+        "inputs": {
+            "owner": {
+                "_value": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+                "balance": {
+                    "erc20": "999999"
+                }
+            }
+        }
+    }));
+    let owner = context.get_ref("inputs.owner").expect("must resolve");
+    assert_eq!(owner, json!("0x70997970c51812dc3a010c7d01b50e0d17dc79c8"));
+    let balance = context
+        .get_ref("inputs.owner.balance.erc20")
+        .expect("must resolve");
+    assert_eq!(balance, json!("999999"));
+}
+
+#[test]
+fn get_ref_returns_plain_object_when_no_value_sentinel() {
+    let context = ResolverContext::with_runtime(json!({
+        "inputs": {
+            "owner": {
+                "balance": { "native": "100" }
+            }
+        }
+    }));
+    let owner = context.get_ref("inputs.owner").expect("must resolve");
+    assert_eq!(owner, json!({"balance": {"native": "100"}}));
+}
+
+#[test]
+fn get_ref_value_sentinel_with_address_bridge_still_works() {
+    let context = ResolverContext::with_runtime(json!({
+        "inputs": {
+            "token": {
+                "_value": "0x8464135c8F25Da09e49BC8782676a84730C318bC",
+                "decimals": "18"
+            }
+        }
+    }));
+    let token = context.get_ref("inputs.token").expect("must resolve");
+    assert_eq!(token, json!("0x8464135c8F25Da09e49BC8782676a84730C318bC"));
+    let token_address = context
+        .get_ref("inputs.token.address")
+        .expect("address bridge");
+    assert_eq!(
+        token_address,
+        json!("0x8464135c8F25Da09e49BC8782676a84730C318bC")
+    );
+    let decimals = context
+        .get_ref("inputs.token.decimals")
+        .expect("must resolve");
+    assert_eq!(decimals, json!("18"));
+}

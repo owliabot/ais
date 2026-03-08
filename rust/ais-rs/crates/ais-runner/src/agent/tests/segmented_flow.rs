@@ -19,6 +19,7 @@ chains:
         runtime: None,
         events_jsonl: None,
         trace: None,
+        agent_trace_jsonl: None,
         checkpoint: None,
         profile: AgentProfile::Standard,
         llm_script_jsonl: None,
@@ -57,6 +58,7 @@ fn execute_agent_intent_mode_requires_llm_provider_with_workspace() {
         runtime: None,
         events_jsonl: None,
         trace: None,
+        agent_trace_jsonl: None,
         checkpoint: None,
         profile: AgentProfile::Standard,
         llm_script_jsonl: None,
@@ -104,6 +106,7 @@ fn build_segmented_demo_command(
         runtime: None,
         events_jsonl: events_jsonl.map(|path| path.display().to_string()),
         trace: None,
+        agent_trace_jsonl: None,
         checkpoint,
         profile: AgentProfile::DemoScripted,
         llm_script_jsonl: Some(llm_script_jsonl),
@@ -127,6 +130,13 @@ fn segmented_native_erc20_fixture_root() -> PathBuf {
 }
 
 fn build_segmented_native_erc20_command(llm_script_jsonl: PathBuf) -> AgentCommand {
+    build_segmented_native_erc20_command_with_checkpoint(llm_script_jsonl, None)
+}
+
+fn build_segmented_native_erc20_command_with_checkpoint(
+    llm_script_jsonl: PathBuf,
+    checkpoint: Option<PathBuf>,
+) -> AgentCommand {
     let fixture_root = segmented_native_erc20_fixture_root();
     let workspace_dir = fixture_root.join("workspace");
     let pack_path = workspace_dir.join("safe-defi.ais-pack.yaml");
@@ -142,7 +152,8 @@ fn build_segmented_native_erc20_command(llm_script_jsonl: PathBuf) -> AgentComma
         runtime: None,
         events_jsonl: None,
         trace: None,
-        checkpoint: None,
+        agent_trace_jsonl: None,
+        checkpoint,
         profile: AgentProfile::DemoScripted,
         llm_script_jsonl: Some(llm_script_jsonl),
         verbose: false,
@@ -159,9 +170,1216 @@ fn build_segmented_native_erc20_command(llm_script_jsonl: PathBuf) -> AgentComma
     }
 }
 
+fn planner_summary_for_runtime(
+    state: &EngineRunnerState,
+    completed_segments: usize,
+) -> (Value, super::StateSummary) {
+    let mut manager = super::context_view::PlanningContextManager::default();
+    let input_store = super::InputStore::default();
+    let runtime_facts_store = super::RuntimeFactsStore::default();
+    let summary = manager.next_summary_result_with_runtime_facts(
+        state,
+        completed_segments,
+        false,
+        None,
+        Some(&input_store),
+        Some(&runtime_facts_store),
+        None,
+    );
+    (summary.packed, summary.typed)
+}
+
+fn missing_input_error_payload(
+    question_id: &str,
+    question_text: &str,
+    message: &str,
+    trace_id: &str,
+) -> Value {
+    json!({
+        "reason_code":"missing_required_input",
+        "message": message,
+        "details": {
+            "questions":[
+                {
+                    "id": question_id,
+                    "question": question_text,
+                    "required": true,
+                    "options": []
+                }
+            ],
+            "recovery_exhaustion": {
+                "unresolved_refs": [question_id],
+                "reasons": ["host_recovery_exhausted"],
+                "attempt_trace_id": trace_id
+            }
+        }
+    })
+}
+
+fn write_grounding_unavailable_then_segment_pause_script(
+    file_stem: &str,
+    grounding_question_id: &str,
+    grounding_question_text: &str,
+    grounding_message: &str,
+    todo_title: &str,
+    segment_question_id: &str,
+    segment_question_text: &str,
+    segment_message: &str,
+) -> PathBuf {
+    let llm_script = [
+        serde_json::to_string(&json!({
+            "assistant_content":"begin",
+            "tool_calls":[{
+                "id":"tool-begin",
+                "name":"plan.begin",
+                "arguments":{
+                    "session_id":"sess-grounding-unavailable",
+                    "snapshot_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "cursor":"cursor-0",
+                    "limits":{"max_rounds":8,"max_segments":4}
+                }
+            }]
+        }))
+        .expect("script line 1"),
+        serde_json::to_string(&json!({
+            "assistant_content":"ground unavailable",
+            "tool_calls":[{
+                "id":"tool-ground",
+                "name":"plan.ground_intent",
+                "arguments":{
+                    "status":"unavailable",
+                    "issues":[],
+                    "error": missing_input_error_payload(
+                        grounding_question_id,
+                        grounding_question_text,
+                        grounding_message,
+                        "missing_resolution:grounding:grounding:need_user_input"
+                    )
+                }
+            }]
+        }))
+        .expect("script line 2"),
+        serde_json::to_string(&json!({
+            "assistant_content":"todos",
+            "tool_calls":[{
+                "id":"tool-todos",
+                "name":"plan.propose_todos",
+                "arguments":{
+                    "status":"proposed",
+                    "todos":[{"title":todo_title}]
+                }
+            }]
+        }))
+        .expect("script line 3"),
+        serde_json::to_string(&json!({
+            "assistant_content":"segment unavailable",
+            "tool_calls":[{
+                "id":"tool-propose",
+                "name":"plan.propose_segment",
+                "arguments":{
+                    "status":"unavailable",
+                    "done":false,
+                    "error": missing_input_error_payload(
+                        segment_question_id,
+                        segment_question_text,
+                        segment_message,
+                        "missing_resolution:segment:seg_1:need_user_input"
+                    )
+                }
+            }]
+        }))
+        .expect("script line 4"),
+        serde_json::to_string(&json!({
+            "assistant_content":"segment unavailable retry",
+            "tool_calls":[{
+                "id":"tool-propose-retry",
+                "name":"plan.propose_segment",
+                "arguments":{
+                    "status":"unavailable",
+                    "done":false,
+                    "error": missing_input_error_payload(
+                        segment_question_id,
+                        segment_question_text,
+                        segment_message,
+                        "missing_resolution:segment:seg_1:need_user_input:retry"
+                    )
+                }
+            }]
+        }))
+        .expect("script line 5"),
+    ]
+    .join("\n");
+    write_temp_file(file_stem, llm_script.as_str())
+}
+
+fn write_grounding_proposed_then_segment_pause_script(
+    file_stem: &str,
+    grounding_ref: &str,
+    grounding_question_text: &str,
+    todo_title: &str,
+    segment_question_id: &str,
+    segment_question_text: &str,
+    segment_message: &str,
+) -> PathBuf {
+    let llm_script = [
+        serde_json::to_string(&json!({
+            "assistant_content":"begin",
+            "tool_calls":[{
+                "id":"tool-begin",
+                "name":"plan.begin",
+                "arguments":{
+                    "session_id":"sess-grounding-proposed",
+                    "snapshot_hash":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                    "cursor":"cursor-0",
+                    "limits":{"max_rounds":8,"max_segments":4}
+                }
+            }]
+        }))
+        .expect("script line 1"),
+        serde_json::to_string(&json!({
+            "assistant_content":"ground proposed not-ready",
+            "tool_calls":[{
+                "id":"tool-ground",
+                "name":"plan.ground_intent",
+                "arguments":{
+                    "status":"proposed",
+                    "ready_for_todos": false,
+                    "missing_refs":[grounding_ref],
+                    "questions":[
+                        {
+                            "id": grounding_ref,
+                            "question": grounding_question_text,
+                            "required": true,
+                            "options": []
+                        }
+                    ]
+                }
+            }]
+        }))
+        .expect("script line 2"),
+        serde_json::to_string(&json!({
+            "assistant_content":"todos",
+            "tool_calls":[{
+                "id":"tool-todos",
+                "name":"plan.propose_todos",
+                "arguments":{
+                    "status":"proposed",
+                    "todos":[{"title":todo_title}]
+                }
+            }]
+        }))
+        .expect("script line 3"),
+        serde_json::to_string(&json!({
+            "assistant_content":"segment unavailable",
+            "tool_calls":[{
+                "id":"tool-propose",
+                "name":"plan.propose_segment",
+                "arguments":{
+                    "status":"unavailable",
+                    "done":false,
+                    "error": missing_input_error_payload(
+                        segment_question_id,
+                        segment_question_text,
+                        segment_message,
+                        "missing_resolution:segment:seg_1:need_user_input"
+                    )
+                }
+            }]
+        }))
+        .expect("script line 4"),
+        serde_json::to_string(&json!({
+            "assistant_content":"segment unavailable retry",
+            "tool_calls":[{
+                "id":"tool-propose-retry",
+                "name":"plan.propose_segment",
+                "arguments":{
+                    "status":"unavailable",
+                    "done":false,
+                    "error": missing_input_error_payload(
+                        segment_question_id,
+                        segment_question_text,
+                        segment_message,
+                        "missing_resolution:segment:seg_1:need_user_input:retry"
+                    )
+                }
+            }]
+        }))
+        .expect("script line 5"),
+    ]
+    .join("\n");
+    write_temp_file(file_stem, llm_script.as_str())
+}
+
+fn write_grounding_decode_failure_then_segment_pause_script(
+    file_stem: &str,
+    todo_title: &str,
+    segment_question_id: &str,
+    segment_question_text: &str,
+    segment_message: &str,
+) -> PathBuf {
+    let llm_script = [
+        serde_json::to_string(&json!({
+            "assistant_content":"begin",
+            "tool_calls":[{
+                "id":"tool-begin",
+                "name":"plan.begin",
+                "arguments":{
+                    "session_id":"sess-grounding-decode-failure",
+                    "snapshot_hash":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                    "cursor":"cursor-0",
+                    "limits":{"max_rounds":8,"max_segments":4}
+                }
+            }]
+        }))
+        .expect("script line 1"),
+        serde_json::to_string(&json!({
+            "assistant_content":"wrong tool for grounding",
+            "tool_calls":[{
+                "id":"tool-wrong-ground",
+                "name":"plan.propose_todos",
+                "arguments":{
+                    "status":"proposed",
+                    "todos":[{"title":"wrong phase payload"}]
+                }
+            }]
+        }))
+        .expect("script line 2"),
+        serde_json::to_string(&json!({
+            "assistant_content":"todos after grounding fallback",
+            "tool_calls":[{
+                "id":"tool-todos",
+                "name":"plan.propose_todos",
+                "arguments":{
+                    "status":"proposed",
+                    "todos":[{"title":todo_title}]
+                }
+            }]
+        }))
+        .expect("script line 3"),
+        serde_json::to_string(&json!({
+            "assistant_content":"segment unavailable",
+            "tool_calls":[{
+                "id":"tool-propose",
+                "name":"plan.propose_segment",
+                "arguments":{
+                    "status":"unavailable",
+                    "done":false,
+                    "error": missing_input_error_payload(
+                        segment_question_id,
+                        segment_question_text,
+                        segment_message,
+                        "missing_resolution:segment:seg_1:need_user_input"
+                    )
+                }
+            }]
+        }))
+        .expect("script line 4"),
+        serde_json::to_string(&json!({
+            "assistant_content":"segment unavailable retry",
+            "tool_calls":[{
+                "id":"tool-propose-retry",
+                "name":"plan.propose_segment",
+                "arguments":{
+                    "status":"unavailable",
+                    "done":false,
+                    "error": missing_input_error_payload(
+                        segment_question_id,
+                        segment_question_text,
+                        segment_message,
+                        "missing_resolution:segment:seg_1:need_user_input:retry"
+                    )
+                }
+            }]
+        }))
+        .expect("script line 5"),
+    ]
+    .join("\n");
+    write_temp_file(file_stem, llm_script.as_str())
+}
+
+fn write_runtime_grounding_reuse_then_segment_pause_script(
+    file_stem: &str,
+    todo_title: &str,
+    segment_question_id: &str,
+    segment_question_text: &str,
+    segment_message: &str,
+) -> PathBuf {
+    let llm_script = [
+        serde_json::to_string(&json!({
+            "assistant_content":"begin",
+            "tool_calls":[{
+                "id":"tool-begin",
+                "name":"plan.begin",
+                "arguments":{
+                    "session_id":"sess-grounding-reuse",
+                    "snapshot_hash":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                    "cursor":"cursor-0",
+                    "limits":{"max_rounds":8,"max_segments":4}
+                }
+            }]
+        }))
+        .expect("script line 1"),
+        serde_json::to_string(&json!({
+            "assistant_content":"todos after runtime grounding reuse",
+            "tool_calls":[{
+                "id":"tool-todos",
+                "name":"plan.propose_todos",
+                "arguments":{
+                    "status":"proposed",
+                    "todos":[{"title":todo_title}]
+                }
+            }]
+        }))
+        .expect("script line 2"),
+        serde_json::to_string(&json!({
+            "assistant_content":"segment unavailable",
+            "tool_calls":[{
+                "id":"tool-propose",
+                "name":"plan.propose_segment",
+                "arguments":{
+                    "status":"unavailable",
+                    "done":false,
+                    "error": missing_input_error_payload(
+                        segment_question_id,
+                        segment_question_text,
+                        segment_message,
+                        "missing_resolution:segment:seg_1:need_user_input"
+                    )
+                }
+            }]
+        }))
+        .expect("script line 3"),
+        serde_json::to_string(&json!({
+            "assistant_content":"segment unavailable retry",
+            "tool_calls":[{
+                "id":"tool-propose-retry",
+                "name":"plan.propose_segment",
+                "arguments":{
+                    "status":"unavailable",
+                    "done":false,
+                    "error": missing_input_error_payload(
+                        segment_question_id,
+                        segment_question_text,
+                        segment_message,
+                        "missing_resolution:segment:seg_1:need_user_input:retry"
+                    )
+                }
+            }]
+        }))
+        .expect("script line 4"),
+    ]
+    .join("\n");
+    write_temp_file(file_stem, llm_script.as_str())
+}
+
+fn write_checkpoint_with_seed_input(
+    file_stem: &str,
+    input_ref: &str,
+    value: Value,
+) -> PathBuf {
+    write_checkpoint_with_seed_input_and_grounding(
+        file_stem,
+        input_ref,
+        value,
+        None,
+    )
+}
+
+fn write_checkpoint_with_seed_input_and_grounding(
+    file_stem: &str,
+    input_ref: &str,
+    value: Value,
+    intent_grounding: Option<Value>,
+) -> PathBuf {
+    let active_plan = super::empty_plan_document();
+    let active_plan_hash = super::hash_plan(&active_plan).expect("empty plan hash");
+    let checkpoint_path = write_temp_file(file_stem, "");
+    let mut input_store = super::InputStore::default();
+    input_store.upsert_user(
+        input_ref,
+        value.clone(),
+        format!("test.seed.{input_ref}").as_str(),
+    );
+    let extensions = super::checkpoint_ext::AgentCheckpointExtensions::default()
+        .encode_updated_with_runtime_facts(
+            None,
+            &input_store,
+            &super::RuntimeFactsStore::default(),
+        );
+    let mut runtime_snapshot = json!({});
+    if let Some(slot) = super::input_normalize::normalize_input_slot_key(input_ref) {
+        super::input_normalize::set_runtime_input_value(
+            &mut runtime_snapshot,
+            slot.as_str(),
+            value,
+        );
+    }
+    if let Some(intent_grounding) = intent_grounding {
+        runtime_snapshot
+            .as_object_mut()
+            .expect("runtime snapshot object")
+            .entry("agent".to_string())
+            .or_insert_with(|| json!({}));
+        if let Some(agent) = runtime_snapshot
+            .get_mut("agent")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            agent.insert("intent_grounding".to_string(), intent_grounding);
+        }
+    }
+    let mut checkpoint = create_checkpoint_document(
+        "run-grounding-unavailable-fixture",
+        active_plan_hash,
+        CheckpointEngineState::default(),
+        Some(runtime_snapshot),
+        Some(serde_json::to_value(active_plan).expect("empty plan snapshot")),
+        None,
+    );
+    checkpoint.extensions = extensions;
+    save_checkpoint_to_path(&checkpoint_path, &checkpoint).expect("save checkpoint");
+    checkpoint_path
+}
+
+fn write_checkpoint_with_custom_input_store(
+    file_stem: &str,
+    input_store: super::InputStore,
+) -> PathBuf {
+    let active_plan = super::empty_plan_document();
+    let active_plan_hash = super::hash_plan(&active_plan).expect("empty plan hash");
+    let checkpoint_path = write_temp_file(file_stem, "");
+    let extensions = super::checkpoint_ext::AgentCheckpointExtensions::default()
+        .encode_updated_with_runtime_facts(
+            None,
+            &input_store,
+            &super::RuntimeFactsStore::default(),
+        );
+    let checkpoint = create_checkpoint_document(
+        "run-custom-input-store-fixture",
+        active_plan_hash,
+        CheckpointEngineState::default(),
+        Some(json!({})),
+        Some(serde_json::to_value(active_plan).expect("empty plan snapshot")),
+        None,
+    );
+    let mut checkpoint = checkpoint;
+    checkpoint.extensions = extensions;
+    save_checkpoint_to_path(&checkpoint_path, &checkpoint).expect("save checkpoint");
+    checkpoint_path
+}
+
+fn temp_output_path(file_stem: &str, extension: &str) -> PathBuf {
+    let path = write_temp_file(file_stem, "");
+    let _ = fs::remove_file(&path);
+    if extension.is_empty() {
+        return path;
+    }
+    let desired = path.with_extension(extension);
+    let _ = fs::remove_file(&desired);
+    desired
+}
+
+fn read_jsonl_values(path: &std::path::Path) -> Vec<Value> {
+    let text = fs::read_to_string(path).expect("jsonl file");
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<Value>(line).expect("jsonl line"))
+        .collect()
+}
+
+#[test]
+fn segmented_demo_fixture_grounding_unavailable_fast_path_keeps_single_ground_round() {
+    let checkpoint_path = write_checkpoint_with_seed_input(
+        "agent-segmented-demo-grounding-unavailable-checkpoint",
+        "inputs.recipient.profile",
+        json!("alice"),
+    );
+    let command = build_segmented_demo_command(
+        write_grounding_unavailable_then_segment_pause_script(
+            "agent-segmented-demo-grounding-unavailable-script",
+            "inputs.recipient.profile",
+            "recipient profile?",
+            "need recipient profile before planning todos",
+            "send transfer",
+            "inputs.transfer.memo",
+            "transfer memo?",
+            "need transfer memo before proposing the first segment",
+        ),
+        Some(checkpoint_path),
+        None,
+    );
+    let parsed = parse_agent_output_json(&command);
+    assert_eq!(parsed.get("status").and_then(Value::as_str), Some("paused"));
+    assert_eq!(
+        parsed.get("paused_reason").and_then(Value::as_str),
+        Some("missing_required_input")
+    );
+    assert_eq!(
+        parsed.pointer("/llm_usage/diagnostics/phase_round_count/ground_intent"),
+        Some(&json!(1))
+    );
+}
+
+#[test]
+fn segmented_demo_fixture_grounding_planner_call_failed_fallback_keeps_single_ground_round() {
+    let command = build_segmented_demo_command(
+        write_grounding_decode_failure_then_segment_pause_script(
+            "agent-segmented-demo-grounding-decode-failure-script",
+            "send transfer",
+            "inputs.transfer.memo",
+            "transfer memo?",
+            "need transfer memo before proposing the first segment",
+        ),
+        None,
+        None,
+    );
+    let parsed = parse_agent_output_json(&command);
+    assert_eq!(parsed.get("status").and_then(Value::as_str), Some("paused"));
+    assert_eq!(
+        parsed.get("paused_reason").and_then(Value::as_str),
+        Some("missing_required_input")
+    );
+    assert_eq!(
+        parsed.pointer("/llm_usage/diagnostics/phase_round_count/ground_intent"),
+        Some(&json!(1))
+    );
+}
+
+#[test]
+fn native_erc20_fixture_grounding_planner_call_failed_fallback_keeps_single_ground_round() {
+    let command = build_segmented_native_erc20_command(
+        write_grounding_decode_failure_then_segment_pause_script(
+            "agent-segmented-native-erc20-grounding-decode-failure-script",
+            "send native and token transfer",
+            "inputs.confirmation.note",
+            "confirmation note?",
+            "need confirmation note before proposing the transfer segment",
+        ),
+    );
+    let parsed = parse_agent_output_json(&command);
+    assert_eq!(parsed.get("status").and_then(Value::as_str), Some("paused"));
+    assert_eq!(
+        parsed.get("paused_reason").and_then(Value::as_str),
+        Some("missing_required_input")
+    );
+    assert_eq!(
+        parsed.pointer("/llm_usage/diagnostics/phase_round_count/ground_intent"),
+        Some(&json!(1))
+    );
+}
+
+#[test]
+fn native_erc20_fixture_grounding_unavailable_fast_path_keeps_single_ground_round() {
+    let checkpoint_path = write_checkpoint_with_seed_input(
+        "agent-segmented-native-erc20-grounding-unavailable-checkpoint",
+        "inputs.token.decimals",
+        json!(18),
+    );
+    let command = build_segmented_native_erc20_command_with_checkpoint(
+        write_grounding_unavailable_then_segment_pause_script(
+            "agent-segmented-native-erc20-grounding-unavailable-script",
+            "inputs.token.decimals",
+            "token decimals?",
+            "need token decimals before planning todos",
+            "send native and token transfer",
+            "inputs.confirmation.note",
+            "confirmation note?",
+            "need confirmation note before proposing the transfer segment",
+        ),
+        Some(checkpoint_path),
+    );
+    let parsed = parse_agent_output_json(&command);
+    assert_eq!(parsed.get("status").and_then(Value::as_str), Some("paused"));
+    assert_eq!(
+        parsed.get("paused_reason").and_then(Value::as_str),
+        Some("missing_required_input")
+    );
+    assert_eq!(
+        parsed.pointer("/llm_usage/diagnostics/phase_round_count/ground_intent"),
+        Some(&json!(1))
+    );
+}
+
+#[test]
+fn segmented_demo_fixture_grounding_proposed_fast_path_keeps_single_ground_round() {
+    let checkpoint_path = write_checkpoint_with_seed_input(
+        "agent-segmented-demo-grounding-proposed-checkpoint",
+        "inputs.recipient.profile",
+        json!("alice"),
+    );
+    let command = build_segmented_demo_command(
+        write_grounding_proposed_then_segment_pause_script(
+            "agent-segmented-demo-grounding-proposed-script",
+            "inputs.recipient.profile",
+            "recipient profile?",
+            "send transfer",
+            "inputs.transfer.memo",
+            "transfer memo?",
+            "need transfer memo before proposing the first segment",
+        ),
+        Some(checkpoint_path),
+        None,
+    );
+    let parsed = parse_agent_output_json(&command);
+    assert_eq!(parsed.get("status").and_then(Value::as_str), Some("paused"));
+    assert_eq!(
+        parsed.get("paused_reason").and_then(Value::as_str),
+        Some("missing_required_input")
+    );
+    assert_eq!(
+        parsed.pointer("/llm_usage/diagnostics/phase_round_count/ground_intent"),
+        Some(&json!(1))
+    );
+}
+
+#[test]
+fn native_erc20_fixture_grounding_proposed_fast_path_keeps_single_ground_round() {
+    let checkpoint_path = write_checkpoint_with_seed_input(
+        "agent-segmented-native-erc20-grounding-proposed-checkpoint",
+        "inputs.token.decimals",
+        json!(18),
+    );
+    let command = build_segmented_native_erc20_command_with_checkpoint(
+        write_grounding_proposed_then_segment_pause_script(
+            "agent-segmented-native-erc20-grounding-proposed-script",
+            "inputs.token.decimals",
+            "token decimals?",
+            "send native and token transfer",
+            "inputs.confirmation.note",
+            "confirmation note?",
+            "need confirmation note before proposing the transfer segment",
+        ),
+        Some(checkpoint_path),
+    );
+    let parsed = parse_agent_output_json(&command);
+    assert_eq!(parsed.get("status").and_then(Value::as_str), Some("paused"));
+    assert_eq!(
+        parsed.get("paused_reason").and_then(Value::as_str),
+        Some("missing_required_input")
+    );
+    assert_eq!(
+        parsed.pointer("/llm_usage/diagnostics/phase_round_count/ground_intent"),
+        Some(&json!(1))
+    );
+}
+
+#[test]
+fn segmented_demo_fixture_reuses_runtime_grounding_without_ground_round() {
+    let checkpoint_path = write_checkpoint_with_seed_input_and_grounding(
+        "agent-segmented-demo-grounding-reuse-checkpoint",
+        "inputs.recipient.profile",
+        json!("alice"),
+        Some(json!({
+            "status":"proposed",
+            "ready_for_todos": true,
+            "resolved_inputs": {
+                "recipient.profile": "alice"
+            },
+            "questions": [],
+            "missing_refs": []
+        })),
+    );
+    let command = build_segmented_demo_command(
+        write_runtime_grounding_reuse_then_segment_pause_script(
+            "agent-segmented-demo-grounding-reuse-script",
+            "send transfer",
+            "inputs.transfer.memo",
+            "transfer memo?",
+            "need transfer memo before proposing the first segment",
+        ),
+        Some(checkpoint_path),
+        None,
+    );
+    let parsed = parse_agent_output_json(&command);
+    assert_eq!(parsed.get("status").and_then(Value::as_str), Some("paused"));
+    assert_eq!(
+        parsed.get("paused_reason").and_then(Value::as_str),
+        Some("missing_required_input")
+    );
+    assert_eq!(
+        parsed.pointer("/llm_usage/diagnostics/phase_round_count/ground_intent"),
+        None
+    );
+}
+
+#[test]
+fn native_erc20_fixture_reuses_runtime_grounding_without_ground_round() {
+    let checkpoint_path = write_checkpoint_with_seed_input_and_grounding(
+        "agent-segmented-native-erc20-grounding-reuse-checkpoint",
+        "inputs.token.decimals",
+        json!(18),
+        Some(json!({
+            "status":"proposed",
+            "ready_for_todos": true,
+            "resolved_inputs": {
+                "token.decimals": 18
+            },
+            "questions": [],
+            "missing_refs": []
+        })),
+    );
+    let command = build_segmented_native_erc20_command_with_checkpoint(
+        write_runtime_grounding_reuse_then_segment_pause_script(
+            "agent-segmented-native-erc20-grounding-reuse-script",
+            "send native and token transfer",
+            "inputs.confirmation.note",
+            "confirmation note?",
+            "need confirmation note before proposing the transfer segment",
+        ),
+        Some(checkpoint_path),
+    );
+    let parsed = parse_agent_output_json(&command);
+    assert_eq!(parsed.get("status").and_then(Value::as_str), Some("paused"));
+    assert_eq!(
+        parsed.get("paused_reason").and_then(Value::as_str),
+        Some("missing_required_input")
+    );
+    assert_eq!(
+        parsed.pointer("/llm_usage/diagnostics/phase_round_count/ground_intent"),
+        None
+    );
+}
+
 fn parse_agent_output_json(command: &AgentCommand) -> Value {
     let output = super::execute_agent(command).expect("agent execution");
     serde_json::from_str(output.as_str()).expect("json output")
+}
+
+fn write_restore_resolved_decimals_then_pause_for_confirm_script() -> PathBuf {
+    let segment = json!({
+        "segment_id":"seg-transfer",
+        "cursor_in":"cursor-0",
+        "cursor_out":"cursor-1",
+        "done":true,
+        "summary":"query token balance then transfer when balance is sufficient",
+        "steps":[
+            {
+                "id":"q_token_balance",
+                "kind":"query",
+                "candidate_ref":"erc20@0.0.2/balance-of",
+                "inputs":{
+                    "owner":{"ref":"inputs.owner"},
+                    "token":{"object":{
+                        "address":{"lit":"0x8464135c8F25Da09e49BC8782676a84730C318bC"},
+                        "chain_ref":{"lit":"eip155:31338"}
+                    }}
+                }
+            },
+            {
+                "id":"check_token_balance",
+                "kind":"assert",
+                "depends_on":["q_token_balance"],
+                "inputs":{},
+                "when":{"cel":"nodes.q_token_balance.outputs.balance > to_atomic(1, inputs.token.decimals)"}
+            },
+            {
+                "id":"a_transfer_erc20",
+                "kind":"action",
+                "candidate_ref":"erc20@0.0.2/transfer",
+                "depends_on":["check_token_balance"],
+                "inputs":{
+                    "amount":{"lit":"1000000000000000000"},
+                    "to":{"ref":"inputs.recipient"},
+                    "token":{"object":{
+                        "address":{"lit":"0x8464135c8F25Da09e49BC8782676a84730C318bC"},
+                        "chain_ref":{"lit":"eip155:31338"}
+                    }}
+                }
+            }
+        ],
+        "extensions":{}
+    });
+    let llm_script = [
+        serde_json::to_string(&json!({
+            "assistant_content":"begin",
+            "tool_calls":[{
+                "id":"tool-begin",
+                "name":"plan.begin",
+                "arguments":{
+                    "session_id":"sess-restore-decimals",
+                    "snapshot_hash":"dededededededededededededededededededededededededededededededede",
+                    "cursor":"cursor-0",
+                    "limits":{"max_rounds":8,"max_segments":4}
+                }
+            }]
+        }))
+        .expect("restore script line 1"),
+        serde_json::to_string(&json!({
+            "assistant_content":"ground",
+            "tool_calls":[{
+                "id":"tool-ground",
+                "name":"plan.ground_intent",
+                "arguments":{
+                    "status":"proposed",
+                    "ready_for_todos": true,
+                    "resolved_inputs": {
+                        "owner":"0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+                        "recipient":"0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+                    }
+                }
+            }]
+        }))
+        .expect("restore script line 2"),
+        serde_json::to_string(&json!({
+            "assistant_content":"todos",
+            "tool_calls":[{
+                "id":"tool-todos",
+                "name":"plan.propose_todos",
+                "arguments":{
+                    "status":"proposed",
+                    "todos":[{"title":"transfer erc20 after balance check"}]
+                }
+            }]
+        }))
+        .expect("restore script line 3"),
+        serde_json::to_string(&json!({
+            "assistant_content":"propose restore-backed segment",
+            "tool_calls":[
+                {
+                    "id":"tool-check",
+                    "name":"plan.check_segment",
+                    "arguments":{"segment": segment}
+                },
+                {
+                    "id":"tool-propose",
+                    "name":"plan.propose_segment",
+                    "arguments":{
+                        "status":"proposed",
+                        "done":true,
+                        "cursor_next":"cursor-1",
+                        "summary":"restore-backed decimals transfer",
+                        "segment": segment,
+                        "issues":[]
+                    }
+                }
+            ]
+        }))
+        .expect("restore script line 4"),
+    ]
+    .join("\n");
+    write_temp_file(
+        "agent-segmented-restore-decimals-success-script",
+        llm_script.as_str(),
+    )
+}
+
+fn write_missing_action_gate_dep_then_revise_success_script() -> PathBuf {
+    let bad_segment = json!({
+        "segment_id":"seg-native-transfer",
+        "cursor_in":"cursor-0",
+        "cursor_out":"cursor-1",
+        "done":true,
+        "summary":"missing explicit action gate dep",
+        "steps":[
+            {
+                "id":"q_native_balance",
+                "kind":"query",
+                "candidate_ref":"evm-native-utils@0.0.1/native-balance",
+                "inputs":{"addr":{"ref":"inputs.owner"}}
+            },
+            {
+                "id":"check_native_balance",
+                "kind":"assert",
+                "depends_on":["q_native_balance"],
+                "inputs":{},
+                "when":{"cel":"nodes.q_native_balance.outputs.balance > to_atomic(1, 18)"}
+            },
+            {
+                "id":"a_transfer_native",
+                "kind":"action",
+                "candidate_ref":"evm-native-utils@0.0.1/native-transfer",
+                "inputs":{
+                    "amount":{"lit":"1"},
+                    "to":{"ref":"inputs.recipient"}
+                }
+            }
+        ],
+        "extensions":{}
+    });
+    let good_segment = json!({
+        "segment_id":"seg-native-transfer",
+        "cursor_in":"cursor-0",
+        "cursor_out":"cursor-1",
+        "done":true,
+        "summary":"native transfer with explicit gate dep",
+        "steps":[
+            {
+                "id":"q_native_balance",
+                "kind":"query",
+                "candidate_ref":"evm-native-utils@0.0.1/native-balance",
+                "inputs":{"addr":{"ref":"inputs.owner"}}
+            },
+            {
+                "id":"check_native_balance",
+                "kind":"assert",
+                "depends_on":["q_native_balance"],
+                "inputs":{},
+                "when":{"cel":"nodes.q_native_balance.outputs.balance > to_atomic(1, 18)"}
+            },
+            {
+                "id":"a_transfer_native",
+                "kind":"action",
+                "candidate_ref":"evm-native-utils@0.0.1/native-transfer",
+                "depends_on":["check_native_balance"],
+                "inputs":{
+                    "amount":{"lit":"1"},
+                    "to":{"ref":"inputs.recipient"}
+                }
+            }
+        ],
+        "extensions":{}
+    });
+    let llm_script = [
+        serde_json::to_string(&json!({
+            "assistant_content":"begin",
+            "tool_calls":[{
+                "id":"tool-begin",
+                "name":"plan.begin",
+                "arguments":{
+                    "session_id":"sess-missing-gate-dep",
+                    "snapshot_hash":"efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+                    "cursor":"cursor-0",
+                    "limits":{"max_rounds":8,"max_segments":4}
+                }
+            }]
+        }))
+        .expect("gate-dep script line 1"),
+        serde_json::to_string(&json!({
+            "assistant_content":"ground",
+            "tool_calls":[{
+                "id":"tool-ground",
+                "name":"plan.ground_intent",
+                "arguments":{
+                    "status":"proposed",
+                    "ready_for_todos": true,
+                    "resolved_inputs": {
+                        "owner":"0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+                        "recipient":"0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+                    }
+                }
+            }]
+        }))
+        .expect("gate-dep script line 2"),
+        serde_json::to_string(&json!({
+            "assistant_content":"todos",
+            "tool_calls":[{
+                "id":"tool-todos",
+                "name":"plan.propose_todos",
+                "arguments":{
+                    "status":"proposed",
+                    "todos":[{"title":"transfer native after balance check"}]
+                }
+            }]
+        }))
+        .expect("gate-dep script line 3"),
+        serde_json::to_string(&json!({
+            "assistant_content":"propose segment with missing action gate dep",
+            "tool_calls":[
+                {
+                    "id":"tool-check",
+                    "name":"plan.check_segment",
+                    "arguments":{"segment": bad_segment}
+                },
+                {
+                    "id":"tool-propose",
+                    "name":"plan.propose_segment",
+                    "arguments":{
+                        "status":"proposed",
+                        "done":true,
+                        "cursor_next":"cursor-1",
+                        "summary":"missing action gate dep",
+                        "segment": bad_segment,
+                        "issues":[]
+                    }
+                }
+            ]
+        }))
+        .expect("gate-dep script line 4"),
+        serde_json::to_string(&json!({
+            "assistant_content":"revise segment after missing_action_gate_dep",
+            "tool_calls":[
+                {
+                    "id":"tool-check-revise",
+                    "name":"plan.check_segment",
+                    "arguments":{"segment": good_segment}
+                },
+                {
+                    "id":"tool-revise",
+                    "name":"plan.revise_segment",
+                    "arguments":{
+                        "status":"proposed",
+                        "done":true,
+                        "cursor_next":"cursor-1",
+                        "summary":"fixed missing action gate dep",
+                        "segment": good_segment,
+                        "issues":[]
+                    }
+                }
+            ]
+        }))
+        .expect("gate-dep script line 5"),
+    ]
+    .join("\n");
+    write_temp_file(
+        "agent-segmented-missing-action-gate-dep-script",
+        llm_script.as_str(),
+    )
+}
+
+fn write_stale_balance_then_refresh_query_repair_script() -> PathBuf {
+    let stale_segment = json!({
+        "segment_id":"seg-stale-native-transfer",
+        "cursor_in":"cursor-0",
+        "cursor_out":"cursor-1",
+        "done":true,
+        "summary":"write tries to reuse stale balance",
+        "steps":[
+            {
+                "id":"check_native_balance",
+                "kind":"assert",
+                "candidate_ref":"evm-native-utils@0.0.1/native-balance",
+                "inputs":{"addr":{"ref":"inputs.owner"}}
+            },
+            {
+                "id":"a_transfer_native",
+                "kind":"action",
+                "candidate_ref":"evm-native-utils@0.0.1/native-transfer",
+                "depends_on":["check_native_balance"],
+                "inputs":{
+                    "amount":{"lit":"1"},
+                    "to":{"ref":"inputs.recipient"}
+                }
+            }
+        ],
+        "extensions":{}
+    });
+    let fresh_segment = json!({
+        "segment_id":"seg-stale-native-transfer",
+        "cursor_in":"cursor-0",
+        "cursor_out":"cursor-1",
+        "done":true,
+        "summary":"refresh balance before native transfer",
+        "steps":[
+            {
+                "id":"q_native_balance",
+                "kind":"query",
+                "candidate_ref":"evm-native-utils@0.0.1/native-balance",
+                "inputs":{"addr":{"ref":"inputs.owner"}}
+            },
+            {
+                "id":"check_native_balance",
+                "kind":"assert",
+                "depends_on":["q_native_balance"],
+                "candidate_ref":"evm-native-utils@0.0.1/native-balance",
+                "inputs":{"addr":{"ref":"inputs.owner"}}
+            },
+            {
+                "id":"a_transfer_native",
+                "kind":"action",
+                "candidate_ref":"evm-native-utils@0.0.1/native-transfer",
+                "depends_on":["check_native_balance"],
+                "inputs":{
+                    "amount":{"lit":"1"},
+                    "to":{"ref":"inputs.recipient"}
+                }
+            }
+        ],
+        "extensions":{}
+    });
+    let llm_script = [
+        serde_json::to_string(&json!({
+            "assistant_content":"begin",
+            "tool_calls":[{
+                "id":"tool-begin",
+                "name":"plan.begin",
+                "arguments":{
+                    "session_id":"sess-stale-balance",
+                    "snapshot_hash":"ababefefababefefababefefababefefababefefababefefababefefababefef",
+                    "cursor":"cursor-0",
+                    "limits":{"max_rounds":8,"max_segments":4}
+                }
+            }]
+        }))
+        .expect("stale script line 1"),
+        serde_json::to_string(&json!({
+            "assistant_content":"ground",
+            "tool_calls":[{
+                "id":"tool-ground",
+                "name":"plan.ground_intent",
+                "arguments":{
+                    "status":"proposed",
+                    "ready_for_todos": true,
+                    "resolved_inputs": {
+                        "owner":"0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+                        "recipient":"0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+                    }
+                }
+            }]
+        }))
+        .expect("stale script line 2"),
+        serde_json::to_string(&json!({
+            "assistant_content":"todos",
+            "tool_calls":[{
+                "id":"tool-todos",
+                "name":"plan.propose_todos",
+                "arguments":{
+                    "status":"proposed",
+                    "todos":[{"title":"refresh stale native balance before transfer"}]
+                }
+            }]
+        }))
+        .expect("stale script line 3"),
+        serde_json::to_string(&json!({
+            "assistant_content":"propose stale-balance segment",
+            "tool_calls":[
+                {
+                    "id":"tool-check",
+                    "name":"plan.check_segment",
+                    "arguments":{"segment": stale_segment}
+                },
+                {
+                    "id":"tool-propose",
+                    "name":"plan.propose_segment",
+                    "arguments":{
+                        "status":"proposed",
+                        "done":true,
+                        "cursor_next":"cursor-1",
+                        "summary":"stale balance draft",
+                        "segment": stale_segment,
+                        "issues":[]
+                    }
+                }
+            ]
+        }))
+        .expect("stale script line 4"),
+        serde_json::to_string(&json!({
+            "assistant_content":"revise after stale_volatile_fact",
+            "tool_calls":[
+                {
+                    "id":"tool-check-revise",
+                    "name":"plan.check_segment",
+                    "arguments":{"segment": fresh_segment}
+                },
+                {
+                    "id":"tool-revise",
+                    "name":"plan.revise_segment",
+                    "arguments":{
+                        "status":"proposed",
+                        "done":true,
+                        "cursor_next":"cursor-1",
+                        "summary":"fresh balance repair",
+                        "segment": fresh_segment,
+                        "issues":[]
+                    }
+                }
+            ]
+        }))
+        .expect("stale script line 5"),
+    ]
+    .join("\n");
+    write_temp_file(
+        "agent-segmented-stale-balance-repair-script",
+        llm_script.as_str(),
+    )
 }
 
 fn write_compile_write_gate_missing_then_revise_missing_input_script() -> PathBuf {
@@ -647,6 +1865,218 @@ fn write_compile_write_gate_missing_retry_bounded_script() -> PathBuf {
     )
 }
 
+fn write_compile_write_gate_with_same_segment_decimals_query_script() -> PathBuf {
+    let llm_script = [
+        serde_json::to_string(&json!({
+            "assistant_content":"begin",
+            "tool_calls":[{
+                "id":"tool-begin",
+                "name":"plan.begin",
+                "arguments":{
+                    "session_id":"sess-compile-decimals-query-not-bound",
+                    "snapshot_hash":"abababababababababababababababababababababababababababababababab",
+                    "cursor":"cursor-0",
+                    "limits":{"max_rounds":8,"max_segments":4}
+                }
+            }]
+        }))
+        .expect("script line 1"),
+        serde_json::to_string(&json!({
+            "assistant_content":"ground",
+            "tool_calls":[{
+                "id":"tool-ground",
+                "name":"plan.ground_intent",
+                "arguments":{
+                    "status":"proposed",
+                    "ready_for_todos": true,
+                    "resolved_inputs": {"owner":"0x70997970C51812dc3A010C7d01b50e0d17dc79C8"}
+                }
+            }]
+        }))
+        .expect("script line 2"),
+        serde_json::to_string(&json!({
+            "assistant_content":"todos",
+            "tool_calls":[{
+                "id":"tool-todos",
+                "name":"plan.propose_todos",
+                "arguments":{
+                    "status":"proposed",
+                    "todos":[{"title":"transfer erc20"}]
+                }
+            }]
+        }))
+        .expect("script line 3"),
+        serde_json::to_string(&json!({
+            "assistant_content":"propose segment with same-segment decimals query",
+            "tool_calls":[
+                {
+                    "id":"tool-check",
+                    "name":"plan.check_segment",
+                    "arguments":{
+                        "segment":{
+                            "segment_id":"seg-transfer",
+                            "cursor_in":"cursor-0",
+                            "cursor_out":"cursor-1",
+                            "done":false,
+                            "summary":"decimals query + write",
+                            "steps":[
+                                {
+                                    "id":"q_balance",
+                                    "kind":"query",
+                                    "candidate_ref":"erc20@0.0.2/balance-of",
+                                    "inputs":{
+                                        "token":{"object":{"address":{"lit":"0x8464135c8F25Da09e49BC8782676a84730C318bC"},"chain_ref":{"lit":"eip155:31338"}}},
+                                        "owner":{"lit":"0x70997970C51812dc3A010C7d01b50e0d17dc79C8"}
+                                    }
+                                },
+                                {
+                                    "id":"q_decimals",
+                                    "kind":"query",
+                                    "candidate_ref":"erc20@0.0.2/balance-of",
+                                    "stores":{"decimals":"inputs.token.decimals"},
+                                    "inputs":{
+                                        "token":{"object":{"address":{"lit":"0x8464135c8F25Da09e49BC8782676a84730C318bC"},"chain_ref":{"lit":"eip155:31338"}}},
+                                        "owner":{"lit":"0x70997970C51812dc3A010C7d01b50e0d17dc79C8"}
+                                    }
+                                },
+                                {
+                                    "id":"assert_balance",
+                                    "kind":"assert",
+                                    "depends_on":["q_balance","q_decimals"],
+                                    "inputs":{"condition":{"cel":"nodes.q_balance.outputs.balance != null"}}
+                                },
+                                {
+                                    "id":"a_transfer_erc20",
+                                    "kind":"action",
+                                    "candidate_ref":"erc20@0.0.2/transfer",
+                                    "depends_on":["assert_balance"],
+                                    "inputs":{
+                                        "token":{"object":{"address":{"lit":"0x8464135c8F25Da09e49BC8782676a84730C318bC"},"chain_ref":{"lit":"eip155:31338"}}},
+                                        "to":{"lit":"0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"},
+                                        "amount":{"lit":"10000000000000000000"}
+                                    }
+                                }
+                            ],
+                            "extensions":{}
+                        }
+                    }
+                },
+                {
+                    "id":"tool-propose",
+                    "name":"plan.propose_segment",
+                    "arguments":{
+                        "status":"proposed",
+                        "done":false,
+                        "cursor_next":"cursor-1",
+                        "summary":"transfer with same-segment decimals query",
+                        "segment":{
+                            "segment_id":"seg-transfer",
+                            "cursor_in":"cursor-0",
+                            "cursor_out":"cursor-1",
+                            "done":false,
+                            "summary":"decimals query + write",
+                            "steps":[
+                                {
+                                    "id":"q_balance",
+                                    "kind":"query",
+                                    "candidate_ref":"erc20@0.0.2/balance-of",
+                                    "inputs":{
+                                        "token":{"object":{"address":{"lit":"0x8464135c8F25Da09e49BC8782676a84730C318bC"},"chain_ref":{"lit":"eip155:31338"}}},
+                                        "owner":{"lit":"0x70997970C51812dc3A010C7d01b50e0d17dc79C8"}
+                                    }
+                                },
+                                {
+                                    "id":"q_decimals",
+                                    "kind":"query",
+                                    "candidate_ref":"erc20@0.0.2/balance-of",
+                                    "stores":{"decimals":"inputs.token.decimals"},
+                                    "inputs":{
+                                        "token":{"object":{"address":{"lit":"0x8464135c8F25Da09e49BC8782676a84730C318bC"},"chain_ref":{"lit":"eip155:31338"}}},
+                                        "owner":{"lit":"0x70997970C51812dc3A010C7d01b50e0d17dc79C8"}
+                                    }
+                                },
+                                {
+                                    "id":"assert_balance",
+                                    "kind":"assert",
+                                    "depends_on":["q_balance","q_decimals"],
+                                    "inputs":{"condition":{"cel":"nodes.q_balance.outputs.balance != null"}}
+                                },
+                                {
+                                    "id":"a_transfer_erc20",
+                                    "kind":"action",
+                                    "candidate_ref":"erc20@0.0.2/transfer",
+                                    "depends_on":["assert_balance"],
+                                    "inputs":{
+                                        "token":{"object":{"address":{"lit":"0x8464135c8F25Da09e49BC8782676a84730C318bC"},"chain_ref":{"lit":"eip155:31338"}}},
+                                        "to":{"lit":"0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"},
+                                        "amount":{"lit":"10000000000000000000"}
+                                    }
+                                }
+                            ],
+                            "extensions":{}
+                        },
+                        "issues":[]
+                    }
+                }
+            ]
+        }))
+        .expect("script line 4"),
+        serde_json::to_string(&json!({
+            "assistant_content":"revise to missing input after strict write gate",
+            "tool_calls":[{
+                "id":"tool-revise",
+                "name":"plan.revise_segment",
+                "arguments":{
+                    "status":"unavailable",
+                    "done":false,
+                    "error":{
+                        "reason_code":"missing_required_input",
+                        "message":"token decimals is still unresolved",
+                        "details":{
+                            "questions":[{"id":"token.decimals","question":"Provide token decimals"}],
+                            "recovery_exhaustion":{
+                                "unresolved_refs":["token.decimals"],
+                                "reasons":["host_recovery_exhausted"],
+                                "attempt_trace_id":"trace-compile-strict-decimals-1"
+                            }
+                        }
+                    }
+                }
+            }]
+        }))
+        .expect("script line 5"),
+        serde_json::to_string(&json!({
+            "assistant_content":"revise to missing input after strict write gate (retry)",
+            "tool_calls":[{
+                "id":"tool-revise-2",
+                "name":"plan.revise_segment",
+                "arguments":{
+                    "status":"unavailable",
+                    "done":false,
+                    "error":{
+                        "reason_code":"missing_required_input",
+                        "message":"token decimals is still unresolved",
+                        "details":{
+                            "questions":[{"id":"token.decimals","question":"Provide token decimals"}],
+                            "recovery_exhaustion":{
+                                "unresolved_refs":["token.decimals"],
+                                "reasons":["host_recovery_exhausted"],
+                                "attempt_trace_id":"trace-compile-strict-decimals-2"
+                            }
+                        }
+                    }
+                }
+            }]
+        }))
+        .expect("script line 6"),
+    ]
+    .join("\n");
+    write_temp_file(
+        "agent-segmented-compile-strict-decimals-query-script",
+        llm_script.as_str(),
+    )
+}
+
 fn write_missing_required_input_script() -> PathBuf {
     let llm_script = [serde_json::to_string(&json!({
             "assistant_content":"begin",
@@ -960,6 +2390,7 @@ fn execute_agent_segmented_missing_required_input_pauses_instead_of_failing() {
         runtime: None,
         events_jsonl: None,
         trace: None,
+        agent_trace_jsonl: None,
         checkpoint: None,
         profile: AgentProfile::DemoScripted,
         llm_script_jsonl: Some(llm_script_path),
@@ -1033,6 +2464,10 @@ fn execute_agent_segmented_missing_required_object_input_keeps_same_pause_contra
 
 #[test]
 fn compile_write_gate_missing_runs_host_autofill_revise_before_missing_input_pause() {
+    if std::env::var("AIS_TEST_RPC").is_err() {
+        eprintln!("skipped: set AIS_TEST_RPC=1 to enable (requires local RPC at 127.0.0.1:8545)");
+        return;
+    }
     let command = build_segmented_native_erc20_command(
         write_compile_write_gate_missing_then_revise_missing_input_script(),
     );
@@ -1054,8 +2489,15 @@ fn compile_write_gate_missing_runs_host_autofill_revise_before_missing_input_pau
 
 #[test]
 fn compile_autofill_retry_is_bounded_to_single_revise_round() {
-    let command = build_segmented_native_erc20_command(
+    if std::env::var("AIS_TEST_RPC").is_err() {
+        eprintln!("skipped: set AIS_TEST_RPC=1 to enable (requires local RPC at 127.0.0.1:8545)");
+        return;
+    }
+    let checkpoint_path = write_temp_file("agent-segmented-bounded-checkpoint", "{}");
+    let _ = fs::remove_file(&checkpoint_path);
+    let command = build_segmented_native_erc20_command_with_checkpoint(
         write_compile_write_gate_missing_retry_bounded_script(),
+        Some(checkpoint_path.clone()),
     );
     let parsed = parse_agent_output_json(&command);
     assert_eq!(parsed.get("status").and_then(Value::as_str), Some("paused"));
@@ -1071,6 +2513,217 @@ fn compile_autofill_retry_is_bounded_to_single_revise_round() {
         parsed.pointer("/llm_usage/diagnostics/phase_round_count/revise_segment"),
         Some(&json!(3))
     );
+
+    let checkpoint_text = fs::read_to_string(checkpoint_path).expect("checkpoint file");
+    let checkpoint: Value = serde_json::from_str(checkpoint_text.as_str()).expect("checkpoint");
+    assert_eq!(
+        checkpoint.pointer("/runtime_snapshot/agent/missing_ref_termination/reason"),
+        Some(&json!("max_rounds_reached"))
+    );
+}
+
+#[test]
+fn compile_write_gate_missing_rejects_same_segment_decimals_query_without_bound_value() {
+    if std::env::var("AIS_TEST_RPC").is_err() {
+        eprintln!("skipped: set AIS_TEST_RPC=1 to enable (requires local RPC at 127.0.0.1:8545)");
+        return;
+    }
+    let command = build_segmented_native_erc20_command(
+        write_compile_write_gate_with_same_segment_decimals_query_script(),
+    );
+    let parsed = parse_agent_output_json(&command);
+    assert_eq!(parsed.get("status").and_then(Value::as_str), Some("paused"));
+    assert_eq!(
+        parsed.get("paused_reason").and_then(Value::as_str),
+        Some("missing_required_input")
+    );
+    assert_eq!(
+        parsed.pointer("/llm_usage/diagnostics/phase_round_count/revise_segment"),
+        Some(&json!(2))
+    );
+}
+
+#[test]
+fn native_erc20_fixture_restore_with_resolved_decimals_executes_cel_and_pauses_for_confirm() {
+    if std::env::var("AIS_TEST_RPC").is_err() {
+        eprintln!("skipped: set AIS_TEST_RPC=1 to enable (requires local RPC at 127.0.0.1:8545)");
+        return;
+    }
+    let checkpoint_path = write_checkpoint_with_seed_input(
+        "agent-segmented-native-erc20-restore-decimals-checkpoint",
+        "inputs.token.decimals",
+        json!(18),
+    );
+    let events_path = temp_output_path("agent-segmented-native-erc20-restore-decimals-events", "jsonl");
+    let transcript_path =
+        temp_output_path("agent-segmented-native-erc20-restore-decimals-transcript", "md");
+    let mut command = build_segmented_native_erc20_command_with_checkpoint(
+        write_restore_resolved_decimals_then_pause_for_confirm_script(),
+        Some(checkpoint_path.clone()),
+    );
+    command.events_jsonl = Some(events_path.display().to_string());
+    command.llm_transcript_path = Some(transcript_path.clone());
+
+    let parsed = parse_agent_output_json(&command);
+    assert_eq!(parsed.get("status").and_then(Value::as_str), Some("paused"));
+    assert!(
+        parsed
+            .get("paused_reason")
+            .and_then(Value::as_str)
+            .is_some_and(|reason| reason.starts_with("need_user_confirm")),
+        "expected need_user_confirm pause: {parsed}"
+    );
+    assert_eq!(
+        parsed.pointer("/llm_usage/diagnostics/phase_round_count/revise_segment"),
+        None
+    );
+
+    let checkpoint_text = fs::read_to_string(checkpoint_path).expect("checkpoint file");
+    let checkpoint: Value = serde_json::from_str(checkpoint_text.as_str()).expect("checkpoint");
+    assert_eq!(
+        checkpoint.pointer("/extensions/resume_core/input_store/entries/token.decimals/value"),
+        Some(&json!(18))
+    );
+
+    let transcript = fs::read_to_string(transcript_path).expect("transcript");
+    assert!(transcript.contains("inputs.token.decimals"));
+    assert!(transcript.contains("to_atomic(1, inputs.token.decimals)"));
+
+    let events = read_jsonl_values(events_path.as_path());
+    assert!(events.iter().any(|record| {
+        record
+            .pointer("/event/event_type")
+            .and_then(Value::as_str)
+            .is_some_and(|event_type| event_type == "need_user_confirm")
+    }));
+}
+
+#[test]
+fn native_erc20_fixture_missing_action_gate_dep_revises_once_then_pauses_for_confirm() {
+    if std::env::var("AIS_TEST_RPC").is_err() {
+        eprintln!("skipped: set AIS_TEST_RPC=1 to enable (requires local RPC at 127.0.0.1:8545)");
+        return;
+    }
+    let transcript_path =
+        temp_output_path("agent-segmented-native-erc20-missing-gate-dep-transcript", "md");
+    let mut command =
+        build_segmented_native_erc20_command(write_missing_action_gate_dep_then_revise_success_script());
+    command.llm_transcript_path = Some(transcript_path.clone());
+
+    let parsed = parse_agent_output_json(&command);
+    assert_eq!(parsed.get("status").and_then(Value::as_str), Some("paused"));
+    assert!(
+        parsed
+            .get("paused_reason")
+            .and_then(Value::as_str)
+            .is_some_and(|reason| reason.starts_with("need_user_confirm")),
+        "expected need_user_confirm pause after repair: {parsed}"
+    );
+    assert_eq!(
+        parsed.pointer("/llm_usage/diagnostics/phase_round_count/revise_segment"),
+        Some(&json!(1))
+    );
+
+    let transcript = fs::read_to_string(transcript_path).expect("transcript");
+    assert!(transcript.contains("missing_action_gate_dep"));
+    assert!(transcript.contains("depends_on"));
+}
+
+#[test]
+fn native_erc20_fixture_stale_balance_repair_adds_refresh_query_and_then_pauses_for_confirm() {
+    if std::env::var("AIS_TEST_RPC").is_err() {
+        eprintln!("skipped: set AIS_TEST_RPC=1 to enable (requires local RPC at 127.0.0.1:8545)");
+        return;
+    }
+    let mut input_store = super::InputStore::default();
+    input_store.upsert(
+        "wallet.balance.native",
+        json!("100000000000000000000"),
+        super::InputValueMeta {
+            source: "query".to_string(),
+            source_priority: 90,
+            provenance: Some("test.stale.native_balance".to_string()),
+            confidence: None,
+            layer: super::InputValueLayer::Observed,
+            stability: super::InputValueStability::Volatile,
+            observed_at_ms: Some(1),
+        },
+    );
+    let checkpoint_path = write_checkpoint_with_custom_input_store(
+        "agent-segmented-native-erc20-stale-balance-checkpoint",
+        input_store,
+    );
+    let transcript_path =
+        temp_output_path("agent-segmented-native-erc20-stale-balance-transcript", "md");
+    let mut command = build_segmented_native_erc20_command_with_checkpoint(
+        write_stale_balance_then_refresh_query_repair_script(),
+        Some(checkpoint_path),
+    );
+    command.llm_transcript_path = Some(transcript_path.clone());
+
+    let parsed = parse_agent_output_json(&command);
+    assert_eq!(parsed.get("status").and_then(Value::as_str), Some("paused"));
+    assert!(
+        parsed
+            .get("paused_reason")
+            .and_then(Value::as_str)
+            .is_some_and(|reason| reason.starts_with("need_user_confirm")),
+        "expected need_user_confirm pause after stale repair: {parsed}"
+    );
+    assert_eq!(
+        parsed.pointer("/llm_usage/diagnostics/phase_round_count/revise_segment"),
+        Some(&json!(1))
+    );
+
+    let transcript = fs::read_to_string(transcript_path).expect("transcript");
+    assert!(transcript.contains("stale_volatile_fact"));
+    assert!(transcript.contains("fresh query"));
+}
+
+#[test]
+fn compile_write_gate_missing_artifacts_keep_issue_and_semantic_truth_aligned() {
+    if std::env::var("AIS_TEST_RPC").is_err() {
+        eprintln!("skipped: set AIS_TEST_RPC=1 to enable (requires local RPC at 127.0.0.1:8545)");
+        return;
+    }
+    let checkpoint_path =
+        temp_output_path("agent-segmented-compile-autofill-artifacts-checkpoint", "json");
+    let events_path =
+        temp_output_path("agent-segmented-compile-autofill-artifacts-events", "jsonl");
+    let transcript_path =
+        temp_output_path("agent-segmented-compile-autofill-artifacts-transcript", "md");
+    let mut command = build_segmented_native_erc20_command_with_checkpoint(
+        write_compile_write_gate_missing_then_revise_missing_input_script(),
+        Some(checkpoint_path.clone()),
+    );
+    command.events_jsonl = Some(events_path.display().to_string());
+    command.llm_transcript_path = Some(transcript_path.clone());
+
+    let parsed = parse_agent_output_json(&command);
+    assert_eq!(parsed.get("status").and_then(Value::as_str), Some("paused"));
+    assert_eq!(
+        parsed.get("paused_reason").and_then(Value::as_str),
+        Some("missing_required_input")
+    );
+
+    let events = read_jsonl_values(events_path.as_path());
+    assert!(events.iter().any(|record| {
+        record.to_string().contains("missing_required_input")
+    }));
+
+    let checkpoint_text = fs::read_to_string(checkpoint_path).expect("checkpoint file");
+    let checkpoint: Value = serde_json::from_str(checkpoint_text.as_str()).expect("checkpoint");
+    let decimals_value = checkpoint
+        .pointer("/extensions/resume_core/input_store/entries/token.decimals/value")
+        .expect("checkpoint should persist resolved token.decimals after host autofill");
+    assert!(
+        decimals_value.is_number(),
+        "resolved token.decimals should be numeric in checkpoint, got {decimals_value}"
+    );
+
+    let transcript = fs::read_to_string(transcript_path).expect("transcript");
+    assert!(transcript.contains("missing_token_decimals"));
+    assert!(transcript.contains("missing_required_input"));
 }
 
 #[test]
@@ -1095,6 +2748,7 @@ fn execute_agent_segmented_intent_fixture_queries_then_pauses_for_confirm() {
         runtime: None,
         events_jsonl: None,
         trace: None,
+        agent_trace_jsonl: None,
         checkpoint: None,
         profile: AgentProfile::DemoScripted,
         llm_script_jsonl: Some(llm_script_path),
@@ -1169,6 +2823,7 @@ fn execute_agent_segmented_intent_fixture_queries_then_pauses_for_confirm() {
             intent: intent.clone(),
             session: session.clone(),
             state_summary: None,
+            typed_summary: None,
             previous_error: None,
             last_segment: None,
         })
@@ -1221,12 +2876,14 @@ fn execute_agent_segmented_intent_fixture_queries_then_pauses_for_confirm() {
         Some("260")
     );
     session.cursor = first_cursor_next;
+    let (second_state_summary, second_typed_summary) = planner_summary_for_runtime(&state, 1);
 
     let draft_second = planner
         .propose_segment(super::intent_segmented::SegmentPlanningRequest {
             intent: intent.clone(),
             session: session.clone(),
-            state_summary: None,
+            state_summary: Some(second_state_summary),
+            typed_summary: Some(second_typed_summary),
             previous_error: None,
             last_segment: Some(first_segment),
         })
@@ -1308,6 +2965,7 @@ fn segmented_intent_fixture_revise_with_until_retry_then_complete() {
         runtime: None,
         events_jsonl: None,
         trace: None,
+        agent_trace_jsonl: None,
         checkpoint: None,
         profile: AgentProfile::DemoScripted,
         llm_script_jsonl: Some(llm_script_path),
@@ -1382,6 +3040,7 @@ fn segmented_intent_fixture_revise_with_until_retry_then_complete() {
             intent: intent.clone(),
             session: session.clone(),
             state_summary: None,
+            typed_summary: None,
             previous_error: None,
             last_segment: None,
         })
@@ -1418,12 +3077,14 @@ fn segmented_intent_fixture_revise_with_until_retry_then_complete() {
     );
     assert_eq!(first_run.status, EngineRunStatus::Completed);
     session.cursor = first_cursor_next;
+    let (second_state_summary, second_typed_summary) = planner_summary_for_runtime(&state, 1);
 
     let draft_second = planner
         .propose_segment(super::intent_segmented::SegmentPlanningRequest {
             intent: intent.clone(),
             session: session.clone(),
-            state_summary: None,
+            state_summary: Some(second_state_summary),
+            typed_summary: Some(second_typed_summary),
             previous_error: None,
             last_segment: Some(first_segment.clone()),
         })
@@ -1553,6 +3214,7 @@ fn segmented_intent_fixture_repairs_format_then_compiles_assert_branch_segment()
         runtime: None,
         events_jsonl: None,
         trace: None,
+        agent_trace_jsonl: None,
         checkpoint: None,
         profile: AgentProfile::DemoScripted,
         llm_script_jsonl: Some(llm_script_path),
@@ -1619,6 +3281,7 @@ fn segmented_intent_fixture_repairs_format_then_compiles_assert_branch_segment()
             intent: intent.clone(),
             session: session.clone(),
             state_summary: None,
+            typed_summary: None,
             previous_error: None,
             last_segment: None,
         })
@@ -1648,6 +3311,7 @@ fn segmented_intent_fixture_repairs_format_then_compiles_assert_branch_segment()
         .revise_segment(super::intent_segmented::SegmentPlanningRequest {
             intent: intent.clone(),
             session: session.clone(),
+            typed_summary: None,
             state_summary: Some(json!({
                 "completed_segments": 0,
                 "previous_error": first_invalid_payload
@@ -1680,12 +3344,16 @@ fn segmented_intent_fixture_repairs_format_then_compiles_assert_branch_segment()
     .expect("compile first repaired segment");
     assert_eq!(first_plan.nodes.len(), 1);
     session.cursor = first_cursor_next;
+    let runtime_state = EngineRunnerState::default();
+    let (second_state_summary, second_typed_summary) =
+        planner_summary_for_runtime(&runtime_state, 1);
 
     let draft_second = planner
         .propose_segment(super::intent_segmented::SegmentPlanningRequest {
             intent: intent.clone(),
             session: session.clone(),
-            state_summary: None,
+            state_summary: Some(second_state_summary),
+            typed_summary: Some(second_typed_summary),
             previous_error: None,
             last_segment: Some(first_segment.clone()),
         })
@@ -2060,7 +3728,10 @@ fn compile_error_state_payload_normalizes_phase_reason_and_round() {
         &json!({
             "reason_code":"write_gate_missing",
             "message":"segment write preconditions are not satisfied",
-            "issues":[{"reason_code":"missing_query_assert_branch_chain"}]
+            "issues":[{
+                "reason_code":"missing_action_gate_dep",
+                "family_reason_code":"missing_query_assert_branch_chain"
+            }]
         }),
         3,
     );
@@ -2075,6 +3746,10 @@ fn compile_error_state_payload_normalizes_phase_reason_and_round() {
     assert_eq!(payload.get("round").and_then(Value::as_u64), Some(3));
     assert_eq!(
         payload.pointer("/issues/0/reason_code"),
+        Some(&json!("missing_action_gate_dep"))
+    );
+    assert_eq!(
+        payload.pointer("/issues/0/family_reason_code"),
         Some(&json!("missing_query_assert_branch_chain"))
     );
 }
@@ -2183,6 +3858,259 @@ fn compile_segment_plan_fails_when_when_cel_references_unknown_input_slot() {
             .any(|issue| issue.to_string().contains("inputs.native_threshold")),
         "unknown slot should be preserved in compile issue payload: {error}"
     );
+}
+
+#[test]
+fn compile_segment_plan_accepts_bound_input_store_token_decimals_for_write_gate() {
+    let fixture_root = segmented_native_erc20_fixture_root();
+    let pack_path = fixture_root.join("workspace/safe-defi.ais-pack.yaml");
+    let pack = crate::policy::load_pack_document(&pack_path).expect("pack");
+    let command = build_segmented_native_erc20_command(write_temp_file(
+        "agent-segmented-bound-decimals-dummy-script",
+        "{}",
+    ));
+    let candidate_context = super::candidates::build_candidate_context_for_agent(
+        &command,
+        Some(&pack),
+        super::candidates::DEFAULT_MAX_INDEX_CANDIDATES,
+    )
+    .expect("candidate context")
+    .expect("workspace candidates");
+    let mut input_store = super::InputStore::default();
+    input_store.upsert_user(
+        "inputs.owner",
+        json!("0x70997970c51812dc3a010c7d01b50e0d17dc79c8"),
+        "test.known_inputs.owner",
+    );
+    input_store.upsert_user(
+        "inputs.recipient",
+        json!("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"),
+        "test.known_inputs.recipient",
+    );
+    input_store.upsert_user(
+        "inputs.token.decimals",
+        json!(6),
+        "test.known_inputs.token.decimals",
+    );
+    let segment: ais_sdk::documents::PlanSketchSegment = serde_json::from_value(json!({
+        "segment_id":"seg-conditional-transfer",
+        "cursor_in":"c2",
+        "cursor_out":"c3",
+        "done":false,
+        "steps":[
+            {
+                "id":"q_native_balance",
+                "kind":"query",
+                "candidate_ref":"evm-native-utils@0.0.1/native-balance",
+                "inputs":{"addr":{"ref":"inputs.owner"}}
+            },
+            {
+                "id":"q_token_balance",
+                "kind":"query",
+                "candidate_ref":"erc20@0.0.2/balance-of",
+                "inputs":{
+                    "owner":{"ref":"inputs.owner"},
+                    "token":{"object":{
+                        "address":{"lit":"0x8464135c8F25Da09e49BC8782676a84730C318bC"},
+                        "chain_ref":{"lit":"eip155:31338"}
+                    }}
+                }
+            },
+            {
+                "id":"check_balance_condition",
+                "kind":"assert",
+                "depends_on":["q_native_balance","q_token_balance"],
+                "inputs":{},
+                "when":{"cel":"nodes.q_native_balance.outputs.balance > to_atomic(100, 18) && nodes.q_token_balance.outputs.balance > to_atomic(100, inputs.token.decimals)"}
+            },
+            {
+                "id":"a_native_transfer",
+                "kind":"action",
+                "candidate_ref":"evm-native-utils@0.0.1/native-transfer",
+                "depends_on":["check_balance_condition"],
+                "inputs":{
+                    "amount":{"lit":5000000000000000000u64},
+                    "to":{"ref":"inputs.recipient"}
+                }
+            },
+            {
+                "id":"a_token_transfer",
+                "kind":"action",
+                "candidate_ref":"erc20@0.0.2/transfer",
+                "depends_on":["check_balance_condition"],
+                "inputs":{
+                    "amount":{"lit":10000000},
+                    "to":{"ref":"inputs.recipient"},
+                    "token":{"object":{
+                        "address":{"lit":"0x8464135c8F25Da09e49BC8782676a84730C318bC"},
+                        "chain_ref":{"lit":"eip155:31338"}
+                    }}
+                }
+            }
+        ],
+        "extensions":{}
+    }))
+    .expect("segment");
+
+    super::compile_segment_plan_with_snapshot_hash_and_facts(
+        "conditional transfer with bound decimals",
+        "s-1",
+        "c2",
+        &segment,
+        &candidate_context,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        &["eip155:31338".to_string()],
+        Some(&input_store),
+    )
+    .expect("bound input_store token decimals should satisfy compile write gate");
+}
+
+#[test]
+fn compile_segment_plan_rejects_storeless_action_segments() {
+    let segment: ais_sdk::documents::PlanSketchSegment = serde_json::from_value(json!({
+        "segment_id":"seg-storeless-action",
+        "cursor_in":"c0",
+        "cursor_out":"c1",
+        "done":false,
+        "steps":[
+            {
+                "id":"a_transfer",
+                "kind":"action",
+                "candidate_ref":"erc20@0.0.2/transfer",
+                "inputs":{
+                    "amount":{"lit":"1000"},
+                    "to":{"lit":"0x1111111111111111111111111111111111111111"}
+                }
+            }
+        ],
+        "extensions":{}
+    }))
+    .expect("segment");
+
+    let error = super::compile_segment_plan_with_snapshot_hash(
+        "storeless action segment",
+        "s-1",
+        "c0",
+        &segment,
+        &super::CandidateContext::default(),
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        &["eip155:1".to_string()],
+        &[],
+        None,
+        None,
+    )
+    .expect_err("action segments should require runtime validation state");
+
+    assert_eq!(
+        error.pointer("/reason_code").and_then(Value::as_str),
+        Some("compile_error")
+    );
+    assert_eq!(
+        error.pointer("/issues/0/reason_code").and_then(Value::as_str),
+        Some("missing_runtime_validation_state")
+    );
+}
+
+#[test]
+fn compile_segment_plan_preserves_full_asset_object_ref_for_write_gate() {
+    let fixture_root = segmented_native_erc20_fixture_root();
+    let pack_path = fixture_root.join("workspace/safe-defi.ais-pack.yaml");
+    let pack = crate::policy::load_pack_document(&pack_path).expect("pack");
+    let command = build_segmented_native_erc20_command(write_temp_file(
+        "agent-segmented-bound-token-ref-dummy-script",
+        "{}",
+    ));
+    let candidate_context = super::candidates::build_candidate_context_for_agent(
+        &command,
+        Some(&pack),
+        super::candidates::DEFAULT_MAX_INDEX_CANDIDATES,
+    )
+    .expect("candidate context")
+    .expect("workspace candidates");
+    let mut input_store = super::InputStore::default();
+    input_store.upsert_user(
+        "inputs.owner",
+        json!("0x70997970c51812dc3a010c7d01b50e0d17dc79c8"),
+        "test.known_inputs.owner",
+    );
+    input_store.upsert_user(
+        "inputs.recipient",
+        json!("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"),
+        "test.known_inputs.recipient",
+    );
+    input_store.upsert_user(
+        "inputs.token",
+        json!({
+            "address": {"lit":"0x8464135c8F25Da09e49BC8782676a84730C318bC"},
+            "decimals": "6"
+        }),
+        "test.known_inputs.token",
+    );
+    let segment: ais_sdk::documents::PlanSketchSegment = serde_json::from_value(json!({
+        "segment_id":"seg-conditional-transfer",
+        "cursor_in":"c2",
+        "cursor_out":"c3",
+        "done":false,
+        "steps":[
+            {
+                "id":"q_native_balance",
+                "kind":"query",
+                "candidate_ref":"evm-native-utils@0.0.1/native-balance",
+                "inputs":{"addr":{"ref":"inputs.owner"}}
+            },
+            {
+                "id":"q_token_balance",
+                "kind":"query",
+                "candidate_ref":"erc20@0.0.2/balance-of",
+                "inputs":{
+                    "owner":{"ref":"inputs.owner"},
+                    "token":{"ref":"inputs.token"}
+                }
+            },
+            {
+                "id":"check_balance_condition",
+                "kind":"assert",
+                "depends_on":["q_native_balance","q_token_balance"],
+                "inputs":{},
+                "when":{"cel":"nodes.q_native_balance.outputs.balance > to_atomic(100, 18) && nodes.q_token_balance.outputs.balance > to_atomic(100, inputs.token.decimals)"}
+            },
+            {
+                "id":"a_native_transfer",
+                "kind":"action",
+                "candidate_ref":"evm-native-utils@0.0.1/native-transfer",
+                "depends_on":["check_balance_condition"],
+                "inputs":{
+                    "amount":{"lit":5000000000000000000u64},
+                    "to":{"ref":"inputs.recipient"}
+                }
+            },
+            {
+                "id":"a_token_transfer",
+                "kind":"action",
+                "candidate_ref":"erc20@0.0.2/transfer",
+                "depends_on":["check_balance_condition"],
+                "inputs":{
+                    "amount":{"lit":10000000},
+                    "to":{"ref":"inputs.recipient"},
+                    "token":{"ref":"inputs.token"}
+                }
+            }
+        ],
+        "extensions":{}
+    }))
+    .expect("segment");
+
+    super::compile_segment_plan_with_snapshot_hash_and_facts(
+        "conditional transfer with full asset object ref",
+        "s-1",
+        "c2",
+        &segment,
+        &candidate_context,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        &["eip155:31338".to_string()],
+        Some(&input_store),
+    )
+    .expect("full asset object ref should survive compile normalization and satisfy write gate");
 }
 
 #[test]
@@ -2576,6 +4504,173 @@ fn normalize_segment_asset_inputs_uses_existing_input_ref_without_inventing_toke
 }
 
 #[test]
+fn normalize_segment_asset_inputs_preserves_full_asset_object_ref() {
+    let segment: ais_sdk::documents::PlanSketchSegment = serde_json::from_value(json!({
+        "segment_id":"seg_asset_ref",
+        "cursor_in":"0",
+        "cursor_out":"1",
+        "done":false,
+        "steps":[
+            {
+                "id":"a1",
+                "kind":"action",
+                "candidate_ref":"erc20@0.0.2/transfer",
+                "inputs":{
+                    "token":{"ref":"inputs.token"},
+                    "amount":{"lit":"1"},
+                    "recipient":{"lit":"0x1111111111111111111111111111111111111111"}
+                }
+            }
+        ]
+    }))
+    .expect("segment");
+    let mut candidate_context = super::CandidateContext::default();
+    candidate_context.detail_by_ref.insert(
+        "erc20@0.0.2/transfer".to_string(),
+        json!({
+            "kind":"action",
+            "params":[
+                {"name":"token","type":"asset","required":true},
+                {"name":"amount","type":"amount","required":true},
+                {"name":"recipient","type":"address","required":true}
+            ]
+        }),
+    );
+
+    let normalized = super::normalize_segment_asset_inputs_for_compile(
+        &segment,
+        &candidate_context,
+        Some("eip155:1"),
+        &["inputs.token".to_string(), "inputs.chain_id".to_string()],
+    );
+    let value = serde_json::to_value(normalized).expect("normalized segment");
+    assert_eq!(
+        value.pointer("/steps/0/inputs/token/ref"),
+        Some(&json!("inputs.token"))
+    );
+    assert!(
+        value.pointer("/steps/0/inputs/token/object").is_none(),
+        "full asset-object ref must not be rewritten into object.address wrapper: {value}"
+    );
+}
+
+#[test]
+fn normalize_segment_auto_adds_gate_depends_on_for_when_cel_node_refs() {
+    let segment: ais_sdk::documents::PlanSketchSegment = serde_json::from_value(json!({
+        "segment_id":"seg_gate",
+        "cursor_in":"1",
+        "cursor_out":"2",
+        "done":false,
+        "steps":[
+            {
+                "id":"q_native_balance",
+                "kind":"query",
+                "candidate_ref":"evm-native-utils@0.0.1/native-balance",
+                "inputs":{"addr":{"ref":"inputs.owner"}}
+            },
+            {
+                "id":"q_token_balance",
+                "kind":"query",
+                "candidate_ref":"erc20@0.0.2/balance-of",
+                "inputs":{"owner":{"ref":"inputs.owner"},"token":{"ref":"inputs.token.address"}}
+            },
+            {
+                "id":"g_balance_check",
+                "kind":"assert",
+                "inputs":{},
+                "when":{"cel":"nodes.q_native_balance.outputs.balance > 100 && nodes[\"q_token_balance\"].outputs.balance > 100"}
+            },
+            {
+                "id":"a_native_transfer",
+                "kind":"action",
+                "candidate_ref":"evm-native-utils@0.0.1/native-transfer",
+                "depends_on":["g_balance_check"],
+                "inputs":{"amount":{"lit":5},"recipient":{"ref":"inputs.recipient"}}
+            }
+        ]
+    }))
+    .expect("segment");
+
+    let mut candidate_context = super::CandidateContext::default();
+    candidate_context.detail_by_ref.insert(
+        "evm-native-utils@0.0.1/native-balance".to_string(),
+        json!({"kind":"query","returns":[{"name":"balance"}]}),
+    );
+    candidate_context.detail_by_ref.insert(
+        "erc20@0.0.2/balance-of".to_string(),
+        json!({"kind":"query","returns":[{"name":"balance"}]}),
+    );
+    candidate_context.detail_by_ref.insert(
+        "evm-native-utils@0.0.1/native-transfer".to_string(),
+        json!({"kind":"action","params":[{"name":"amount","type":"amount"},{"name":"recipient","type":"address"}],"requires_queries":["native-balance"]}),
+    );
+
+    let normalized = super::normalize_segment_asset_inputs_for_compile(
+        &segment,
+        &candidate_context,
+        Some("eip155:31338"),
+        &[],
+    );
+    let gate = normalized
+        .steps
+        .iter()
+        .find(|step| step.id == "g_balance_check")
+        .expect("gate step");
+    assert!(gate.depends_on.iter().any(|id| id == "q_native_balance"));
+    assert!(gate.depends_on.iter().any(|id| id == "q_token_balance"));
+}
+
+#[test]
+fn normalize_segment_gate_depends_on_does_not_duplicate_existing_query_dep() {
+    let segment: ais_sdk::documents::PlanSketchSegment = serde_json::from_value(json!({
+        "segment_id":"seg_gate_dup",
+        "cursor_in":"1",
+        "cursor_out":"2",
+        "done":false,
+        "steps":[
+            {
+                "id":"q_native_balance",
+                "kind":"query",
+                "candidate_ref":"evm-native-utils@0.0.1/native-balance",
+                "inputs":{"addr":{"ref":"inputs.owner"}}
+            },
+            {
+                "id":"g_balance_check",
+                "kind":"assert",
+                "depends_on":["q_native_balance"],
+                "inputs":{},
+                "when":{"cel":"nodes.q_native_balance.outputs.balance > 100"}
+            }
+        ]
+    }))
+    .expect("segment");
+    let mut candidate_context = super::CandidateContext::default();
+    candidate_context.detail_by_ref.insert(
+        "evm-native-utils@0.0.1/native-balance".to_string(),
+        json!({"kind":"query","returns":[{"name":"balance"}]}),
+    );
+
+    let normalized = super::normalize_segment_asset_inputs_for_compile(
+        &segment,
+        &candidate_context,
+        Some("eip155:31338"),
+        &[],
+    );
+    let gate = normalized
+        .steps
+        .iter()
+        .find(|step| step.id == "g_balance_check")
+        .expect("gate step");
+    assert_eq!(
+        gate.depends_on
+            .iter()
+            .filter(|dep| dep.as_str() == "q_native_balance")
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn validate_segment_todo_scope_blocks_action_when_current_todo_is_query_only() {
     let segment: ais_sdk::documents::PlanSketchSegment = serde_json::from_value(json!({
         "segment_id":"seg_scope",
@@ -2597,16 +4692,13 @@ fn validate_segment_todo_scope_blocks_action_when_current_todo_is_query_only() {
         "demo@0.0.1/transfer".to_string(),
         json!({"kind":"action"}),
     );
-    let current_todo = json!({
-        "id":"todo_1",
-        "title":"Query balances only",
-        "execution_scope":"query_only",
-    });
-
-    let error = super::validate_segment_todo_scope(
+    let error = super::validate_segment_todo_scope_with_runtime_facts(
         &segment,
         &candidate_context,
-        Some(&current_todo),
+        Some("query_only"),
+        None,
+        None,
+        None,
     )
     .expect_err("query_only todo should block action step");
     assert_eq!(
@@ -2617,4 +4709,518 @@ fn validate_segment_todo_scope_blocks_action_when_current_todo_is_query_only() {
         error.pointer("/issues/0/step_id").and_then(Value::as_str),
         Some("a1")
     );
+}
+
+#[test]
+fn validate_segment_todo_scope_prefers_typed_current_todo_view_over_raw_todo_payload() {
+    let segment: ais_sdk::documents::PlanSketchSegment = serde_json::from_value(json!({
+        "segment_id":"seg_scope",
+        "cursor_in":"0",
+        "cursor_out":"1",
+        "done":false,
+        "steps":[
+            {
+                "id":"a1",
+                "kind":"action",
+                "candidate_ref":"demo@0.0.1/transfer",
+                "inputs":{}
+            }
+        ]
+    }))
+    .expect("segment");
+    let mut candidate_context = super::CandidateContext::default();
+    candidate_context.detail_by_ref.insert(
+        "demo@0.0.1/transfer".to_string(),
+        json!({"kind":"action"}),
+    );
+    let typed_summary = super::StateSummary {
+        completed_segments: 0,
+        completed_nodes: 0,
+        plan_epoch: 0,
+        paused_reason: None,
+        done: false,
+        previous_error: None,
+        input_store: None,
+        runtime_facts: None,
+        input_binding: super::state_summary::InputBindingContract {
+            schema: "ais-agent-input-binding-contract/0.0.1",
+            bindable_namespace: "inputs",
+            bindable_refs_source: "state_summary.input_store",
+            bindable_refs_projection: "state_summary.input_registry.known_refs",
+            known_refs_only: true,
+            facts_bindable: false,
+        },
+        input_registry: json!({"known_refs": []}),
+        node_output_refs: json!({"known_refs": []}),
+        reusable_outputs: None,
+        tool_memory_projection: None,
+        intent_slots: None,
+        intent_context: None,
+        capability_view: None,
+        capability_ready: None,
+        side_effect_lifecycle: None,
+        todo_state: Some(json!({
+            "current_todo": {
+                "id":"todo_1",
+                "title":"Query balances only",
+                "execution_scope":"query_only"
+            }
+        })),
+        recovery_diagnostics: None,
+    };
+
+    let error = super::validate_segment_todo_scope_with_runtime_facts(
+        &segment,
+        &candidate_context,
+        Some("mixed"),
+        Some(&typed_summary),
+        None,
+        None,
+    )
+    .expect_err("typed todo view should take precedence and block action step");
+    assert_eq!(
+        error.pointer("/reason_code").and_then(Value::as_str),
+        Some("todo_scope_violation")
+    );
+}
+
+#[test]
+fn validate_segment_todo_scope_infers_query_only_from_typed_todo_fields_without_raw_payload() {
+    let segment: ais_sdk::documents::PlanSketchSegment = serde_json::from_value(json!({
+        "segment_id":"seg_scope",
+        "cursor_in":"0",
+        "cursor_out":"1",
+        "done":false,
+        "steps":[
+            {
+                "id":"a1",
+                "kind":"action",
+                "candidate_ref":"demo@0.0.1/transfer",
+                "inputs":{}
+            }
+        ]
+    }))
+    .expect("segment");
+    let mut candidate_context = super::CandidateContext::default();
+    candidate_context.detail_by_ref.insert(
+        "demo@0.0.1/transfer".to_string(),
+        json!({"kind":"action"}),
+    );
+    let typed_summary = super::StateSummary {
+        completed_segments: 0,
+        completed_nodes: 0,
+        plan_epoch: 0,
+        paused_reason: None,
+        done: false,
+        previous_error: None,
+        input_store: None,
+        runtime_facts: None,
+        input_binding: super::state_summary::InputBindingContract {
+            schema: "ais-agent-input-binding-contract/0.0.1",
+            bindable_namespace: "inputs",
+            bindable_refs_source: "state_summary.input_store",
+            bindable_refs_projection: "state_summary.input_registry.known_refs",
+            known_refs_only: true,
+            facts_bindable: false,
+        },
+        input_registry: json!({"known_refs": []}),
+        node_output_refs: json!({"known_refs": []}),
+        reusable_outputs: None,
+        tool_memory_projection: None,
+        intent_slots: None,
+        intent_context: None,
+        capability_view: None,
+        capability_ready: None,
+        side_effect_lifecycle: None,
+        todo_state: Some(json!({
+            "current_todo": {
+                "id":"todo_1",
+                "title":"Check balances",
+                "required_facts":["facts.native_balance"],
+                "produced_facts":["facts.native_balance"]
+            }
+        })),
+        recovery_diagnostics: None,
+    };
+
+    let error = super::validate_segment_todo_scope_with_runtime_facts(
+        &segment,
+        &candidate_context,
+        None,
+        Some(&typed_summary),
+        None,
+        None,
+    )
+    .expect_err("typed todo field corpus should infer query_only and block action step");
+    assert_eq!(
+        error.pointer("/reason_code").and_then(Value::as_str),
+        Some("todo_scope_violation")
+    );
+}
+
+#[test]
+fn validate_segment_todo_scope_rejects_redundant_query_when_fresh_reusable_output_exists() {
+    let segment: ais_sdk::documents::PlanSketchSegment = serde_json::from_value(json!({
+        "segment_id":"seg_reuse",
+        "cursor_in":"0",
+        "cursor_out":"1",
+        "done":false,
+        "steps":[
+            {
+                "id":"q_native_balance",
+                "kind":"query",
+                "candidate_ref":"wallet@0.0.1/native-balance",
+                "inputs":{}
+            }
+        ]
+    }))
+    .expect("segment");
+    let mut candidate_context = super::CandidateContext::default();
+    candidate_context.detail_by_ref.insert(
+        "wallet@0.0.1/native-balance".to_string(),
+        json!({
+            "kind":"query",
+            "returns":[{"name":"balance","type":"uint256"}]
+        }),
+    );
+    let mut input_store = super::InputStore::default();
+    let mut runtime_facts_store = super::RuntimeFactsStore::default();
+    input_store.upsert(
+        "inputs.native_balance",
+        json!("100"),
+        super::InputValueMeta {
+            source: "query".to_string(),
+            source_priority: 80,
+            provenance: Some("segment_store.seg_prev.q_native_balance.balance".to_string()),
+            confidence: None,
+            layer: super::InputValueLayer::Observed,
+            stability: super::InputValueStability::Volatile,
+            observed_at_ms: Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0),
+            ),
+        },
+    );
+    runtime_facts_store.upsert(
+        "inputs.native_balance",
+        json!("100"),
+        super::InputValueMeta {
+            source: "query".to_string(),
+            source_priority: 80,
+            provenance: Some("segment_store.seg_prev.q_native_balance.balance".to_string()),
+            confidence: None,
+            layer: super::InputValueLayer::Observed,
+            stability: super::InputValueStability::Volatile,
+            observed_at_ms: Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0),
+            ),
+        },
+    );
+
+    let error = super::validate_segment_todo_scope_with_runtime_facts(
+        &segment,
+        &candidate_context,
+        None,
+        None,
+        Some(&runtime_facts_store),
+        Some(&input_store),
+    )
+    .expect_err("fresh reusable balance output should reject redundant query");
+    assert_eq!(
+        error.pointer("/reason_code").and_then(Value::as_str),
+        Some("redundant_query_step")
+    );
+    assert_eq!(
+        error.pointer("/issues/0/projected_refs/0").and_then(Value::as_str),
+        Some("inputs.native_balance")
+    );
+}
+
+#[test]
+fn validate_segment_todo_scope_keeps_query_when_reusable_output_is_stale() {
+    let segment: ais_sdk::documents::PlanSketchSegment = serde_json::from_value(json!({
+        "segment_id":"seg_reuse",
+        "cursor_in":"0",
+        "cursor_out":"1",
+        "done":false,
+        "steps":[
+            {
+                "id":"q_native_balance",
+                "kind":"query",
+                "candidate_ref":"wallet@0.0.1/native-balance",
+                "inputs":{}
+            }
+        ]
+    }))
+    .expect("segment");
+    let mut candidate_context = super::CandidateContext::default();
+    candidate_context.detail_by_ref.insert(
+        "wallet@0.0.1/native-balance".to_string(),
+        json!({
+            "kind":"query",
+            "returns":[{"name":"balance","type":"uint256"}]
+        }),
+    );
+    let mut input_store = super::InputStore::default();
+    let mut runtime_facts_store = super::RuntimeFactsStore::default();
+    input_store.upsert(
+        "inputs.native_balance",
+        json!("100"),
+        super::InputValueMeta {
+            source: "query".to_string(),
+            source_priority: 80,
+            provenance: Some("segment_store.seg_prev.q_native_balance.balance".to_string()),
+            confidence: None,
+            layer: super::InputValueLayer::Observed,
+            stability: super::InputValueStability::Volatile,
+            observed_at_ms: Some(1),
+        },
+    );
+    runtime_facts_store.upsert(
+        "inputs.native_balance",
+        json!("100"),
+        super::InputValueMeta {
+            source: "query".to_string(),
+            source_priority: 80,
+            provenance: Some("segment_store.seg_prev.q_native_balance.balance".to_string()),
+            confidence: None,
+            layer: super::InputValueLayer::Observed,
+            stability: super::InputValueStability::Volatile,
+            observed_at_ms: Some(1),
+        },
+    );
+
+    super::validate_segment_todo_scope_with_runtime_facts(
+        &segment,
+        &candidate_context,
+        None,
+        None,
+        Some(&runtime_facts_store),
+        Some(&input_store),
+    )
+    .expect("stale volatile output should not reject refresh query");
+}
+
+#[test]
+fn validate_segment_todo_scope_rejects_redundant_query_when_query_balance_metadata_is_incomplete() {
+    let segment: ais_sdk::documents::PlanSketchSegment = serde_json::from_value(json!({
+        "segment_id":"seg_reuse",
+        "cursor_in":"0",
+        "cursor_out":"1",
+        "done":false,
+        "steps":[
+            {
+                "id":"q_native_balance",
+                "kind":"query",
+                "candidate_ref":"wallet@0.0.1/native-balance",
+                "inputs":{}
+            }
+        ]
+    }))
+    .expect("segment");
+    let mut candidate_context = super::CandidateContext::default();
+    candidate_context.detail_by_ref.insert(
+        "wallet@0.0.1/native-balance".to_string(),
+        json!({
+            "kind":"query",
+            "returns":[{"name":"balance","type":"uint256"}]
+        }),
+    );
+    let mut input_store = super::InputStore::default();
+    input_store.upsert(
+        "inputs.native_balance",
+        json!("100"),
+        super::InputValueMeta {
+            source: "query".to_string(),
+            source_priority: 80,
+            provenance: Some("segment_store.seg_prev.q_native_balance.balance".to_string()),
+            confidence: None,
+            layer: super::InputValueLayer::Observed,
+            stability: super::InputValueStability::Unknown,
+            observed_at_ms: None,
+        },
+    );
+
+    let error = super::validate_segment_todo_scope_with_runtime_facts(
+        &segment,
+        &candidate_context,
+        None,
+        None,
+        None,
+        Some(&input_store),
+    )
+    .expect_err("query-derived balance should be normalized fresh enough to reject redundant query");
+    assert_eq!(
+        error.pointer("/reason_code").and_then(Value::as_str),
+        Some("redundant_query_step")
+    );
+}
+
+#[test]
+fn native_erc20_fixture_redundant_balance_queries_are_rejected_with_query_observed_input_store() {
+    let fixture_root = segmented_native_erc20_fixture_root();
+    let pack_path = fixture_root.join("workspace/safe-defi.ais-pack.yaml");
+    let pack = crate::policy::load_pack_document(&pack_path).expect("pack");
+    let command = build_segmented_native_erc20_command(write_temp_file(
+        "agent-segmented-native-erc20-redundant-query-fixture-script",
+        "{}",
+    ));
+    let candidate_context = super::candidates::build_candidate_context_for_agent(
+        &command,
+        Some(&pack),
+        super::candidates::DEFAULT_MAX_INDEX_CANDIDATES,
+    )
+    .expect("candidate context")
+    .expect("workspace candidates");
+
+    let segment: ais_sdk::documents::PlanSketchSegment = serde_json::from_value(json!({
+        "segment_id":"seg_todo_3",
+        "cursor_in":"2",
+        "cursor_out":"3",
+        "done":true,
+        "steps":[
+            {
+                "id":"q_native_balance",
+                "kind":"query",
+                "candidate_ref":"evm-native-utils@0.0.1/native-balance",
+                "inputs":{"addr":{"ref":"inputs.owner"}}
+            },
+            {
+                "id":"q_token_balance",
+                "kind":"query",
+                "candidate_ref":"erc20@0.0.2/balance-of",
+                "inputs":{"owner":{"ref":"inputs.owner"},"token":{"ref":"inputs.token.address"}}
+            }
+        ]
+    }))
+    .expect("segment");
+
+    let mut input_store = super::InputStore::default();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    input_store.upsert(
+        "native_balance",
+        json!("100"),
+        super::InputValueMeta {
+            source: "query".to_string(),
+            source_priority: 80,
+            provenance: Some("segment_store.seg_todo_1/q_native_balance.balance".to_string()),
+            confidence: None,
+            layer: super::InputValueLayer::Observed,
+            stability: super::InputValueStability::Volatile,
+            observed_at_ms: Some(now_ms),
+        },
+    );
+    input_store.upsert(
+        "token_balance",
+        json!("100"),
+        super::InputValueMeta {
+            source: "query".to_string(),
+            source_priority: 80,
+            provenance: Some("segment_store.seg_todo_2/q_token_balance.balance".to_string()),
+            confidence: None,
+            layer: super::InputValueLayer::Observed,
+            stability: super::InputValueStability::Volatile,
+            observed_at_ms: Some(now_ms),
+        },
+    );
+
+    let error = super::validate_segment_todo_scope_with_runtime_facts(
+        &segment,
+        &candidate_context,
+        None,
+        None,
+        None,
+        Some(&input_store),
+    )
+    .expect_err("fixture-like repeated balance queries should be rejected using query-observed input store entries");
+    assert_eq!(
+        error.pointer("/reason_code").and_then(Value::as_str),
+        Some("redundant_query_step")
+    );
+    let issues = error
+        .pointer("/issues")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(issues.len(), 2);
+    assert!(issues.iter().any(|issue| {
+        issue.pointer("/step_id").and_then(Value::as_str) == Some("q_native_balance")
+            && issue
+                .pointer("/projected_refs/0")
+                .and_then(Value::as_str)
+                == Some("inputs.native_balance")
+    }));
+    assert!(issues.iter().any(|issue| {
+        issue.pointer("/step_id").and_then(Value::as_str) == Some("q_token_balance")
+            && issue
+                .pointer("/projected_refs/0")
+                .and_then(Value::as_str)
+                == Some("inputs.token_balance")
+    }));
+}
+
+#[test]
+fn runtime_query_inspect_prefers_runtime_facts_in_native_erc20_fixture_shape_without_input_store_mirror() {
+    let summary = super::StateSummary {
+        completed_segments: 2,
+        completed_nodes: 2,
+        plan_epoch: 2,
+        paused_reason: None,
+        done: false,
+        previous_error: None,
+        input_store: Some(json!({
+            "facts": {
+                "owner": "0x1111111111111111111111111111111111111111",
+                "native_balance": "100",
+                "token_balance": "100"
+            },
+            "meta": {
+                "owner": {"source":"user","source_priority":100},
+                "native_balance": {"source":"query","source_priority":80,"stability":"volatile","observed_at_ms":123},
+                "token_balance": {"source":"query","source_priority":80,"stability":"volatile","observed_at_ms":123}
+            }
+        })),
+        runtime_facts: None,
+        input_binding: super::state_summary::InputBindingContract {
+            schema: "ais-agent-input-binding-contract/0.0.1",
+            bindable_namespace: "inputs",
+            bindable_refs_source: "state_summary.input_store",
+            bindable_refs_projection: "state_summary.input_registry.known_refs",
+            known_refs_only: true,
+            facts_bindable: false,
+        },
+        input_registry: json!({"known_refs":["inputs.owner","inputs.native_balance","inputs.token_balance"]}),
+        node_output_refs: json!({"known_refs":[]}),
+        reusable_outputs: None,
+        tool_memory_projection: None,
+        intent_slots: None,
+        intent_context: None,
+        capability_view: None,
+        capability_ready: None,
+        side_effect_lifecycle: None,
+        todo_state: None,
+        recovery_diagnostics: None,
+    };
+
+    let args = super::tools::runtime_query::RuntimeQueryArgs {
+        action: "inspect".to_string(),
+        refs: vec![
+            "inputs.native_balance".to_string(),
+            "inputs.token_balance".to_string(),
+        ],
+    };
+    let result = super::tools::runtime_query::handle_inspect(&args, Some(&summary), None, None);
+    let results = result["results"].as_array().expect("results");
+    assert_eq!(results[0]["status"], "resolved");
+    assert_eq!(results[0]["source"], "input_store_projection");
+    assert_eq!(results[1]["status"], "resolved");
+    assert_eq!(results[1]["source"], "input_store_projection");
 }

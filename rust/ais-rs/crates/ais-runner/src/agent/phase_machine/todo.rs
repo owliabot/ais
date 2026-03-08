@@ -52,7 +52,8 @@ pub(crate) fn bootstrap_todos_if_needed<P: LlmProvider>(
     let draft = planner.propose_todos(TodoPlanningRequest {
         intent: context.intent().to_string(),
         session: context.session().clone(),
-        state_summary: context.state_summary().clone(),
+        state_summary: context.packed_summary().clone(),
+        typed_summary: context.typed_summary().cloned(),
     });
     super::super::orchestrator::refresh_tool_memory_projection(context, planner, state);
     match draft {
@@ -102,7 +103,32 @@ pub(crate) fn bootstrap_todos_if_needed<P: LlmProvider>(
             message,
             issues,
             questions,
+            error_details,
         }) => {
+            if reason_code == "intent_aborted" {
+                super::super::trace::emit(
+                    trace_enabled,
+                    "todo",
+                    "abort_intent",
+                    &[("reason_code", reason_code.clone())],
+                );
+                super::super::runtime_store::record_runtime_agent_field(
+                    &mut state.runtime,
+                    "abort_intent",
+                    serde_json::json!({
+                        "accepted": true,
+                        "phase": "todo",
+                        "reason_code": reason_code,
+                        "summary": message,
+                        "evidence": error_details.as_ref().and_then(|value| value.get("evidence")).cloned().unwrap_or_else(|| serde_json::json!({})),
+                        "user_fix_hint": error_details.as_ref().and_then(|value| value.get("user_fix_hint")).cloned().unwrap_or(Value::Null),
+                    }),
+                );
+                state.paused_reason = None;
+                context.set_final_status(EngineRunStatus::Stopped);
+                context.clear_previous_error_and_refresh(state, true);
+                return Ok(());
+            }
             super::super::trace::emit(
                 trace_enabled,
                 "todo",
@@ -113,10 +139,11 @@ pub(crate) fn bootstrap_todos_if_needed<P: LlmProvider>(
                 ],
             );
             if reason_code == "missing_required_input" {
-                let payload = super::super::missing_input::payload(
+                let payload = super::super::missing_input::payload_with_error_details(
                     message.as_deref(),
                     questions.as_slice(),
                     issues.as_slice(),
+                    error_details.as_ref(),
                     context.completed_segments_u8(),
                 );
                 match super::super::phase_machine::pause::recover_missing_required_input_payload(
@@ -132,23 +159,22 @@ pub(crate) fn bootstrap_todos_if_needed<P: LlmProvider>(
                     false,
                     true,
                 )? {
-                    super::super::phase_machine::pause::MissingRequiredInputRecoveryBackflow::RetryScheduled => {
-                        return Ok(());
-                    }
-                    super::super::phase_machine::pause::MissingRequiredInputRecoveryBackflow::ResolvedByUserInput { answers } => {
-                        context.clear_previous_error_and_refresh(state, false);
-                        if command.verbose_llm {
-                            eprintln!(
-                                "[agent] todo plan missing_required_input resolved via user answers keys={}",
-                                answers.keys().cloned().collect::<Vec<_>>().join(",")
+                    super::super::phase_machine::pause::MissingRequiredInputRecoveryBackflow::Retry { answers, .. } => {
+                        if let Some(answers) = answers {
+                            context.clear_previous_error_and_refresh(state, false);
+                            if command.verbose_llm {
+                                eprintln!(
+                                    "[agent] todo plan missing_required_input resolved via user answers keys={}",
+                                    answers.keys().cloned().collect::<Vec<_>>().join(",")
+                                );
+                            }
+                            super::super::trace::emit(
+                                trace_enabled,
+                                "pause_resolution",
+                                "resolved_by_user_input",
+                                &[("phase_hint", "todo".to_string())],
                             );
                         }
-                        super::super::trace::emit(
-                            trace_enabled,
-                            "pause_resolution",
-                            "resolved_by_user_input",
-                            &[("phase_hint", "todo".to_string())],
-                        );
                         return Ok(());
                     }
                     super::super::phase_machine::pause::MissingRequiredInputRecoveryBackflow::Paused => {

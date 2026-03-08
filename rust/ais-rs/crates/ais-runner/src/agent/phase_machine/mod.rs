@@ -4,6 +4,7 @@ pub(super) mod grounding;
 pub(super) mod pause;
 pub(super) mod segment_exec;
 pub(super) mod segment_plan;
+pub(super) mod store_projection;
 pub(super) mod todo;
 pub(super) mod types;
 

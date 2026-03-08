@@ -1,26 +1,51 @@
 use super::candidates::CandidateContext;
 use super::input_normalize::normalize_input_slot_key;
-use super::input_store::{InputStore, VolatileInputSignal};
+use super::input_store::{InputStore, VolatileInputSignal, VolatileSignalObservation};
+use super::runtime_facts_store::RuntimeFactsStore;
+use crate::policy::VolatileFactsPolicy;
 use ais_sdk::documents::{PlanSketchSegment, PlanSketchStep};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const VOLATILE_FACT_MAX_AGE_MS: u64 = 30_000;
+const WRITE_GATE_CHAIN_FAMILY_REASON_CODE: &str = "missing_query_assert_branch_chain";
+const WRITE_GATE_ACCEPTED_BACKING_MODES: [&str; 2] =
+    ["same_segment_query", "historical_node_output"];
 
 #[derive(Debug, Clone)]
 struct WriteGateChainDiagnostics {
-    gate_reason_code: &'static str,
+    reason_code: &'static str,
+    family_reason_code: &'static str,
     message: String,
     action_depends_on: Vec<String>,
     gate_step_ids: Vec<String>,
-    gates_missing_query_dep: Vec<String>,
+    missing_depends_on: bool,
+    missing_gate_step_ids: Vec<String>,
+    missing_data_backing_refs: Vec<String>,
 }
 
+#[cfg(test)]
 pub(super) fn validate_segment_write_gates(
     segment: &PlanSketchSegment,
     candidate_context: &CandidateContext,
+    runtime_facts_store: Option<&RuntimeFactsStore>,
     input_store: Option<&InputStore>,
+) -> Result<(), Value> {
+    validate_segment_write_gates_with_policy(
+        segment,
+        candidate_context,
+        runtime_facts_store,
+        input_store,
+        VolatileFactsPolicy::default(),
+    )
+}
+
+pub(super) fn validate_segment_write_gates_with_policy(
+    segment: &PlanSketchSegment,
+    candidate_context: &CandidateContext,
+    runtime_facts_store: Option<&RuntimeFactsStore>,
+    input_store: Option<&InputStore>,
+    volatile_facts_policy: VolatileFactsPolicy,
 ) -> Result<(), Value> {
     let mut issues = Vec::<Value>::new();
     let step_by_id = segment
@@ -28,6 +53,7 @@ pub(super) fn validate_segment_write_gates(
         .iter()
         .map(|step| (step.id.as_str(), step))
         .collect::<BTreeMap<_, _>>();
+    let now_ms = current_unix_ms();
 
     for step in &segment.steps {
         if step.kind != "action" {
@@ -52,15 +78,18 @@ pub(super) fn validate_segment_write_gates(
         {
             issues.push(json!({
                 "kind": "write_gate_missing",
-                "reason_code": "missing_query_assert_branch_chain",
-                "gate_reason_code": chain_issue.gate_reason_code,
+                "reason_code": chain_issue.reason_code,
+                "family_reason_code": chain_issue.family_reason_code,
                 "message": chain_issue.message,
                 "step_id": step.id,
                 "candidate_ref": step_candidate_ref,
-                "required_pattern": "query -> assert|branch -> action",
+                "required_pattern": "assert|branch -> action with query ancestry or explicit historical node-output backing",
                 "action_depends_on": chain_issue.action_depends_on,
                 "gate_step_ids": chain_issue.gate_step_ids,
-                "gates_missing_query_dep": chain_issue.gates_missing_query_dep,
+                "missing_depends_on": chain_issue.missing_depends_on,
+                "missing_gate_step_ids": chain_issue.missing_gate_step_ids,
+                "missing_data_backing_refs": chain_issue.missing_data_backing_refs,
+                "accepted_backing_modes": WRITE_GATE_ACCEPTED_BACKING_MODES,
             }));
         }
 
@@ -79,40 +108,33 @@ pub(super) fn validate_segment_write_gates(
             }
         }
 
-        if let Some(store) = input_store {
-            if let Some(required_fact) = missing_asset_decimals_fact(step, detail) {
-                if !asset_decimals_available(step, segment, candidate_context, store) {
-                    issues.push(json!({
-                        "kind": "write_gate_missing",
-                        "reason_code": "missing_token_decimals",
-                        "message": "asset decimals unavailable; add decimals query or return missing_required_input",
-                        "step_id": step.id,
-                        "candidate_ref": step_candidate_ref,
-                        "required_fact": required_fact,
-                        "required_object_fields": ["decimals"],
-                    }));
-                }
-            }
-
-            for signal in required_volatile_signals(step, detail) {
-                if segment_has_query_for_signal(segment, candidate_context, signal)
-                    || store.has_fresh_volatile_signal(
-                        signal,
-                        VOLATILE_FACT_MAX_AGE_MS,
-                        current_unix_ms(),
-                    )
-                {
-                    continue;
-                }
+        if let Some(required_fact) = missing_asset_decimals_fact(step, detail) {
+            if !asset_decimals_available(step, detail, runtime_facts_store, input_store) {
                 issues.push(json!({
                     "kind": "write_gate_missing",
-                    "reason_code": "stale_volatile_fact",
-                    "message": format!("volatile fact `{}` is stale or missing; add fresh query in this segment before write", volatile_signal_name(signal)),
+                    "reason_code": "missing_token_decimals",
+                    "message": "asset decimals unavailable; add decimals query or return missing_required_input",
                     "step_id": step.id,
                     "candidate_ref": step_candidate_ref,
-                    "required_signal": volatile_signal_name(signal),
-                    "max_age_ms": VOLATILE_FACT_MAX_AGE_MS,
+                    "required_fact": required_fact,
+                    "required_object_fields": ["decimals"],
                 }));
+            }
+        }
+
+        for signal in required_volatile_signals(step, detail) {
+            if let Some(issue) = stale_volatile_signal_issue(
+                step,
+                step_candidate_ref,
+                segment,
+                candidate_context,
+                runtime_facts_store,
+                input_store,
+                signal,
+                now_ms,
+                volatile_facts_policy,
+            ) {
+                issues.push(issue);
             }
         }
     }
@@ -125,6 +147,76 @@ pub(super) fn validate_segment_write_gates(
         "message": "segment write preconditions are not satisfied",
         "issues": issues,
     }))
+}
+
+fn stale_volatile_signal_issue(
+    step: &PlanSketchStep,
+    step_candidate_ref: &str,
+    segment: &PlanSketchSegment,
+    candidate_context: &CandidateContext,
+    runtime_facts_store: Option<&RuntimeFactsStore>,
+    input_store: Option<&InputStore>,
+    signal: VolatileInputSignal,
+    now_ms: u64,
+    volatile_facts_policy: VolatileFactsPolicy,
+) -> Option<Value> {
+    if segment_has_query_for_signal(segment, candidate_context, signal) {
+        return None;
+    }
+    if action_has_historical_node_output_backing_for_signal(step, segment, signal) {
+        return None;
+    }
+    let max_age_ms = volatile_facts_policy.max_age_ms;
+    let has_fresh_fact = runtime_facts_store
+        .is_some_and(|store| store.has_fresh_volatile_signal(signal, max_age_ms, now_ms))
+        || input_store
+            .is_some_and(|store| store.has_fresh_volatile_signal(signal, max_age_ms, now_ms));
+    if has_fresh_fact {
+        return None;
+    }
+    let latest_observation =
+        freshest_volatile_signal_observation(runtime_facts_store, input_store, signal);
+    let observed_at_ms = latest_observation.map(|observation| observation.observed_at_ms);
+    let age_ms = observed_at_ms.map(|observed_at_ms| now_ms.saturating_sub(observed_at_ms));
+    Some(json!({
+        "kind": "write_gate_missing",
+        "reason_code": "stale_volatile_fact",
+        "message": format!("volatile fact `{}` is stale or missing; add fresh query in this segment before write", volatile_signal_name(signal)),
+        "step_id": step.id,
+        "candidate_ref": step_candidate_ref,
+        "required_signal": volatile_signal_name(signal),
+        "observed_at_ms": observed_at_ms,
+        "age_ms": age_ms,
+        "max_age_ms": max_age_ms,
+    }))
+}
+
+fn action_has_historical_node_output_backing_for_signal(
+    action_step: &PlanSketchStep,
+    segment: &PlanSketchSegment,
+    signal: VolatileInputSignal,
+) -> bool {
+    let step_by_id = segment
+        .steps
+        .iter()
+        .map(|step| (step.id.as_str(), step))
+        .collect::<BTreeMap<_, _>>();
+    reachable_gate_step_ids(action_step, &step_by_id)
+        .into_iter()
+        .filter_map(|step_id| step_by_id.get(step_id.as_str()).copied())
+        .any(|gate_step| step_references_node_output_for_signal(gate_step, signal))
+}
+
+fn freshest_volatile_signal_observation(
+    runtime_facts_store: Option<&RuntimeFactsStore>,
+    input_store: Option<&InputStore>,
+    signal: VolatileInputSignal,
+) -> Option<VolatileSignalObservation> {
+    runtime_facts_store
+        .and_then(|store| store.newest_volatile_signal_observation(signal))
+        .into_iter()
+        .chain(input_store.and_then(|store| store.newest_volatile_signal_observation(signal)))
+        .max_by_key(|observation| observation.observed_at_ms)
 }
 
 fn action_requires_write_gate(detail: Option<&Value>) -> bool {
@@ -264,40 +356,51 @@ fn diagnose_required_write_gate_chain<'a>(
     let action_depends_on = action_step.depends_on.clone();
     if action_depends_on.is_empty() {
         return Some(WriteGateChainDiagnostics {
-            gate_reason_code: "missing_action_gate_dep",
-            message: "write action is missing assert/branch gate dependency in depends_on"
-                .to_string(),
+            reason_code: "missing_action_gate_dep",
+            family_reason_code: WRITE_GATE_CHAIN_FAMILY_REASON_CODE,
+            message:
+                "write action is missing an assert/branch gate in depends_on; add a gate step before the action"
+                    .to_string(),
             action_depends_on,
             gate_step_ids: Vec::new(),
-            gates_missing_query_dep: Vec::new(),
+            missing_depends_on: true,
+            missing_gate_step_ids: Vec::new(),
+            missing_data_backing_refs: Vec::new(),
         });
     }
     let gate_step_ids = reachable_gate_step_ids(action_step, step_by_id);
     if gate_step_ids.is_empty() {
         return Some(WriteGateChainDiagnostics {
-            gate_reason_code: "missing_action_gate_dep",
+            reason_code: "missing_action_gate_dep",
+            family_reason_code: WRITE_GATE_CHAIN_FAMILY_REASON_CODE,
             message:
-                "write action depends_on does not include any assert/branch gate step in dependency ancestry"
+                "write action depends_on does not reach any assert/branch gate step; add a gate step to the dependency chain"
                     .to_string(),
             action_depends_on,
             gate_step_ids,
-            gates_missing_query_dep: Vec::new(),
+            missing_depends_on: true,
+            missing_gate_step_ids: Vec::new(),
+            missing_data_backing_refs: Vec::new(),
         });
     }
-    let gates_missing_query_dep = gate_step_ids
+    let missing_gate_step_ids = gate_step_ids
         .iter()
-        .filter(|gate_id| !gate_has_query_backing(gate_id.as_str(), step_by_id, candidate_context))
+        .filter(|gate_id| !gate_has_data_backing(gate_id.as_str(), step_by_id, candidate_context))
         .cloned()
         .collect::<Vec<_>>();
-    if gates_missing_query_dep.len() == gate_step_ids.len() {
+    if missing_gate_step_ids.len() == gate_step_ids.len() {
+        let missing_gate_label = missing_gate_step_ids.join(", ");
         return Some(WriteGateChainDiagnostics {
-            gate_reason_code: "missing_gate_query_dep",
-            message:
-                "assert/branch gate steps must depend_on query facts in the same segment before write actions"
-                    .to_string(),
+            reason_code: "missing_gate_data_backing",
+            family_reason_code: WRITE_GATE_CHAIN_FAMILY_REASON_CODE,
+            message: format!(
+                "gate step(s) [{missing_gate_label}] are not backed by same-segment query ancestry or historical node outputs; add one accepted backing before the write"
+            ),
             action_depends_on,
             gate_step_ids,
-            gates_missing_query_dep,
+            missing_depends_on: false,
+            missing_gate_step_ids,
+            missing_data_backing_refs: Vec::new(),
         });
     }
     None
@@ -335,16 +438,16 @@ fn collect_reachable_gate_step_ids<'a>(
     }
 }
 
-fn gate_has_query_backing<'a>(
+fn gate_has_data_backing<'a>(
     step_id: &'a str,
     step_by_id: &BTreeMap<&'a str, &'a PlanSketchStep>,
     candidate_context: &CandidateContext,
 ) -> bool {
     let mut visited = HashSet::<String>::new();
-    gate_has_query_backing_inner(step_id, step_by_id, candidate_context, &mut visited)
+    gate_has_data_backing_inner(step_id, step_by_id, candidate_context, &mut visited)
 }
 
-fn gate_has_query_backing_inner<'a>(
+fn gate_has_data_backing_inner<'a>(
     step_id: &'a str,
     step_by_id: &BTreeMap<&'a str, &'a PlanSketchStep>,
     candidate_context: &CandidateContext,
@@ -362,9 +465,115 @@ fn gate_has_query_backing_inner<'a>(
             .is_some_and(|reference| is_query_candidate_ref(reference, candidate_context));
     }
 
+    if step.kind == "assert" || step.kind == "branch" {
+        if step_explicitly_references_node_outputs(step) {
+            return true;
+        }
+    }
+
     step.depends_on.iter().any(|dep| {
-        gate_has_query_backing_inner(dep.as_str(), step_by_id, candidate_context, visited)
+        gate_has_data_backing_inner(dep.as_str(), step_by_id, candidate_context, visited)
     })
+}
+
+fn step_explicitly_references_node_outputs(step: &PlanSketchStep) -> bool {
+    if let Some(when) = step.when.as_ref() {
+        if text_explicitly_references_node_outputs(when.cel.as_str()) {
+            return true;
+        }
+    }
+
+    serde_json::to_value(&step.inputs)
+        .ok()
+        .is_some_and(|value| value_explicitly_references_node_outputs(&value))
+}
+
+fn step_references_node_output_for_signal(
+    step: &PlanSketchStep,
+    signal: VolatileInputSignal,
+) -> bool {
+    if let Some(when) = step.when.as_ref() {
+        if text_references_node_output_for_signal(when.cel.as_str(), signal) {
+            return true;
+        }
+    }
+    serde_json::to_value(&step.inputs)
+        .ok()
+        .is_some_and(|value| value_references_node_output_for_signal(&value, signal))
+}
+
+fn value_explicitly_references_node_outputs(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => object.iter().any(|(key, inner)| {
+            if key == "ref" {
+                return inner.as_str().is_some_and(|reference| {
+                    reference.starts_with("nodes.") && reference.contains(".outputs.")
+                });
+            }
+            if key == "cel" {
+                return inner
+                    .as_str()
+                    .is_some_and(text_explicitly_references_node_outputs);
+            }
+            value_explicitly_references_node_outputs(inner)
+        }),
+        Value::Array(items) => items.iter().any(value_explicitly_references_node_outputs),
+        _ => false,
+    }
+}
+
+fn value_references_node_output_for_signal(value: &Value, signal: VolatileInputSignal) -> bool {
+    match value {
+        Value::Object(object) => object.iter().any(|(key, inner)| {
+            if key == "ref" {
+                return inner
+                    .as_str()
+                    .is_some_and(|reference| node_output_ref_matches_signal(reference, signal));
+            }
+            if key == "cel" {
+                return inner
+                    .as_str()
+                    .is_some_and(|text| text_references_node_output_for_signal(text, signal));
+            }
+            value_references_node_output_for_signal(inner, signal)
+        }),
+        Value::Array(items) => items
+            .iter()
+            .any(|item| value_references_node_output_for_signal(item, signal)),
+        _ => false,
+    }
+}
+
+fn text_explicitly_references_node_outputs(text: &str) -> bool {
+    text.find("nodes.")
+        .zip(text.find(".outputs."))
+        .is_some_and(|(nodes_pos, outputs_pos)| outputs_pos > nodes_pos + "nodes.".len())
+}
+
+fn text_references_node_output_for_signal(text: &str, signal: VolatileInputSignal) -> bool {
+    text.match_indices("nodes.").any(|(start, _)| {
+        node_output_field_name(&text[start..])
+            .is_some_and(|field| leaf_matches_signal(field, signal))
+    })
+}
+
+fn node_output_ref_matches_signal(reference: &str, signal: VolatileInputSignal) -> bool {
+    reference.starts_with("nodes.")
+        && node_output_field_name(reference).is_some_and(|field| leaf_matches_signal(field, signal))
+}
+
+fn node_output_field_name(reference: &str) -> Option<&str> {
+    let outputs_marker = ".outputs.";
+    let outputs_start = reference.find(outputs_marker)? + outputs_marker.len();
+    let tail = reference.get(outputs_start..)?;
+    let field_end = tail
+        .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+        .unwrap_or(tail.len());
+    let field = tail.get(..field_end)?.trim();
+    if field.is_empty() {
+        return None;
+    }
+    Some(field)
 }
 
 fn is_query_candidate_ref(candidate_ref: &str, candidate_context: &CandidateContext) -> bool {
@@ -435,91 +644,163 @@ fn missing_asset_decimals_fact(
     action_step: &PlanSketchStep,
     detail: Option<&Value>,
 ) -> Option<String> {
-    let Some(detail) = detail else {
-        return None;
-    };
-    let Some(params) = detail.get("params").and_then(Value::as_array) else {
-        return None;
-    };
-
-    params
-        .iter()
-        .filter_map(asset_param_slot)
-        .find(|slot| {
-            action_step
-                .inputs
-                .get(slot.as_str())
-                .is_some_and(|value| !value_contains_asset_decimals(value))
-        })
+    action_asset_slots_missing_decimals(action_step, detail)
+        .into_iter()
+        .next()
         .map(|slot| format!("{slot}.decimals"))
 }
 
 fn asset_decimals_available(
     action_step: &PlanSketchStep,
-    segment: &PlanSketchSegment,
-    candidate_context: &CandidateContext,
-    input_store: &InputStore,
+    detail: Option<&Value>,
+    runtime_facts_store: Option<&RuntimeFactsStore>,
+    input_store: Option<&InputStore>,
 ) -> bool {
-    if action_step
-        .inputs
-        .values()
-        .any(value_contains_asset_decimals)
-    {
+    let decimals_max = super::missing_resolution::heuristics::token_decimals_max();
+    let missing_slots = action_asset_slots_missing_decimals(action_step, detail);
+    if missing_slots.is_empty() {
         return true;
     }
-    if input_store
-        .list_ref_strings()
-        .iter()
-        .any(|slot| slot.ends_with(".decimals"))
-    {
-        return true;
-    }
-    if query_steps_store_asset_decimals(segment, candidate_context) {
-        return true;
-    }
-    segment.steps.iter().any(|step| {
-        if step.kind != "query" && step.kind != "assert" {
-            return false;
+    missing_slots.iter().all(|slot| {
+        action_step.inputs.get(slot.as_str()).is_some_and(|value| {
+            asset_value_contains_resolved_valid_decimals(
+                value,
+                runtime_facts_store,
+                input_store,
+                decimals_max,
+            )
+        }) || {
+            let canonical_key = format!("inputs.{slot}.decimals");
+            runtime_facts_has_valid_decimals(
+                runtime_facts_store,
+                canonical_key.as_str(),
+                decimals_max,
+            ) || input_store_has_valid_decimals(input_store, canonical_key.as_str(), decimals_max)
         }
-        let Some(reference) = step_candidate_ref(step) else {
-            return false;
-        };
-        if !is_query_candidate_ref(reference, candidate_context) {
-            return false;
-        }
-        query_candidate_returns_decimals(reference, candidate_context)
     })
 }
 
-fn query_steps_store_asset_decimals(
-    segment: &PlanSketchSegment,
-    candidate_context: &CandidateContext,
+fn asset_value_contains_resolved_valid_decimals(
+    value: &Value,
+    runtime_facts_store: Option<&RuntimeFactsStore>,
+    input_store: Option<&InputStore>,
+    max: u32,
 ) -> bool {
-    segment.steps.iter().any(|step| {
-        if step.kind != "query" {
-            return false;
+    match value {
+        Value::Object(object) => {
+            if let Some(decimals) = object.get("decimals") {
+                if asset_value_contains_resolved_valid_decimals(
+                    decimals,
+                    runtime_facts_store,
+                    input_store,
+                    max,
+                ) {
+                    return true;
+                }
+            }
+            if let Some(lit) = object.get("lit") {
+                if asset_value_contains_resolved_valid_decimals(
+                    lit,
+                    runtime_facts_store,
+                    input_store,
+                    max,
+                ) {
+                    return true;
+                }
+            }
+            if let Some(inner_object) = object.get("object") {
+                if asset_value_contains_resolved_valid_decimals(
+                    inner_object,
+                    runtime_facts_store,
+                    input_store,
+                    max,
+                ) {
+                    return true;
+                }
+            }
+            if let Some(inner_value) = object.get("value") {
+                if asset_value_contains_resolved_valid_decimals(
+                    inner_value,
+                    runtime_facts_store,
+                    input_store,
+                    max,
+                ) {
+                    return true;
+                }
+            }
+            if let Some(ref_path) = object.get("ref").and_then(Value::as_str) {
+                if let Some(resolved) =
+                    resolve_runtime_ref_value(ref_path, runtime_facts_store, input_store)
+                {
+                    return asset_value_contains_resolved_valid_decimals(
+                        &resolved,
+                        runtime_facts_store,
+                        input_store,
+                        max,
+                    );
+                }
+            }
+            super::missing_resolution::heuristics::parse_valid_token_decimals(value, max).is_some()
         }
-        let slot_has_asset_decimals = step
-            .stores
-            .values()
-            .any(|slot| slot_is_asset_decimals(slot.as_str()));
-        if slot_has_asset_decimals {
-            return true;
+        Value::Array(values) => values.iter().any(|item| {
+            asset_value_contains_resolved_valid_decimals(
+                item,
+                runtime_facts_store,
+                input_store,
+                max,
+            )
+        }),
+        _ => {
+            super::missing_resolution::heuristics::parse_valid_token_decimals(value, max).is_some()
         }
-        let Some(reference) = step_candidate_ref(step) else {
-            return false;
-        };
-        is_query_candidate_ref(reference, candidate_context)
-            && query_candidate_returns_decimals(reference, candidate_context)
-    })
+    }
 }
 
-fn slot_is_asset_decimals(slot: &str) -> bool {
-    let Some(canonical) = normalize_input_slot_key(slot) else {
-        return false;
+fn resolve_runtime_ref_value(
+    ref_path: &str,
+    runtime_facts_store: Option<&RuntimeFactsStore>,
+    input_store: Option<&InputStore>,
+) -> Option<Value> {
+    let trimmed = ref_path.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.starts_with("inputs.") {
+        return input_store
+            .and_then(|store| store.get_projected(trimmed))
+            .map(|entry| entry.value);
+    }
+    if trimmed.starts_with("facts.") {
+        return runtime_facts_store
+            .and_then(|store| store.get(trimmed))
+            .map(|entry| entry.value.clone());
+    }
+    None
+}
+
+fn action_asset_slots_missing_decimals(
+    action_step: &PlanSketchStep,
+    detail: Option<&Value>,
+) -> Vec<String> {
+    let Some(detail) = detail else {
+        return Vec::new();
     };
-    let lowered = canonical.to_lowercase();
-    lowered.ends_with(".decimals")
+    let Some(params) = detail.get("params").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let decimals_max = super::missing_resolution::heuristics::token_decimals_max();
+    params
+        .iter()
+        .filter_map(asset_param_slot)
+        .filter(|slot| {
+            action_step.inputs.get(slot.as_str()).is_some_and(|value| {
+                !super::missing_resolution::heuristics::value_contains_valid_asset_decimals(
+                    value,
+                    decimals_max,
+                )
+            })
+        })
+        .collect::<Vec<_>>()
 }
 
 fn asset_param_slot(param: &Value) -> Option<String> {
@@ -554,30 +835,6 @@ fn step_candidate_ref(step: &PlanSketchStep) -> Option<&str> {
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-}
-
-fn query_candidate_returns_decimals(
-    candidate_ref: &str,
-    candidate_context: &CandidateContext,
-) -> bool {
-    if candidate_leaf_name(candidate_ref).contains("decimal") {
-        return true;
-    }
-    candidate_context
-        .detail_by_ref
-        .get(candidate_ref)
-        .and_then(|detail| detail.get("returns"))
-        .and_then(Value::as_array)
-        .map(|returns| {
-            returns.iter().any(|entry| {
-                entry
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .map(|name| name.to_lowercase().contains("decimal"))
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false)
 }
 
 fn query_candidate_matches_signal(
@@ -653,6 +910,18 @@ fn required_volatile_signals(
         .collect::<Vec<_>>()
 }
 
+pub(super) fn required_action_volatile_signals(
+    step: &PlanSketchStep,
+    candidate_context: &CandidateContext,
+) -> Vec<VolatileInputSignal> {
+    if step.kind != "action" {
+        return Vec::new();
+    }
+    let detail = step_candidate_ref(step)
+        .and_then(|candidate_ref| candidate_context.detail_by_ref.get(candidate_ref));
+    required_volatile_signals(step, detail)
+}
+
 fn action_has_allowance_role(detail: &Value) -> bool {
     detail
         .get("params")
@@ -681,30 +950,29 @@ fn candidate_leaf_name(candidate_ref: &str) -> String {
         .to_lowercase()
 }
 
-fn value_contains_asset_decimals(value: &Value) -> bool {
-    match value {
-        Value::Object(object) => {
-            if let Some(decimals) = object.get("decimals") {
-                if decimals.is_number() || decimals.is_string() {
-                    return true;
-                }
-            }
-            if let Some(lit) = object.get("lit") {
-                if value_contains_asset_decimals(lit) {
-                    return true;
-                }
-            }
-            if let Some(inner_object) = object.get("object") {
-                return value_contains_asset_decimals(inner_object);
-            }
-            false
-        }
-        Value::Array(values) => values.iter().any(value_contains_asset_decimals),
-        _ => false,
-    }
+fn runtime_facts_has_valid_decimals(
+    runtime_facts_store: Option<&RuntimeFactsStore>,
+    key: &str,
+    max: u32,
+) -> bool {
+    runtime_facts_store
+        .and_then(|store| store.get(key))
+        .and_then(|entry| {
+            super::missing_resolution::heuristics::parse_valid_token_decimals(&entry.value, max)
+        })
+        .is_some()
 }
 
-fn volatile_signal_name(signal: VolatileInputSignal) -> &'static str {
+fn input_store_has_valid_decimals(input_store: Option<&InputStore>, key: &str, max: u32) -> bool {
+    input_store
+        .and_then(|store| store.get_projected(key))
+        .and_then(|entry| {
+            super::missing_resolution::heuristics::parse_valid_token_decimals(&entry.value, max)
+        })
+        .is_some()
+}
+
+pub(super) fn volatile_signal_name(signal: VolatileInputSignal) -> &'static str {
     match signal {
         VolatileInputSignal::Balance => "balance",
         VolatileInputSignal::Allowance => "allowance",

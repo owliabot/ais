@@ -2,6 +2,7 @@ use super::brain::{DecisionPolicy, LlmBrain};
 use super::intent_segmented::SegmentedIntentPlanner;
 use super::r#loop::{run_agent_loop, AgentLoopConfig, CommandBuilder};
 use super::summary::PauseKind;
+use crate::checkpoint_ledger::RunnerCheckpointLedger;
 use crate::cli::{AgentCommand, AgentProfile, OutputFormat};
 use crate::config::{
     ChainConfig, RunnerConfig, RunnerEngineConfig, RunnerLlmConfig, RunnerLlmRotationMode,
@@ -9,9 +10,9 @@ use crate::config::{
 };
 use crate::error::RunnerError;
 use ais_engine::{
-    create_checkpoint_document, run_plan_once, save_checkpoint_to_path, CheckpointEngineState,
-    DefaultSolver, EngineCommandEnvelope, EngineRunStatus, EngineRunnerOptions, EngineRunnerState,
-    Executor, ExecutorOutput, RouterExecutor,
+    create_checkpoint_document, load_checkpoint_from_path, run_plan_once, save_checkpoint_to_path,
+    CheckpointEngineState, DefaultSolver, EngineCommandEnvelope, EngineRunStatus,
+    EngineRunnerOptions, EngineRunnerState, Executor, ExecutorOutput, RouterExecutor,
 };
 use ais_llm::{CompleteWithToolsResponse, ScriptedLlmProvider, ToolCall};
 use ais_sdk::PlanDocument;

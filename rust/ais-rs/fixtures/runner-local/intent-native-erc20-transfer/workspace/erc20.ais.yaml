@@ -4,7 +4,7 @@ meta:
   protocol: "erc20"
   version: "0.0.2"
   name: "ERC-20"
-  description: "Minimal ERC-20 primitives used by workflows (approve/transfer/balance/allowance/decimals)."
+  description: "Minimal ERC-20 primitives used by workflows (approve/transfer/transferFrom/balance/allowance/name/symbol/decimals/totalSupply)."
   tags: ["evm", "token", "erc20"]
 
 capabilities_required:
@@ -69,7 +69,87 @@ actions:
           to: { ref: "params.to" }
           amount: { ref: "params.amount" }
 
+  transfer-from:
+    description: "Transfer ERC-20 tokens using an existing allowance."
+    risk_level: 3
+    risk_tags: ["transfer", "allowance"]
+    params:
+      - { name: token, type: asset, description: "ERC-20 token asset", required: true }
+      - { name: from, type: address, description: "Source address", required: true }
+      - { name: to, type: address, description: "Recipient address", required: true }
+      - { name: amount, type: uint256, description: "Transfer amount (atomic)", required: true }
+    execution:
+      "eip155:*":
+        type: evm_call
+        to: { ref: "params.token.address" }
+        abi:
+          type: "function"
+          name: "transferFrom"
+          inputs:
+            - { name: "from", type: "address" }
+            - { name: "to", type: "address" }
+            - { name: "amount", type: "uint256" }
+          outputs: []
+        args:
+          from: { ref: "params.from" }
+          to: { ref: "params.to" }
+          amount: { ref: "params.amount" }
+
 queries:
+  name:
+    description: "Read ERC-20 name()."
+    params:
+      - { name: token, type: asset, description: "ERC-20 token asset", required: true }
+    returns:
+      - { name: name, type: string, description: "Token name" }
+    execution:
+      "eip155:*":
+        type: evm_read
+        to: { ref: "params.token.address" }
+        abi:
+          type: "function"
+          name: "name"
+          inputs: []
+          outputs:
+            - { name: "name", type: "string" }
+        args: {}
+
+  symbol:
+    description: "Read ERC-20 symbol()."
+    params:
+      - { name: token, type: asset, description: "ERC-20 token asset", required: true }
+    returns:
+      - { name: symbol, type: string, description: "Token symbol" }
+    execution:
+      "eip155:*":
+        type: evm_read
+        to: { ref: "params.token.address" }
+        abi:
+          type: "function"
+          name: "symbol"
+          inputs: []
+          outputs:
+            - { name: "symbol", type: "string" }
+        args: {}
+
+  total-supply:
+    description: "Read ERC-20 totalSupply()."
+    params:
+      - { name: token, type: asset, description: "ERC-20 token asset", required: true }
+    returns:
+      - { name: total_supply, type: uint256, description: "Total supply (atomic)" }
+    execution:
+      "eip155:*":
+        type: evm_read
+        to: { ref: "params.token.address" }
+        abi:
+          type: "function"
+          name: "totalSupply"
+          inputs: []
+          outputs:
+            - { name: "total_supply", type: "uint256" }
+        args: {}
+
   balance-of:
     description: "Read ERC-20 balanceOf(owner)."
     params:

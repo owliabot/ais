@@ -2,7 +2,9 @@ use ais_engine::{EngineEventRecord, EngineEventType, EngineRunnerState};
 use ais_sdk::PlanDocument;
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::BTreeSet;
+use sha2::{Digest, Sha256};
+
+use super::execution_view::ConfirmationView;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum PauseKind {
@@ -23,7 +25,15 @@ pub struct NeedUserConfirmSummary {
     pub reason: Option<String>,
     pub confirmation_hash: Option<String>,
     pub confirmation_summary: Option<Value>,
-    pub segment_bundle: Vec<NeedUserConfirmBundleItem>,
+    pub confirmation_bundle: Option<ConfirmationBundle>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ConfirmationBundle {
+    pub bundle_id: String,
+    pub segment_id: String,
+    pub current_node_id: String,
+    pub items: Vec<NeedUserConfirmBundleItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -109,12 +119,13 @@ pub fn summarize_pause_with_context(
                 .and_then(Value::as_object)
                 .and_then(|details| details.get("confirmation_summary"))
                 .cloned();
-            let segment_bundle = node_id
+            let confirmation_bundle = node_id
                 .as_deref()
                 .and_then(segment_id_from_node_id)
                 .map(|segment_id| {
-                    build_segment_confirm_bundle(
+                    build_confirmation_bundle(
                         segment_id,
+                        node_id.as_deref().unwrap_or_default(),
                         plan,
                         state,
                         confirmation_summary.as_ref(),
@@ -127,7 +138,7 @@ pub fn summarize_pause_with_context(
                 reason,
                 confirmation_hash,
                 confirmation_summary,
-                segment_bundle,
+                confirmation_bundle,
             }
         });
 
@@ -232,9 +243,9 @@ impl PauseSummary {
                     }
                 }
             }
-            if !need.segment_bundle.is_empty() {
+            if let Some(bundle) = need.confirmation_bundle.as_ref() {
                 out.push_str("- segment_confirm_bundle:\n");
-                for (index, item) in need.segment_bundle.iter().enumerate() {
+                for (index, item) in bundle.items.iter().enumerate() {
                     out.push_str(
                         format!(
                             "  {}. node={} action_ref={} risk={} params={} confirmation_hash={}\n",
@@ -256,40 +267,26 @@ impl PauseSummary {
     }
 }
 
-fn build_segment_confirm_bundle(
+fn build_confirmation_bundle(
     segment_id: &str,
+    current_node_id: &str,
     plan: Option<&PlanDocument>,
     state: Option<&EngineRunnerState>,
     current_confirmation_summary: Option<&Value>,
     current_confirmation_hash: Option<&str>,
-) -> Vec<NeedUserConfirmBundleItem> {
+) -> Option<ConfirmationBundle> {
     let Some(plan_value) = plan.and_then(|plan| serde_json::to_value(plan).ok()) else {
-        return Vec::new();
+        return None;
     };
-    let completed = state
-        .map(|runtime| {
-            runtime
-                .completed_node_ids
-                .iter()
-                .cloned()
-                .collect::<BTreeSet<_>>()
-        })
-        .unwrap_or_default();
-    let approved = state
-        .map(|runtime| {
-            runtime
-                .approved_node_ids
-                .iter()
-                .cloned()
-                .collect::<BTreeSet<_>>()
-        })
-        .unwrap_or_default();
+    let confirmation_view = ConfirmationView::new(state);
+    let completed = confirmation_view.completed_node_ids();
+    let approved = confirmation_view.approved_node_ids();
     let nodes = plan_value
         .get("nodes")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let mut bundle = Vec::<NeedUserConfirmBundleItem>::new();
+    let mut items = Vec::<NeedUserConfirmBundleItem>::new();
     for node in nodes {
         let Some(node_id) = node.get("id").and_then(Value::as_str) else {
             continue;
@@ -314,16 +311,19 @@ fn build_segment_confirm_bundle(
             .pointer("/execution/type")
             .and_then(Value::as_str)
             .map(str::to_string);
-        let chain = node.get("chain").and_then(Value::as_str).map(str::to_string);
+        let chain = node
+            .get("chain")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         let risk_level = node
             .pointer("/extensions/risk_level")
             .and_then(Value::as_u64);
-        let params = extract_param_bindings(node.get("bindings"), state);
+        let params = extract_param_bindings(node.get("bindings"), &confirmation_view);
         let confirmation_hash = current_confirmation_summary
             .and_then(|summary| summary.get("node_id").and_then(Value::as_str))
             .filter(|id| *id == node_id)
             .and(current_confirmation_hash.map(str::to_string));
-        bundle.push(NeedUserConfirmBundleItem {
+        items.push(NeedUserConfirmBundleItem {
             node_id: node_id.to_string(),
             action_ref,
             chain,
@@ -333,12 +333,49 @@ fn build_segment_confirm_bundle(
             confirmation_hash,
         });
     }
-    bundle
+    if items.is_empty() {
+        return None;
+    }
+    Some(ConfirmationBundle {
+        bundle_id: build_confirmation_bundle_id(segment_id, items.as_slice()),
+        segment_id: segment_id.to_string(),
+        current_node_id: current_node_id.to_string(),
+        items,
+    })
+}
+
+fn build_confirmation_bundle_id(segment_id: &str, items: &[NeedUserConfirmBundleItem]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(segment_id.as_bytes());
+    for item in items {
+        hasher.update(b"\n");
+        hasher.update(item.node_id.as_bytes());
+        hasher.update(b":");
+        hasher.update(item.action_ref.as_deref().unwrap_or("-").as_bytes());
+        hasher.update(b":");
+        hasher.update(item.chain.as_deref().unwrap_or("-").as_bytes());
+        hasher.update(b":");
+        hasher.update(item.execution_type.as_deref().unwrap_or("-").as_bytes());
+        hasher.update(b":");
+        hasher.update(
+            item.risk_level
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string())
+                .as_bytes(),
+        );
+        for param in &item.params {
+            hasher.update(b"|");
+            hasher.update(param.key.as_bytes());
+            hasher.update(b"=");
+            hasher.update(param.value.as_bytes());
+        }
+    }
+    format!("confirm_bundle:{:x}", hasher.finalize())
 }
 
 fn extract_param_bindings(
     bindings: Option<&Value>,
-    state: Option<&EngineRunnerState>,
+    confirmation_view: &ConfirmationView<'_>,
 ) -> Vec<NeedUserConfirmParamItem> {
     let mut params = Vec::<NeedUserConfirmParamItem>::new();
     let Some(param_map) = bindings
@@ -353,83 +390,11 @@ fn extract_param_bindings(
         let Some(raw_value) = param_map.get(key.as_str()) else {
             continue;
         };
-        if let Some(value) = render_param_value(raw_value, state) {
+        if let Some(value) = confirmation_view.render_param_value(raw_value) {
             params.push(NeedUserConfirmParamItem { key, value });
         }
     }
     params
-}
-
-fn render_param_value(value: &Value, state: Option<&EngineRunnerState>) -> Option<String> {
-    if let Some(text) = value.as_str() {
-        return Some(text.to_string());
-    }
-    if value.is_number() || value.is_boolean() {
-        return Some(value.to_string());
-    }
-    let object = value.as_object()?;
-    if let Some(lit) = object.get("lit") {
-        if let Some(text) = lit.as_str() {
-            return Some(text.to_string());
-        }
-        return Some(lit.to_string());
-    }
-    if let Some(reference) = object.get("ref").and_then(Value::as_str) {
-        return resolve_reference_display(reference, state)
-            .or_else(|| Some(format!("ref:{reference}")));
-    }
-    if let Some(inner) = object.get("object") {
-        if let Some(address_ref) = inner
-            .get("address")
-            .and_then(Value::as_object)
-            .and_then(|entry| entry.get("ref"))
-            .and_then(Value::as_str)
-        {
-            return resolve_reference_display(address_ref, state)
-                .or_else(|| Some(format!("ref:{address_ref}")));
-        }
-        if let Some(text) = inner.as_str() {
-            return Some(text.to_string());
-        }
-    }
-    if object.get("cel").is_some() {
-        return Some("computed(cel)".to_string());
-    }
-    Some(value.to_string())
-}
-
-fn resolve_reference_display(reference: &str, state: Option<&EngineRunnerState>) -> Option<String> {
-    let state = state?;
-    let key = reference.strip_prefix("inputs.")?;
-    state
-        .runtime
-        .pointer("/agent/state_summary/input_store/facts")
-        .and_then(|facts| value_at_dotted_path(facts, key))
-        .or_else(|| {
-            state
-                .runtime
-                .pointer("/agent/state_summary/intent_context/facts")
-                .and_then(|facts| value_at_dotted_path(facts, key))
-        })
-        .and_then(value_to_text)
-}
-
-fn value_at_dotted_path<'a>(root: &'a Value, dotted: &str) -> Option<&'a Value> {
-    let mut current = root;
-    for segment in dotted.split('.').filter(|part| !part.is_empty()) {
-        current = current.get(segment)?;
-    }
-    Some(current)
-}
-
-fn value_to_text(value: &Value) -> Option<String> {
-    if let Some(text) = value.as_str() {
-        return Some(text.to_string());
-    }
-    if value.is_number() || value.is_boolean() {
-        return Some(value.to_string());
-    }
-    None
 }
 
 fn render_param_items(items: &[NeedUserConfirmParamItem]) -> String {

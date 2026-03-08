@@ -9,6 +9,21 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
+pub const DEFAULT_VOLATILE_FACT_MAX_AGE_MS: u64 = 30_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VolatileFactsPolicy {
+    pub max_age_ms: u64,
+}
+
+impl Default for VolatileFactsPolicy {
+    fn default() -> Self {
+        Self {
+            max_age_ms: DEFAULT_VOLATILE_FACT_MAX_AGE_MS,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum PackPolicyError {
     #[error("pack file must be AIS pack document")]
@@ -20,6 +35,8 @@ pub enum PackPolicyError {
         auto_execute_max_risk_level: u8,
         require_approval_min_risk_level: u8,
     },
+    #[error("invalid execution volatile_facts max_age_ms: policy.execution.volatile_facts.max_age_ms must be a positive integer")]
+    InvalidVolatileFactsMaxAgeMs,
 }
 
 pub fn load_pack_document(path: &Path) -> Result<PackDocument, RunnerError> {
@@ -84,6 +101,23 @@ pub fn policy_from_pack(pack: &PackDocument) -> Result<PolicyEnforcementOptions,
     })
 }
 
+pub fn volatile_facts_policy_from_pack(
+    pack: Option<&PackDocument>,
+) -> Result<VolatileFactsPolicy, PackPolicyError> {
+    let Some(pack) = pack else {
+        return Ok(VolatileFactsPolicy::default());
+    };
+    let policy_object = match &pack.policy {
+        Some(Value::Object(map)) => Some(map),
+        Some(_) => return Err(PackPolicyError::PolicyNotObject),
+        None => None,
+    };
+    let Some(max_age_ms) = volatile_facts_max_age_ms_from_policy(policy_object)? else {
+        return Ok(VolatileFactsPolicy::default());
+    };
+    Ok(VolatileFactsPolicy { max_age_ms })
+}
+
 fn thresholds_from_policy(
     policy: Option<&Map<String, Value>>,
 ) -> Result<PolicyThresholdRules, PackPolicyError> {
@@ -114,6 +148,34 @@ fn thresholds_from_policy(
     thresholds.max_risk_level = auto_execute_max_risk_level.or(Some(0));
 
     Ok(thresholds)
+}
+
+fn volatile_facts_max_age_ms_from_policy(
+    policy: Option<&Map<String, Value>>,
+) -> Result<Option<u64>, PackPolicyError> {
+    let Some(policy) = policy else {
+        return Ok(None);
+    };
+    let Some(execution) = policy.get("execution") else {
+        return Ok(None);
+    };
+    let execution = execution
+        .as_object()
+        .ok_or(PackPolicyError::InvalidVolatileFactsMaxAgeMs)?;
+    let Some(volatile_facts) = execution.get("volatile_facts") else {
+        return Ok(None);
+    };
+    let volatile_facts = volatile_facts
+        .as_object()
+        .ok_or(PackPolicyError::InvalidVolatileFactsMaxAgeMs)?;
+    let Some(max_age_ms) = volatile_facts.get("max_age_ms") else {
+        return Ok(None);
+    };
+    let max_age_ms = max_age_ms
+        .as_u64()
+        .filter(|value| *value > 0)
+        .ok_or(PackPolicyError::InvalidVolatileFactsMaxAgeMs)?;
+    Ok(Some(max_age_ms))
 }
 
 fn allowlist_from_pack(pack: &PackDocument) -> PolicyPackAllowlist {

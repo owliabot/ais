@@ -241,23 +241,6 @@ impl RunnerCheckpointLedger {
             .collect()
     }
 
-    pub fn preferred_tx_hash_for_node(&self, node_id: &str) -> Option<String> {
-        self.side_effect_index
-            .values()
-            .filter(|effect| effect.node_id == node_id)
-            .filter_map(|effect| {
-                side_effect_tx_hash(effect).map(|tx_hash| {
-                    (
-                        side_effect_status_rank(effect.status.as_str()),
-                        effect.observed_at.as_str(),
-                        tx_hash,
-                    )
-                })
-            })
-            .max()
-            .map(|(_, _, tx_hash)| tx_hash.to_string())
-    }
-
     pub fn side_effect_lifecycle_summary(&self) -> Value {
         let mut status_counts = BTreeMap::<String, usize>::new();
         let mut execution_counts = BTreeMap::<String, BTreeMap<String, usize>>::new();
@@ -429,15 +412,6 @@ fn side_effect_tx_hash(effect: &CheckpointSideEffectRecord) -> Option<&str> {
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-}
-
-fn side_effect_status_rank(status: &str) -> u8 {
-    match canonical_side_effect_status(status) {
-        SIDE_EFFECT_STATUS_CONFIRMED => 3,
-        SIDE_EFFECT_STATUS_SENT => 2,
-        SIDE_EFFECT_STATUS_REVERTED => 1,
-        _ => 0,
-    }
 }
 
 #[cfg(test)]
@@ -821,48 +795,5 @@ mod tests {
         );
         let hashes = ledger.tx_hashes_for_nodes(&["n1".to_string()]);
         assert_eq!(hashes, vec!["0xa".to_string(), "0xb".to_string()]);
-    }
-
-    #[test]
-    fn ledger_preferred_tx_hash_for_node_prefers_confirmed_record() {
-        let ledger = RunnerCheckpointLedger::from_checkpoint(
-            &[],
-            &[
-                CheckpointSideEffectRecord {
-                    schema: Some("ais-side-effect-record/0.1.0".to_string()),
-                    idempotency_key: "tx:n1:0xa".to_string(),
-                    node_id: "n1".to_string(),
-                    effect_type: "tx".to_string(),
-                    chain: Some("eip155:1".to_string()),
-                    execution_type: Some("evm_call".to_string()),
-                    tx_hash: Some("0xa".to_string()),
-                    nonce: None,
-                    provider_ref: None,
-                    reason_code: None,
-                    details: None,
-                    status: "sent".to_string(),
-                    observed_at: "2026-02-24T00:01:00Z".to_string(),
-                },
-                CheckpointSideEffectRecord {
-                    schema: Some("ais-side-effect-record/0.1.0".to_string()),
-                    idempotency_key: "tx:n1:0xb".to_string(),
-                    node_id: "n1".to_string(),
-                    effect_type: "tx".to_string(),
-                    chain: Some("eip155:1".to_string()),
-                    execution_type: Some("evm_call".to_string()),
-                    tx_hash: Some("0xb".to_string()),
-                    nonce: None,
-                    provider_ref: None,
-                    reason_code: None,
-                    details: None,
-                    status: "confirmed".to_string(),
-                    observed_at: "2026-02-24T00:00:00Z".to_string(),
-                },
-            ],
-        );
-        assert_eq!(
-            ledger.preferred_tx_hash_for_node("n1"),
-            Some("0xb".to_string())
-        );
     }
 }

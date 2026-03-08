@@ -1,24 +1,9 @@
+use super::ref_model::RefPath;
 use serde_json::{Map, Value};
 use std::collections::BTreeSet;
 
 const PROHIBITED_INPUT_PREFIXES: [&str; 6] =
     ["nodes", "facts", "agent", "runtime", "workspace", "input"];
-const NON_INPUT_MISSING_REF_ROOTS: [&str; 14] = [
-    "agent",
-    "calculated",
-    "contracts",
-    "ctx",
-    "facts",
-    "nodes",
-    "params",
-    "policy",
-    "query",
-    "runtime",
-    "session",
-    "state",
-    "todo",
-    "workspace",
-];
 const MISSING_REF_HINT_POINTERS: [&str; 14] = [
     "/missing_ref_fields",
     "/missing_ref_expansions",
@@ -63,48 +48,63 @@ pub(super) fn normalize_input_slot_key(raw_key: &str) -> Option<String> {
     Some(segments.join("."))
 }
 
+const INPUT_SLOT_ALIASES: &[(&str, &str)] = &[
+    ("token_address", "token.address"),
+    ("token_decimals", "token.decimals"),
+    ("recipient_address", "recipient"),
+];
+
 pub(super) fn normalize_grounding_input_key(raw_key: &str) -> String {
     let trimmed = raw_key.trim();
-    if let Some(suffix) = trimmed.strip_prefix("runtime.inputs.") {
-        return suffix.trim().to_string();
+    let stripped = if let Some(suffix) = trimmed.strip_prefix("runtime.inputs.") {
+        suffix.trim().to_string()
+    } else if let Some(suffix) = trimmed.strip_prefix("inputs.") {
+        suffix.trim().to_string()
+    } else {
+        trimmed.to_string()
+    };
+    for &(alias, canonical) in INPUT_SLOT_ALIASES {
+        if stripped == alias {
+            return canonical.to_string();
+        }
     }
-    if let Some(suffix) = trimmed.strip_prefix("inputs.") {
-        return suffix.trim().to_string();
+    stripped
+}
+
+pub(super) fn parse_missing_ref_path(raw: &str) -> Option<RefPath> {
+    let normalized = normalized_missing_ref_source(raw)?;
+    if normalized.starts_with("input.") {
+        return None;
     }
-    trimmed.to_string()
+    RefPath::parse(normalized.as_str())
+}
+
+pub(super) fn canonical_missing_ref_path(raw: &str) -> Option<RefPath> {
+    let parsed = parse_missing_ref_path(raw)?;
+    match parsed {
+        RefPath::Input { slot } => {
+            normalize_input_slot_key(slot.as_str()).map(|slot| RefPath::Input { slot })
+        }
+        RefPath::Fact { key } => Some(RefPath::Fact { key }),
+        RefPath::NodeOutput {
+            step_id,
+            field_path,
+        } => Some(RefPath::NodeOutput {
+            step_id,
+            field_path,
+        }),
+    }
+}
+
+pub(super) fn canonical_missing_ref(raw: &str) -> Option<String> {
+    canonical_missing_ref_path(raw).map(|reference| reference.as_canonical_str())
 }
 
 pub(super) fn normalize_missing_input_ref(raw: &str) -> Option<String> {
-    let trimmed = raw.trim_matches(|ch: char| {
-        ch.is_whitespace() || matches!(ch, '`' | '"' | '\'' | ',' | ';' | '.' | ')' | '(')
-    });
-    if trimmed.is_empty() {
+    let RefPath::Input { slot } = canonical_missing_ref_path(raw)? else {
         return None;
-    }
-    let right_of_equals = trimmed
-        .rsplit_once('=')
-        .map(|(_, value)| value)
-        .unwrap_or(trimmed);
-    let normalized = right_of_equals
-        .strip_prefix("runtime.")
-        .unwrap_or(right_of_equals);
-    let key = normalized.strip_prefix("inputs.").unwrap_or(normalized);
-    let key = key.strip_suffix(".value").unwrap_or(key).trim_matches('.');
-    if key.is_empty() {
-        return None;
-    }
-
-    let root = key
-        .split('.')
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase();
-    if NON_INPUT_MISSING_REF_ROOTS.contains(&root.as_str()) {
-        return None;
-    }
-
-    normalize_input_slot_key(key)
+    };
+    Some(slot)
 }
 
 pub(super) fn expand_missing_input_slot(slot: &str, metadata: Option<&Value>) -> Vec<String> {
@@ -213,6 +213,30 @@ fn normalize_missing_ref_hint(slot: &str, hint: &str) -> Option<String> {
     normalize_input_slot_key(format!("{slot}.{joined}").as_str())
 }
 
+fn normalized_missing_ref_source(raw: &str) -> Option<String> {
+    let trimmed = raw.trim_matches(|ch: char| {
+        ch.is_whitespace() || matches!(ch, '`' | '"' | '\'' | ',' | ';' | '.' | ')' | '(')
+    });
+    if trimmed.is_empty() {
+        return None;
+    }
+    let right_of_equals = trimmed
+        .rsplit_once('=')
+        .map(|(_, value)| value)
+        .unwrap_or(trimmed);
+    let normalized = right_of_equals
+        .strip_prefix("runtime.")
+        .unwrap_or(right_of_equals);
+    let normalized = normalized
+        .strip_suffix(".value")
+        .unwrap_or(normalized)
+        .trim_matches('.');
+    if normalized.is_empty() {
+        return None;
+    }
+    Some(normalized.to_string())
+}
+
 #[cfg(test)]
 #[path = "tests/input_normalize.rs"]
 mod tests;
@@ -248,19 +272,41 @@ pub(super) fn set_runtime_input_value(runtime: &mut Value, key: &str, value: Val
     set_nested_object_value(inputs_obj, segments.as_slice(), value);
 }
 
+/// Sentinel key used when a flat InputStore slot (e.g. `owner = "0x..."`) coexists
+/// with a nested sub-slot (e.g. `owner.balance.erc20 = "999..."`).  The leaf value is
+/// preserved under `_value` so that ref resolution (`inputs.owner`) can still return
+/// the original primitive while the subtree remains accessible.
+pub(super) const LEAF_VALUE_KEY: &str = "_value";
+
 fn set_nested_object_value(root: &mut Map<String, Value>, path: &[&str], value: Value) {
     if path.is_empty() {
         return;
     }
     if path.len() == 1 {
-        root.insert(path[0].to_string(), value);
+        let key = path[0].to_string();
+        if let Some(existing) = root.get_mut(&key) {
+            // Setting a leaf on a key that is already an object (subtree exists) —
+            // store the leaf as `_value` inside the existing subtree.
+            if existing.is_object() {
+                if let Some(obj) = existing.as_object_mut() {
+                    obj.insert(LEAF_VALUE_KEY.to_string(), value);
+                }
+                return;
+            }
+        }
+        root.insert(key, value);
         return;
     }
     let entry = root
         .entry(path[0].to_string())
         .or_insert_with(|| Value::Object(Map::new()));
     if !entry.is_object() {
-        *entry = Value::Object(Map::new());
+        // Existing value is a primitive leaf but we need to create a subtree under it.
+        // Preserve the leaf as `_value`.
+        let previous = std::mem::replace(entry, Value::Object(Map::new()));
+        if let Some(obj) = entry.as_object_mut() {
+            obj.insert(LEAF_VALUE_KEY.to_string(), previous);
+        }
     }
     if let Some(child) = entry.as_object_mut() {
         set_nested_object_value(child, &path[1..], value);

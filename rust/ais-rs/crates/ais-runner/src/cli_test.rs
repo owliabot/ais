@@ -150,6 +150,8 @@ fn cli_parses_agent_command() {
         "--llm-transcript-path",
         "llm.full.md",
         "--llm-transcript-append",
+        "--agent-trace-jsonl",
+        "agent.trace.jsonl",
         "--approvals-mode",
         "yolo",
     ])
@@ -185,6 +187,10 @@ fn cli_parses_agent_command() {
             assert_eq!(
                 command.llm_transcript_path.as_deref(),
                 Some(std::path::Path::new("llm.full.md"))
+            );
+            assert_eq!(
+                command.agent_trace_jsonl.as_deref(),
+                Some(std::path::Path::new("agent.trace.jsonl"))
             );
             assert!(command.llm_transcript_append);
             assert!(command.verbose_llm);
@@ -231,6 +237,22 @@ fn cli_parses_agent_intent_command() {
         }
         _ => panic!("expected agent command"),
     }
+}
+
+#[test]
+fn cli_agent_help_defines_events_and_checkpoint_contracts() {
+    let mut command = Cli::command();
+    let agent = command
+        .find_subcommand_mut("agent")
+        .expect("agent subcommand");
+    let help = agent.render_long_help().to_string();
+    assert!(help.contains("engine-event JSONL sink"));
+    assert!(help.contains("excludes host decision traces"));
+    assert!(help.contains("redacted engine trace JSONL sink"));
+    assert!(help.contains("not a host decision log"));
+    assert!(help.contains("host decision trace JSONL sink"));
+    assert!(help.contains("Resume snapshot checkpoint"));
+    assert!(help.contains("not an audit log"));
 }
 
 #[test]

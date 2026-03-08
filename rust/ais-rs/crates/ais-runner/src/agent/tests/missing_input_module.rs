@@ -63,7 +63,46 @@ fn payload_from_pause_maps_need_user_input_event() {
         payload.pointer("/suggested_paths/0"),
         Some(&json!("inputs.owner"))
     );
-    assert_eq!(payload.pointer("/questions/0/id"), Some(&json!("inputs.owner")));
+    assert_eq!(
+        payload.pointer("/questions/0/id"),
+        Some(&json!("inputs.owner"))
+    );
+}
+
+#[test]
+fn payload_with_error_details_surfaces_decisions_and_recovery_exhaustion() {
+    let payload = payload_with_error_details(
+        Some("need owner"),
+        &[json!({"id":"inputs.owner","question":"owner?"})],
+        &[json!({"reason_code":"missing_required_input"})],
+        Some(&json!({
+            "decisions": [
+                {
+                    "kind":"run_producer",
+                    "target":"inputs.owner",
+                    "query_ref":"wallet@0.0.1/defaultOwner"
+                }
+            ],
+            "recovery_exhaustion": {
+                "unresolved_refs": ["inputs.owner"],
+                "reasons": ["no_query_candidates"],
+                "attempt_trace_id": "missing_resolution:todo:todo_1:user_input:1"
+            }
+        })),
+        1,
+    );
+    assert_eq!(
+        payload.pointer("/decisions/0/query_ref"),
+        Some(&json!("wallet@0.0.1/defaultOwner"))
+    );
+    assert_eq!(
+        payload.pointer("/recovery_exhaustion/unresolved_refs/0"),
+        Some(&json!("inputs.owner"))
+    );
+    assert_eq!(
+        payload.pointer("/error_details/decisions/0/query_ref"),
+        Some(&json!("wallet@0.0.1/defaultOwner"))
+    );
 }
 
 #[test]
@@ -76,7 +115,10 @@ fn payload_from_pause_rewrites_params_token_address_to_inputs_source_ref() {
     event.node_id = Some("seg_1/q_erc20_balance".to_string());
     event.data = serde_json::Map::from_iter([
         ("reason_code".to_string(), json!("missing_required_input")),
-        ("reason".to_string(), json!("missing_inputs_or_runtime_refs")),
+        (
+            "reason".to_string(),
+            json!("missing_inputs_or_runtime_refs"),
+        ),
         (
             "details".to_string(),
             json!({
@@ -159,7 +201,10 @@ fn payload_from_pause_keeps_recovery_exhaustion_evidence() {
     event.node_id = Some("seg_1/q_token".to_string());
     event.data = serde_json::Map::from_iter([
         ("reason_code".to_string(), json!("missing_required_input")),
-        ("reason".to_string(), json!("missing_inputs_or_runtime_refs")),
+        (
+            "reason".to_string(),
+            json!("missing_inputs_or_runtime_refs"),
+        ),
         (
             "details".to_string(),
             json!({
@@ -168,7 +213,7 @@ fn payload_from_pause_keeps_recovery_exhaustion_evidence() {
                 "recovery_exhaustion":{
                     "unresolved_refs":["params.token.address"],
                     "reasons":["host_recovery_exhausted"],
-                    "attempt_trace_id":"missing_ref_recovery:todo:todo_1:user_input:2"
+                    "attempt_trace_id":"missing_resolution:todo:todo_1:user_input:2"
                 }
             }),
         ),
@@ -187,20 +232,87 @@ fn payload_from_pause_keeps_recovery_exhaustion_evidence() {
     );
     assert_eq!(
         payload.pointer("/recovery_exhaustion/attempt_trace_id"),
-        Some(&json!("missing_ref_recovery:todo:todo_1:user_input:2"))
+        Some(&json!("missing_resolution:todo:todo_1:user_input:2"))
+    );
+}
+
+#[test]
+fn normalize_missing_required_input_payload_preserves_recovery_status_and_source() {
+    let payload = normalize_missing_required_input_payload(&json!({
+        "missing_refs": ["inputs.token.decimals"],
+        "recovery_exhaustion": {
+            "status": "need_user_input",
+            "source": "missing_resolution",
+            "unresolved_refs": ["inputs.token.decimals"],
+            "reasons": ["query_exec_failed"],
+            "attempt_trace_id": "missing_resolution:grounding:grounding:need_user_input"
+        }
+    }));
+    assert_eq!(
+        payload.pointer("/recovery_exhaustion/status"),
+        Some(&json!("need_user_input"))
+    );
+    assert_eq!(
+        payload.pointer("/recovery_exhaustion/source"),
+        Some(&json!("missing_resolution"))
+    );
+}
+
+#[test]
+fn normalize_missing_required_input_payload_infers_recovery_status_from_attempt_trace() {
+    let payload = normalize_missing_required_input_payload(&json!({
+        "missing_refs": ["inputs.token.decimals"],
+        "recovery_exhaustion": {
+            "unresolved_refs": ["inputs.token.decimals"],
+            "reasons": ["query_exec_failed"],
+            "attempt_trace_id": "missing_resolution:grounding:grounding:exhausted_unavailable"
+        }
+    }));
+    assert_eq!(
+        payload.pointer("/recovery_exhaustion/status"),
+        Some(&json!("exhausted_unavailable"))
+    );
+    assert_eq!(
+        payload.pointer("/recovery_exhaustion/source"),
+        Some(&json!("missing_resolution"))
+    );
+}
+
+#[test]
+fn normalize_missing_required_input_payload_keeps_non_input_refs() {
+    let payload = normalize_missing_required_input_payload(&json!({
+        "missing_refs": ["facts.quote.price", "nodes.q_balance.outputs.balance"],
+        "suggested_paths": ["facts.quote.price", "nodes.q_balance.outputs.balance"],
+        "questions": [
+            {"id":"facts.quote.price","question":"Need quote"},
+            {"id":"nodes.q_balance.outputs.balance","question":"Need balance"}
+        ]
+    }));
+    assert_eq!(
+        payload.get("missing_refs"),
+        Some(&json!([
+            "facts.quote.price",
+            "nodes.q_balance.outputs.balance"
+        ]))
+    );
+    assert_eq!(
+        payload.pointer("/questions/0/id"),
+        Some(&json!("facts.quote.price"))
+    );
+    assert_eq!(
+        payload.pointer("/questions/1/id"),
+        Some(&json!("nodes.q_balance.outputs.balance"))
     );
 }
 
 #[test]
 fn render_missing_input_recovery_summary_requires_complete_evidence() {
     assert!(super::render_missing_input_recovery_summary(None).is_none());
-    assert!(
-        super::render_missing_input_recovery_summary(Some(&json!({
-            "unresolved_refs":["inputs.token.decimals"],
-            "reasons":[]
-        })))
-        .is_none()
-    );
+    assert!(super::render_missing_input_recovery_summary(Some(&json!({
+        "unresolved_refs":["inputs.token.decimals"],
+        "reasons":[]
+    })))
+    .is_none());
 }
 
 #[test]
@@ -208,10 +320,10 @@ fn render_missing_input_recovery_summary_formats_compact_line() {
     let summary = super::render_missing_input_recovery_summary(Some(&json!({
         "unresolved_refs":["inputs.token.decimals"],
         "reasons":["query_autofill_exhausted"],
-        "attempt_trace_id":"missing_ref_recovery:todo:todo_1:user_input:1"
+        "attempt_trace_id":"missing_resolution:todo:todo_1:user_input:1"
     })))
     .expect("summary line");
-    assert!(summary.contains("attempt_trace_id=missing_ref_recovery:todo:todo_1:user_input:1"));
+    assert!(summary.contains("attempt_trace_id=missing_resolution:todo:todo_1:user_input:1"));
     assert!(summary.contains("unresolved_refs=inputs.token.decimals"));
     assert!(summary.contains("reasons=query_autofill_exhausted"));
 }

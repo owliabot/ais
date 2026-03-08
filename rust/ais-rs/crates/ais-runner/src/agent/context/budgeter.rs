@@ -1,15 +1,15 @@
 use super::super::budget::compact_json_with_options;
+use super::super::token_count;
 use super::budget_policy::{ContextCompactionPolicy, ContextPressureMode, ToolMemoryBudgetPolicy};
 use super::packing::{
     ContextBlockPriority, ContextCompressLevel, ContextPackBlockId, PackAction, PackDecision,
-    PackDiagnostics, PackTrace,
+    PackDiagnostics, PackPhaseHint, PackTrace,
 };
 use ais_engine::EngineRunnerState;
 use serde_json::{json, Value};
 
 pub(in super::super) const DEFAULT_PLANNER_CONTEXT_TOKEN_BUDGET: usize =
     ToolMemoryBudgetPolicy::PLANNER_CONTEXT_DEFAULT_TOKEN_BUDGET;
-const CHARS_PER_TOKEN_ESTIMATE: usize = 4;
 
 #[derive(Debug, Clone, Copy)]
 struct AdaptivePlannerBudget {
@@ -28,10 +28,11 @@ pub(in super::super) fn budget_and_compact_summary(
     base: Value,
     state: &EngineRunnerState,
     token_budget: usize,
+    phase: PackPhaseHint,
 ) -> Value {
     let adaptive_budget = derive_adaptive_planner_budget(state, token_budget);
     let strategy = resolve_context_compaction_strategy(adaptive_budget);
-    let mut budgeted = apply_planner_context_budget(base, adaptive_budget, strategy);
+    let mut budgeted = apply_planner_context_budget(base, adaptive_budget, strategy, phase);
     let overflow = budgeted
         .pointer("/context_budget/pack_overflow_reason")
         .and_then(Value::as_str)
@@ -120,6 +121,7 @@ fn apply_planner_context_budget(
     mut base: Value,
     budget: AdaptivePlannerBudget,
     strategy: ContextCompactionStrategy,
+    phase: PackPhaseHint,
 ) -> Value {
     let mut pack_trace = PackTrace::default();
     let pack = pack_blocks(
@@ -127,6 +129,7 @@ fn apply_planner_context_budget(
         budget.effective_token_limit.max(1) as u64,
         strategy,
         &mut pack_trace,
+        phase,
     );
 
     if let Some(object) = base.as_object_mut() {
@@ -177,7 +180,7 @@ struct PackBlocksResult {
 const MUST_KEEP_CONTEXT_POINTERS: [(&str, &str); 3] = [
     ("todo_state", "/todo_state"),
     ("input_registry.known_refs", "/input_registry/known_refs"),
-    ("previous_error", "/previous_error"),
+    ("input_binding", "/input_binding"),
 ];
 
 fn pack_blocks(
@@ -185,6 +188,7 @@ fn pack_blocks(
     token_budget: u64,
     strategy: ContextCompactionStrategy,
     trace: &mut PackTrace,
+    phase: PackPhaseHint,
 ) -> PackBlocksResult {
     // Build a small set of optional blocks and let a single loop decide compress/drop.
     let mut blocks = ContextPackBlockId::optional_pack_blocks()
@@ -204,7 +208,7 @@ fn pack_blocks(
         block.apply_selected(summary);
     }
 
-    let baseline_tokens = estimate_tokens_json(summary);
+    let baseline_tokens = token_count::count_tokens_json(summary);
     if baseline_tokens <= token_budget {
         trace.push(PackDecision {
             block_id: "state_summary".to_string(),
@@ -221,7 +225,7 @@ fn pack_blocks(
 
     // Single convergence loop.
     for _ in 0..64 {
-        let current_tokens = estimate_tokens_json(summary);
+        let current_tokens = token_count::count_tokens_json(summary);
         if current_tokens <= token_budget {
             return PackBlocksResult {
                 overflow_reason: None,
@@ -233,6 +237,7 @@ fn pack_blocks(
         if let Some((index, next_level, reason)) = select_next_compress(
             &blocks,
             &[ContextBlockPriority::Low, ContextBlockPriority::Stale],
+            phase,
         ) {
             let block = &mut blocks[index];
             let before = block.selected;
@@ -252,6 +257,7 @@ fn pack_blocks(
         if let Some((index, reason)) = select_next_drop(
             &blocks,
             &[ContextBlockPriority::Stale, ContextBlockPriority::Low],
+            phase,
         ) {
             let block = &mut blocks[index];
             let before = block.selected;
@@ -270,7 +276,7 @@ fn pack_blocks(
 
         // 3) If still over, start compressing medium-priority blocks.
         if let Some((index, next_level, reason)) =
-            select_next_compress(&blocks, &[ContextBlockPriority::Medium])
+            select_next_compress(&blocks, &[ContextBlockPriority::Medium], phase)
         {
             let block = &mut blocks[index];
             let before = block.selected;
@@ -287,7 +293,9 @@ fn pack_blocks(
         }
 
         // 4) If still over, drop medium blocks after they've reached skeleton.
-        if let Some((index, reason)) = select_next_drop(&blocks, &[ContextBlockPriority::Medium]) {
+        if let Some((index, reason)) =
+            select_next_drop(&blocks, &[ContextBlockPriority::Medium], phase)
+        {
             let block = &mut blocks[index];
             let before = block.selected;
             block.selected = ContextCompressLevel::Skeleton;
@@ -395,6 +403,15 @@ impl PackBlock {
         self.selected = recipe.preferred_level;
 
         match self.id {
+            ContextPackBlockId::PreviousError => {
+                self.skeleton = minimal_previous_error(&self.full);
+            }
+            ContextPackBlockId::PreviousErrorAutofillHistory => {
+                self.skeleton = Value::Null;
+            }
+            ContextPackBlockId::RecoveryDiagnostics => {
+                self.skeleton = Value::Null;
+            }
             ContextPackBlockId::ToolMemoryProjection => {
                 self.skeleton = Value::Null;
             }
@@ -408,9 +425,6 @@ impl PackBlock {
             }
             ContextPackBlockId::CapabilityViewProtocols => {
                 self.skeleton = Value::Array(vec![]);
-            }
-            ContextPackBlockId::InputSlotsCanonicalRefs => {
-                self.skeleton = Value::Null;
             }
         }
     }
@@ -462,6 +476,23 @@ impl PackBlock {
     }
 }
 
+fn minimal_previous_error(full: &Value) -> Value {
+    let Some(object) = full.as_object() else {
+        return Value::Null;
+    };
+    let mut out = serde_json::Map::<String, Value>::new();
+    for key in ["phase", "reason_code", "sub_reason_code", "message"] {
+        if let Some(value) = object.get(key) {
+            out.insert(key.to_string(), value.clone());
+        }
+    }
+    if out.is_empty() {
+        Value::Null
+    } else {
+        Value::Object(out)
+    }
+}
+
 fn minimal_input_store_facts(full: &Value) -> Value {
     let mut out = serde_json::Map::<String, Value>::new();
     let Some(facts) = full.as_object() else {
@@ -478,10 +509,11 @@ fn minimal_input_store_facts(full: &Value) -> Value {
 fn select_next_compress(
     blocks: &[PackBlock],
     priorities: &[ContextBlockPriority],
+    phase: PackPhaseHint,
 ) -> Option<(usize, ContextCompressLevel, &'static str)> {
     for &priority in priorities {
         for (index, block) in blocks.iter().enumerate() {
-            if block.id.default_priority() != priority {
+            if block.id.priority_for_phase(phase) != priority {
                 continue;
             }
             let Some(next) = block.has_next_compress_level() else {
@@ -502,16 +534,16 @@ fn select_next_compress(
 fn select_next_drop(
     blocks: &[PackBlock],
     priorities: &[ContextBlockPriority],
+    phase: PackPhaseHint,
 ) -> Option<(usize, &'static str)> {
     for &priority in priorities {
         for (index, block) in blocks.iter().enumerate() {
-            if block.id.default_priority() != priority {
+            if block.id.priority_for_phase(phase) != priority {
                 continue;
             }
             if !block.id.is_evictable() || block.dropped {
                 continue;
             }
-            // Only drop once we've reached skeleton (or can't compress further).
             if block.selected != ContextCompressLevel::Skeleton {
                 continue;
             }
@@ -558,13 +590,4 @@ fn set_pointer_value(target: &mut Value, path: &str, value: Value) -> bool {
     };
     *slot = value;
     true
-}
-
-pub(in super::super) fn estimate_tokens_json(value: &Value) -> u64 {
-    let encoded = serde_json::to_string(value).unwrap_or_default();
-    let chars = encoded.chars().count();
-    chars
-        .saturating_add(CHARS_PER_TOKEN_ESTIMATE.saturating_sub(1))
-        .checked_div(CHARS_PER_TOKEN_ESTIMATE)
-        .unwrap_or(0) as u64
 }

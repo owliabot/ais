@@ -81,29 +81,32 @@ fn projected_summary_includes_tool_memory_projection() {
 }
 
 #[test]
-fn projected_summary_emits_prompt_compact_without_pack_trace() {
+fn projected_summary_does_not_embed_prompt_compact_projection() {
     let state = EngineRunnerState::default();
     let mut manager = PlanningContextManager::default();
     let summary = manager.next_summary(&state, 0, false, None, None, None);
+    assert!(
+        summary.pointer("/prompt_compact").is_none(),
+        "state_summary should not embed nested prompt_compact"
+    );
+    let compact = super::super::context::prompt_compact::build_prompt_compact(&summary);
     assert_eq!(
-        summary.pointer("/prompt_compact/schema"),
+        compact.pointer("/schema"),
         Some(&json!("ais-agent-state-summary-prompt-compact/0.0.1"))
     );
     assert!(
-        summary
-            .pointer("/prompt_compact/context_budget/pack_trace")
-            .is_none(),
+        compact.pointer("/context_budget/pack_trace").is_none(),
         "prompt_compact must not include pack_trace"
     );
     assert!(
-        summary
-            .pointer("/prompt_compact/context_budget/pack_diagnostics/packed_blocks_total")
+        compact
+            .pointer("/context_budget/pack_diagnostics/packed_blocks_total")
             .is_some(),
         "prompt_compact must keep compact diagnostics summary"
     );
     assert!(
-        summary
-            .pointer("/prompt_compact/summary_text")
+        compact
+            .pointer("/summary_text")
             .and_then(Value::as_str)
             .is_some(),
         "prompt_compact must include summary_text"
@@ -195,33 +198,41 @@ fn projected_summary_includes_input_slots_and_missing_refs() {
         ..EngineRunnerState::default()
     };
     let summary = build_projected_summary(&state, 0, false, None, Some(&store), None);
-    assert_eq!(
-        summary.pointer("/input_slots/canonical_refs/owner"),
-        Some(&json!("inputs.owner"))
+    // input_registry.known_refs contains the canonical refs formerly in input_slots
+    let known_refs = summary
+        .pointer("/input_registry/known_refs")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let known_ref_strs = known_refs
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(
+        known_ref_strs.contains(&"inputs.owner"),
+        "known_refs should contain inputs.owner: {known_ref_strs:?}"
+    );
+    assert!(
+        known_ref_strs.contains(&"inputs.token.address"),
+        "known_refs should contain inputs.token.address: {known_ref_strs:?}"
+    );
+    // missing entries are now in input_registry.entries with status "missing"
+    let entries = summary
+        .pointer("/input_registry/entries")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let missing_entry = entries
+        .iter()
+        .find(|entry| entry.get("status").and_then(Value::as_str) == Some("missing"));
+    assert!(
+        missing_entry.is_some(),
+        "input_registry.entries should contain a missing entry: {entries:?}"
     );
     assert_eq!(
-        summary.pointer("/input_slots/canonical_refs/token.address"),
-        Some(&json!("inputs.token.address"))
-    );
-    assert_eq!(
-        summary.pointer("/input_slots/missing/0/ref"),
-        Some(&json!("inputs.amount"))
-    );
-    assert_eq!(
-        summary.pointer("/input_registry/known_refs/0"),
-        Some(&json!("inputs.owner"))
-    );
-    assert_eq!(
-        summary.pointer("/input_registry/known_refs/1"),
-        Some(&json!("inputs.token.address"))
-    );
-    assert_eq!(
-        summary.pointer("/input_registry/entries/0/status"),
-        Some(&json!("missing"))
-    );
-    assert_eq!(
-        summary.pointer("/canonical_context/account_refs/0/account_ref"),
-        Some(&json!("0xabc"))
+        missing_entry.unwrap().get("ref").and_then(Value::as_str),
+        Some("inputs.amount"),
+        "missing entry ref should be inputs.amount"
     );
     assert_eq!(
         summary.pointer("/input_binding/bindable_refs_source"),
@@ -395,27 +406,16 @@ fn projected_summary_prefers_input_store_values_for_overlap_with_runtime() {
     };
     let summary = build_projected_summary(&state, 0, false, None, Some(&store), None);
 
-    let resolved = summary
-        .pointer("/input_slots/resolved")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let owner = resolved.iter().find_map(|item| {
-        if item.get("id") == Some(&json!("owner")) {
-            item.get("value")
-        } else {
-            None
-        }
-    });
-    let chain_id = resolved.iter().find_map(|item| {
-        if item.get("id") == Some(&json!("chain_id")) {
-            item.get("value")
-        } else {
-            None
-        }
-    });
-    assert_eq!(owner, Some(&json!("0xinputstore-owner")));
-    assert_eq!(chain_id, Some(&json!("eip155:2")));
+    // input_store.facts should prefer input_store values over runtime
+    // (keys are stored without the "inputs." prefix after normalization)
+    assert_eq!(
+        summary.pointer("/input_store/facts/owner"),
+        Some(&json!("0xinputstore-owner"))
+    );
+    assert_eq!(
+        summary.pointer("/input_store/facts/chain_id"),
+        Some(&json!("eip155:2"))
+    );
 
     let known_refs = summary
         .pointer("/input_registry/known_refs")
@@ -428,13 +428,19 @@ fn projected_summary_prefers_input_store_values_for_overlap_with_runtime() {
         .collect::<Vec<_>>();
     assert!(known_refs.contains(&"inputs.owner"));
     assert!(known_refs.contains(&"inputs.chain_id"));
-    assert_eq!(
-        summary.pointer("/input_slots/missing/0/ref"),
-        Some(&json!("inputs.token.decimals"))
-    );
-    assert_eq!(
-        summary.pointer("/canonical_context/chain_refs/0/chain_ref"),
-        Some(&json!("eip155:2"))
+    // missing entries are now in input_registry.entries with status "missing"
+    let entries = summary
+        .pointer("/input_registry/entries")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let missing_entry = entries.iter().find(|entry| {
+        entry.get("status").and_then(Value::as_str) == Some("missing")
+            && entry.get("ref").and_then(Value::as_str) == Some("inputs.token.decimals")
+    });
+    assert!(
+        missing_entry.is_some(),
+        "input_registry.entries should contain a missing entry for inputs.token.decimals: {entries:?}"
     );
 }
 
@@ -491,24 +497,52 @@ fn projected_summary_includes_chain_account_asset_and_amount_refs() {
         ..EngineRunnerState::default()
     };
     let summary = build_projected_summary(&state, 0, false, None, Some(&store), None);
+    // canonical_context no longer exists; verify inputs via input_registry and input_store
+    let known_refs = summary
+        .pointer("/input_registry/known_refs")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let known_ref_strs = known_refs
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(
+        known_ref_strs.contains(&"inputs.chain_id"),
+        "known_refs should contain inputs.chain_id: {known_ref_strs:?}"
+    );
+    assert!(
+        known_ref_strs.contains(&"inputs.owner"),
+        "known_refs should contain inputs.owner: {known_ref_strs:?}"
+    );
+    assert!(
+        known_ref_strs.contains(&"inputs.recipient"),
+        "known_refs should contain inputs.recipient: {known_ref_strs:?}"
+    );
+    assert!(
+        known_ref_strs.contains(&"inputs.token"),
+        "known_refs should contain inputs.token: {known_ref_strs:?}"
+    );
+    assert!(
+        known_ref_strs.contains(&"inputs.amount"),
+        "known_refs should contain inputs.amount: {known_ref_strs:?}"
+    );
+    // Verify the actual values are in input_store.facts
+    // (keys are stored without the "inputs." prefix after normalization)
     assert_eq!(
-        summary.pointer("/canonical_context/chain_refs/0/chain_ref"),
+        summary.pointer("/input_store/facts/chain_id"),
         Some(&json!("eip155:31338"))
     );
     assert_eq!(
-        summary.pointer("/canonical_context/account_refs/0/account_ref"),
+        summary.pointer("/input_store/facts/owner"),
         Some(&json!("0x1111111111111111111111111111111111111111"))
     );
     assert_eq!(
-        summary.pointer("/canonical_context/account_refs/1/account_ref"),
+        summary.pointer("/input_store/facts/recipient"),
         Some(&json!("0x2222222222222222222222222222222222222222"))
     );
     assert_eq!(
-        summary.pointer("/canonical_context/asset_refs/0/chain_ref"),
-        Some(&json!("eip155:31338"))
-    );
-    assert_eq!(
-        summary.pointer("/canonical_context/amount_refs/0/amount_atomic"),
+        summary.pointer("/input_store/facts/amount/atomic"),
         Some(&json!("1250000000000000000"))
     );
 }
@@ -680,16 +714,15 @@ fn projected_summary_uses_critical_pressure_strategy_when_usage_exceeds_ninety_p
         Some(&json!("critical"))
     );
     assert_eq!(
-        summary.pointer("/input_slots/canonical_refs"),
-        Some(&Value::Null)
-    );
-    assert_eq!(
         summary.pointer("/capability_view/protocols"),
         Some(&json!([]))
     );
-    assert_eq!(
-        summary.pointer("/previous_error/last_failed_finalize/assistant_content"),
-        Some(&Value::Null)
+    assert!(
+        summary
+            .pointer("/previous_error/last_failed_finalize/assistant_content")
+            .is_none()
+            || summary.pointer("/previous_error/last_failed_finalize/assistant_content")
+                == Some(&Value::Null)
     );
     assert!(
         summary
@@ -1030,5 +1063,99 @@ fn pack_blocks_handles_medium_priority_blocks_after_low_and_stale() {
                     .any(|fact_key| format!("inputs.{fact_key}") == *meta_key)
         }),
         "input_store.meta must remain coherent with packed input_store.facts: facts={fact_keys:?} meta={meta_keys:?}"
+    );
+}
+
+#[test]
+fn pack_blocks_can_compress_and_drop_recovery_related_context_under_pressure() {
+    let state = EngineRunnerState {
+        runtime: json!({
+            "agent": {
+                "llm_usage": {
+                    "context_soft_limit_tokens": 100_000,
+                    "context_remaining_tokens": 900
+                },
+                "missing_input_autofill": {
+                    "query_autofill_round": {
+                        "round": 3,
+                        "terminal_reason": "attempt_exhausted"
+                    },
+                    "query_attempts": [
+                        {
+                            "status": "failed",
+                            "query_ref": "erc20@0.0.2/balance-of",
+                            "missing_ref": "inputs.token.address",
+                            "detail": "x".repeat(2000)
+                        },
+                        {
+                            "status": "failed",
+                            "query_ref": "erc20@0.0.2/symbol",
+                            "missing_ref": "inputs.token.address",
+                            "detail": "y".repeat(2000)
+                        }
+                    ]
+                }
+            }
+        }),
+        ..EngineRunnerState::default()
+    };
+    let previous_error = json!({
+        "phase": "ground_intent",
+        "reason_code": "missing_inputs",
+        "sub_reason_code": "autofill_exhausted",
+        "message": "failed to recover missing refs",
+        "autofill_history": {
+            "attempt_keys": [
+                "query_ref:erc20@0.0.2/balance-of",
+                "query_ref:erc20@0.0.2/symbol"
+            ],
+            "trace": "z".repeat(8000)
+        },
+        "last_failed_finalize": {
+            "tool": "plan.ground_intent",
+            "assistant_content": "k".repeat(8000)
+        }
+    });
+
+    let mut manager = PlanningContextManager::with_token_budget(320);
+    let summary = manager.next_summary(&state, 0, false, Some(&previous_error), None, None);
+
+    let trace = summary
+        .pointer("/context_budget/pack_trace")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    assert!(
+        trace.iter().any(|decision| {
+            decision.pointer("/block_id").and_then(Value::as_str) == Some("recovery_diagnostics")
+        }),
+        "expected recovery_diagnostics to participate in pack loop; trace={trace:?}"
+    );
+    assert!(
+        trace.iter().any(|decision| {
+            decision.pointer("/block_id").and_then(Value::as_str) == Some("previous_error")
+        }),
+        "expected previous_error to participate in pack loop; trace={trace:?}"
+    );
+    assert!(
+        trace.iter().any(|decision| {
+            decision.pointer("/block_id").and_then(Value::as_str)
+                == Some("previous_error.autofill_history")
+        }),
+        "expected previous_error.autofill_history to participate in pack loop; trace={trace:?}"
+    );
+
+    assert!(
+        summary.pointer("/recovery_diagnostics").is_none()
+            || summary.pointer("/recovery_diagnostics") == Some(&Value::Null),
+        "recovery_diagnostics should be compressible/evictable under pressure"
+    );
+    assert!(
+        summary
+            .pointer("/previous_error/autofill_history")
+            .is_none()
+            || summary.pointer("/previous_error/autofill_history") == Some(&Value::Null),
+        "previous_error.autofill_history should be compressible/evictable under pressure"
     );
 }

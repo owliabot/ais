@@ -54,6 +54,8 @@ pub enum RunnerError {
     EventsIo(String),
     #[error("write trace JSONL failed: {0}")]
     TraceIo(String),
+    #[error("write agent trace JSONL failed: {0}")]
+    AgentTraceIo(String),
     #[error("llm provider failed: {0}")]
     Llm(String),
     #[error("agent profile invalid: {0}")]

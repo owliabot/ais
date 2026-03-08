@@ -10,18 +10,19 @@ pub(crate) fn plan_round<P: LlmProvider>(
     context: &mut SegmentedAgentContext,
 ) -> Result<SegmentDraft, RunnerError> {
     loop {
-        if context.planning_rounds >= context.planner_round_limit {
+        if context.planning_rounds() >= context.planner_round_limit() {
             return Err(RunnerError::Llm(format!(
                 "segmented planner round limit reached ({})",
-                context.planner_round_limit
+                context.planner_round_limit()
             )));
         }
-        context.planning_rounds = context.planning_rounds.saturating_add(1);
+        context.increment_planning_rounds();
 
         let request = SegmentPlanningRequest {
             intent: context.intent.clone(),
             session: context.session.clone(),
-            state_summary: context.state_summary.clone(),
+            state_summary: context.packed_summary().clone(),
+            typed_summary: context.typed_summary().cloned(),
             previous_error: context.previous_error.clone(),
             last_segment: context.last_segment.clone(),
         };
@@ -33,14 +34,15 @@ pub(crate) fn plan_round<P: LlmProvider>(
         if let Some(previous_error) = context.previous_error.as_ref() {
             eprintln!(
                 "[agent] plan_round={} mode={} previous_error={}",
-                context.planning_rounds,
+                context.planning_rounds(),
                 expected_finalize_tool,
                 previous_error_compact(previous_error)
             );
         } else {
             eprintln!(
                 "[agent] plan_round={} mode={} previous_error=-",
-                context.planning_rounds, expected_finalize_tool
+                context.planning_rounds(),
+                expected_finalize_tool
             );
         }
         let draft_result = if context.previous_error.is_some() {
@@ -51,28 +53,29 @@ pub(crate) fn plan_round<P: LlmProvider>(
         super::super::orchestrator::refresh_tool_memory_projection(context, planner, state);
         match draft_result {
             Ok(draft) => {
-                context.planner_output_retries = 0;
+                context.reset_planner_output_retries();
                 return Ok(draft);
             }
             Err(error) => {
                 if super::super::should_retry_segmented_planner_output(&error)
-                    && context.planner_output_retries < MAX_PLANNER_OUTPUT_REPAIR_RETRIES
+                    && context.planner_output_retries() < MAX_PLANNER_OUTPUT_REPAIR_RETRIES
                 {
-                    context.planner_output_retries =
-                        context.planner_output_retries.saturating_add(1);
+                    context.increment_planner_output_retries();
                     eprintln!(
                         "[agent] planner_output_retry retry={}/{} reason={}",
-                        context.planner_output_retries, MAX_PLANNER_OUTPUT_REPAIR_RETRIES, error
+                        context.planner_output_retries(),
+                        MAX_PLANNER_OUTPUT_REPAIR_RETRIES,
+                        error
                     );
                     let last_failed_finalize = planner.take_last_failed_finalize();
                     let mut payload = super::super::segmented_planner_output_error_payload(
                         &error,
                         expected_finalize_tool,
-                        context.planning_rounds as u8,
-                        context.planner_output_retries as u8,
+                        context.planning_rounds() as u8,
+                        context.planner_output_retries() as u8,
                         last_failed_finalize,
                     );
-                    super::super::missing_ref_recovery::preserve_autofill_context(
+                    super::super::missing_resolution::preserve_autofill_context(
                         context.previous_error.as_ref(),
                         &mut payload,
                     );

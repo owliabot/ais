@@ -57,8 +57,24 @@ impl ResolverContext {
                     // Compatibility bridge for asset-like refs: when callers request
                     // `<something>.address` but `<something>` is already a raw address string,
                     // treat it as resolved instead of hard failing on missing nested object.
-                    if key == "address" && current.as_str().is_some() {
-                        continue;
+                    if key == "address" {
+                        if current.as_str().is_some() {
+                            continue;
+                        }
+                        // Also handle `_value` sentinel: if current is an object
+                        // whose `_value` is a string, the address bridge applies.
+                        if current
+                            .as_object()
+                            .and_then(|obj| obj.get("_value"))
+                            .and_then(Value::as_str)
+                            .is_some()
+                        {
+                            current = current
+                                .as_object()
+                                .and_then(|obj| obj.get("_value"))
+                                .unwrap();
+                            continue;
+                        }
                     }
                     return Err(ResolverError::NotFound(path.to_string()));
                 }
@@ -69,6 +85,13 @@ impl ResolverContext {
                         .ok_or_else(|| ResolverError::NotFound(path.to_string()))?;
                 }
             }
+        }
+        // When the resolved value is an object that carries a `_value` sentinel,
+        // the caller asked for the leaf value (e.g. `inputs.owner`) which coexists
+        // with nested sub-keys (e.g. `inputs.owner.balance.erc20`).  Return the
+        // original primitive stored under `_value`.
+        if let Some(leaf) = current.as_object().and_then(|obj| obj.get("_value")) {
+            return Ok(leaf.clone());
         }
         Ok(current.clone())
     }

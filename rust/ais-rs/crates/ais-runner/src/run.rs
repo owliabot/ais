@@ -1,3 +1,7 @@
+use crate::audit_contract::{
+    augment_jsonl_line, next_attempt_from_extensions, write_attempt_into_extensions,
+    AuditStreamAttempt,
+};
 use crate::checkpoint_ledger::RunnerCheckpointLedger;
 use crate::cli::{OutputFormat, PlanCommand, PlanDiffCommand, ReplayCommand, WorkflowCommand};
 use crate::config::{build_router_executor_for_plan, load_runner_config};
@@ -381,6 +385,7 @@ fn execute_plan_with_engine(
     let mut active_plan_hash = hash_plan(&active_plan)?;
     let mut resumed_from_checkpoint = false;
     let mut checkpoint_ledger = RunnerCheckpointLedger::default();
+    let mut audit_attempt = AuditStreamAttempt::fresh();
     let mut state = if let Some(checkpoint_path) = &command.checkpoint {
         let checkpoint_usable = fs::metadata(checkpoint_path)
             .map(|meta| meta.is_file() && meta.len() > 0)
@@ -395,6 +400,7 @@ fn execute_plan_with_engine(
             match load_checkpoint_from_path(checkpoint_path) {
                 Ok(checkpoint) => {
                     resumed_from_checkpoint = true;
+                    audit_attempt = next_attempt_from_extensions(Some(&checkpoint.extensions));
                     checkpoint_ledger = RunnerCheckpointLedger::from_checkpoint(
                         &checkpoint.approvals_ledger,
                         &checkpoint.side_effects,
@@ -478,6 +484,7 @@ fn execute_plan_with_engine(
                 &active_plan,
                 &state,
                 &checkpoint_ledger,
+                &audit_attempt,
             )?;
             let rendered = render_execution_output(
                 command,
@@ -486,6 +493,7 @@ fn execute_plan_with_engine(
                 resumed_from_checkpoint,
                 0,
                 &all_events,
+                &audit_attempt,
             )?;
             return Ok(PlanExecutionResult {
                 rendered,
@@ -528,13 +536,13 @@ fn execute_plan_with_engine(
         }
         let mut iteration_events = processed.events;
         iteration_events.extend(run_result.events);
+        write_event_sinks(command, &iteration_events, &mut audit_attempt)?;
         checkpoint_ledger.absorb_events(&iteration_events);
         checkpoint_ledger.mark_approved_nodes(
             &state.approved_node_ids,
             wall_clock_timestamp_rfc3339().as_str(),
         );
         record_side_effect_lifecycle(&mut state.runtime, &checkpoint_ledger);
-        write_event_sinks(command, &iteration_events)?;
         all_events.extend(iteration_events);
         maybe_save_checkpoint(
             command,
@@ -543,6 +551,7 @@ fn execute_plan_with_engine(
             &active_plan,
             &state,
             &checkpoint_ledger,
+            &audit_attempt,
         )?;
         if processed.pause_after_processing {
             break EngineRunStatus::Paused;
@@ -566,6 +575,7 @@ fn execute_plan_with_engine(
         resumed_from_checkpoint,
         iteration,
         &all_events,
+        &audit_attempt,
     )?;
     Ok(PlanExecutionResult {
         rendered,
@@ -894,12 +904,15 @@ fn render_execution_output(
     resumed_from_checkpoint: bool,
     iteration: usize,
     events: &[ais_engine::EngineEventRecord],
+    audit_attempt: &AuditStreamAttempt,
 ) -> Result<String, RunnerError> {
     if command.events_jsonl.as_deref() == Some("-") {
         let mut out = String::new();
         for event in events {
+            let line = encode_event_jsonl_line(event)
+                .map_err(|error| RunnerError::EventsIo(error.to_string()))?;
             out.push_str(
-                encode_event_jsonl_line(event)
+                augment_jsonl_line(line.as_str(), audit_attempt)
                     .map_err(|error| RunnerError::EventsIo(error.to_string()))?
                     .as_str(),
             );
@@ -947,25 +960,37 @@ fn render_execution_output(
 fn write_event_sinks(
     command: &PlanCommand,
     events: &[ais_engine::EngineEventRecord],
+    audit_attempt: &mut AuditStreamAttempt,
 ) -> Result<(), RunnerError> {
     if command.verbose {
         write_verbose_events(events);
     }
 
+    let mut persisted_engine_sink = false;
     if let Some(target) = &command.events_jsonl {
         if target == "-" {
-            return Ok(());
-        }
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(target)
-            .map_err(|error| RunnerError::EventsIo(error.to_string()))?;
-        for event in events {
-            let line = encode_event_jsonl_line(event)
+            for event in events {
+                let line = encode_event_jsonl_line(event)
+                    .map_err(|error| RunnerError::EventsIo(error.to_string()))?;
+                let line = augment_jsonl_line(line.as_str(), audit_attempt)
+                    .map_err(|error| RunnerError::EventsIo(error.to_string()))?;
+                print!("{line}");
+            }
+        } else {
+            let mut file = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(target)
                 .map_err(|error| RunnerError::EventsIo(error.to_string()))?;
-            file.write_all(line.as_bytes())
-                .map_err(|error| RunnerError::EventsIo(error.to_string()))?;
+            for event in events {
+                let line = encode_event_jsonl_line(event)
+                    .map_err(|error| RunnerError::EventsIo(error.to_string()))?;
+                let line = augment_jsonl_line(line.as_str(), audit_attempt)
+                    .map_err(|error| RunnerError::EventsIo(error.to_string()))?;
+                file.write_all(line.as_bytes())
+                    .map_err(|error| RunnerError::EventsIo(error.to_string()))?;
+            }
+            persisted_engine_sink = true;
         }
     }
 
@@ -979,10 +1004,15 @@ fn write_event_sinks(
         for event in events {
             let line = encode_trace_jsonl_line(event, &redact)
                 .map_err(|error| RunnerError::TraceIo(error.to_string()))?;
+            let line = augment_jsonl_line(line.as_str(), audit_attempt)
+                .map_err(|error| RunnerError::TraceIo(error.to_string()))?;
             file.write_all(line.as_bytes())
                 .map_err(|error| RunnerError::TraceIo(error.to_string()))?;
         }
+        persisted_engine_sink = true;
     }
+
+    audit_attempt.record_persisted_events_if(persisted_engine_sink, events);
 
     Ok(())
 }
@@ -1128,6 +1158,7 @@ fn maybe_save_checkpoint(
     plan: &ais_sdk::PlanDocument,
     state: &EngineRunnerState,
     ledger: &RunnerCheckpointLedger,
+    audit_attempt: &AuditStreamAttempt,
 ) -> Result<(), RunnerError> {
     let Some(path) = &command.checkpoint else {
         return Ok(());
@@ -1149,6 +1180,9 @@ fn maybe_save_checkpoint(
     );
     checkpoint.approvals_ledger = ledger.approvals();
     checkpoint.side_effects = ledger.side_effects();
+    let mut extensions = checkpoint.extensions;
+    write_attempt_into_extensions(&mut extensions, audit_attempt);
+    checkpoint.extensions = extensions;
     save_checkpoint_to_path(path, &checkpoint).map_err(|error| RunnerError::CheckpointSave {
         path: path.display().to_string(),
         reason: error.to_string(),

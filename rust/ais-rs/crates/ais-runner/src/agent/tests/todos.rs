@@ -145,7 +145,7 @@ fn todo_board_records_receipt_by_todo_id() {
 }
 
 #[test]
-fn intent_acceptance_complete_reads_input_and_intent_context_from_state_summary() {
+fn intent_acceptance_complete_requires_owned_refs_not_intent_context_projection() {
     let mut board = TodoBoard::bootstrap("transfer 10 usdc");
     board.replace_from_specs(
         "transfer 10 usdc",
@@ -169,7 +169,7 @@ fn intent_acceptance_complete_reads_input_and_intent_context_from_state_summary(
             }
         }
     });
-    assert!(board.intent_acceptance_complete(Some(&state_summary)));
+    assert!(!board.intent_acceptance_complete_from_state_summary(Some(&state_summary)));
 }
 
 #[test]

@@ -1,4 +1,5 @@
 mod agent;
+mod audit_contract;
 mod checkpoint_ledger;
 mod cli;
 mod config;

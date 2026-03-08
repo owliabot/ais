@@ -55,7 +55,7 @@ fn tool_memory_projection_contains_recent_high_value_entries() {
     let mut memory = PlanningMemory::default();
     memory.ensure_scope("s", "snap-1");
     memory.insert(
-        "list_candidates:k0".to_string(),
+        "catalog.discover:k0".to_string(),
         json!({
             "protocols":[
                 {
@@ -69,7 +69,7 @@ fn tool_memory_projection_contains_recent_high_value_entries() {
         .to_string(),
     );
     memory.insert(
-            "catalog.search:k1".to_string(),
+            "catalog.discover:k1".to_string(),
             json!({
                 "query":"transfer",
                 "returned_matches":2,
@@ -146,7 +146,7 @@ fn tool_memory_projection_budget_is_clamped() {
     memory.ensure_scope("s", "snap-2");
     for index in 0..8 {
         memory.insert(
-            format!("catalog.search:k{index}"),
+            format!("catalog.discover:k{index}"),
             json!({
                 "query": format!("q{index}"),
                 "returned_matches": 1,
@@ -178,7 +178,7 @@ fn tool_memory_projection_dedupes_catalog_and_detail_refs() {
     let mut memory = PlanningMemory::default();
     memory.ensure_scope("s", "snap-3");
     memory.insert(
-        "catalog.search:k1".to_string(),
+        "catalog.discover:k1".to_string(),
         json!({
             "query":"transfer",
             "returned_matches":2,
@@ -190,7 +190,7 @@ fn tool_memory_projection_dedupes_catalog_and_detail_refs() {
         .to_string(),
     );
     memory.insert(
-        "catalog.search:k2".to_string(),
+        "catalog.discover:k2".to_string(),
         json!({
             "query":"transfer",
             "returned_matches":2,

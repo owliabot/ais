@@ -150,7 +150,10 @@ fn initial_input_store_seeds_runtime_inputs_under_inputs_namespace() {
             "owner": "0x1111111111111111111111111111111111111111",
             "token": {
                 "address": "0x2222222222222222222222222222222222222222",
-                "decimals": 6
+                "decimals": "6"
+            },
+            "native": {
+                "decimals": "18"
             },
             "amount": "1.5"
         }
@@ -186,6 +189,12 @@ fn initial_input_store_seeds_runtime_inputs_under_inputs_namespace() {
             .get("inputs.token.decimals")
             .and_then(|entry| entry.value.as_i64()),
         Some(6)
+    );
+    assert_eq!(
+        input_store
+            .get("inputs.native.decimals")
+            .and_then(|entry| entry.value.as_i64()),
+        Some(18)
     );
     assert_eq!(
         input_store
@@ -236,6 +245,14 @@ fn state_summary_includes_input_store_payload() {
     assert_eq!(
         summary.pointer("/input_store/meta/owner/stability"),
         Some(&json!("unknown"))
+    );
+    assert_eq!(
+        summary.pointer("/reusable_outputs/schema"),
+        Some(&json!("ais-agent-reusable-output-inventory/0.0.1"))
+    );
+    assert_eq!(
+        summary.pointer("/reusable_outputs/summary/reusable_refs"),
+        Some(&json!(1))
     );
 }
 
@@ -322,18 +339,26 @@ fn state_summary_projects_input_registry_missing_slots_from_todo_and_questions()
         summary.pointer("/todo_state/current_todo/id"),
         Some(&json!("todo_1"))
     );
-    assert_eq!(
-        summary.pointer("/input_slots/canonical_refs/owner"),
-        Some(&json!("inputs.owner"))
-    );
-
-    let missing_items = summary
-        .pointer("/input_slots/missing")
+    // input_slots removed; check input_registry.known_refs for resolved owner
+    let known_refs = summary
+        .pointer("/input_registry/known_refs")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let missing_refs = missing_items
+    assert!(
+        known_refs.contains(&json!("inputs.owner")),
+        "known_refs={known_refs:?}"
+    );
+
+    // check missing entries via input_registry.entries instead of input_slots.missing
+    let registry_entries_for_missing = summary
+        .pointer("/input_registry/entries")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let missing_refs = registry_entries_for_missing
         .iter()
+        .filter(|entry| entry.get("status") == Some(&json!("missing")))
         .filter_map(|item| item.get("ref"))
         .filter_map(Value::as_str)
         .collect::<Vec<_>>();
@@ -471,9 +496,15 @@ fn context_envelope_keeps_projected_summary_contract_compatible() {
         envelope.pointer("/node_output_refs/schema"),
         Some(&json!("ais-agent-node-output-refs/0.0.1"))
     );
-    assert_eq!(
-        envelope.pointer("/input_slots/canonical_refs/owner"),
-        Some(&json!("inputs.owner"))
+    // input_slots removed; check input_registry.known_refs for resolved owner
+    let envelope_known_refs = envelope
+        .pointer("/input_registry/known_refs")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        envelope_known_refs.contains(&json!("inputs.owner")),
+        "envelope known_refs={envelope_known_refs:?}"
     );
     let meta_base = if envelope.pointer("/input_store/meta/inputs.owner").is_some() {
         "/input_store/meta/inputs.owner"
@@ -551,9 +582,15 @@ fn context_envelope_hash_and_unchanged_flags_track_payload_mutations() {
         third.pointer("/context_envelope/hash"),
         Some(&json!(third_hash))
     );
-    assert_eq!(
-        third.pointer("/input_slots/canonical_refs/amount"),
-        Some(&json!("inputs.amount"))
+    // input_slots removed; check input_registry.known_refs for resolved amount
+    let third_known_refs = third
+        .pointer("/input_registry/known_refs")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        third_known_refs.contains(&json!("inputs.amount")),
+        "third known_refs={third_known_refs:?}"
     );
 }
 
@@ -631,19 +668,21 @@ fn typed_context_core_path_switch_keeps_projection_and_envelope_contract_parity(
         ),
         Some(&tool_memory_projection),
     );
-    let core_payload = super::context::projector::build_projected_summary_base(
+    let core_payload = super::context::projector::build_projected_summary_base_with_runtime_facts(
         &state,
         2,
         false,
         Some(&previous_error),
         Some(&input_store,
         ),
+        None,
         Some(&tool_memory_projection),
     );
     let via_typed_core = super::context::budgeter::budget_and_compact_summary(
-        core_payload,
+        core_payload.to_value(),
         &state,
         super::context_view::DEFAULT_PLANNER_CONTEXT_TOKEN_BUDGET,
+        super::context::packing::PackPhaseHint::Default,
     );
     assert_eq!(
         via_compat_facade.pointer("/input_registry/schema"),
@@ -661,9 +700,15 @@ fn typed_context_core_path_switch_keeps_projection_and_envelope_contract_parity(
         via_typed_core.pointer("/node_output_refs/schema"),
         Some(&json!("ais-agent-node-output-refs/0.0.1"))
     );
-    assert_eq!(
-        via_typed_core.pointer("/input_slots/canonical_refs/owner"),
-        Some(&json!("inputs.owner"))
+    // input_slots removed; check input_registry.known_refs for resolved owner
+    let typed_core_known_refs = via_typed_core
+        .pointer("/input_registry/known_refs")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        typed_core_known_refs.contains(&json!("inputs.owner")),
+        "typed_core known_refs={typed_core_known_refs:?}"
     );
     let typed_owner_meta_base = if via_typed_core.pointer("/input_store/meta/inputs.owner").is_some()
     {
@@ -1084,6 +1129,22 @@ fn maybe_collect_missing_input_answers_auto_query_works_without_tty_prompt() {
 }
 
 #[test]
+fn fallback_missing_input_questions_are_generated_from_recovery_refs() {
+    let questions = super::fallback_missing_input_questions(Some(&json!({
+        "unresolved_refs": ["inputs.token.decimals", "facts.quote.price"],
+        "attempt_trace_id": "missing_resolution:grounding:grounding:need_user_input"
+    })));
+    assert_eq!(questions.len(), 2);
+    assert_eq!(questions[0].id, "facts.quote.price");
+    assert_eq!(questions[0].question, "Provide a value for facts.quote.price.");
+    assert_eq!(questions[1].id, "inputs.token.decimals");
+    assert_eq!(
+        questions[1].question,
+        "Provide a value for inputs.token.decimals."
+    );
+}
+
+#[test]
 fn apply_missing_input_answers_resolves_token_decimals_missing_slot_in_summary() {
     let mut state = EngineRunnerState {
         runtime: json!({
@@ -1106,13 +1167,17 @@ fn apply_missing_input_answers_resolves_token_decimals_missing_slot_in_summary()
         Some(&store,
         ),
     );
+    // input_slots removed; check input_registry.entries for missing token.decimals
     assert!(summary_before
-        .pointer("/input_slots/missing")
+        .pointer("/input_registry/entries")
         .and_then(Value::as_array)
-        .is_some_and(|items| {
-            items
+        .is_some_and(|entries| {
+            entries
                 .iter()
-                .any(|item| item.get("ref") == Some(&json!("inputs.token.decimals")))
+                .any(|entry| {
+                    entry.get("ref") == Some(&json!("inputs.token.decimals"))
+                        && entry.get("status") == Some(&json!("missing"))
+                })
         }));
 
     let answers = Map::from_iter([("token.decimals".to_string(), json!(6))]);
@@ -1126,17 +1191,27 @@ fn apply_missing_input_answers_resolves_token_decimals_missing_slot_in_summary()
         Some(&store,
         ),
     );
-    assert_eq!(
-        summary_after.pointer("/input_slots/canonical_refs/token.decimals"),
-        Some(&json!("inputs.token.decimals"))
-    );
-    assert!(!summary_after
-        .pointer("/input_slots/missing")
+    // input_slots removed; check input_registry.known_refs for resolved token.decimals
+    let after_known_refs = summary_after
+        .pointer("/input_registry/known_refs")
         .and_then(Value::as_array)
-        .is_some_and(|items| {
-            items
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        after_known_refs.contains(&json!("inputs.token.decimals")),
+        "after known_refs={after_known_refs:?}"
+    );
+    // verify token.decimals no longer appears as missing in input_registry.entries
+    assert!(!summary_after
+        .pointer("/input_registry/entries")
+        .and_then(Value::as_array)
+        .is_some_and(|entries| {
+            entries
                 .iter()
-                .any(|item| item.get("ref") == Some(&json!("inputs.token.decimals")))
+                .any(|entry| {
+                    entry.get("ref") == Some(&json!("inputs.token.decimals"))
+                        && entry.get("status") == Some(&json!("missing"))
+                })
         }));
     assert!(summary_after
         .pointer("/input_registry/entries")
@@ -1172,13 +1247,17 @@ fn apply_missing_input_answers_resolves_non_token_object_missing_slot_in_summary
         Some(&store,
         ),
     );
+    // input_slots removed; check input_registry.entries for missing recipient.profile
     assert!(summary_before
-        .pointer("/input_slots/missing")
+        .pointer("/input_registry/entries")
         .and_then(Value::as_array)
-        .is_some_and(|items| {
-            items
+        .is_some_and(|entries| {
+            entries
                 .iter()
-                .any(|item| item.get("ref") == Some(&json!("inputs.recipient.profile")))
+                .any(|entry| {
+                    entry.get("ref") == Some(&json!("inputs.recipient.profile"))
+                        && entry.get("status") == Some(&json!("missing"))
+                })
         }));
 
     let answers = Map::from_iter([(
@@ -1232,17 +1311,27 @@ fn apply_missing_input_answers_resolves_non_token_object_missing_slot_in_summary
         Some(&store,
         ),
     );
-    assert_eq!(
-        summary_after.pointer("/input_slots/canonical_refs/recipient.profile"),
-        Some(&json!("inputs.recipient.profile"))
-    );
-    assert!(!summary_after
-        .pointer("/input_slots/missing")
+    // input_slots removed; check input_registry.known_refs for resolved recipient.profile
+    let after_known_refs = summary_after
+        .pointer("/input_registry/known_refs")
         .and_then(Value::as_array)
-        .is_some_and(|items| {
-            items
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        after_known_refs.contains(&json!("inputs.recipient.profile")),
+        "after known_refs={after_known_refs:?}"
+    );
+    // verify recipient.profile no longer appears as missing in input_registry.entries
+    assert!(!summary_after
+        .pointer("/input_registry/entries")
+        .and_then(Value::as_array)
+        .is_some_and(|entries| {
+            entries
                 .iter()
-                .any(|item| item.get("ref") == Some(&json!("inputs.recipient.profile")))
+                .any(|entry| {
+                    entry.get("ref") == Some(&json!("inputs.recipient.profile"))
+                        && entry.get("status") == Some(&json!("missing"))
+                })
         }));
     assert!(summary_after
         .pointer("/input_registry/entries")
@@ -1288,32 +1377,19 @@ fn query_stores_backfill_multiple_fields_to_inputs_with_query_meta() {
         ..EngineRunnerState::default()
     };
     let mut input_store = super::InputStore::default();
+    let mut runtime_facts_store = super::runtime_facts_store::RuntimeFactsStore::default();
 
-    super::phase_machine::segment_exec::apply_segment_stores_from_runtime(
+    super::phase_machine::segment_exec::apply_segment_stores_from_runtime_with_runtime_facts(
         &segment,
         &state,
+        &mut runtime_facts_store,
         &mut input_store,
         false,
     );
 
-    assert_eq!(
-        input_store
-            .get("inputs.token.decimals")
-            .and_then(|entry| entry.value.as_i64()),
-        Some(6)
-    );
-    assert_eq!(
-        input_store
-            .get("inputs.token.symbol")
-            .and_then(|entry| entry.value.as_str()),
-        Some("USDC")
-    );
-    assert_eq!(
-        input_store
-            .get("inputs.token.address")
-            .and_then(|entry| entry.value.as_str()),
-        Some("0x2222222222222222222222222222222222222222")
-    );
+    assert!(runtime_facts_store.get("inputs.token.decimals").is_none());
+    assert!(runtime_facts_store.get("inputs.token.symbol").is_none());
+    assert!(runtime_facts_store.get("inputs.token.address").is_none());
     assert_eq!(
         input_store
             .get("token.decimals")
@@ -1322,43 +1398,37 @@ fn query_stores_backfill_multiple_fields_to_inputs_with_query_meta() {
     );
     assert_eq!(
         input_store
-            .get("inputs.token.decimals")
+            .get("token.symbol")
+            .and_then(|entry| entry.value.as_str()),
+        Some("USDC")
+    );
+    assert_eq!(
+        input_store
+            .get("token.address")
+            .and_then(|entry| entry.value.as_str()),
+        Some("0x2222222222222222222222222222222222222222")
+    );
+    assert_eq!(
+        input_store
+            .get("token.decimals")
             .map(|entry| entry.meta.source.as_str()),
         Some("query")
     );
     assert_eq!(
         input_store
-            .get("inputs.token.decimals")
+            .get("token.decimals")
             .and_then(|entry| entry.meta.provenance.as_deref()),
         Some("segment_store.seg_query/q_token.decimals")
-    );
-
-    let mut runtime = json!({});
-    let projection = input_store.to_runtime_projection();
-    runtime
-        .as_object_mut()
-        .expect("runtime object")
-        .insert(
-            "inputs".to_string(),
-            projection
-                .pointer("/inputs")
-                .cloned()
-                .unwrap_or_else(|| json!({})),
-        );
-    assert_eq!(runtime.pointer("/inputs/token/decimals"), Some(&json!(6)));
-    assert_eq!(runtime.pointer("/inputs/token/symbol"), Some(&json!("USDC")));
-    assert_eq!(
-        runtime.pointer("/inputs/token/address"),
-        Some(&json!("0x2222222222222222222222222222222222222222"))
     );
 }
 
 #[test]
-fn checkpoint_roundtrip_restores_query_backfilled_inputs() {
+fn checkpoint_roundtrip_restores_query_backfilled_inputs_from_input_store() {
     let mut input_store = super::InputStore::default();
+    let runtime_facts_store = super::runtime_facts_store::RuntimeFactsStore::default();
     let _ = super::upsert_store_value_with_source(
         &mut input_store,
-        "token.decimals",
+        "inputs.token.decimals",
         json!(6),
         super::input_store::InputValueLayer::Observed,
         "query",
@@ -1367,7 +1437,7 @@ fn checkpoint_roundtrip_restores_query_backfilled_inputs() {
     );
     let _ = super::upsert_store_value_with_source(
         &mut input_store,
-        "token.symbol",
+        "inputs.token.symbol",
         json!("USDC"),
         super::input_store::InputValueLayer::Observed,
         "query",
@@ -1375,11 +1445,11 @@ fn checkpoint_roundtrip_restores_query_backfilled_inputs() {
         "segment_store.seg_query/q_token.symbol",
     );
 
-    let extensions = super::checkpoint_ext::AgentCheckpointExtensions::decode(None).encode_updated(
+    let extensions = super::checkpoint_ext::AgentCheckpointExtensions::decode(None)
+        .encode_updated_with_runtime_facts(
         None,
         &input_store,
-        None,
-        None,
+        &runtime_facts_store,
     );
     let mut restored_runtime = json!({});
     let restored = super::decode_agent_checkpoint_extensions(
@@ -1413,26 +1483,52 @@ fn checkpoint_roundtrip_restores_query_backfilled_inputs() {
         Some("segment_store.seg_query/q_token.decimals")
     );
 
-    let mut projected_runtime = json!({});
-    let projection = restored_store.to_runtime_projection();
-    projected_runtime
-        .as_object_mut()
-        .expect("runtime object")
-        .insert(
-            "inputs".to_string(),
-            projection
-                .pointer("/inputs")
-                .cloned()
-                .unwrap_or_else(|| json!({})),
-        );
+}
+
+#[test]
+fn query_upsert_normalizes_asset_object_into_leaf_semantics_and_projected_token_view() {
+    let mut input_store = super::InputStore::default();
+    let result = super::upsert_store_value_with_source(
+        &mut input_store,
+        "inputs.token",
+        json!({
+            "address": "0x2222222222222222222222222222222222222222",
+            "decimals": "6",
+            "symbol": "USDC"
+        }),
+        super::input_store::InputValueLayer::Observed,
+        "query",
+        90,
+        "segment_store.seg_query/q_token.object",
+    );
+
+    assert!(matches!(
+        result,
+        super::input_store::InputStoreUpsertResult::Inserted
+            | super::input_store::InputStoreUpsertResult::Replaced
+    ));
+    assert!(input_store.get("token").is_none());
     assert_eq!(
-        projected_runtime.pointer("/inputs/token/decimals"),
-        Some(&json!(6))
+        input_store
+            .get("token.decimals")
+            .and_then(|entry| entry.value.as_i64()),
+        Some(6)
     );
     assert_eq!(
-        projected_runtime.pointer("/inputs/token/symbol"),
-        Some(&json!("USDC"))
+        input_store
+            .get("token.symbol")
+            .and_then(|entry| entry.value.as_str()),
+        Some("USDC")
     );
+    let projected = input_store
+        .get_projected("inputs.token")
+        .expect("projected token root");
+    assert_eq!(
+        projected.value.pointer("/address"),
+        Some(&json!("0x2222222222222222222222222222222222222222"))
+    );
+    assert_eq!(projected.value.pointer("/decimals"), Some(&json!(6)));
+    assert_eq!(projected.meta.layer, super::input_store::InputValueLayer::Derived);
 }
 
 

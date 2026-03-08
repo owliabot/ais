@@ -1,8 +1,11 @@
+use super::super::execution_view::build_reusable_output_inventory_projection;
 use super::super::input_store::InputStore;
 use super::super::intent_context::IntentContext;
+use super::super::runtime_facts_store::RuntimeFactsStore;
+use super::super::state_summary::{InputBindingContract, StateSummary};
 use super::collector::{
-    build_canonical_context_projection, build_input_registry_projection,
-    build_input_slots_projection, build_node_output_refs_projection,
+    build_input_registry_projection, build_input_slots_projection,
+    build_node_output_refs_projection,
 };
 use ais_engine::EngineRunnerState;
 use serde_json::{json, Map, Value};
@@ -10,49 +13,168 @@ use std::collections::BTreeSet;
 const INPUT_BINDABLE_SOURCE_OF_TRUTH: &str = "state_summary.input_store";
 const INPUT_BINDABLE_REFS_PROJECTION_PATH: &str = "state_summary.input_registry.known_refs";
 const INPUT_BINDING_SCHEMA: &str = "ais-agent-input-binding-contract/0.0.1";
+const INPUT_BINDING_CONTRACT: InputBindingContract = InputBindingContract {
+    schema: INPUT_BINDING_SCHEMA,
+    bindable_namespace: "inputs",
+    bindable_refs_source: INPUT_BINDABLE_SOURCE_OF_TRUTH,
+    bindable_refs_projection: INPUT_BINDABLE_REFS_PROJECTION_PATH,
+    known_refs_only: true,
+    facts_bindable: false,
+};
 
-pub(in super::super) fn build_projected_summary_base(
+pub(in super::super) fn build_projected_summary_base_with_runtime_facts(
     state: &EngineRunnerState,
     completed_segments: usize,
     done: bool,
     previous_error: Option<&Value>,
     input_store: Option<&InputStore>,
+    runtime_facts_store: Option<&RuntimeFactsStore>,
     tool_memory_projection: Option<&Value>,
-) -> Value {
+) -> StateSummary {
     let input_slots = build_input_slots_projection(state, input_store);
-    let input_binding = build_input_binding_contract();
-    json!({
-        "completed_segments": completed_segments,
-        "completed_nodes": state.completed_node_ids.len(),
-        "plan_epoch": state.plan_epoch,
-        "paused_reason": state.paused_reason,
-        "done": done,
-        "previous_error": previous_error,
-        "input_store": input_store.map(InputStore::to_projected_planning_value),
-        "input_binding": input_binding,
-        "input_slots": input_slots.value,
-        "input_registry": build_input_registry_projection(&input_slots.resolved, input_slots.missing.as_slice()),
-        "canonical_context": build_canonical_context_projection(&input_slots.resolved),
-        "node_output_refs": build_node_output_refs_projection(state),
-        "tool_memory_projection": tool_memory_projection,
-        "intent_slots": build_intent_slots_projection(state),
-        "intent_context": IntentContext::from_runtime(&state.runtime).map(|context| context.projection().clone()),
-        "capability_view": state.runtime.pointer("/agent/capability_view"),
-        "capability_ready": state.runtime.pointer("/agent/capability_ready"),
-        "side_effect_lifecycle": state.runtime.pointer("/agent/side_effect_lifecycle"),
-        "todo_state": state.runtime.pointer("/agent/todo_progress"),
-    })
+    let intent_context =
+        IntentContext::from_runtime(&state.runtime).map(|context| context.projection().clone());
+    StateSummary {
+        completed_segments,
+        completed_nodes: state.completed_node_ids.len(),
+        plan_epoch: state.plan_epoch,
+        paused_reason: state.paused_reason.clone(),
+        done,
+        previous_error: previous_error.cloned(),
+        input_store: input_store.map(InputStore::to_projected_planning_value),
+        runtime_facts: runtime_facts_store.map(RuntimeFactsStore::to_projected_planning_value),
+        input_binding: INPUT_BINDING_CONTRACT,
+        input_registry: build_input_registry_projection(
+            &input_slots.resolved,
+            input_slots.missing.as_slice(),
+        ),
+        node_output_refs: build_node_output_refs_projection(state),
+        reusable_outputs: build_reusable_output_inventory_projection(
+            runtime_facts_store,
+            input_store,
+        ),
+        tool_memory_projection: tool_memory_projection.cloned(),
+        intent_slots: Some(build_intent_slots_projection(state)).filter(|v| !v.is_null()),
+        intent_context,
+        capability_view: state.runtime.pointer("/agent/capability_view").cloned(),
+        capability_ready: state
+            .runtime
+            .pointer("/agent/capability_ready")
+            .and_then(Value::as_bool),
+        side_effect_lifecycle: state
+            .runtime
+            .pointer("/agent/side_effect_lifecycle")
+            .cloned(),
+        todo_state: state.runtime.pointer("/agent/todo_progress").cloned(),
+        recovery_diagnostics: build_recovery_diagnostics_projection(state, previous_error),
+    }
 }
 
-fn build_input_binding_contract() -> Value {
-    json!({
-        "schema": INPUT_BINDING_SCHEMA,
-        "bindable_namespace": "inputs",
-        "bindable_refs_source": INPUT_BINDABLE_SOURCE_OF_TRUTH,
-        "bindable_refs_projection": INPUT_BINDABLE_REFS_PROJECTION_PATH,
-        "known_refs_only": true,
-        "facts_bindable": false,
-    })
+fn build_recovery_diagnostics_projection(
+    state: &EngineRunnerState,
+    previous_error: Option<&Value>,
+) -> Option<Value> {
+    let query_round = state
+        .runtime
+        .pointer("/agent/missing_input_autofill/query_autofill_round")
+        .cloned();
+    let recent_attempts = state
+        .runtime
+        .pointer("/agent/missing_input_autofill/query_attempts")
+        .and_then(Value::as_array)
+        .map(|items| {
+            let keep = items.len().saturating_sub(8);
+            Value::Array(items.iter().skip(keep).cloned().collect::<Vec<_>>())
+        });
+
+    let mut available_attempt_keys = BTreeSet::<String>::new();
+    if let Some(keys) = previous_error
+        .and_then(|value| value.pointer("/autofill_history/attempt_keys"))
+        .and_then(Value::as_array)
+    {
+        for key in keys.iter().filter_map(Value::as_str) {
+            let key = key.trim();
+            if !key.is_empty() {
+                available_attempt_keys.insert(key.to_string());
+            }
+        }
+    }
+    if let Some(attempts) = recent_attempts.as_ref().and_then(Value::as_array) {
+        for attempt in attempts {
+            if let Some(mode) = attempt.get("status").and_then(Value::as_str) {
+                available_attempt_keys.insert(format!("attempt_status:{mode}"));
+            }
+            if let Some(query_ref) = attempt.get("query_ref").and_then(Value::as_str) {
+                if !query_ref.trim().is_empty() {
+                    available_attempt_keys.insert(format!("query_ref:{query_ref}"));
+                }
+            }
+            if let Some(missing_ref) = attempt.get("missing_ref").and_then(Value::as_str) {
+                if !missing_ref.trim().is_empty() {
+                    available_attempt_keys.insert(format!("missing_ref:{missing_ref}"));
+                }
+            }
+        }
+    }
+
+    if let Some(mode) = previous_error
+        .and_then(|value| value.pointer("/autofill/mode"))
+        .and_then(Value::as_str)
+    {
+        available_attempt_keys.insert(format!("mode:{mode}"));
+    }
+    if let Some(refs) = previous_error
+        .and_then(|value| value.pointer("/autofill/selected_query_refs"))
+        .and_then(Value::as_array)
+    {
+        for query_ref in refs.iter().filter_map(Value::as_str) {
+            let query_ref = query_ref.trim();
+            if !query_ref.is_empty() {
+                available_attempt_keys.insert(format!("query_ref:{query_ref}"));
+            }
+        }
+    }
+
+    let last_error_code = previous_error
+        .and_then(|value| value.get("reason_code"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let last_error_reason = previous_error
+        .and_then(|value| value.get("message"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            previous_error
+                .and_then(|value| value.get("sub_reason_code"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+
+    let recoverable_candidates_remaining = query_round
+        .as_ref()
+        .and_then(|value| value.get("terminal_reason"))
+        .and_then(Value::as_str)
+        .map(|reason| reason != "no_query_candidates" && reason != "router_unavailable")
+        .unwrap_or(false);
+
+    if query_round.is_none()
+        && recent_attempts.is_none()
+        && available_attempt_keys.is_empty()
+        && last_error_code.is_none()
+        && last_error_reason.is_none()
+    {
+        return None;
+    }
+
+    Some(json!({
+        "schema": "ais-agent-recovery-diagnostics/0.0.1",
+        "recent_query_autofill_round": query_round,
+        "recent_attempts": recent_attempts,
+        "last_error_code": last_error_code,
+        "last_error_reason": last_error_reason,
+        "recoverable_candidates_remaining": recoverable_candidates_remaining,
+        "available_attempt_keys": available_attempt_keys.into_iter().collect::<Vec<_>>(),
+    }))
 }
 
 fn build_intent_slots_projection(state: &EngineRunnerState) -> Value {

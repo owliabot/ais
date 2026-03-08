@@ -1,4 +1,5 @@
 use crate::error::RunnerError;
+use crate::policy::VolatileFactsPolicy;
 use ais_core::{stable_hash_hex, StableJsonOptions};
 use ais_llm::{CompleteWithToolsRequest, LlmMessage, LlmProvider, MessageRole, ToolCall, ToolSpec};
 use ais_schema::{
@@ -17,15 +18,20 @@ use std::time::Instant;
 use super::budget::{compact_json_with_options, JsonBudgetOptions};
 use super::candidates::{CandidateContext, DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT};
 use super::context::budget_policy::ToolMemoryBudgetPolicy;
+use super::planner_diagnostics::PlannerDiagnosticsTracker;
 use super::planning_memory::{
     PlanningMemory, PlanningMemoryBudget, ToolMemoryProjectionCandidates,
 };
 use super::sanitize::sanitize_for_llm_payload;
+use super::state_summary::StateSummary;
 use super::todos::TodoSpec;
 use super::tools::decode::{normalize_tool_args_for_validation, phase_from_finalize_tool};
 use super::tools::dispatch::{DecodedSegmentedToolCall, PlannerToolOutput};
+#[cfg(test)]
+use super::tools::phase_policy::validate_tool_calls_for_phase;
 use super::tools::phase_policy::{
-    ensure_tool_allowed_for_phase, phase_name, validate_tool_calls_for_phase,
+    ensure_tool_allowed_for_phase, phase_name, validate_tool_calls_for_phase_with_context,
+    ToolCallValidationContext,
 };
 
 pub trait SegmentedIntentPlanner {
@@ -66,6 +72,7 @@ pub struct SegmentPlanningRequest {
     pub intent: String,
     pub session: SegmentPlanningSession,
     pub state_summary: Option<Value>,
+    pub typed_summary: Option<StateSummary>,
     pub previous_error: Option<Value>,
     pub last_segment: Option<PlanSketchSegment>,
 }
@@ -75,6 +82,7 @@ pub struct TodoPlanningRequest {
     pub intent: String,
     pub session: SegmentPlanningSession,
     pub state_summary: Option<Value>,
+    pub typed_summary: Option<StateSummary>,
 }
 
 #[derive(Debug, Clone)]
@@ -82,6 +90,7 @@ pub struct IntentGroundingRequest {
     pub intent: String,
     pub session: SegmentPlanningSession,
     pub state_summary: Option<Value>,
+    pub typed_summary: Option<StateSummary>,
 }
 
 #[derive(Debug, Clone)]
@@ -108,6 +117,7 @@ pub enum SegmentDraft {
         done: bool,
         issues: Vec<Value>,
         questions: Vec<Value>,
+        error_details: Option<Value>,
     },
     Invalid {
         reason_code: String,
@@ -129,6 +139,7 @@ pub enum TodoDraft {
         message: Option<String>,
         issues: Vec<Value>,
         questions: Vec<Value>,
+        error_details: Option<Value>,
     },
     Invalid {
         reason_code: String,
@@ -142,6 +153,7 @@ pub enum IntentGroundingDraft {
     Proposed {
         summary: Option<String>,
         ready_for_todos: bool,
+        missing_refs: Vec<String>,
         resolved_inputs: BTreeMap<String, Value>,
         intent_facts: BTreeMap<String, Value>,
         confidence: BTreeMap<String, u8>,
@@ -153,6 +165,7 @@ pub enum IntentGroundingDraft {
         message: Option<String>,
         issues: Vec<Value>,
         questions: Vec<Value>,
+        error_details: Option<Value>,
     },
     Invalid {
         reason_code: String,
@@ -171,6 +184,7 @@ pub struct LlmSegmentedIntentPlanner<P> {
     prompt_builder: SegmentedPromptContextBuilder,
     prompt_overrides: SegmentedPromptOverrides,
     max_tool_rounds: u8,
+    volatile_facts_policy: VolatileFactsPolicy,
     verbose_llm: bool,
     usage_tracker: PlannerLlmUsageTracker,
     llm_transcript: Option<LlmTranscriptSink>,
@@ -196,9 +210,10 @@ pub(super) struct SegmentCheckContext {
     pub(super) cursor: String,
     pub(super) pack_snapshot_hash: String,
     pub(super) chain_scope: Vec<String>,
+    pub(super) volatile_facts_policy: VolatileFactsPolicy,
     pub(super) known_input_refs: Vec<String>,
     pub(super) grounding_fact_keys: Vec<String>,
-    pub(super) current_todo: Option<Value>,
+    pub(super) current_todo_scope: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,7 +225,7 @@ pub(super) enum PlannerRoundPhase {
     ReviseSegment,
 }
 
-const SEGMENTED_PROMPT_VERSION: &str = "aisrs-segmented-planner-v2";
+const SEGMENTED_PROMPT_VERSION: &str = "aisrs-segmented-planner-v3";
 pub(crate) const DEFAULT_SEGMENTED_MAX_TOOL_ROUNDS: u8 = 24;
 const REPEATED_PLAN_CHECK_FAILURE_THRESHOLD: u64 = 3;
 const FINALIZE_SCHEMA_REPAIR_ATTEMPT_LIMIT: u8 = 2;
@@ -218,7 +233,7 @@ const NON_FINALIZE_TOOL_SCHEMA_REPAIR_ATTEMPT_LIMIT: u8 = 2;
 const NO_TOOLCALL_RETRY_ATTEMPT_LIMIT: u8 = 2;
 const ADJUDICATE_MAX_TOOL_ROUNDS: u8 = 3;
 const ADJUDICATE_EMPTY_SEARCH_STREAK_LIMIT: u64 = 2;
-const LLM_CHARS_PER_TOKEN_ESTIMATE: usize = 4;
+
 const CONTEXT_SOFT_LIMIT_NUMERATOR: u64 = 9;
 const CONTEXT_SOFT_LIMIT_DENOMINATOR: u64 = 10;
 
@@ -247,287 +262,6 @@ struct PlannerLlmUsageTracker {
     context_limit_tokens: Option<u64>,
     latest_input_tokens: u64,
     latest_total_tokens: u64,
-}
-
-#[derive(Debug, Clone, Default)]
-struct PlannerDiagnosticsTracker {
-    total_tool_calls: u64,
-    duplicate_tool_calls: u64,
-    tool_call_count_by_tool: BTreeMap<String, u64>,
-    tool_result_count_by_tool: BTreeMap<String, u64>,
-    memory_hits_by_tool: BTreeMap<String, u64>,
-    phase_round_count: BTreeMap<String, u64>,
-    memory_projection_budget_tokens: u64,
-    memory_projection_estimated_tokens: u64,
-    finalize_schema_repair_attempts_total: u64,
-    finalize_schema_repair_exhausted_total: u64,
-    finalize_schema_repair_by_sub_reason: BTreeMap<String, u64>,
-    no_toolcall_retries_total: u64,
-    no_toolcall_retries_exhausted_total: u64,
-    empty_search_streak_max: u64,
-    parallel_batches_total: u64,
-    parallel_calls_total: u64,
-    parallel_failures_total: u64,
-    parallel_partial_success_total: u64,
-    tool_exec_total: u64,
-    tool_exec_success: u64,
-    tool_exec_error: u64,
-    tool_exec_cached_hit: u64,
-    tool_exec_parallel: u64,
-    tool_exec_sequential: u64,
-    tool_exec_blocked_finalize: u64,
-    tool_exec_repair_retry: u64,
-    tool_exec_repair_exhausted: u64,
-    tool_exec_count_by_tool: BTreeMap<String, u64>,
-    tool_exec_error_by_tool: BTreeMap<String, u64>,
-    tool_exec_latency_sum_ms_by_tool: BTreeMap<String, u64>,
-    tool_exec_latency_max_ms_by_tool: BTreeMap<String, u64>,
-    seen_tool_call_keys: BTreeSet<String>,
-}
-
-impl PlannerDiagnosticsTracker {
-    fn observe_phase_round(&mut self, phase: PlannerRoundPhase) {
-        let key = phase_name(phase).to_string();
-        let entry = self.phase_round_count.entry(key).or_insert(0);
-        *entry = entry.saturating_add(1);
-    }
-
-    fn observe_tool_call(&mut self, tool_name: &str, dedupe_key: Option<String>) -> bool {
-        self.total_tool_calls = self.total_tool_calls.saturating_add(1);
-        let entry = self
-            .tool_call_count_by_tool
-            .entry(tool_name.to_string())
-            .or_insert(0);
-        *entry = entry.saturating_add(1);
-        let Some(key) = dedupe_key else {
-            return false;
-        };
-        if !self.seen_tool_call_keys.insert(key) {
-            self.duplicate_tool_calls = self.duplicate_tool_calls.saturating_add(1);
-            return true;
-        }
-        false
-    }
-
-    fn observe_tool_result(&mut self, tool_name: &str, cached: bool) {
-        let total = self
-            .tool_result_count_by_tool
-            .entry(tool_name.to_string())
-            .or_insert(0);
-        *total = total.saturating_add(1);
-        if cached {
-            let hits = self
-                .memory_hits_by_tool
-                .entry(tool_name.to_string())
-                .or_insert(0);
-            *hits = hits.saturating_add(1);
-        }
-    }
-
-    fn observe_empty_search_streak(&mut self, streak: u64) {
-        if streak > self.empty_search_streak_max {
-            self.empty_search_streak_max = streak;
-        }
-    }
-
-    fn observe_finalize_schema_repair_attempt(&mut self, sub_reason_code: &str) {
-        self.finalize_schema_repair_attempts_total =
-            self.finalize_schema_repair_attempts_total.saturating_add(1);
-        let entry = self
-            .finalize_schema_repair_by_sub_reason
-            .entry(sub_reason_code.to_string())
-            .or_insert(0);
-        *entry = entry.saturating_add(1);
-    }
-
-    fn observe_tool_memory_projection(
-        &mut self,
-        budget_tokens: usize,
-        estimated_tokens: Option<u64>,
-    ) {
-        self.memory_projection_budget_tokens = u64::try_from(budget_tokens).unwrap_or(u64::MAX);
-        self.memory_projection_estimated_tokens = estimated_tokens.unwrap_or(0);
-    }
-
-    fn observe_finalize_schema_repair_exhausted(&mut self) {
-        self.finalize_schema_repair_exhausted_total = self
-            .finalize_schema_repair_exhausted_total
-            .saturating_add(1);
-    }
-
-    fn observe_no_toolcall_retry(&mut self) {
-        self.no_toolcall_retries_total = self.no_toolcall_retries_total.saturating_add(1);
-    }
-
-    fn observe_no_toolcall_retry_exhausted(&mut self) {
-        self.no_toolcall_retries_exhausted_total =
-            self.no_toolcall_retries_exhausted_total.saturating_add(1);
-    }
-
-    fn observe_parallel_batch(&mut self, calls: u64) {
-        self.parallel_batches_total = self.parallel_batches_total.saturating_add(1);
-        self.parallel_calls_total = self.parallel_calls_total.saturating_add(calls);
-    }
-
-    fn observe_parallel_partial_success(&mut self) {
-        self.parallel_partial_success_total = self.parallel_partial_success_total.saturating_add(1);
-    }
-
-    fn observe_tool_exec_end(
-        &mut self,
-        tool_name: &str,
-        mode: &'static str,
-        status: &'static str,
-        latency_ms: u64,
-    ) {
-        self.tool_exec_total = self.tool_exec_total.saturating_add(1);
-        let total = self
-            .tool_exec_count_by_tool
-            .entry(tool_name.to_string())
-            .or_insert(0);
-        *total = total.saturating_add(1);
-        if mode == "parallel" {
-            self.tool_exec_parallel = self.tool_exec_parallel.saturating_add(1);
-        } else {
-            self.tool_exec_sequential = self.tool_exec_sequential.saturating_add(1);
-        }
-        match status {
-            "success" => self.tool_exec_success = self.tool_exec_success.saturating_add(1),
-            "cached_hit" => {
-                self.tool_exec_cached_hit = self.tool_exec_cached_hit.saturating_add(1);
-            }
-            "blocked_finalize" => {
-                self.tool_exec_blocked_finalize = self.tool_exec_blocked_finalize.saturating_add(1);
-            }
-            _ => {
-                self.tool_exec_error = self.tool_exec_error.saturating_add(1);
-                let errors = self
-                    .tool_exec_error_by_tool
-                    .entry(tool_name.to_string())
-                    .or_insert(0);
-                *errors = errors.saturating_add(1);
-                if mode == "parallel" {
-                    self.parallel_failures_total = self.parallel_failures_total.saturating_add(1);
-                }
-            }
-        }
-        let latency_sum = self
-            .tool_exec_latency_sum_ms_by_tool
-            .entry(tool_name.to_string())
-            .or_insert(0);
-        *latency_sum = latency_sum.saturating_add(latency_ms);
-        let latency_max = self
-            .tool_exec_latency_max_ms_by_tool
-            .entry(tool_name.to_string())
-            .or_insert(0);
-        if latency_ms > *latency_max {
-            *latency_max = latency_ms;
-        }
-    }
-
-    fn observe_tool_exec_retry(&mut self, exhausted: bool) {
-        if exhausted {
-            self.tool_exec_repair_exhausted = self.tool_exec_repair_exhausted.saturating_add(1);
-        } else {
-            self.tool_exec_repair_retry = self.tool_exec_repair_retry.saturating_add(1);
-        }
-    }
-
-    fn duplicate_ratio_bps(&self) -> u64 {
-        if self.total_tool_calls == 0 {
-            return 0;
-        }
-        self.duplicate_tool_calls.saturating_mul(10_000) / self.total_tool_calls
-    }
-
-    fn discovery_ratio_bps(&self) -> u64 {
-        if self.total_tool_calls == 0 {
-            return 0;
-        }
-        let discovery_calls = [
-            "list_candidates",
-            "catalog.search",
-            "get_candidate_detail",
-            "guide.get",
-        ]
-        .iter()
-        .map(|tool| {
-            self.tool_call_count_by_tool
-                .get(*tool)
-                .copied()
-                .unwrap_or(0)
-        })
-        .sum::<u64>();
-        discovery_calls.saturating_mul(10_000) / self.total_tool_calls
-    }
-
-    fn memory_hit_rate_by_tool_value(&self) -> Value {
-        let mut output = serde_json::Map::<String, Value>::new();
-        for (tool_name, total) in &self.tool_result_count_by_tool {
-            let hits = self
-                .memory_hits_by_tool
-                .get(tool_name)
-                .copied()
-                .unwrap_or(0);
-            let rate_bps = if *total == 0 {
-                0
-            } else {
-                hits.saturating_mul(10_000) / *total
-            };
-            output.insert(
-                tool_name.clone(),
-                json!({
-                    "hits": hits,
-                    "total": total,
-                    "rate_bps": rate_bps,
-                }),
-            );
-        }
-        Value::Object(output)
-    }
-
-    fn to_value(&self) -> Value {
-        let ratio_bps = self.duplicate_ratio_bps();
-        let discovery_ratio_bps = self.discovery_ratio_bps();
-        json!({
-            "tool_calls_total": self.total_tool_calls,
-            "tool_calls_duplicate": self.duplicate_tool_calls,
-            "duplicate_tool_call_ratio_bps": ratio_bps,
-            "duplicate_tool_call_ratio": (ratio_bps as f64) / 10_000.0_f64,
-            "discovery_tool_call_ratio_bps": discovery_ratio_bps,
-            "discovery_tool_call_ratio": (discovery_ratio_bps as f64) / 10_000.0_f64,
-            "tool_call_count_by_tool": self.tool_call_count_by_tool,
-            "memory_hit_rate_by_tool": self.memory_hit_rate_by_tool_value(),
-            "phase_round_count": self.phase_round_count,
-            "finalize_schema_repair_attempts_total": self.finalize_schema_repair_attempts_total,
-            "finalize_schema_repair_exhausted_total": self.finalize_schema_repair_exhausted_total,
-            "finalize_schema_repair_by_sub_reason": self.finalize_schema_repair_by_sub_reason,
-            "no_toolcall_retries_total": self.no_toolcall_retries_total,
-            "no_toolcall_retries_exhausted_total": self.no_toolcall_retries_exhausted_total,
-            "memory_projection_budget_tokens": self.memory_projection_budget_tokens,
-            "memory_projection_estimated_tokens": self.memory_projection_estimated_tokens,
-            "empty_search_streak_max": self.empty_search_streak_max,
-            "parallel_batches_total": self.parallel_batches_total,
-            "parallel_calls_total": self.parallel_calls_total,
-            "parallel_failures_total": self.parallel_failures_total,
-            "parallel_partial_success_total": self.parallel_partial_success_total,
-            "tool_exec": {
-                "total": self.tool_exec_total,
-                "success": self.tool_exec_success,
-                "error": self.tool_exec_error,
-                "cached_hit": self.tool_exec_cached_hit,
-                "parallel": self.tool_exec_parallel,
-                "sequential": self.tool_exec_sequential,
-                "blocked_finalize": self.tool_exec_blocked_finalize,
-                "repair_retry": self.tool_exec_repair_retry,
-                "repair_exhausted": self.tool_exec_repair_exhausted,
-                "count_by_tool": self.tool_exec_count_by_tool,
-                "error_by_tool": self.tool_exec_error_by_tool,
-                "latency_sum_ms_by_tool": self.tool_exec_latency_sum_ms_by_tool,
-                "latency_max_ms_by_tool": self.tool_exec_latency_max_ms_by_tool,
-            }
-        })
-    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -618,8 +352,8 @@ impl PlannerLlmUsageTracker {
         request: &CompleteWithToolsRequest,
         response: &ais_llm::CompleteWithToolsResponse,
     ) -> PlannerLlmCallUsage {
-        let input_tokens = estimate_tokens_from_json(request);
-        let output_tokens = estimate_tokens_from_json(response);
+        let input_tokens = super::token_count::count_tokens_serializable(request);
+        let output_tokens = super::token_count::count_tokens_serializable(response);
         let total_tokens = input_tokens.saturating_add(output_tokens);
         self.calls = self.calls.saturating_add(1);
         self.input_tokens = self.input_tokens.saturating_add(input_tokens);
@@ -643,7 +377,7 @@ impl PlannerLlmUsageTracker {
             context_soft_limit_tokens,
             context_remaining_tokens,
             estimated: true,
-            source: "estimated(chars_div_4)",
+            source: super::token_count::ESTIMATOR_SOURCE,
         }
     }
 
@@ -655,7 +389,7 @@ impl PlannerLlmUsageTracker {
             "output_tokens": self.output_tokens,
             "total_tokens": self.total_tokens,
             "estimated_calls": self.estimated_calls,
-            "source": "estimated(chars_div_4)",
+            "source": super::token_count::ESTIMATOR_SOURCE,
             "context_limit_tokens": self.context_limit_tokens,
             "context_soft_limit_tokens": self.context_limit_tokens.map(context_soft_limit_tokens),
             "context_window_input_tokens": self.latest_input_tokens,
@@ -681,6 +415,7 @@ struct PromptRenderOutput {
 
 #[derive(Debug, Clone)]
 struct SegmentedPromptContextBuilder {
+    system_core_prompt: String,
     base_rules: Vec<String>,
     phase_rules_begin: Vec<String>,
     phase_rules_grounding: Vec<String>,
@@ -692,6 +427,7 @@ struct SegmentedPromptContextBuilder {
 
 #[derive(Debug, Clone, Default)]
 pub struct SegmentedPromptOverrides {
+    pub system_core_prompt: Option<String>,
     pub base_rules: Option<Vec<String>>,
     pub phase_rules_begin: Option<Vec<String>>,
     pub phase_rules_grounding: Option<Vec<String>>,
@@ -708,29 +444,31 @@ pub struct SegmentedPromptOverrides {
 impl Default for SegmentedPromptContextBuilder {
     fn default() -> Self {
         Self {
+            system_core_prompt: super::brain::DEFAULT_AGENT_SYSTEM_CORE_PROMPT.to_string(),
             base_rules: vec![
-                "Tool-calling only.",
-                "Emit schema-typed JSON only: when schema expects boolean/number, send JSON bool/number (never quoted strings).",
-                "Before every tool call/finalize, self-check: phase-allowed tool, required keys present, and JSON value types exactly match schema.",
+                // -- Core Invariants --
+                "Tool-calling only. Emit schema-typed JSON only: boolean/number as JSON bool/number (never quoted strings). Before every tool call/finalize, self-check: phase-allowed tool, required keys present, value types match schema.",
                 "Check state_summary.tool_memory_projection first and reuse cached discovery/schema context; avoid repeating identical discovery calls in one snapshot scope.",
-                "For schema/topic and control-step contracts, use guide.get with canonical request shape; schema lookups are digest-first and should request {\"full\":true} only when digest is insufficient.",
-                "guide.get examples: good {\"schema\":\"ais-plan-sketch/0.1.0\"}, {\"schema\":\"ais-plan-sketch/0.1.0\",\"full\":true}, {\"topic\":\"cel\"}; bad {\"schema\":{\"id\":\"ais-plan-sketch/0.1.0\"}}, {\"full\":\"true\"}.",
-                "Capability narrowing order: prefer catalog.search first (compact ref-first cards: ref/kind/chains?/risk_level?), then get_candidate_detail for selected refs; use list_candidates only as broad inventory when needed.",
-                "list_candidates policy template (filter-first): start with exact chain, add protocol when hinted, and broaden only when empty/insufficient in strict order: exact chain+protocol -> exact chain -> chain namespace wildcard.",
-                "assert/branch/until/retry are PlanSketch control-step semantics, not catalog candidates.",
-                "candidate_ref is required for query/action steps and optional for assert/branch control steps.",
-                "Plan against state_summary.todo_state.current_todo only and produce exactly one deterministic segment for that todo.",
-                "depends_on may only reference step ids in the current segment; never use cross-segment refs like seg_1/....",
-                "For inputs.* refs, use InputStore-only bindable refs: source_of_truth=state_summary.input_store, projection=state_summary.input_registry.known_refs; never invent candidate/protocol/action refs outside discovered context.",
-                "For unknown_input_ref repair, preserve slot semantics: token/address params map to address-like refs (for example *.address), and *.decimals refs cannot substitute token/address slots.",
-                "If previous_error.autofill.mode=host_binding_adjudicate_round: first prefer host-provided ambiguous_bindings[]/query_candidate_pool/available_input_refs; you may call readonly discovery tools (list_candidates/catalog.search/get_candidate_detail/guide.get) to find query refs; output binding/query decisions before asking user input.",
-                "If previous_error.autofill.mode=host_missing_input_round: prioritize resolver.selected_query_refs/query_candidate_pool for recovery; attempt query_decisions/binding_decisions before emitting missing_required_input questions.",
-                "Never ask user input until both input-ref binding and query-based recovery are exhausted for current missing refs.",
-                "When resolver or host recovery has viable query/binding candidates, continue recovery and do not emit missing_required_input yet.",
-                "Emit missing_required_input only after recovery exhaustion, and include error.details.recovery_exhaustion with unresolved_refs[] + reasons[] + attempt_trace_id.",
-                "For missing_required_input, unresolved_refs/questions must use canonical source refs (inputs.* / node outputs) and must never expose params.* paths to users.",
-                "For transfer/swap writes, enforce same-segment gate chain query -> assert|branch -> action and refresh volatile write facts by query when needed.",
-                "For errors, return status=invalid|unavailable with error.reason_code; for missing_required_input use canonical shape: error.details.questions[] + error.details.recovery_exhaustion{unresolved_refs[],reasons[],attempt_trace_id} (all non-empty). Repair order is strict: shape -> ref -> slot -> semantic.",
+                "Phase compliance: only call tools listed in the current phase's allowed tools. Finalize tool must be last.",
+                "InputStore binding: source_of_truth=state_summary.input_store, projection=state_summary.input_registry.known_refs. Never invent refs outside discovered context.",
+                "Plan against state_summary.todo_state.current_todo only; produce exactly one deterministic segment. depends_on may only reference step ids in the current segment.",
+                // -- Discovery & Binding --
+                "Discovery basis contract: use catalog.discover/get_candidate_detail with filter-first narrowing (exact chain+protocol -> exact chain -> chain namespace wildcard).",
+                "For schema/topic lookups, use guide.get with canonical shape; digest-first, request {\"full\":true} only when insufficient. Examples: good {\"schema\":\"ais-plan-sketch/0.1.0\"}, {\"topic\":\"cel\"}; bad {\"schema\":{\"id\":\"...\"}}.",
+                "runtime.query for inspect/resolve across all namespaces (inputs.*, facts.*, nodes.*.outputs.*).",
+                // -- Recovery & Missing Input --
+                "Recovery-first: never ask user input until both input-ref binding and query-based recovery are exhausted. When resolver/host recovery has viable candidates (query_candidate_pool, ambiguous_bindings, selected_query_refs), continue recovery. If previous_error.autofill.mode=host_binding_adjudicate_round or host_missing_input_round, prefer host-provided recovery context and output binding/query decisions first.",
+                "Emit missing_required_input only after recovery exhaustion, with canonical shape: error.details.questions[] + error.details.recovery_exhaustion{unresolved_refs[],reasons[],attempt_trace_id} (all non-empty). Use source refs only (inputs.* / node outputs); never expose params.* paths.",
+                "Abort evidence contract: plan.abort_intent.evidence.attempted_recovery must be drawn from host-provided history keys (state_summary.recovery_diagnostics.available_attempt_keys / previous_error.autofill_history.attempt_keys); do not invent attempt IDs.",
+                "Error contract: status=invalid|unavailable with error.reason_code. Repair order: shape -> ref -> slot -> semantic.",
+                // -- Domain --
+                "assert/branch/until/retry are PlanSketch control-step semantics, not catalog candidates. candidate_ref is required for query/action steps, optional for assert/branch.",
+                "Write safety: value-moving actions must satisfy action -> assert|branch gating. Gate backing is valid only when it comes from same-segment query ancestry or explicit historical nodes.<step>.outputs references.",
+                "depends_on is for same-segment scheduling/gate reachability only. Do not invent same-segment query deps when a condition intentionally reads stable historical nodes.<step>.outputs.",
+                "Volatile facts (balance, allowance) are query-observed signals. A fresh same-segment query is required before a write when the write depends on those signals and the segment is not explicitly backed by historical node outputs.",
+                "Post-write invalidation is real: after a successful write, previously observed volatile facts are no longer fresh. A follow-up write that still depends on balance/allowance must add a new query in that segment instead of reusing earlier query freshness.",
+                "For unknown_input_ref repair, preserve slot semantics: token/address params map to address-like refs (*.address); *.decimals refs cannot substitute token/address slots.",
+                "decimals contract: prefer canonical leaf refs such as inputs.token.decimals in CEL and resolved asset objects or *.address refs for token/address params. If decimals are missing for a write-required asset, add/query evidence before finalize; do not guess.",
             ]
             .into_iter()
             .map(str::to_string)
@@ -745,12 +483,12 @@ impl Default for SegmentedPromptContextBuilder {
             .collect(),
             phase_rules_grounding: vec![
                 "Current phase: ground_intent.",
-                "Allowed tools: list_candidates, catalog.search, catalog.resolve_missing_facts, get_candidate_detail, guide.get, and one final plan.ground_intent (must be last).",
-                "list_candidates usage follows the base-rules filter-first policy template; do not invent alternate broaden order.",
+                "Allowed tools: catalog.discover, catalog.resolve_missing_facts, get_candidate_detail, guide.get, runtime.query, and one terminal tool among plan.ground_intent/plan.abort_intent (must be last).",
                 "Goal: derive deterministic initial inputs/facts before todo planning; prioritize high-confidence owner/recipient/amount/token/chain fields and avoid guessing.",
                 "When grounding-required facts for known refs are missing, call catalog.resolve_missing_facts with missing_refs before asking user input.",
                 "If status=proposed and ready_for_todos=false, include actionable questions or missing_refs (non-empty).",
                 "If required grounding fields remain missing, return unavailable with reason_code=missing_required_input and canonical error.details.questions[] + error.details.recovery_exhaustion.",
+                "Use plan.abort_intent only as last resort when recovery is exhausted and evidence is explicit (attempted_recovery must be non-empty).",
                 "Call plan.ground_intent exactly once and only as the last tool call.",
                 "Do not call plan.begin, plan.propose_todos, plan.propose_segment, or plan.revise_segment.",
             ]
@@ -759,12 +497,12 @@ impl Default for SegmentedPromptContextBuilder {
             .collect(),
             phase_rules_todos: vec![
                 "Current phase: propose_todos.",
-                "Allowed tools: list_candidates, catalog.search, catalog.resolve_missing_facts, get_candidate_detail, guide.get, and one final plan.propose_todos (must be last).",
-                "list_candidates usage follows the base-rules filter-first policy template; do not invent alternate broaden order.",
+                "Allowed tools: catalog.discover, catalog.resolve_missing_facts, get_candidate_detail, guide.get, runtime.query, and one terminal tool among plan.propose_todos/plan.abort_intent (must be last).",
                 "Output deterministic todos for the whole intent before segment planning.",
                 "Each todo must include title; optional fields: required_facts/produced_facts/acceptance.",
                 "Prefer 2-4 concise todos; avoid duplicates or overlapping objectives.",
                 "When todo-required facts for known refs are missing, call catalog.resolve_missing_facts with missing_refs before asking user input.",
+                "Use plan.abort_intent only as last resort when recovery is exhausted and evidence is explicit (attempted_recovery must be non-empty).",
                 "Call plan.propose_todos exactly once and only as the last tool call.",
                 "Do not call plan.begin, plan.propose_segment, or plan.revise_segment.",
             ]
@@ -773,14 +511,13 @@ impl Default for SegmentedPromptContextBuilder {
             .collect(),
             phase_rules_propose: vec![
                 "Current phase: propose_segment.",
-                "Allowed tools: list_candidates, catalog.search, catalog.resolve_missing_facts, get_candidate_detail, guide.get, plan.check_segment, and one final plan.propose_segment (must be last).",
-                "list_candidates usage follows the base-rules filter-first policy template; do not invent alternate broaden order.",
+                "Allowed tools: catalog.discover, catalog.resolve_missing_facts, get_candidate_detail, guide.get, runtime.query, plan.check_segment, and one terminal tool among plan.propose_segment/plan.abort_intent (must be last).",
                 "Host enforces 1 todo = 1 segment; plan only for current state_summary.todo_state.current_todo.",
                 "Segment shape must stay flat: do not output legacy branch-tree fields (if_true/if_false/then/else/children); encode branch paths via flat steps + when.cel + depends_on.",
                 "You must call plan.check_segment and only finalize when check result has ok=true.",
-                "If token decimals or write-required facts are unknown, call catalog.resolve_missing_facts with missing refs, then add corresponding query steps before write when possible; do not patch token/address slots with *.decimals refs.",
-                "If required facts are missing and resolver/host recovery still has query or binding candidates, continue recovery and do not emit missing_required_input yet.",
-                "If required facts are still missing after recovery is exhausted, return unavailable with reason_code=missing_required_input and include canonical error.details.questions[] + error.details.recovery_exhaustion.",
+                "If plan.check_segment or local reasoning shows missing write-required facts (missing_token_decimals) or stale volatile write evidence (stale_volatile_fact), repair by adding the required query/gate steps before the write when possible. For follow-up writes after an earlier write, assume prior balance/allowance queries are no longer fresh unless the write is intentionally backed by explicit historical nodes.<step>.outputs.",
+                "Use runtime.query(action=resolve, refs=[...]) to inspect resolution status and catalog.resolve_missing_facts for detailed candidate diagnostics; do not patch token/address slots with *.decimals refs.",
+                "Use plan.abort_intent only as last resort when recovery is exhausted and evidence is explicit (attempted_recovery must be non-empty).",
                 "Call plan.propose_segment exactly once and only as the last tool call.",
                 "Never call plan.begin or plan.revise_segment.",
             ]
@@ -789,16 +526,15 @@ impl Default for SegmentedPromptContextBuilder {
             .collect(),
             phase_rules_revise: vec![
                 "Current phase: revise_segment.",
-                "Allowed tools: list_candidates, catalog.search, catalog.resolve_missing_facts, get_candidate_detail, guide.get, plan.check_segment, and one final plan.revise_segment (must be last).",
-                "list_candidates usage follows the base-rules filter-first policy template; do not invent alternate broaden order.",
+                "Allowed tools: catalog.discover, catalog.resolve_missing_facts, get_candidate_detail, guide.get, runtime.query, plan.check_segment, and one terminal tool among plan.revise_segment/plan.abort_intent (must be last).",
                 "Keep repairing the same current todo from state_summary.todo_state.current_todo; do not switch to a different objective.",
                 "Apply minimum edits to fix output shape and keep semantics stable; patch previous_error.last_failed_finalize when available instead of regenerating from scratch.",
                 "Segment shape must stay flat: do not output legacy branch-tree fields (if_true/if_false/then/else/children); encode branch paths via flat steps + when.cel + depends_on.",
                 "You must call plan.check_segment and only finalize when check result has ok=true.",
                 "Repair order is strict: shape -> ref -> slot -> semantic; keep semantic edits minimal.",
-                "If decimals/facts are missing, call catalog.resolve_missing_facts and prefer adding matched query steps before returning missing_required_input; do not patch token/address slots with *.decimals refs.",
-                "If required facts are missing and resolver/host recovery still has query or binding candidates, continue recovery and do not emit missing_required_input yet.",
-                "If required facts are still missing after recovery is exhausted, return unavailable with reason_code=missing_required_input and include canonical error.details.questions[] + error.details.recovery_exhaustion.",
+                "If plan.check_segment reports missing_token_decimals or stale_volatile_fact, repair by adding the required query/gate steps before the write when possible. For follow-up writes after an earlier write, assume prior balance/allowance queries are no longer fresh unless the write is intentionally backed by explicit historical nodes.<step>.outputs.",
+                "Use runtime.query(action=resolve, refs=[...]) to inspect resolution status and catalog.resolve_missing_facts for detailed candidate diagnostics; do not patch token/address slots with *.decimals refs.",
+                "Use plan.abort_intent only as last resort when recovery is exhausted and evidence is explicit (attempted_recovery must be non-empty).",
                 "Call plan.revise_segment exactly once and only as the last tool call.",
                 "Never call plan.begin or plan.propose_segment.",
             ]
@@ -806,10 +542,13 @@ impl Default for SegmentedPromptContextBuilder {
             .map(str::to_string)
             .collect(),
             contracts_summary: vec![
-                "ValueRef forms: lit/ref/cel/object/array.",
-                "Asset shape: object.address + object.chain_ref (compiler normalizes to chain_id).",
+                "ValueRef forms: lit/ref/cel/object/array. Examples: {\"amount\":{\"lit\":\"10\"}}, {\"owner\":{\"ref\":\"inputs.owner\"}}, {\"ok\":{\"cel\":\"nodes.q_balance.outputs.balance > to_atomic(100, inputs.token.decimals)\"}}. In CEL, use host-exposed runtime roots only. Common runtime roots in segmented planning are inputs, params, and nodes; do not invent new roots. Node refs: nodes.<step_id>.outputs.<field> (same-segment step ids only). Common helpers include to_atomic, to_human, size, contains, int, and string; use guide.get(topic=\"cel\") for the exact CEL helper/root contract when needed.",
+                "Segment contract: step required fields: id, kind, inputs. kind enum: action/query/assert/branch. candidate_ref required for query/action, optional for assert/branch. depends_on references step ids in the same segment only. Forbidden legacy keys: if_true/if_false/then/else/children. Branch encoding: flat steps with when.cel + depends_on.",
+                "Asset param contract: for param type=asset, input must resolve to object with address. Preferred shape: {\"object\":{\"address\":{\"lit\":\"0x...\"},\"chain_ref\":{\"lit\":\"eip155:...\"}}}. Canonical decimals source is the leaf ref inputs.<asset>.decimals or a resolved asset object with numeric decimals. Compiler normalizes chain_ref to chain_id.",
+                "Write gate contract: transfer/swap action steps require action -> assert|branch gating. Gate backing may come from same-segment query ancestry or explicit historical nodes.<step>.outputs references. Use depends_on for same-segment scheduling/gate reachability only; do not invent query deps when reading stable historical node outputs.",
+                "Freshness contract: balance/allowance are volatile query facts. If a write depends on them and there is no explicit historical node-output backing, add a fresh query in the same segment before the write. After a successful write, prior volatile observations are invalidated; follow-up writes must query again.",
+                "Decimals contract: use inputs.token.decimals or another canonical inputs.<asset>.decimals leaf in CEL (for example to_atomic(..., inputs.token.decimals)). Do not use *.decimals refs as substitutes for token/address params.",
                 "Use CEL for deterministic conditions and value computation; expressions must be side-effect free.",
-                "Write-safety should be expressed via deterministic CEL conditions and explicit query/assert/branch guards.",
             ]
             .into_iter()
             .map(str::to_string)
@@ -820,6 +559,9 @@ impl Default for SegmentedPromptContextBuilder {
 
 impl SegmentedPromptContextBuilder {
     fn with_overrides(mut self, overrides: SegmentedPromptOverrides) -> Self {
+        if let Some(system_core_prompt) = non_empty_text(overrides.system_core_prompt) {
+            self.system_core_prompt = system_core_prompt;
+        }
         if let Some(base_rules) = non_empty_rules(overrides.base_rules) {
             self.base_rules = base_rules;
         }
@@ -858,6 +600,7 @@ impl SegmentedPromptContextBuilder {
         let modules = json!({
             "version": SEGMENTED_PROMPT_VERSION,
             "phase": phase_name(phase),
+            "system_core_prompt": self.system_core_prompt,
             "base_rules": base_rules,
             "phase_rules": phase_rules,
             "contracts_summary": contracts_summary,
@@ -867,7 +610,8 @@ impl SegmentedPromptContextBuilder {
         let hash = stable_hash_hex(&modules, &StableJsonOptions::default())
             .unwrap_or_else(|_| "prompt-hash-unavailable".to_string());
         let prompt = format!(
-            "You are an AIS segmented planner.\nPrompt-Version: {SEGMENTED_PROMPT_VERSION}\nPrompt-Hash: {hash}\n\nBase Rules:\n{}\n\nPhase Rules:\n{}\n\nContracts Summary:\n{}\n\nPack Summary:\n- {pack_summary}\n\nWorkspace Summary:\n{}",
+            "You are an AIS segmented planner.\n\n{}\nPlanner scope:\n- Convert intent into one auditable, policy-valid segment for the current todo.\n- Prefer runtime-verifiable refs and query-backed evidence over assumptions, especially for token decimals and value-moving steps.\n\nPrompt-Version: {SEGMENTED_PROMPT_VERSION}\nPrompt-Hash: {hash}\n\nBase Rules:\n{}\n\nPhase Rules:\n{}\n\nContracts Summary:\n{}\n\nPack Summary:\n- {pack_summary}\n\nWorkspace Summary:\n{}",
+            self.system_core_prompt,
             numbered_lines(base_rules.as_ref()),
             numbered_lines(phase_rules.as_slice()),
             numbered_lines(contracts_summary.as_ref()),
@@ -903,6 +647,7 @@ impl<P> LlmSegmentedIntentPlanner<P> {
             prompt_builder: SegmentedPromptContextBuilder::default(),
             prompt_overrides: SegmentedPromptOverrides::default(),
             max_tool_rounds: DEFAULT_SEGMENTED_MAX_TOOL_ROUNDS,
+            volatile_facts_policy: VolatileFactsPolicy::default(),
             verbose_llm: false,
             usage_tracker: PlannerLlmUsageTracker::default(),
             llm_transcript: None,
@@ -917,6 +662,14 @@ impl<P> LlmSegmentedIntentPlanner<P> {
 
     pub fn with_max_tool_rounds(mut self, max_tool_rounds: u8) -> Self {
         self.max_tool_rounds = max_tool_rounds.max(1);
+        self
+    }
+
+    pub fn with_volatile_facts_policy(
+        mut self,
+        volatile_facts_policy: VolatileFactsPolicy,
+    ) -> Self {
+        self.volatile_facts_policy = volatile_facts_policy;
         self
     }
 
@@ -1070,6 +823,8 @@ impl<P> LlmSegmentedIntentPlanner<P> {
         user_prompt: String,
         finalize_tool: &str,
         segment_check_context: Option<&SegmentCheckContext>,
+        packed_summary: Option<&Value>,
+        typed_summary: Option<&StateSummary>,
     ) -> Result<PlannerToolOutput, RunnerError>
     where
         P: LlmProvider,
@@ -1117,6 +872,16 @@ impl<P> LlmSegmentedIntentPlanner<P> {
         let mut finalize_schema_repair_attempts = 0u8;
         let mut check_segment_schema_repair_attempts = 0u8;
         let mut no_toolcall_retry_attempts = 0u8;
+        let message_compactor = super::message_compactor::MessageCompactor::new(
+            super::message_compactor::MessageCompactorConfig {
+                keep_recent_rounds: 3,
+                messages_token_budget: self
+                    .usage_tracker
+                    .context_limit_tokens
+                    .map(|limit| limit * 6 / 10) // 60% of context for messages history
+                    .unwrap_or(0),
+            },
+        );
         let tools = segmented_planner_tools_for_phase(phase);
         if self.verbose_llm {
             eprintln!(
@@ -1262,7 +1027,11 @@ impl<P> LlmSegmentedIntentPlanner<P> {
                     "segmented planner provider returned no tool calls: no_tool_calls_retries_exhausted payload={payload_text}"
                 )));
             }
-            validate_tool_calls_for_phase(&response.tool_calls, phase)?;
+            validate_tool_calls_for_phase_with_context(
+                &response.tool_calls,
+                phase,
+                ToolCallValidationContext,
+            )?;
 
             messages.push(LlmMessage {
                 role: MessageRole::Assistant,
@@ -1287,33 +1056,9 @@ impl<P> LlmSegmentedIntentPlanner<P> {
                     call.name != finalize_tool && is_parallel_readonly_tool(call.name.as_str())
                 });
             if all_parallel_readonly {
-                let planner_usage = self.llm_usage_value();
-                let projection_budget_tokens =
-                    ToolMemoryBudgetPolicy::derive_tool_memory_projection_token_budget(
-                        Some(&planner_usage),
-                        None,
-                    );
-                let remaining_tokens = planner_usage
-                    .get("context_remaining_tokens")
-                    .and_then(Value::as_u64);
-                let usage_ratio_bps = planner_usage
-                    .get("context_soft_limit_tokens")
-                    .and_then(Value::as_u64)
-                    .and_then(|soft_limit| {
-                        if soft_limit == 0 {
-                            None
-                        } else {
-                            Some(10_000_u64.saturating_sub(
-                                remaining_tokens.unwrap_or(0).saturating_mul(10_000) / soft_limit,
-                            ))
-                        }
-                    });
-                let pressure_mode = ToolMemoryBudgetPolicy::derive_context_pressure_mode(
-                    usage_ratio_bps,
-                    remaining_tokens,
-                );
-                let compress_level =
-                    ToolMemoryBudgetPolicy::derive_global_compress_level(pressure_mode);
+                let budget = compute_tool_dispatch_budget(&self.llm_usage_value());
+                let projection_budget_tokens = budget.projection_budget_tokens;
+                let compress_level = budget.compress_level;
                 self.diagnostics_tracker
                     .observe_parallel_batch(response.tool_calls.len() as u64);
 
@@ -1366,7 +1111,7 @@ impl<P> LlmSegmentedIntentPlanner<P> {
                             continue;
                         }
                     }
-                    let decoded = decode_segmented_tool_call_with_memory(
+                    let decoded = decode_segmented_tool_call_with_memory_and_summary(
                         &effective_call,
                         finalize_tool,
                         phase,
@@ -1375,6 +1120,8 @@ impl<P> LlmSegmentedIntentPlanner<P> {
                         None,
                         Some(projection_budget_tokens),
                         Some(compress_level),
+                        packed_summary,
+                        typed_summary,
                     );
                     let latency_ms = started_at.elapsed().as_millis() as u64;
                     if let (
@@ -1426,7 +1173,7 @@ impl<P> LlmSegmentedIntentPlanner<P> {
                                     ("latency_ms", latency_ms.to_string()),
                                 ],
                             );
-                            if tool_name == "catalog.search" {
+                            if tool_name == "catalog.discover" {
                                 let signature =
                                     catalog_search_signature_from_result(content.as_str());
                                 let is_empty = catalog_search_result_is_empty(content.as_str());
@@ -1540,6 +1287,19 @@ impl<P> LlmSegmentedIntentPlanner<P> {
                         tool_calls: vec![],
                     });
                 }
+                if message_compactor.should_compact(&messages) {
+                    let before_len = messages.len();
+                    message_compactor.compact(&mut messages);
+                    if self.verbose_llm {
+                        eprintln!(
+                            "[llm] messages_compacted round={} phase={} before={} after={}",
+                            round + 1,
+                            phase_name(phase),
+                            before_len,
+                            messages.len(),
+                        );
+                    }
+                }
                 if self.verbose_llm {
                     let duplicate_ratio_bps = self.diagnostics_tracker.duplicate_ratio_bps();
                     eprintln!(
@@ -1553,7 +1313,7 @@ impl<P> LlmSegmentedIntentPlanner<P> {
                         round_signal.compressed,
                         round_memory_hits,
                         duplicate_ratio_bps,
-                        self.diagnostics_tracker.empty_search_streak_max,
+                        self.diagnostics_tracker.empty_search_streak_max(),
                         round_signal.adjudicate_mode,
                         effective_max_tool_rounds,
                     );
@@ -1607,34 +1367,10 @@ impl<P> LlmSegmentedIntentPlanner<P> {
                 );
                 let mut effective_call = call.clone();
                 effective_call.arguments = effective_arguments;
-                let planner_usage = self.llm_usage_value();
-                let projection_budget_tokens =
-                    ToolMemoryBudgetPolicy::derive_tool_memory_projection_token_budget(
-                        Some(&planner_usage),
-                        None,
-                    );
-                let remaining_tokens = planner_usage
-                    .get("context_remaining_tokens")
-                    .and_then(Value::as_u64);
-                let usage_ratio_bps = planner_usage
-                    .get("context_soft_limit_tokens")
-                    .and_then(Value::as_u64)
-                    .and_then(|soft_limit| {
-                        if soft_limit == 0 {
-                            None
-                        } else {
-                            Some(10_000_u64.saturating_sub(
-                                remaining_tokens.unwrap_or(0).saturating_mul(10_000) / soft_limit,
-                            ))
-                        }
-                    });
-                let pressure_mode = ToolMemoryBudgetPolicy::derive_context_pressure_mode(
-                    usage_ratio_bps,
-                    remaining_tokens,
-                );
-                let compress_level =
-                    ToolMemoryBudgetPolicy::derive_global_compress_level(pressure_mode);
-                let decoded = match decode_segmented_tool_call_with_memory(
+                let budget = compute_tool_dispatch_budget(&self.llm_usage_value());
+                let projection_budget_tokens = budget.projection_budget_tokens;
+                let compress_level = budget.compress_level;
+                let decoded = match decode_segmented_tool_call_with_memory_and_summary(
                     &effective_call,
                     finalize_tool,
                     phase,
@@ -1643,6 +1379,8 @@ impl<P> LlmSegmentedIntentPlanner<P> {
                     Some(&mut self.planning_memory),
                     Some(projection_budget_tokens),
                     Some(compress_level),
+                    packed_summary,
+                    typed_summary,
                 ) {
                     Ok(decoded) => decoded,
                     Err(error) => {
@@ -1837,34 +1575,73 @@ impl<P> LlmSegmentedIntentPlanner<P> {
                             && finalized_segment_is_proposed(&result)
                         {
                             if !latest_segment_check_ok {
-                                let payload = missing_pre_finalize_check_payload(finalize_tool);
-                                let content =
-                                    serde_json::to_string(&payload).map_err(RunnerError::from)?;
-                                if self.verbose_llm {
-                                    eprintln!(
-                                        "[llm] tool_result tool_call_id={} tool={} cached=false {}",
-                                        call.id,
-                                        call.name,
-                                        summarize_tool_message(
-                                            call.name.as_str(),
-                                            content.as_str()
-                                        )
-                                    );
-                                    eprintln!(
-                                        "[llm] tool_result_prompt tool_call_id={} tool={} content={}",
-                                        call.id,
-                                        call.name,
-                                        truncate_for_log(content.as_str(), 900)
-                                    );
+                                if let Some(auto_check_result) =
+                                    try_auto_check_segment_before_finalize(
+                                        &result,
+                                        self.candidate_context.as_ref(),
+                                        segment_check_context,
+                                        &mut self.planning_memory,
+                                        Some(projection_budget_tokens),
+                                        Some(compress_level),
+                                        self.verbose_llm,
+                                        phase,
+                                        finalize_tool,
+                                        &call,
+                                    )
+                                {
+                                    if auto_check_result.ok {
+                                        latest_segment_check_ok = true;
+                                        latest_checked_segment_signature =
+                                            finalized_segment_signature(&result);
+                                        super::trace::emit(
+                                            self.verbose_llm,
+                                            phase_name(phase),
+                                            "auto_check_segment_passed",
+                                            &[("tool_call_id", call.id.clone())],
+                                        );
+                                    } else {
+                                        let content = auto_check_result.content;
+                                        if self.verbose_llm {
+                                            eprintln!(
+                                                "[llm] auto_check_segment_failed tool_call_id={} tool={} {}",
+                                                call.id,
+                                                call.name,
+                                                summarize_tool_message("plan.check_segment", content.as_str())
+                                            );
+                                        }
+                                        tool_results.push(LlmMessage {
+                                            role: MessageRole::Tool,
+                                            content: Some(content),
+                                            tool_name: Some(call.name.clone()),
+                                            tool_call_id: Some(call.id.clone()),
+                                            tool_calls: vec![],
+                                        });
+                                        continue;
+                                    }
+                                } else {
+                                    let payload = missing_pre_finalize_check_payload(finalize_tool);
+                                    let content = serde_json::to_string(&payload)
+                                        .map_err(RunnerError::from)?;
+                                    if self.verbose_llm {
+                                        eprintln!(
+                                            "[llm] tool_result tool_call_id={} tool={} cached=false {}",
+                                            call.id,
+                                            call.name,
+                                            summarize_tool_message(
+                                                call.name.as_str(),
+                                                content.as_str()
+                                            )
+                                        );
+                                    }
+                                    tool_results.push(LlmMessage {
+                                        role: MessageRole::Tool,
+                                        content: Some(content),
+                                        tool_name: Some(call.name.clone()),
+                                        tool_call_id: Some(call.id.clone()),
+                                        tool_calls: vec![],
+                                    });
+                                    continue;
                                 }
-                                tool_results.push(LlmMessage {
-                                    role: MessageRole::Tool,
-                                    content: Some(content),
-                                    tool_name: Some(call.name.clone()),
-                                    tool_call_id: Some(call.id.clone()),
-                                    tool_calls: vec![],
-                                });
-                                continue;
                             }
                             let finalized_signature = finalized_segment_signature(&result);
                             if finalized_signature.is_none()
@@ -1944,6 +1721,8 @@ impl<P> LlmSegmentedIntentPlanner<P> {
                             round_memory_hits = round_memory_hits.saturating_add(1);
                         }
                         if tool_name == "plan.check_segment" {
+                            self.diagnostics_tracker
+                                .observe_check_segment_redundant_query_rejections(content.as_str());
                             latest_segment_check_ok = plan_check_result_ok(content.as_str());
                             latest_checked_segment_signature = if latest_segment_check_ok {
                                 plan_check_segment_signature_from_tool_args(&call.arguments)
@@ -1981,7 +1760,7 @@ impl<P> LlmSegmentedIntentPlanner<P> {
                                     Some(control_step_candidate_ref_hint_payload());
                             }
                         }
-                        if tool_name == "catalog.search" {
+                        if tool_name == "catalog.discover" {
                             let signature = catalog_search_signature_from_result(content.as_str());
                             let is_empty = catalog_search_result_is_empty(content.as_str());
                             if is_empty {
@@ -2098,6 +1877,19 @@ impl<P> LlmSegmentedIntentPlanner<P> {
                     tool_calls: vec![],
                 });
             }
+            if message_compactor.should_compact(&messages) {
+                let before_len = messages.len();
+                message_compactor.compact(&mut messages);
+                if self.verbose_llm {
+                    eprintln!(
+                        "[llm] messages_compacted round={} phase={} before={} after={}",
+                        round + 1,
+                        phase_name(phase),
+                        before_len,
+                        messages.len(),
+                    );
+                }
+            }
             if self.verbose_llm {
                 let duplicate_ratio_bps = self.diagnostics_tracker.duplicate_ratio_bps();
                 eprintln!(
@@ -2111,7 +1903,7 @@ impl<P> LlmSegmentedIntentPlanner<P> {
                     round_signal.compressed,
                     round_memory_hits,
                     duplicate_ratio_bps,
-                    self.diagnostics_tracker.empty_search_streak_max,
+                    self.diagnostics_tracker.empty_search_streak_max(),
                     round_signal.adjudicate_mode,
                     effective_max_tool_rounds,
                 );
@@ -2124,8 +1916,7 @@ impl<P> LlmSegmentedIntentPlanner<P> {
                 effective_max_tool_rounds,
                 "adjudicate_round_limit_reached",
             );
-            let payload_text =
-                serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+            let payload_text = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
             return Err(RunnerError::Llm(format!(
                 "segmented planner adjudicate rounds exhausted: finalize_required payload={payload_text}"
             )));
@@ -2156,6 +1947,8 @@ where
             ),
             "plan.begin",
             None,
+            None,
+            None,
         )?;
         match output {
             PlannerToolOutput::Begin(session) => {
@@ -2177,6 +1970,10 @@ where
         &mut self,
         request: SegmentPlanningRequest,
     ) -> Result<SegmentDraft, RunnerError> {
+        self.diagnostics_tracker.observe_reusable_inventory_summary(
+            request.typed_summary.as_ref(),
+            request.state_summary.as_ref(),
+        );
         self.planning_memory.ensure_scope(
             request.session.session_id.as_str(),
             request.session.snapshot_hash.as_str(),
@@ -2190,9 +1987,19 @@ where
             ),
             "plan.propose_segment",
             segment_check_context.as_ref(),
+            request.state_summary.as_ref(),
+            request.typed_summary.as_ref(),
         )?;
         match output {
             PlannerToolOutput::SegmentDraft(draft) => Ok(draft),
+            PlannerToolOutput::AbortIntent(abort) => Ok(SegmentDraft::Unavailable {
+                reason_code: "intent_aborted".to_string(),
+                message: Some(abort.summary.clone()),
+                done: true,
+                issues: vec![],
+                questions: vec![],
+                error_details: Some(intent_abort_error_details(&abort)),
+            }),
             _ => Err(RunnerError::Llm(
                 "segmented planner returned non-segment output for propose_segment".to_string(),
             )),
@@ -2200,6 +2007,10 @@ where
     }
 
     fn propose_todos(&mut self, request: TodoPlanningRequest) -> Result<TodoDraft, RunnerError> {
+        self.diagnostics_tracker.observe_reusable_inventory_summary(
+            request.typed_summary.as_ref(),
+            request.state_summary.as_ref(),
+        );
         self.planning_memory.ensure_scope(
             request.session.session_id.as_str(),
             request.session.snapshot_hash.as_str(),
@@ -2211,9 +2022,18 @@ where
             ),
             "plan.propose_todos",
             None,
+            request.state_summary.as_ref(),
+            request.typed_summary.as_ref(),
         )?;
         match output {
             PlannerToolOutput::TodoDraft(draft) => Ok(draft),
+            PlannerToolOutput::AbortIntent(abort) => Ok(TodoDraft::Unavailable {
+                reason_code: "intent_aborted".to_string(),
+                message: Some(abort.summary.clone()),
+                issues: vec![],
+                questions: vec![],
+                error_details: Some(intent_abort_error_details(&abort)),
+            }),
             _ => Err(RunnerError::Llm(
                 "segmented planner returned non-todo output for propose_todos".to_string(),
             )),
@@ -2224,6 +2044,10 @@ where
         &mut self,
         request: IntentGroundingRequest,
     ) -> Result<IntentGroundingDraft, RunnerError> {
+        self.diagnostics_tracker.observe_reusable_inventory_summary(
+            request.typed_summary.as_ref(),
+            request.state_summary.as_ref(),
+        );
         self.planning_memory.ensure_scope(
             request.session.session_id.as_str(),
             request.session.snapshot_hash.as_str(),
@@ -2235,9 +2059,18 @@ where
             ),
             "plan.ground_intent",
             None,
+            request.state_summary.as_ref(),
+            request.typed_summary.as_ref(),
         )?;
         match output {
             PlannerToolOutput::IntentGrounding(draft) => Ok(draft),
+            PlannerToolOutput::AbortIntent(abort) => Ok(IntentGroundingDraft::Unavailable {
+                reason_code: "intent_aborted".to_string(),
+                message: Some(abort.summary.clone()),
+                issues: vec![],
+                questions: vec![],
+                error_details: Some(intent_abort_error_details(&abort)),
+            }),
             _ => Err(RunnerError::Llm(
                 "segmented planner returned non-grounding output for ground_intent".to_string(),
             )),
@@ -2248,6 +2081,10 @@ where
         &mut self,
         request: SegmentPlanningRequest,
     ) -> Result<SegmentDraft, RunnerError> {
+        self.diagnostics_tracker.observe_reusable_inventory_summary(
+            request.typed_summary.as_ref(),
+            request.state_summary.as_ref(),
+        );
         self.planning_memory.ensure_scope(
             request.session.session_id.as_str(),
             request.session.snapshot_hash.as_str(),
@@ -2261,9 +2098,19 @@ where
             ),
             "plan.revise_segment",
             segment_check_context.as_ref(),
+            request.state_summary.as_ref(),
+            request.typed_summary.as_ref(),
         )?;
         match output {
             PlannerToolOutput::SegmentDraft(draft) => Ok(draft),
+            PlannerToolOutput::AbortIntent(abort) => Ok(SegmentDraft::Unavailable {
+                reason_code: "intent_aborted".to_string(),
+                message: Some(abort.summary.clone()),
+                done: true,
+                issues: vec![],
+                questions: vec![],
+                error_details: Some(intent_abort_error_details(&abort)),
+            }),
             _ => Err(RunnerError::Llm(
                 "segmented planner returned non-segment output for revise_segment".to_string(),
             )),
@@ -2283,117 +2130,59 @@ impl<P> LlmSegmentedIntentPlanner<P> {
             cursor: request.session.cursor.clone(),
             pack_snapshot_hash: begin.pack_snapshot_hash.clone(),
             chain_scope: begin.chain_scope.clone(),
-            known_input_refs: super::known_input_refs_from_state_summary(
-                request.state_summary.as_ref(),
-            ),
-            grounding_fact_keys: super::grounding_fact_keys_from_state_summary(
-                request.state_summary.as_ref(),
-            ),
-            current_todo: request
-                .state_summary
+            volatile_facts_policy: self.volatile_facts_policy,
+            known_input_refs: request
+                .typed_summary
                 .as_ref()
-                .and_then(|summary| summary.pointer("/todo_state/current_todo"))
-                .cloned(),
+                .map(|summary| super::known_input_refs_from_typed_summary(Some(summary)))
+                .unwrap_or_else(|| {
+                    super::reference_inventory::ReferenceInventory::build(
+                        request.state_summary.as_ref(),
+                    )
+                    .input_refs()
+                }),
+            grounding_fact_keys: request
+                .typed_summary
+                .as_ref()
+                .map(|summary| super::grounding_fact_keys_from_typed_summary(Some(summary)))
+                .unwrap_or_else(|| {
+                    super::intent_context::grounding_fact_keys_from_state_summary(
+                        request.state_summary.as_ref(),
+                    )
+                    .into_iter()
+                    .filter_map(|raw_key| super::normalize_fact_hint_key(raw_key.as_str()))
+                    .collect()
+                }),
+            current_todo_scope: request
+                .typed_summary
+                .as_ref()
+                .and_then(|summary| summary.todo_state_view().current_todo_execution_scope())
+                .map(str::to_string)
+                .or_else(|| {
+                    request
+                        .state_summary
+                        .as_ref()
+                        .and_then(|summary| {
+                            summary.pointer("/todo_state/current_todo/execution_scope")
+                        })
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                }),
         })
     }
 }
 
-#[derive(Debug, Deserialize)]
-pub(super) struct CandidateDetailArgs {
-    pub(super) refs: Vec<String>,
-}
+// Tool argument structs are defined in tools/args.rs; import only those
+// still referenced within this module.
+use super::tools::args::{GuideGetArgs, ListCandidatesFilterArgs, ResolveMissingFactsArgs};
 
-#[derive(Debug, Deserialize, Default, Clone)]
-pub(super) struct ListCandidatesFilterArgs {
-    #[serde(default)]
-    pub(super) chain: Option<String>,
-    #[serde(default)]
-    pub(super) protocol: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Default)]
-pub(super) struct ListCandidatesArgs {
-    #[serde(default)]
-    pub(super) chain: Option<String>,
-    #[serde(default)]
-    pub(super) protocol: Option<String>,
-    #[serde(default)]
-    pub(super) filter: Option<ListCandidatesFilterArgs>,
-}
-
-impl ListCandidatesArgs {
-    pub(super) fn normalized_filter(&self) -> ListCandidatesFilterArgs {
-        let chain = self
-            .filter
-            .as_ref()
-            .and_then(|filter| filter.chain.as_deref())
-            .or(self.chain.as_deref())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string);
-        let protocol = self
-            .filter
-            .as_ref()
-            .and_then(|filter| filter.protocol.as_deref())
-            .or(self.protocol.as_deref())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_ascii_lowercase);
-        ListCandidatesFilterArgs { chain, protocol }
-    }
-}
-
-#[derive(Debug, Deserialize, Default)]
-pub(super) struct CatalogSearchArgs {
-    #[serde(default)]
-    pub(super) query: Option<String>,
-    #[serde(default)]
-    pub(super) kind: Option<String>,
-    #[serde(default)]
-    pub(super) chain: Option<String>,
-    #[serde(default)]
-    pub(super) min_risk_level: Option<u8>,
-    #[serde(default)]
-    pub(super) max_risk_level: Option<u8>,
-    #[serde(default)]
-    pub(super) limit: Option<usize>,
-}
-
-#[derive(Debug, Deserialize, Default)]
-pub(super) struct GuideGetArgs {
-    #[serde(default)]
-    pub(super) schema: Option<String>,
-    #[serde(default)]
-    pub(super) topic: Option<String>,
-    #[serde(default)]
-    pub(super) full: Option<bool>,
-}
-
-#[derive(Debug, Deserialize, Default)]
-pub(super) struct ResolveMissingFactsArgs {
-    #[serde(default)]
-    pub(super) missing_refs: Vec<String>,
-    #[serde(default)]
-    pub(super) limit_per_ref: Option<usize>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(super) struct CheckSegmentArgs {
-    pub(super) segment: Value,
-}
-
-#[derive(Debug, Deserialize)]
-pub(super) struct BeginLimits {
-    pub(super) max_rounds: u8,
-    pub(super) max_segments: u8,
-}
-
-#[derive(Debug, Deserialize)]
-pub(super) struct BeginToolArgs {
-    pub(super) session_id: Value,
-    pub(super) snapshot_hash: Value,
-    pub(super) cursor: Value,
-    pub(super) limits: BeginLimits,
+fn intent_abort_error_details(abort: &super::tools::dispatch::AbortIntentOutput) -> Value {
+    json!({
+        "reason_code": abort.reason_code,
+        "summary": abort.summary,
+        "evidence": abort.evidence,
+        "user_fix_hint": abort.user_fix_hint,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -2600,6 +2389,14 @@ impl PlannerErrorDetails {
             .filter(|value| !value.is_empty())
             .map(str::to_string)
     }
+
+    fn to_runtime_value(&self) -> Value {
+        match self {
+            Self::Typed(typed) => serde_json::to_value(typed)
+                .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
+            Self::Raw(raw) => raw.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -2695,8 +2492,17 @@ fn schema_guide_payload(topic: &str) -> Option<Value> {
         "cel" => Some(json!({
             "topic": "cel",
             "summary": "Use CEL for deterministic conditional gating and lightweight value computation. Keep expressions side-effect free.",
-            "allowed_namespaces": ["inputs", "params", "nodes", "query", "calculated", "policy", "ctx", "contracts"],
+            "runtime_root_contract": "CEL can read host-exposed runtime roots from ResolverContext.runtime plus root_overrides. In segmented planning the common roots are inputs, params, nodes, and other host-projected runtime roots when present. Do not invent roots that are not present in host context.",
+            "common_runtime_roots": ["inputs", "params", "nodes", "query", "calculated", "policy", "ctx", "contracts"],
             "node_ref_rule": "Use nodes.<step_id>.outputs.<field> and only reference step ids in the same segment. Do not use segment/step form.",
+            "common_helpers": [
+                "to_atomic(amount, decimals)",
+                "to_human(amount_atomic, decimals)",
+                "size(value)",
+                "contains(container, needle)",
+                "int(value)",
+                "string(value)"
+            ],
             "patterns": [
                 {
                     "name": "gate_by_query_output",
@@ -2717,7 +2523,8 @@ fn schema_guide_payload(topic: &str) -> Option<Value> {
             ],
             "avoid": [
                 "Do not call external services in CEL.",
-                "Do not reference unknown or cross-segment node ids."
+                "Do not reference unknown or cross-segment node ids.",
+                "Do not invent runtime roots that are not present in host context."
             ]
         })),
         "valueref" => Some(json!({
@@ -2731,6 +2538,41 @@ fn schema_guide_payload(topic: &str) -> Option<Value> {
             "asset_hint": {
                 "preferred_shape": {"object":{"address":{"lit":"0x..."}, "chain_ref":{"lit":"eip155:1"}}},
                 "normalized_at_compile": "chain_ref -> chain_id"
+            }
+        })),
+        "typing" => Some(json!({
+            "topic": "typing",
+            "tool_call_typing_contract": {
+                "rule": "All tool arguments/finalize payloads must use strict JSON schema types; do not quote booleans or numbers.",
+                "examples": {
+                    "good": [{"full": true}, {"done": false}, {"limit": 5}],
+                    "bad": [{"full": "true"}, {"done": "false"}, {"limit": "5"}]
+                }
+            },
+            "schema_lookup_contract": {
+                "rule": "If unsure about schema fields or CEL/ValueRef usage, call guide.get before finalizing.",
+                "typing_examples": {
+                    "good": [{"schema":"ais-plan-sketch/0.1.0"}, {"topic":"cel"}],
+                    "bad": [{"schema":{"id":"ais-plan-sketch/0.1.0"}}, {"full":"true"}]
+                }
+            }
+        })),
+        "failure" => Some(json!({
+            "topic": "failure",
+            "failure_contract": {
+                "unavailable_or_invalid": {
+                    "required_fields": ["status", "done", "error.reason_code"],
+                    "status_enum": ["unavailable", "invalid"]
+                },
+                "missing_required_input": {
+                    "when": "status=unavailable and error.reason_code=missing_required_input",
+                    "required_fields": ["error.details.questions", "error.details.recovery_exhaustion.unresolved_refs", "error.details.recovery_exhaustion.reasons", "error.details.recovery_exhaustion.attempt_trace_id"],
+                    "question_shape": {"id": "string", "question": "string", "required": "boolean(optional)", "options": [{"label": "string", "value": "any(optional)"}]},
+                    "recovery_exhaustion_shape": {"unresolved_refs": ["inputs.<slot>"], "reasons": ["string(non-empty)"], "attempt_trace_id": "string(non-empty)"}
+                }
+            },
+            "input_ref_semantic_contract": {
+                "rule": "For unknown_input_ref repair, preserve slot semantics: token/address params map to address-like refs (*.address); *.decimals refs are only for decimal slots."
             }
         })),
         _ => None,
@@ -2944,6 +2786,33 @@ fn decode_segmented_tool_call_with_memory(
     memory: Option<&mut PlanningMemory>,
     projection_budget_tokens: Option<usize>,
     compress_level: Option<super::context::packing::ContextCompressLevel>,
+    typed_summary: Option<&StateSummary>,
+) -> Result<DecodedSegmentedToolCall, RunnerError> {
+    decode_segmented_tool_call_with_memory_and_summary(
+        tool,
+        finalize_tool,
+        phase,
+        candidate_context,
+        segment_check_context,
+        memory,
+        projection_budget_tokens,
+        compress_level,
+        None,
+        typed_summary,
+    )
+}
+
+fn decode_segmented_tool_call_with_memory_and_summary(
+    tool: &ToolCall,
+    finalize_tool: &str,
+    phase: PlannerRoundPhase,
+    candidate_context: Option<&CandidateContext>,
+    segment_check_context: Option<&SegmentCheckContext>,
+    memory: Option<&mut PlanningMemory>,
+    projection_budget_tokens: Option<usize>,
+    compress_level: Option<super::context::packing::ContextCompressLevel>,
+    packed_summary: Option<&Value>,
+    typed_summary: Option<&StateSummary>,
 ) -> Result<DecodedSegmentedToolCall, RunnerError> {
     super::tools::dispatch::decode_segmented_tool_call_with_memory(
         tool,
@@ -2954,13 +2823,50 @@ fn decode_segmented_tool_call_with_memory(
         memory,
         projection_budget_tokens,
         compress_level,
+        packed_summary,
+        typed_summary,
     )
+}
+
+struct ToolDispatchBudget {
+    projection_budget_tokens: usize,
+    compress_level: super::context::packing::ContextCompressLevel,
+}
+
+fn compute_tool_dispatch_budget(planner_usage: &Value) -> ToolDispatchBudget {
+    let projection_budget_tokens =
+        ToolMemoryBudgetPolicy::derive_tool_memory_projection_token_budget(
+            Some(planner_usage),
+            None,
+        );
+    let remaining_tokens = planner_usage
+        .get("context_remaining_tokens")
+        .and_then(Value::as_u64);
+    let usage_ratio_bps = planner_usage
+        .get("context_soft_limit_tokens")
+        .and_then(Value::as_u64)
+        .and_then(|soft_limit| {
+            if soft_limit == 0 {
+                None
+            } else {
+                Some(10_000_u64.saturating_sub(
+                    remaining_tokens.unwrap_or(0).saturating_mul(10_000) / soft_limit,
+                ))
+            }
+        });
+    let pressure_mode =
+        ToolMemoryBudgetPolicy::derive_context_pressure_mode(usage_ratio_bps, remaining_tokens);
+    let compress_level = ToolMemoryBudgetPolicy::derive_global_compress_level(pressure_mode);
+    ToolDispatchBudget {
+        projection_budget_tokens,
+        compress_level,
+    }
 }
 
 fn is_parallel_readonly_tool(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "catalog.search" | "get_candidate_detail" | "guide.get" | "list_candidates"
+        "catalog.discover" | "get_candidate_detail" | "guide.get" | "runtime.query"
     )
 }
 
@@ -3162,28 +3068,7 @@ fn query_return_field_names(detail: &Value) -> Vec<String> {
 }
 
 fn normalize_missing_fact_ref(raw: &str) -> Option<String> {
-    let trimmed = raw.trim_matches(|ch: char| {
-        ch.is_whitespace() || matches!(ch, '`' | '"' | '\'' | ',' | ';' | '.' | ')' | '(')
-    });
-    let right_of_equals = trimmed
-        .rsplit_once('=')
-        .map(|(_, value)| value)
-        .unwrap_or(trimmed);
-    let normalized = right_of_equals
-        .strip_prefix("runtime.")
-        .unwrap_or(right_of_equals);
-    let key = if let Some(key) = normalized.strip_prefix("inputs.") {
-        key
-    } else if let Some(key) = normalized.strip_prefix("input.") {
-        key
-    } else {
-        normalized
-    };
-    let key = key.strip_suffix(".value").unwrap_or(key).trim_matches('.');
-    if key.is_empty() {
-        return None;
-    }
-    Some(format!("inputs.{key}"))
+    super::input_normalize::canonical_missing_ref(raw)
 }
 
 fn normalized_tokens(raw: &str) -> Vec<String> {
@@ -3477,6 +3362,59 @@ fn plan_sketch_segment_signature(segment: &PlanSketchSegment) -> Option<String> 
     stable_hash_hex(&value, &StableJsonOptions::default()).ok()
 }
 
+struct AutoCheckResult {
+    ok: bool,
+    content: String,
+}
+
+fn try_auto_check_segment_before_finalize(
+    result: &PlannerToolOutput,
+    candidate_context: Option<&CandidateContext>,
+    segment_check_context: Option<&SegmentCheckContext>,
+    memory: &mut PlanningMemory,
+    projection_budget_tokens: Option<usize>,
+    compress_level: Option<super::context::packing::ContextCompressLevel>,
+    verbose: bool,
+    phase: PlannerRoundPhase,
+    finalize_tool: &str,
+    original_call: &ToolCall,
+) -> Option<AutoCheckResult> {
+    let PlannerToolOutput::SegmentDraft(SegmentDraft::Proposed { segment, .. }) = result else {
+        return None;
+    };
+    let segment_value = serde_json::to_value(segment).ok()?;
+    let synthetic_call = ToolCall {
+        id: format!("{}_auto_check", original_call.id),
+        name: "plan.check_segment".to_string(),
+        arguments: json!({ "segment": segment_value }),
+    };
+    let decoded = decode_segmented_tool_call_with_memory(
+        &synthetic_call,
+        finalize_tool,
+        phase,
+        candidate_context,
+        segment_check_context,
+        Some(memory),
+        projection_budget_tokens,
+        compress_level,
+        None,
+    );
+    match decoded {
+        Ok(DecodedSegmentedToolCall::ToolMessage { content, .. }) => {
+            let ok = plan_check_result_ok(content.as_str());
+            if verbose {
+                eprintln!(
+                    "[llm] auto_check_segment ok={} content={}",
+                    ok,
+                    truncate_for_log(content.as_str(), 300)
+                );
+            }
+            Some(AutoCheckResult { ok, content })
+        }
+        _ => None,
+    }
+}
+
 fn plan_check_failure_signature(content: &str) -> Option<String> {
     let value = serde_json::from_str::<Value>(content).ok()?;
     if value.get("ok").and_then(Value::as_bool) == Some(true) {
@@ -3513,6 +3451,7 @@ fn repeated_plan_check_failure_payload(
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PlanCheckIssueSummary {
     reason_code: String,
+    family_reason_code: Option<String>,
     step_id: String,
     message: String,
     reference: String,
@@ -3532,11 +3471,14 @@ fn plan_check_issue_summaries(value: &Value) -> Vec<PlanCheckIssueSummary> {
         .iter()
         .map(|item| PlanCheckIssueSummary {
             reason_code: item
-                .get("gate_reason_code")
+                .get("reason_code")
                 .and_then(Value::as_str)
-                .or_else(|| item.get("reason_code").and_then(Value::as_str))
                 .unwrap_or("unknown")
                 .to_string(),
+            family_reason_code: item
+                .get("family_reason_code")
+                .and_then(Value::as_str)
+                .map(str::to_string),
             step_id: item
                 .get("step_id")
                 .and_then(Value::as_str)
@@ -3658,6 +3600,17 @@ fn non_empty_rules(lines: Option<Vec<String>>) -> Option<Vec<String>> {
     (!lines.is_empty()).then_some(lines)
 }
 
+fn non_empty_text(text: Option<String>) -> Option<String> {
+    text.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
 pub(super) fn coerce_required_scalar_string(
     field: &str,
     value: &Value,
@@ -3716,13 +3669,20 @@ pub(super) fn parse_segment_draft(args: SegmentToolArgs) -> Result<SegmentDraft,
                 RunnerError::Llm("unavailable segment draft requires `error`".to_string())
             })?;
             let questions = extract_missing_input_questions(error.details.as_ref(), &questions);
-            validate_missing_required_input_error("plan.propose_segment|plan.revise_segment", &error, questions.as_slice())?;
+            validate_missing_required_input_error(
+                "plan.propose_segment|plan.revise_segment",
+                &error,
+                questions.as_slice(),
+            )?;
+            let error_details =
+                extract_missing_input_error_details(error.details.as_ref(), questions.as_slice());
             Ok(SegmentDraft::Unavailable {
                 reason_code: error.reason_code,
                 message: error.message,
                 done,
                 issues: issues.into_values(),
                 questions,
+                error_details,
             })
         }
         "invalid" => {
@@ -3769,12 +3729,19 @@ pub(super) fn parse_todo_draft(args: TodoToolArgs) -> Result<TodoDraft, RunnerEr
                 RunnerError::Llm("unavailable todo draft requires `error`".to_string())
             })?;
             let questions = extract_missing_input_questions(error.details.as_ref(), &questions);
-            validate_missing_required_input_error("plan.propose_todos", &error, questions.as_slice())?;
+            validate_missing_required_input_error(
+                "plan.propose_todos",
+                &error,
+                questions.as_slice(),
+            )?;
+            let error_details =
+                extract_missing_input_error_details(error.details.as_ref(), questions.as_slice());
             Ok(TodoDraft::Unavailable {
                 reason_code: error.reason_code,
                 message: error.message,
                 issues: issues.into_values(),
                 questions,
+                error_details,
             })
         }
         "invalid" => {
@@ -3812,9 +3779,15 @@ pub(super) fn parse_grounding_draft(
         "proposed" => {
             let issues = issues.into_values();
             let questions = questions.into_values();
-            let has_actionable_missing_refs = missing_refs
+            let missing_refs = missing_refs
                 .iter()
-                .any(|missing_ref| !missing_ref.trim().is_empty());
+                .filter_map(|missing_ref| {
+                    super::input_normalize::canonical_missing_ref(missing_ref)
+                })
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            let has_actionable_missing_refs = !missing_refs.is_empty();
             if ready_for_todos == Some(false)
                 && questions.is_empty()
                 && !has_actionable_missing_refs
@@ -3823,11 +3796,13 @@ pub(super) fn parse_grounding_draft(
                     "invalid plan.ground_intent args: status=proposed with ready_for_todos=false requires non-empty `questions` or `missing_refs`".to_string(),
                 ));
             }
-            let inferred_ready = ready_for_todos
-                .unwrap_or_else(|| questions.is_empty() && !resolved_inputs.is_empty());
+            let inferred_ready = ready_for_todos.unwrap_or_else(|| {
+                questions.is_empty() && (!resolved_inputs.is_empty() || !intent_facts.is_empty())
+            });
             Ok(IntentGroundingDraft::Proposed {
                 summary,
                 ready_for_todos: inferred_ready,
+                missing_refs,
                 resolved_inputs,
                 intent_facts,
                 confidence,
@@ -3840,12 +3815,19 @@ pub(super) fn parse_grounding_draft(
                 RunnerError::Llm("unavailable grounding draft requires `error`".to_string())
             })?;
             let questions = extract_missing_input_questions(error.details.as_ref(), &questions);
-            validate_missing_required_input_error("plan.ground_intent", &error, questions.as_slice())?;
+            validate_missing_required_input_error(
+                "plan.ground_intent",
+                &error,
+                questions.as_slice(),
+            )?;
+            let error_details =
+                extract_missing_input_error_details(error.details.as_ref(), questions.as_slice());
             Ok(IntentGroundingDraft::Unavailable {
                 reason_code: error.reason_code,
                 message: error.message,
                 issues: issues.into_values(),
                 questions,
+                error_details,
             })
         }
         "invalid" => {
@@ -3876,7 +3858,8 @@ pub(super) fn decode_segment_tool_args(
     raw_arguments: Value,
     tool_name: &str,
 ) -> Result<SegmentToolArgs, RunnerError> {
-    decode_planner_finalize_tool_args(raw_arguments, tool_name)
+    let normalized = normalize_segment_tool_arguments(raw_arguments);
+    decode_planner_finalize_tool_args(normalized, tool_name)
 }
 
 pub(super) fn decode_todo_tool_args(
@@ -3954,6 +3937,17 @@ fn normalize_grounding_tool_arguments(raw_arguments: Value) -> Value {
     Value::Object(out)
 }
 
+fn normalize_segment_tool_arguments(raw_arguments: Value) -> Value {
+    let Some(object) = raw_arguments.as_object() else {
+        return raw_arguments;
+    };
+    let mut out = object.clone();
+    coerce_json_string_field(&mut out, "error");
+    coerce_json_string_field(&mut out, "issues");
+    coerce_json_string_field(&mut out, "questions");
+    Value::Object(out)
+}
+
 fn parse_stringified_json_value(raw: &Value) -> Option<Value> {
     raw.as_str()
         .and_then(|text| serde_json::from_str::<Value>(text).ok())
@@ -3998,6 +3992,17 @@ fn extract_missing_input_questions(
         .iter()
         .filter_map(|question| serde_json::to_value(question).ok())
         .collect::<Vec<_>>()
+}
+
+fn extract_missing_input_error_details(
+    details: Option<&PlannerErrorDetails>,
+    questions: &[Value],
+) -> Option<Value> {
+    let mut object = details
+        .map(PlannerErrorDetails::to_runtime_value)
+        .and_then(|value| value.as_object().cloned())?;
+    object.insert("questions".to_string(), Value::Array(questions.to_vec()));
+    Some(Value::Object(object))
 }
 
 fn validate_missing_required_input_error(
@@ -4158,27 +4163,6 @@ fn missing_step_candidate_ref_diagnostics(raw: &Value) -> Option<String> {
 fn segmented_planner_tools() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
-            name: "list_candidates".to_string(),
-            description: "Get executable candidates snapshot for current workspace/pack"
-                .to_string(),
-            input_schema: json!({
-              "type":"object",
-              "properties":{
-                "chain":{"type":"string"},
-                "protocol":{"type":"string"},
-                "filter":{
-                  "type":"object",
-                  "properties":{
-                    "chain":{"type":"string"},
-                    "protocol":{"type":"string"}
-                  },
-                  "additionalProperties":false
-                }
-              },
-              "additionalProperties":false
-            }),
-        },
-        ToolSpec {
             name: "get_candidate_detail".to_string(),
             description: "Fetch candidate detail cards by refs".to_string(),
             input_schema: json!({
@@ -4189,20 +4173,21 @@ fn segmented_planner_tools() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
-            name: "catalog.search".to_string(),
-            description: "Search candidates by keyword/risk/chain with bounded result size"
+            name: "catalog.discover".to_string(),
+            description: "Discover executable candidates by filter (chain/protocol) or keyword search. Without query, returns filtered snapshot; with query, performs keyword search."
                 .to_string(),
             input_schema: json!({
-              "type":"object",
-              "properties":{
-                "query":{"type":"string"},
-                "kind":{"type":"string","enum":["action","query","any"]},
-                "chain":{"type":"string"},
-                "min_risk_level":{"type":"integer","minimum":0,"maximum":10},
-                "max_risk_level":{"type":"integer","minimum":0,"maximum":10},
-                "limit":{"type":"integer","minimum":1,"maximum":24}
+              "type": "object",
+              "properties": {
+                "chain": {"type": "string"},
+                "protocol": {"type": "string"},
+                "query": {"type": "string", "description": "Keyword search query; omit for filter-only snapshot"},
+                "kind": {"type": "string", "enum": ["action", "query", "any"]},
+                "min_risk_level": {"type": "integer", "minimum": 0, "maximum": 10},
+                "max_risk_level": {"type": "integer", "minimum": 0, "maximum": 10},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 24}
               },
-              "additionalProperties":false
+              "additionalProperties": false
             }),
         },
         ToolSpec {
@@ -4227,7 +4212,7 @@ fn segmented_planner_tools() -> Vec<ToolSpec> {
                 },
                 {
                   "properties":{
-                    "topic":{"type":"string","enum":["cel","valueref"]},
+                    "topic":{"type":"string","enum":["cel","valueref","typing","failure"]},
                     "full":{"type":"boolean"}
                   },
                   "required":["topic"],
@@ -4242,6 +4227,33 @@ fn segmented_planner_tools() -> Vec<ToolSpec> {
             description: "Compile-check a segment and return structured issues without executing."
                 .to_string(),
             input_schema: plan_check_segment_tool_schema(),
+        },
+        ToolSpec {
+            name: "runtime.query".to_string(),
+            description: "Query runtime ref values across inputs/facts/node-outputs namespaces. Use action=inspect to verify host-resolved ref values; use action=resolve to check resolution status and available query candidates for missing refs."
+                .to_string(),
+            input_schema: json!({
+              "type": "object",
+              "properties": {
+                "action": {
+                  "type": "string",
+                  "enum": ["inspect", "resolve"]
+                },
+                "refs": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "description": "Canonical ref keys: inputs.*, facts.*, nodes.<step_id>.outputs.<field>"
+                }
+              },
+              "required": ["action", "refs"],
+              "additionalProperties": false
+            }),
+        },
+        ToolSpec {
+            name: "plan.abort_intent".to_string(),
+            description: "Terminally abort current intent when recovery is exhausted and evidence is explicit."
+                .to_string(),
+            input_schema: plan_abort_intent_tool_schema(),
         },
         ToolSpec {
             name: "plan.begin".to_string(),
@@ -4396,6 +4408,39 @@ fn plan_ground_intent_tool_schema() -> Value {
             "details":{"type":"object","additionalProperties":true}
           }
         }
+      }
+    })
+}
+
+fn plan_abort_intent_tool_schema() -> Value {
+    json!({
+      "type":"object",
+      "additionalProperties": false,
+      "required": ["reason_code", "summary", "evidence"],
+      "properties": {
+        "reason_code": {
+          "type":"string",
+          "enum": [
+            "insufficient_intent_information",
+            "invalid_user_inputs",
+            "conflicting_constraints",
+            "unsupported_capability",
+            "policy_blocked",
+            "recovery_exhausted"
+          ]
+        },
+        "summary": {"type":"string", "minLength": 10, "maxLength": 300},
+        "evidence": {
+          "type":"object",
+          "additionalProperties": false,
+          "properties": {
+            "attempted_recovery": {"type":"array", "items":{"type":"string"}},
+            "invalid_fields": {"type":"array", "items":{"type":"string"}},
+            "missing_refs": {"type":"array", "items":{"type":"string"}}
+          },
+          "required": ["attempted_recovery"]
+        },
+        "user_fix_hint": {"type":"string", "maxLength": 300}
       }
     })
 }
@@ -4585,74 +4630,6 @@ fn render_segment_prompt_with_patch(
                 "Never output legacy branch-tree keys (if_true/if_false/then/else/children); branch is encoded by normal flat steps + when/depends_on."
             ]
         },
-        "segment_contract": {
-            "required_step_fields": ["id", "kind", "inputs"],
-            "candidate_ref_rule": "required for query/action; optional for assert/branch control steps",
-            "kind_enum": ["action", "query", "assert", "branch"],
-            "optional_runtime_controls": ["until", "retry", "timeout_ms"],
-            "forbidden_step_fields": ["if_true", "if_false", "then", "else", "children", "steps_if_true", "steps_if_false"],
-            "notes": "depends_on references step ids inside the same segment",
-            "branch_encoding": "use flat steps; express branch path by when.cel and dependencies. Do not nest child steps under a branch step."
-        },
-        "value_ref_contract": {
-            "allowed": ["lit", "ref", "cel", "object", "array"],
-            "examples": [
-                {"amount": {"lit": "10"}},
-                {"owner": {"ref": "inputs.owner"}},
-                {"ok": {"cel": "nodes.q_balance.outputs.balance > 100"}}
-            ],
-            "cel_namespaces": ["inputs", "params", "nodes", "query", "calculated", "policy", "ctx", "contracts"],
-            "node_ref_rule": "Use nodes.<step_id>.outputs.<field> and same-segment step ids only; do not use segment/step path."
-        },
-        "asset_param_contract": {
-            "rule": "for param type=asset, input must resolve to object with address",
-            "preferred_shape": {"object":{"address":{"lit":"0x..."}, "chain_ref":{"lit":"eip155:..."}}},
-            "shorthand": ["token: \"0x...\"", "token: {\"lit\":\"0x...\"}", "token: {\"object\":{\"address\":{\"lit\":\"0x...\"},\"chain_id\":{\"lit\":\"eip155:...\"}}}"],
-            "note": "compiler normalizes chain_ref to chain_id and may normalize shorthand to preferred asset object"
-        },
-        "write_gate_contract": {
-            "scope": "transfer/swap-like action steps",
-            "required_pattern": "query -> assert|branch -> action",
-            "requirements": [
-                "action.depends_on must include at least one assert|branch gate step",
-                "gate(assert|branch).depends_on must include query step ids in the same segment (directly or via gate->gate chain)",
-                "gate step must be backed by query facts in the same segment",
-                "if facts are missing, call catalog.resolve_missing_facts with missing_refs and add matched query steps (e.g. decimals query) before write; if none available return missing_required_input"
-            ],
-            "minimal_template": {
-                "query_step": {"id":"q_balance","kind":"query","candidate_ref":"...","inputs":{}},
-                "gate_step": {"id":"g_balance_ok","kind":"assert","depends_on":["q_balance"],"inputs":{},"when":{"cel":"nodes.q_balance.outputs.balance > inputs.threshold"}},
-                "action_step": {"id":"a_transfer","kind":"action","candidate_ref":"...","depends_on":["g_balance_ok"],"inputs":{}}
-            }
-        },
-        "schema_lookup_contract": {
-            "rule": "If you are unsure about schema fields or CEL/ValueRef usage, call guide.get before finalizing.",
-            "examples": [
-                {"schema":"ais-plan-sketch/0.1.0"},
-                {"schema":"ais-agent-intent/0.0.1"},
-                {"topic":"cel"},
-                {"topic":"valueref"}
-            ],
-            "typing_examples": {
-                "good": [
-                    {"schema":"ais-plan-sketch/0.1.0"},
-                    {"schema":"ais-plan-sketch/0.1.0","full":true},
-                    {"topic":"cel"}
-                ],
-                "bad": [
-                    {"schema":{"id":"ais-plan-sketch/0.1.0"}},
-                    {"topic":{"name":"cel"}},
-                    {"schema":"ais-plan-sketch/0.1.0","full":"true"}
-                ]
-            }
-        },
-        "tool_call_typing_contract": {
-            "rule": "All tool arguments/finalize payloads must use strict JSON schema types; do not quote booleans or numbers.",
-            "examples": {
-                "good": [{"full": true}, {"done": false}, {"limit": 5}, {"cursor": "0"}],
-                "bad": [{"full": "true"}, {"done": "false"}, {"limit": "5"}]
-            }
-        },
         "self_check_before_tool_or_finalize": {
             "checklist": [
                 "Tool is allowed in current phase and finalize tool (if any) is last.",
@@ -4665,47 +4642,6 @@ fn render_segment_prompt_with_patch(
         "check_segment_contract": {
             "rule": "Before finalizing proposed/revised segment, you must call plan.check_segment and only finalize when result.ok=true.",
             "segment_binding_rule": "If you change the segment after a successful check, you must run plan.check_segment again for the updated segment."
-        },
-        "depends_on_contract": {
-            "rule": "depends_on items must reference known step ids in the same segment",
-            "examples": ["q_native_balance", "q_token_balance"]
-        },
-        "input_ref_semantic_contract": {
-            "rule": "For unknown_input_ref repair, preserve slot semantics: token/address params map to address-like refs (for example *.address); *.decimals refs are only for decimal slots.",
-            "negative_examples": [
-                {
-                    "param": "token",
-                    "expected_ref_like": "*.address",
-                    "invalid_ref": "inputs.token.decimals"
-                }
-            ]
-        },
-        "failure_contract": {
-            "unavailable_or_invalid": {
-                "required_fields": ["status", "done", "error.reason_code"],
-                "status_enum": ["unavailable", "invalid"]
-            },
-            "missing_required_input": {
-                "when": "status=unavailable and error.reason_code=missing_required_input",
-                "required_fields": ["error.details.questions", "error.details.recovery_exhaustion.unresolved_refs", "error.details.recovery_exhaustion.reasons", "error.details.recovery_exhaustion.attempt_trace_id"],
-                "question_shape": {
-                    "id": "string",
-                    "question": "string",
-                    "required": "boolean(optional)",
-                    "options": [
-                        {
-                            "label": "string",
-                            "description": "string(optional)",
-                            "value": "any(optional)"
-                        }
-                    ]
-                },
-                "recovery_exhaustion_shape": {
-                    "unresolved_refs": ["inputs.<slot>"],
-                    "reasons": ["string(non-empty)"],
-                    "attempt_trace_id": "string(non-empty)"
-                }
-            }
         },
         "todo_contract": {
             "rule": "Host enforces one todo per segment (1 todo = 1 segment).",
@@ -4730,7 +4666,7 @@ fn render_segment_prompt_with_patch(
 
 fn state_summary_for_prompt(state_summary: Option<&Value>) -> Value {
     state_summary
-        .and_then(|summary| summary.pointer("/prompt_compact").cloned())
+        .map(super::context::prompt_compact::build_prompt_compact)
         .or_else(|| state_summary.cloned())
         .unwrap_or(Value::Null)
 }
@@ -5142,10 +5078,10 @@ fn catalog_search_loop_guard_hint_payload(streak: u64) -> Value {
         "loop_guard": {
             "kind": "catalog_search_empty_streak",
             "streak": streak,
-            "rule": "Avoid repeating semantically similar catalog.search queries that keep returning empty.",
+            "rule": "Avoid repeating semantically similar catalog.discover(query=...) calls that keep returning empty.",
             "next_step_order": [
                 "reuse state_summary.tool_memory_projection.recent.list_inventory if present",
-                "if discovery baseline is missing, call list_candidates once",
+                "if discovery baseline is missing, call catalog.discover without query once",
                 "narrow by explicit refs and call get_candidate_detail",
                 "for control semantics (assert/branch/until/retry), call guide.get with {\"schema\":\"ais-plan-sketch/0.1.0\"} or {\"topic\":\"cel\"}"
             ]
@@ -5186,7 +5122,10 @@ fn no_toolcall_repair_payload(
     json!({
         "error": {
             "reason_code": "no_tool_calls",
-            "message": "No tool calls were returned. You must return at least one allowed tool call.",
+            "message": format!(
+                "You returned no tool calls. You MUST call exactly one tool. The expected finalize tool is `{}`. Call it now.",
+                finalize_tool
+            ),
             "phase": phase_name(phase),
             "finalize_tool": finalize_tool,
             "round": round,
@@ -5195,9 +5134,10 @@ fn no_toolcall_repair_payload(
             "allowed_tools": allowed_tools,
         },
         "rules": [
-            "Return at least one tool call in this response.",
+            "You MUST return at least one tool call in this response.",
             "Use only allowed tools for this phase.",
-            "If finishing this phase, call finalize_tool exactly once and as the last tool call."
+            format!("If you are ready to finalize, call `{}` exactly once as the last tool call.", finalize_tool),
+            "Do NOT return an empty response without tool calls."
         ]
     })
 }
@@ -5268,7 +5208,7 @@ fn control_step_candidate_ref_hint_payload() -> Value {
             "rule": "Do not search catalog for synthetic refs like `.../assert` or `.../branch`. Control steps are built in.",
             "fix": [
                 "For kind=assert|branch, keep kind as assert/branch and use when.cel / inputs.condition to express gate logic.",
-                "Then express gate semantics via when.cel and depends_on (query -> assert|branch -> action).",
+                "Then express gate semantics via when.cel and depends_on. Use depends_on for same-segment scheduling; historical nodes.<step>.outputs references do not require synthetic query deps.",
                 "Re-run plan.check_segment and finalize only when ok=true."
             ]
         }
@@ -5278,42 +5218,6 @@ fn control_step_candidate_ref_hint_payload() -> Value {
 fn summarize_tool_message(tool_name: &str, content: &str) -> String {
     let parsed = serde_json::from_str::<Value>(content).ok();
     match (tool_name, parsed) {
-        ("list_candidates", Some(value)) => {
-            let protocols = value
-                .get("protocols")
-                .and_then(Value::as_array)
-                .map(|arr| arr.len())
-                .unwrap_or(0);
-            let action_count = value
-                .get("protocols")
-                .and_then(Value::as_array)
-                .map(|arr| {
-                    arr.iter()
-                        .map(|item| {
-                            item.get("actions")
-                                .and_then(Value::as_array)
-                                .map(|items| items.len())
-                                .unwrap_or(0)
-                        })
-                        .sum::<usize>()
-                })
-                .unwrap_or(0);
-            let query_count = value
-                .get("protocols")
-                .and_then(Value::as_array)
-                .map(|arr| {
-                    arr.iter()
-                        .map(|item| {
-                            item.get("queries")
-                                .and_then(Value::as_array)
-                                .map(|items| items.len())
-                                .unwrap_or(0)
-                        })
-                        .sum::<usize>()
-                })
-                .unwrap_or(0);
-            format!("summary(protocols={protocols},actions={action_count},queries={query_count})")
-        }
         ("get_candidate_detail", Some(value)) => {
             let items = value
                 .get("details")
@@ -5322,7 +5226,31 @@ fn summarize_tool_message(tool_name: &str, content: &str) -> String {
                 .unwrap_or_else(|| value.as_array().map(|arr| arr.len()).unwrap_or(0));
             format!("summary(items={items})")
         }
-        ("catalog.search", Some(value)) => {
+        ("catalog.discover", Some(value)) => {
+            if let Some(protocols) = value.get("protocols").and_then(Value::as_array) {
+                let protocols_count = protocols.len();
+                let action_count = protocols
+                    .iter()
+                    .map(|item| {
+                        item.get("actions")
+                            .and_then(Value::as_array)
+                            .map(|items| items.len())
+                            .unwrap_or(0)
+                    })
+                    .sum::<usize>();
+                let query_count = protocols
+                    .iter()
+                    .map(|item| {
+                        item.get("queries")
+                            .and_then(Value::as_array)
+                            .map(|items| items.len())
+                            .unwrap_or(0)
+                    })
+                    .sum::<usize>();
+                return format!(
+                    "summary(protocols={protocols_count},actions={action_count},queries={query_count})"
+                );
+            }
             let total = value
                 .get("total_matches")
                 .and_then(Value::as_u64)
@@ -5405,15 +5333,6 @@ fn truncate_for_log(input: &str, max_len: usize) -> String {
     }
     let clipped = input.chars().take(max_len).collect::<String>();
     format!("{clipped}...")
-}
-
-fn estimate_tokens_from_json<T: Serialize>(value: &T) -> u64 {
-    let encoded = serde_json::to_string(value).unwrap_or_default();
-    let chars = encoded.chars().count();
-    chars
-        .saturating_add(LLM_CHARS_PER_TOKEN_ESTIMATE.saturating_sub(1))
-        .checked_div(LLM_CHARS_PER_TOKEN_ESTIMATE)
-        .unwrap_or(0) as u64
 }
 
 #[cfg(test)]

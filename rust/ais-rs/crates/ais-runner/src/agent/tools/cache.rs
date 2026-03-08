@@ -1,18 +1,16 @@
-use ais_core::{stable_hash_hex, StableJsonOptions};
 use serde_json::{json, Value};
 
 pub(crate) fn tool_cache_key(tool_name: &str, arguments: &Value) -> Option<String> {
     match tool_name {
-        "list_candidates"
-        | "get_candidate_detail"
-        | "catalog.search"
+        "get_candidate_detail"
+        | "catalog.discover"
         | "catalog.resolve_missing_facts"
         | "guide.get"
         | "plan.check_segment" => {
             let normalized = normalize_tool_arguments(tool_name, arguments);
-            let hash = stable_hash_hex(&normalized, &StableJsonOptions::default())
-                .unwrap_or_else(|_| serde_json::to_string(&normalized).unwrap_or_default());
-            Some(format!("{tool_name}:{hash}"))
+            let normalized_text =
+                serde_json::to_string(&normalized).unwrap_or_else(|_| normalized.to_string());
+            Some(format!("{tool_name}:{normalized_text}"))
         }
         _ => None,
     }
@@ -20,44 +18,6 @@ pub(crate) fn tool_cache_key(tool_name: &str, arguments: &Value) -> Option<Strin
 
 fn normalize_tool_arguments(tool_name: &str, arguments: &Value) -> Value {
     match tool_name {
-        "list_candidates" => {
-            let chain = arguments
-                .get("chain")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(|value| Value::String(value.to_ascii_lowercase()))
-                .unwrap_or(Value::Null);
-            let protocol = arguments
-                .get("protocol")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(|value| Value::String(value.to_ascii_lowercase()))
-                .unwrap_or(Value::Null);
-            let filter_chain = arguments
-                .get("filter")
-                .and_then(Value::as_object)
-                .and_then(|filter| filter.get("chain"))
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(|value| Value::String(value.to_ascii_lowercase()))
-                .unwrap_or(Value::Null);
-            let filter_protocol = arguments
-                .get("filter")
-                .and_then(Value::as_object)
-                .and_then(|filter| filter.get("protocol"))
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(|value| Value::String(value.to_ascii_lowercase()))
-                .unwrap_or(Value::Null);
-            json!({
-                "chain": if chain.is_null() { filter_chain } else { chain },
-                "protocol": if protocol.is_null() { filter_protocol } else { protocol },
-            })
-        }
         "get_candidate_detail" => {
             let mut refs = arguments
                 .get("refs")
@@ -74,7 +34,7 @@ fn normalize_tool_arguments(tool_name: &str, arguments: &Value) -> Value {
             refs.dedup();
             json!({ "refs": refs })
         }
-        "catalog.search" => {
+        "catalog.discover" => {
             let query = arguments
                 .get("query")
                 .and_then(Value::as_str)
@@ -83,13 +43,6 @@ fn normalize_tool_arguments(tool_name: &str, arguments: &Value) -> Value {
                 .and_then(normalize_catalog_search_query_for_cache)
                 .map(Value::String)
                 .unwrap_or(Value::Null);
-            let kind = arguments
-                .get("kind")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(|value| Value::String(value.to_ascii_lowercase()))
-                .unwrap_or(Value::Null);
             let chain = arguments
                 .get("chain")
                 .and_then(Value::as_str)
@@ -97,10 +50,25 @@ fn normalize_tool_arguments(tool_name: &str, arguments: &Value) -> Value {
                 .filter(|value| !value.is_empty())
                 .map(|value| Value::String(value.to_ascii_lowercase()))
                 .unwrap_or(Value::Null);
+            let protocol = arguments
+                .get("protocol")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| Value::String(value.to_ascii_lowercase()))
+                .unwrap_or(Value::Null);
+            let kind = arguments
+                .get("kind")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| Value::String(value.to_ascii_lowercase()))
+                .unwrap_or(Value::Null);
             json!({
                 "query": query,
-                "kind": kind,
                 "chain": chain,
+                "protocol": protocol,
+                "kind": kind,
                 "min_risk_level": arguments.get("min_risk_level").cloned().unwrap_or(Value::Null),
                 "max_risk_level": arguments.get("max_risk_level").cloned().unwrap_or(Value::Null),
                 "limit": arguments.get("limit").cloned().unwrap_or(Value::Null),
@@ -184,26 +152,5 @@ fn normalize_catalog_search_query_for_cache(query: &str) -> Option<String> {
 }
 
 fn normalize_missing_fact_ref_for_cache(raw: &str) -> Option<String> {
-    let trimmed = raw.trim_matches(|ch: char| {
-        ch.is_whitespace() || matches!(ch, '`' | '"' | '\'' | ',' | ';' | '.' | ')' | '(')
-    });
-    let right_of_equals = trimmed
-        .rsplit_once('=')
-        .map(|(_, value)| value)
-        .unwrap_or(trimmed);
-    let normalized = right_of_equals
-        .strip_prefix("runtime.")
-        .unwrap_or(right_of_equals);
-    let key = if let Some(key) = normalized.strip_prefix("inputs.") {
-        key
-    } else if let Some(key) = normalized.strip_prefix("input.") {
-        key
-    } else {
-        normalized
-    };
-    let compacted = key.trim_matches('.');
-    if compacted.is_empty() {
-        return None;
-    }
-    Some(format!("inputs.{}", compacted.to_ascii_lowercase()))
+    super::super::input_normalize::canonical_missing_ref(raw)
 }

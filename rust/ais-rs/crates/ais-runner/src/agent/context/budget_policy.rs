@@ -122,6 +122,17 @@ impl ToolMemoryBudgetPolicy {
     // Legacy aliases while callsites are migrated to strategy-table field access.
     pub(crate) const PLANNER_CONTEXT_DEFAULT_TOKEN_BUDGET: usize =
         CONTEXT_STRATEGY_TABLE.planner_context_default_token_budget;
+
+    pub(crate) fn default_token_budget_for_context_limit(
+        context_limit_tokens: Option<usize>,
+    ) -> usize {
+        match context_limit_tokens {
+            Some(limit) if limit > 128_000 => 20_000,
+            Some(limit) if limit > 64_000 => 16_000,
+            Some(limit) if limit > 32_000 => 12_000,
+            _ => Self::PLANNER_CONTEXT_DEFAULT_TOKEN_BUDGET,
+        }
+    }
     pub(crate) const ADAPTIVE_RELAXED_MAX_MULTIPLIER: usize =
         CONTEXT_STRATEGY_TABLE.adaptive_relaxed_max_multiplier;
     pub(crate) const ADAPTIVE_MEDIUM_NUMERATOR: usize =
@@ -571,6 +582,101 @@ impl ToolMemoryBudgetPolicy {
         mode: ContextPressureMode,
     ) -> ContextPackBlockRecipe {
         match block_id {
+            ContextPackBlockId::PreviousError => {
+                let summary_compact_options = match mode {
+                    ContextPressureMode::Critical => Some(JsonBudgetOptions {
+                        max_depth: 4,
+                        max_object_entries: 20,
+                        max_array_items: 8,
+                        max_string_chars: 360,
+                    }),
+                    ContextPressureMode::Medium => Some(JsonBudgetOptions {
+                        max_depth: 5,
+                        max_object_entries: 32,
+                        max_array_items: 12,
+                        max_string_chars: 640,
+                    }),
+                    ContextPressureMode::Light => Some(JsonBudgetOptions {
+                        max_depth: 7,
+                        max_object_entries: 64,
+                        max_array_items: 24,
+                        max_string_chars: 1400,
+                    }),
+                    ContextPressureMode::Normal => None,
+                };
+                ContextPackBlockRecipe {
+                    summary_compact_options,
+                    preferred_level: if matches!(mode, ContextPressureMode::Critical) {
+                        ContextCompressLevel::Skeleton
+                    } else {
+                        ContextCompressLevel::Full
+                    },
+                }
+            }
+            ContextPackBlockId::PreviousErrorAutofillHistory => {
+                let summary_compact_options = Some(match mode {
+                    ContextPressureMode::Critical => JsonBudgetOptions {
+                        max_depth: 3,
+                        max_object_entries: 12,
+                        max_array_items: 8,
+                        max_string_chars: 320,
+                    },
+                    ContextPressureMode::Medium => JsonBudgetOptions {
+                        max_depth: 4,
+                        max_object_entries: 20,
+                        max_array_items: 12,
+                        max_string_chars: 540,
+                    },
+                    ContextPressureMode::Light | ContextPressureMode::Normal => JsonBudgetOptions {
+                        max_depth: 5,
+                        max_object_entries: 32,
+                        max_array_items: 16,
+                        max_string_chars: 800,
+                    },
+                });
+                ContextPackBlockRecipe {
+                    summary_compact_options,
+                    preferred_level: if matches!(mode, ContextPressureMode::Critical) {
+                        ContextCompressLevel::Skeleton
+                    } else if matches!(mode, ContextPressureMode::Medium) {
+                        ContextCompressLevel::Summary
+                    } else {
+                        ContextCompressLevel::Full
+                    },
+                }
+            }
+            ContextPackBlockId::RecoveryDiagnostics => {
+                let summary_compact_options = Some(match mode {
+                    ContextPressureMode::Critical => JsonBudgetOptions {
+                        max_depth: 4,
+                        max_object_entries: 24,
+                        max_array_items: 10,
+                        max_string_chars: 400,
+                    },
+                    ContextPressureMode::Medium => JsonBudgetOptions {
+                        max_depth: 5,
+                        max_object_entries: 36,
+                        max_array_items: 16,
+                        max_string_chars: 720,
+                    },
+                    ContextPressureMode::Light | ContextPressureMode::Normal => JsonBudgetOptions {
+                        max_depth: 7,
+                        max_object_entries: 72,
+                        max_array_items: 24,
+                        max_string_chars: 1400,
+                    },
+                });
+                ContextPackBlockRecipe {
+                    summary_compact_options,
+                    preferred_level: if matches!(mode, ContextPressureMode::Critical) {
+                        ContextCompressLevel::Skeleton
+                    } else if matches!(mode, ContextPressureMode::Medium) {
+                        ContextCompressLevel::Summary
+                    } else {
+                        ContextCompressLevel::Full
+                    },
+                }
+            }
             ContextPackBlockId::ToolMemoryProjection => {
                 let summary_compact_options = match mode {
                     ContextPressureMode::Critical => Some(JsonBudgetOptions {
@@ -666,17 +772,6 @@ impl ToolMemoryBudgetPolicy {
             ContextPackBlockId::CapabilityViewProtocols => ContextPackBlockRecipe {
                 summary_compact_options: None,
                 preferred_level: if matches!(mode, ContextPressureMode::Critical) {
-                    ContextCompressLevel::Skeleton
-                } else {
-                    ContextCompressLevel::Full
-                },
-            },
-            ContextPackBlockId::InputSlotsCanonicalRefs => ContextPackBlockRecipe {
-                summary_compact_options: None,
-                preferred_level: if matches!(
-                    mode,
-                    ContextPressureMode::Critical | ContextPressureMode::Medium
-                ) {
                     ContextCompressLevel::Skeleton
                 } else {
                     ContextCompressLevel::Full

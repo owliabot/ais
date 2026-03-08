@@ -43,9 +43,11 @@ pub(crate) fn bootstrap_intent_grounding_if_needed<P: LlmProvider>(
         let draft_result = planner.ground_intent(IntentGroundingRequest {
             intent: context.intent().to_string(),
             session: context.session().clone(),
-            state_summary: context.state_summary().clone(),
+            state_summary: context.packed_summary().clone(),
+            typed_summary: context.typed_summary().cloned(),
         });
         super::super::orchestrator::refresh_tool_memory_projection(context, planner, state);
+        let is_retry_round = autofill_retry_budget == 0;
         match handle_grounding_draft(
             command,
             state,
@@ -53,27 +55,81 @@ pub(crate) fn bootstrap_intent_grounding_if_needed<P: LlmProvider>(
             candidate_context,
             readonly_autofill_router,
             draft_result,
+            is_retry_round,
         )? {
             GroundingDraftOutcome::Ready(ready) => return Ok(ready),
-            GroundingDraftOutcome::RetryAutofill => {
-                if autofill_retry_budget == 0 {
-                    return Ok(false);
+            outcome => match handle_grounding_retry_outcome(outcome, &mut autofill_retry_budget) {
+                GroundingRetryAction::ReturnReady => return Ok(true),
+                GroundingRetryAction::RetryWithTrace => {
+                    super::super::trace::emit(
+                        trace_enabled,
+                        "grounding",
+                        "autofill_retry",
+                        &[("remaining_budget", autofill_retry_budget.to_string())],
+                    );
                 }
-                autofill_retry_budget = autofill_retry_budget.saturating_sub(1);
-                super::super::trace::emit(
-                    trace_enabled,
-                    "grounding",
-                    "autofill_retry",
-                    &[("remaining_budget", autofill_retry_budget.to_string())],
-                );
-            }
+                GroundingRetryAction::RetrySilently => continue,
+                GroundingRetryAction::StopNotReady => return Ok(false),
+            },
         }
     }
 }
 
 enum GroundingDraftOutcome {
     Ready(bool),
-    RetryAutofill,
+    Retry {
+        state_changed: bool,
+        host_ready: bool,
+    },
+}
+
+enum GroundingRetryAction {
+    ReturnReady,
+    RetryWithTrace,
+    RetrySilently,
+    StopNotReady,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GroundingFollowUpState {
+    Actionable,
+    NonActionable,
+}
+
+fn handle_grounding_retry_outcome(
+    outcome: GroundingDraftOutcome,
+    autofill_retry_budget: &mut u8,
+) -> GroundingRetryAction {
+    match outcome {
+        GroundingDraftOutcome::Retry {
+            state_changed,
+            host_ready,
+        } => {
+            if host_ready {
+                return GroundingRetryAction::ReturnReady;
+            }
+            if state_changed {
+                return GroundingRetryAction::RetrySilently;
+            }
+            if *autofill_retry_budget == 0 {
+                return GroundingRetryAction::StopNotReady;
+            }
+            *autofill_retry_budget = autofill_retry_budget.saturating_sub(1);
+            GroundingRetryAction::RetryWithTrace
+        }
+        GroundingDraftOutcome::Ready(_) => GroundingRetryAction::StopNotReady,
+    }
+}
+
+fn grounding_follow_up_state(
+    questions: &[Value],
+    missing_refs: &[String],
+) -> GroundingFollowUpState {
+    if questions.is_empty() && missing_refs.is_empty() {
+        GroundingFollowUpState::NonActionable
+    } else {
+        GroundingFollowUpState::Actionable
+    }
 }
 
 fn handle_grounding_draft(
@@ -83,6 +139,7 @@ fn handle_grounding_draft(
     candidate_context: &CandidateContext,
     readonly_autofill_router: Option<&ais_engine::RouterExecutor>,
     draft_result: Result<IntentGroundingDraft, RunnerError>,
+    is_retry_round: bool,
 ) -> Result<GroundingDraftOutcome, RunnerError> {
     let trace_enabled = command.verbose || command.verbose_llm;
     let draft = match draft_result {
@@ -129,6 +186,7 @@ fn handle_grounding_draft(
         IntentGroundingDraft::Proposed {
             summary,
             ready_for_todos,
+            missing_refs,
             resolved_inputs,
             intent_facts,
             confidence,
@@ -158,72 +216,162 @@ fn handle_grounding_draft(
                     ],
                 );
             }
-            let answered_questions = Map::new();
+            let mut answered_questions = Map::new();
             let remaining_questions_raw = filter_unanswered_questions(
                 questions.as_slice(),
                 answered_questions.keys().collect::<Vec<_>>().as_slice(),
             );
+            let (auto_answers, after_auto_answer_questions) = auto_answer_single_option_questions(
+                remaining_questions_raw.as_slice(),
+                &resolved_inputs,
+                &intent_facts,
+                context.input_store_mut(),
+            );
+            if !auto_answers.is_empty() {
+                super::super::trace::emit(
+                    trace_enabled,
+                    "grounding",
+                    "auto_answered_single_option_questions",
+                    &[
+                        ("count", auto_answers.len().to_string()),
+                        (
+                            "keys",
+                            auto_answers.keys().cloned().collect::<Vec<_>>().join(","),
+                        ),
+                    ],
+                );
+                for (key, value) in &auto_answers {
+                    answered_questions.insert(key.clone(), value.clone());
+                }
+            }
             let (query_recoverable_questions, remaining_questions) =
-                super::super::missing_ref_recovery::split_query_recoverable_questions(
+                super::super::missing_resolution::split_query_recoverable_questions(
                     candidate_context,
-                    remaining_questions_raw.as_slice(),
+                    after_auto_answer_questions.as_slice(),
                     2,
                 );
+            let candidate = super::super::grounding_resolution::normalize_grounding_candidate(
+                ready_for_todos,
+                missing_refs.as_slice(),
+                remaining_questions.as_slice(),
+                &resolved_inputs,
+                &intent_facts,
+                &confidence,
+                issues.as_slice(),
+            );
+            let resolution = super::super::grounding_resolution::reconcile_grounding_candidate(
+                context.typed_summary(),
+                &candidate,
+            );
             if !query_recoverable_questions.is_empty() {
                 super::super::trace::emit(
                     trace_enabled,
                     "grounding",
                     "query_recoverable_questions_filtered",
                     &[
-                        (
-                            "count",
-                            query_recoverable_questions.len().to_string(),
-                        ),
+                        ("count", query_recoverable_questions.len().to_string()),
                         ("remaining", remaining_questions.len().to_string()),
                     ],
                 );
             }
-            let ready = (ready_for_todos && remaining_questions.is_empty())
-                || (!query_recoverable_questions.is_empty() && remaining_questions.is_empty());
+            let ready = resolution.ready_for_todos;
             super::super::trace::emit(
                 trace_enabled,
                 "grounding",
                 "draft_proposed",
                 &[
+                    (
+                        "planner_ready_hint",
+                        resolution.planner_ready_hint.to_string(),
+                    ),
                     ("ready_for_todos", ready.to_string()),
-                    ("remaining_questions", remaining_questions.len().to_string()),
+                    (
+                        "remaining_questions",
+                        resolution.effective_questions.len().to_string(),
+                    ),
+                    (
+                        "missing_refs",
+                        resolution.effective_missing_refs.len().to_string(),
+                    ),
                 ],
             );
-            super::super::runtime_store::record_runtime_agent_field(
-                &mut state.runtime,
-                "intent_grounding",
-                json!({
-                    "status":"proposed",
-                    "summary": summary,
-                    "ready_for_todos": ready,
-                    "resolved_inputs": resolved_inputs,
-                    "intent_facts": intent_facts,
-                    "confidence": confidence,
-                    "issues": issues,
-                    "questions": remaining_questions,
-                    "answers": answered_questions,
-                    "query_recoverable_questions": query_recoverable_questions,
-                    "applied": apply_summary.applied,
-                    "skipped_low_confidence": apply_summary.skipped_low_confidence,
-                    "deterministic_rule_inputs": apply_summary.deterministic_applied,
-                    "deterministic_rule_skipped": apply_summary.deterministic_skipped,
-                    "deterministic_conflicts": apply_summary.deterministic_conflicts,
-                    "deterministic_conflict_policy": "rule_extracted_over_llm",
-                    "resolved_input_refs": collect_bindable_input_refs(&resolved_inputs),
-                    "input_binding": grounding_input_binding_metadata(),
-                }),
+            record_grounding_proposed_runtime(
+                state,
+                summary.as_deref(),
+                &candidate,
+                &resolution,
+                &answered_questions,
+                query_recoverable_questions.as_slice(),
+                &apply_summary,
             );
             context.refresh_state_summary(state, false);
+            let mandatory_missing = collect_mandatory_grounding_missing_refs_host(
+                &state.runtime,
+                context.typed_summary(),
+            );
+            if !mandatory_missing.is_empty() {
+                super::super::trace::emit(
+                    trace_enabled,
+                    "grounding",
+                    "mandatory_missing_refs_detected",
+                    &[("missing_refs", mandatory_missing.join(","))],
+                );
+            }
             if !ready {
-                let payload = super::super::missing_input::payload(
+                let mut payload_missing_refs = resolution.effective_missing_refs.clone();
+                for mandatory_ref in &mandatory_missing {
+                    if !payload_missing_refs.contains(mandatory_ref) {
+                        payload_missing_refs.push(mandatory_ref.clone());
+                    }
+                }
+                payload_missing_refs.sort();
+                payload_missing_refs.dedup();
+                if matches!(
+                    grounding_follow_up_state(
+                        resolution.effective_questions.as_slice(),
+                        payload_missing_refs.as_slice()
+                    ),
+                    GroundingFollowUpState::NonActionable
+                ) {
+                    let payload = super::super::missing_input::payload_with_context(
+                        Some("intent_grounding_missing_inputs"),
+                        &[],
+                        issues.as_slice(),
+                        &[],
+                        &[],
+                        context.completed_segments_u8(),
+                    );
+                    super::super::runtime_store::record_runtime_agent_field(
+                        &mut state.runtime,
+                        "missing_required_input",
+                        payload.clone(),
+                    );
+                    state.paused_reason = Some("missing_required_input".to_string());
+                    context.set_previous_error_and_refresh(
+                        state,
+                        false,
+                        super::super::grounding_phase_error_payload(
+                            "missing_required_input",
+                            Some("intent_grounding_missing_inputs"),
+                            issues.as_slice(),
+                            &[],
+                            context.completed_segments_u8(),
+                        ),
+                    );
+                    super::super::trace::emit(
+                        trace_enabled,
+                        "pause_resolution",
+                        "paused_missing_required_input",
+                        &[("phase_hint", "grounding".to_string())],
+                    );
+                    return Ok(GroundingDraftOutcome::Ready(false));
+                }
+                let payload = super::super::missing_input::payload_with_context(
                     Some("intent_grounding_missing_inputs"),
-                    remaining_questions.as_slice(),
+                    resolution.effective_questions.as_slice(),
                     &[],
+                    payload_missing_refs.as_slice(),
+                    payload_missing_refs.as_slice(),
                     context.completed_segments_u8(),
                 );
                 match super::super::phase_machine::pause::recover_missing_required_input_payload(
@@ -237,13 +385,48 @@ fn handle_grounding_draft(
                     false,
                     "grounding",
                     false,
-                    false,
+                    is_retry_round,
                 )? {
-                    super::super::phase_machine::pause::MissingRequiredInputRecoveryBackflow::RetryScheduled => {
-                        return Ok(GroundingDraftOutcome::RetryAutofill);
-                    }
-                    super::super::phase_machine::pause::MissingRequiredInputRecoveryBackflow::ResolvedByUserInput { .. } => {
-                        return Ok(GroundingDraftOutcome::RetryAutofill);
+                    super::super::phase_machine::pause::MissingRequiredInputRecoveryBackflow::Retry {
+                        state_changed,
+                        ..
+                    } => {
+                        context.refresh_state_summary(state, false);
+                        let fast_resolution =
+                            super::super::grounding_resolution::reconcile_grounding_candidate(
+                                context.typed_summary(),
+                                &candidate,
+                            );
+                        let fast_mandatory_missing = collect_mandatory_grounding_missing_refs_host(
+                            &state.runtime,
+                            context.typed_summary(),
+                        );
+                        let host_ready =
+                            fast_resolution.ready_for_todos && fast_mandatory_missing.is_empty();
+                        if host_ready {
+                            record_grounding_proposed_runtime(
+                                state,
+                                summary.as_deref(),
+                                &candidate,
+                                &fast_resolution,
+                                &answered_questions,
+                                query_recoverable_questions.as_slice(),
+                                &apply_summary,
+                            );
+                            state.paused_reason = None;
+                            context.clear_previous_error_and_refresh(state, false);
+                            super::super::trace::emit(
+                                trace_enabled,
+                                "grounding",
+                                "post_recovery_fast_path_ready",
+                                &[("source", "host_recovery".to_string())],
+                            );
+                            return Ok(GroundingDraftOutcome::Ready(true));
+                        }
+                        return Ok(GroundingDraftOutcome::Retry {
+                            state_changed,
+                            host_ready,
+                        });
                     }
                     super::super::phase_machine::pause::MissingRequiredInputRecoveryBackflow::Paused => {
                         context.set_previous_error_and_refresh(
@@ -253,7 +436,7 @@ fn handle_grounding_draft(
                                 "missing_required_input",
                                 Some("intent_grounding_missing_inputs"),
                                 &[],
-                                remaining_questions.as_slice(),
+                                resolution.effective_questions.as_slice(),
                                 context.completed_segments_u8(),
                             ),
                         );
@@ -267,6 +450,34 @@ fn handle_grounding_draft(
                     }
                 }
             }
+            if !mandatory_missing.is_empty() {
+                let payload = super::super::missing_input::payload_with_context(
+                    Some("grounding_mandatory_missing_facts"),
+                    &[],
+                    &[],
+                    mandatory_missing.as_slice(),
+                    mandatory_missing.as_slice(),
+                    context.completed_segments_u8(),
+                );
+                let recovery_outcome =
+                    super::super::missing_resolution::missing_resolution_recover_missing_refs(
+                        command,
+                        state,
+                        context,
+                        &payload,
+                        candidate_context,
+                        readonly_autofill_router,
+                        "grounding_mandatory",
+                        false,
+                        "grounding",
+                    );
+                if recovery_outcome.should_retry_round() {
+                    return Ok(GroundingDraftOutcome::Retry {
+                        state_changed: true,
+                        host_ready: false,
+                    });
+                }
+            }
             state.paused_reason = None;
             context.clear_previous_error_and_refresh(state, false);
             super::super::trace::emit(trace_enabled, "grounding", "ready", &[]);
@@ -277,7 +488,32 @@ fn handle_grounding_draft(
             message,
             issues,
             questions,
+            error_details,
         } => {
+            if reason_code == "intent_aborted" {
+                super::super::trace::emit(
+                    trace_enabled,
+                    "grounding",
+                    "abort_intent",
+                    &[("reason_code", reason_code.clone())],
+                );
+                super::super::runtime_store::record_runtime_agent_field(
+                    &mut state.runtime,
+                    "abort_intent",
+                    json!({
+                        "accepted": true,
+                        "phase": "grounding",
+                        "reason_code": reason_code,
+                        "summary": message,
+                        "evidence": error_details.as_ref().and_then(|value| value.get("evidence")).cloned().unwrap_or_else(|| json!({})),
+                        "user_fix_hint": error_details.as_ref().and_then(|value| value.get("user_fix_hint")).cloned().unwrap_or(Value::Null),
+                    }),
+                );
+                state.paused_reason = None;
+                context.set_final_status(EngineRunStatus::Stopped);
+                context.clear_previous_error_and_refresh(state, true);
+                return Ok(GroundingDraftOutcome::Ready(false));
+            }
             super::super::trace::emit(
                 trace_enabled,
                 "grounding",
@@ -288,10 +524,11 @@ fn handle_grounding_draft(
                 ],
             );
             if reason_code == "missing_required_input" {
-                let payload = super::super::missing_input::payload(
+                let payload = super::super::missing_input::payload_with_error_details(
                     message.as_deref(),
                     questions.as_slice(),
                     issues.as_slice(),
+                    error_details.as_ref(),
                     context.completed_segments_u8(),
                 );
                 match super::super::phase_machine::pause::recover_missing_required_input_payload(
@@ -307,29 +544,64 @@ fn handle_grounding_draft(
                     false,
                     true,
                 )? {
-                    super::super::phase_machine::pause::MissingRequiredInputRecoveryBackflow::RetryScheduled => {
-                        return Ok(GroundingDraftOutcome::RetryAutofill);
-                    }
-                    super::super::phase_machine::pause::MissingRequiredInputRecoveryBackflow::ResolvedByUserInput { answers } => {
-                        super::super::runtime_store::record_runtime_agent_field(
-                            &mut state.runtime,
-                            "intent_grounding",
-                            json!({
-                                "status":"resolved_by_user_input",
-                                "ready_for_todos": true,
-                                "reason_code": reason_code,
-                                "answers": answers,
-                                "input_binding": grounding_input_binding_metadata(),
-                            }),
-                        );
+                    super::super::phase_machine::pause::MissingRequiredInputRecoveryBackflow::Retry {
+                        state_changed,
+                        answers,
+                    } => {
+                        let payload_missing_refs =
+                            collect_grounding_payload_missing_refs(&payload);
+                        if let Some(answers) = answers {
+                            super::super::runtime_store::record_runtime_agent_field(
+                                &mut state.runtime,
+                                "intent_grounding",
+                                json!({
+                                    "status":"resolved_by_user_input",
+                                    "ready_for_todos": true,
+                                    "reason_code": reason_code,
+                                    "answers": answers,
+                                    "input_binding": grounding_input_binding_metadata(),
+                                }),
+                            );
+                            context.refresh_state_summary(state, false);
+                            super::super::trace::emit(
+                                trace_enabled,
+                                "pause_resolution",
+                                "resolved_by_user_input",
+                                &[("phase_hint", "grounding".to_string())],
+                            );
+                        }
                         context.refresh_state_summary(state, false);
-                        super::super::trace::emit(
-                            trace_enabled,
-                            "pause_resolution",
-                            "resolved_by_user_input",
-                            &[("phase_hint", "grounding".to_string())],
+                        let fast_missing_refs = collect_unresolved_grounding_payload_missing_refs(
+                            &state.runtime,
+                            context.typed_summary(),
+                            payload_missing_refs.as_slice(),
                         );
-                        return Ok(GroundingDraftOutcome::Ready(true));
+                        let fast_mandatory_missing =
+                            collect_mandatory_grounding_missing_refs_host(
+                                &state.runtime,
+                                context.typed_summary(),
+                            );
+                        if fast_missing_refs.is_empty() && fast_mandatory_missing.is_empty() {
+                            record_grounding_unavailable_ready_runtime(
+                                state,
+                                reason_code.as_str(),
+                                message.as_deref(),
+                                issues.as_slice(),
+                            );
+                            state.paused_reason = None;
+                            context.clear_previous_error_and_refresh(state, false);
+                            super::super::trace::emit(
+                                trace_enabled,
+                                "grounding",
+                                "post_recovery_fast_path_short_circuit",
+                                &[("source", "unavailable_host_recovery".to_string())],
+                            );
+                        }
+                        return Ok(GroundingDraftOutcome::Retry {
+                            state_changed,
+                            host_ready: fast_missing_refs.is_empty()
+                                && fast_mandatory_missing.is_empty(),
+                        });
                     }
                     super::super::phase_machine::pause::MissingRequiredInputRecoveryBackflow::Paused => {
                         super::super::runtime_store::record_runtime_agent_field(
@@ -417,6 +689,75 @@ fn handle_grounding_draft(
     }
 }
 
+fn record_grounding_proposed_runtime(
+    state: &mut EngineRunnerState,
+    summary: Option<&str>,
+    candidate: &super::super::grounding_resolution::GroundingCandidate,
+    resolution: &super::super::grounding_resolution::GroundingResolution,
+    answered_questions: &Map<String, Value>,
+    query_recoverable_questions: &[Value],
+    apply_summary: &GroundingApplySummary,
+) {
+    super::super::runtime_store::record_runtime_agent_field(
+        &mut state.runtime,
+        "intent_grounding",
+        json!({
+            "status":"proposed",
+            "summary": summary,
+            "ready_for_todos": resolution.ready_for_todos,
+            "resolved_inputs": candidate.resolved_inputs.clone(),
+            "intent_facts": candidate.intent_facts.clone(),
+            "confidence": candidate.confidence.clone(),
+            "issues": candidate.issues.clone(),
+            "questions": resolution.effective_questions.clone(),
+            "missing_refs": resolution.effective_missing_refs.clone(),
+            "answers": answered_questions,
+            "query_recoverable_questions": query_recoverable_questions,
+            "applied": apply_summary.applied,
+            "skipped_low_confidence": apply_summary.skipped_low_confidence,
+            "deterministic_rule_inputs": apply_summary.deterministic_applied,
+            "deterministic_rule_skipped": apply_summary.deterministic_skipped,
+            "deterministic_conflicts": apply_summary.deterministic_conflicts,
+            "deterministic_conflict_policy": "rule_extracted_over_llm",
+            "resolved_input_refs": collect_bindable_input_refs(&candidate.resolved_inputs),
+            "host_recovery_satisfied": resolution.host_recovery_satisfied,
+            "user_input_required": resolution.user_input_required,
+            "planner_ready_hint": resolution.planner_ready_hint,
+            "resolution_state": match resolution.state {
+                super::super::grounding_resolution::GroundingResolutionState::Ready => "ready",
+                super::super::grounding_resolution::GroundingResolutionState::NeedsUserInput => "needs_user_input",
+            },
+            "input_binding": grounding_input_binding_metadata(),
+        }),
+    );
+}
+
+fn record_grounding_unavailable_ready_runtime(
+    state: &mut EngineRunnerState,
+    reason_code: &str,
+    message: Option<&str>,
+    issues: &[Value],
+) {
+    super::super::runtime_store::record_runtime_agent_field(
+        &mut state.runtime,
+        "intent_grounding",
+        json!({
+            "status":"unavailable_recovered",
+            "ready_for_todos": true,
+            "reason_code": reason_code,
+            "message": message,
+            "issues": issues,
+            "questions": [],
+            "missing_refs": [],
+            "host_recovery_satisfied": true,
+            "user_input_required": false,
+            "planner_ready_hint": false,
+            "resolution_state": "ready",
+            "input_binding": grounding_input_binding_metadata(),
+        }),
+    );
+}
+
 pub(crate) fn apply_intent_grounding(
     state: &mut EngineRunnerState,
     fact_store: &mut InputStore,
@@ -442,6 +783,12 @@ pub(crate) fn apply_intent_grounding(
             summary
                 .skipped_low_confidence
                 .push(format!("inputs.{key}:invalid_input_slot"));
+            continue;
+        }
+        if is_decimals_slot(key.as_str()) {
+            summary
+                .skipped_low_confidence
+                .push(format!("inputs.{key}:decimals_requires_query"));
             continue;
         }
         let (value, inline_confidence) = normalize_grounding_input_value(raw_value);
@@ -756,9 +1103,6 @@ pub(crate) fn intent_grounding_ready_for_todos(state: &EngineRunnerState) -> boo
         .get("ready_for_todos")
         .and_then(Value::as_bool)
         .unwrap_or(true);
-    if ready_flag {
-        return true;
-    }
     let has_questions = grounding
         .get("questions")
         .and_then(Value::as_array)
@@ -766,10 +1110,25 @@ pub(crate) fn intent_grounding_ready_for_todos(state: &EngineRunnerState) -> boo
     if has_questions {
         return false;
     }
-    grounding
+    let has_missing_refs = grounding
+        .get("missing_refs")
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty());
+    if has_missing_refs {
+        return false;
+    }
+    if ready_flag {
+        return true;
+    }
+    let has_resolved_inputs = grounding
         .get("resolved_inputs")
         .and_then(Value::as_object)
-        .is_some_and(|resolved| !resolved.is_empty())
+        .is_some_and(|resolved| !resolved.is_empty());
+    let has_intent_facts = grounding
+        .get("intent_facts")
+        .and_then(Value::as_object)
+        .is_some_and(|facts| !facts.is_empty());
+    has_resolved_inputs || has_intent_facts
 }
 
 fn normalize_grounding_input_value(raw_value: &Value) -> (Value, Option<u8>) {
@@ -864,6 +1223,214 @@ fn is_bindable_input_slot(slot: &str) -> bool {
         && !lowered.starts_with("facts.")
         && !lowered.starts_with("fact.")
         && !lowered.starts_with("fact:")
+}
+
+fn is_decimals_slot(slot: &str) -> bool {
+    slot == "token.decimals"
+        || slot == "decimals"
+        || slot == "token_decimals"
+        || slot.ends_with(".decimals")
+}
+
+fn auto_answer_single_option_questions(
+    questions: &[Value],
+    resolved_inputs: &BTreeMap<String, Value>,
+    intent_facts: &BTreeMap<String, Value>,
+    _fact_store: &mut InputStore,
+) -> (Map<String, Value>, Vec<Value>) {
+    let mut answers = Map::new();
+    let mut remaining = Vec::new();
+    for question in questions {
+        let id = question
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let options = question
+            .get("options")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if options.len() == 1 {
+            let value = options[0]
+                .get("value")
+                .cloned()
+                .unwrap_or_else(|| options[0].clone());
+            answers.insert(id.to_string(), value);
+            continue;
+        }
+        if options.len() > 1 {
+            if let Some(matched_value) =
+                match_question_option_to_known_values(&options, resolved_inputs, intent_facts)
+            {
+                answers.insert(id.to_string(), matched_value);
+                continue;
+            }
+        }
+        remaining.push(question.clone());
+    }
+    (answers, remaining)
+}
+
+fn match_question_option_to_known_values(
+    options: &[Value],
+    resolved_inputs: &BTreeMap<String, Value>,
+    intent_facts: &BTreeMap<String, Value>,
+) -> Option<Value> {
+    let known_values: Vec<&Value> = resolved_inputs
+        .values()
+        .chain(intent_facts.values())
+        .collect();
+    let mut matched = Vec::new();
+    for option in options {
+        let option_value = option.get("value").unwrap_or(option);
+        let option_str = option_value.as_str().unwrap_or_default();
+        if option_str.is_empty() {
+            continue;
+        }
+        for known in &known_values {
+            let known_str = known.as_str().unwrap_or_default();
+            if !known_str.is_empty() && known_str == option_str {
+                matched.push(option_value.clone());
+            }
+        }
+    }
+    if matched.len() == 1 {
+        return Some(matched.into_iter().next().unwrap());
+    }
+    None
+}
+
+fn collect_mandatory_grounding_missing_refs_host(
+    runtime: &Value,
+    typed_summary: Option<&super::super::state_summary::StateSummary>,
+) -> Vec<String> {
+    let mut mandatory = Vec::<String>::new();
+    let has_token = grounding_payload_ref_resolved(runtime, typed_summary, "inputs.token")
+        || grounding_payload_ref_resolved(runtime, typed_summary, "inputs.token_address")
+        || grounding_payload_ref_resolved(runtime, typed_summary, "inputs.erc20_token");
+    let has_decimals =
+        grounding_payload_ref_resolved(runtime, typed_summary, "inputs.token.decimals")
+            || grounding_payload_ref_resolved(runtime, typed_summary, "inputs.token_decimals")
+            || grounding_payload_ref_resolved(runtime, typed_summary, "inputs.decimals");
+    if has_token && !has_decimals {
+        mandatory.push("inputs.token.decimals".to_string());
+    }
+    mandatory
+}
+
+fn collect_unresolved_grounding_payload_missing_refs(
+    runtime: &Value,
+    typed_summary: Option<&super::super::state_summary::StateSummary>,
+    missing_refs: &[String],
+) -> Vec<String> {
+    missing_refs
+        .iter()
+        .filter(|reference| !grounding_payload_ref_resolved(runtime, typed_summary, reference))
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+}
+
+fn collect_grounding_payload_missing_refs(payload: &Value) -> Vec<String> {
+    super::super::missing_resolution::missing_required_input_refs(payload)
+        .into_iter()
+        .chain(super::super::missing_resolution::payload_question_refs(
+            payload,
+        ))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+}
+
+fn grounding_payload_ref_resolved(
+    runtime: &Value,
+    typed_summary: Option<&super::super::state_summary::StateSummary>,
+    reference: &str,
+) -> bool {
+    let Some(path) = super::super::input_normalize::canonical_missing_ref_path(reference) else {
+        return false;
+    };
+    match path {
+        super::super::ref_model::RefPath::Input { slot } => grounding_has_input_slot(
+            runtime,
+            typed_summary,
+            format!("inputs.{slot}").as_str(),
+            slot.as_str(),
+        ),
+        super::super::ref_model::RefPath::Fact { key } => typed_summary
+            .and_then(|summary| summary.runtime_facts_facts())
+            .and_then(|facts| {
+                let canonical = format!("facts.{key}");
+                facts
+                    .get(canonical.as_str())
+                    .or_else(|| value_at_dotted_path_object(facts, canonical.as_str()))
+            })
+            .is_some(),
+        super::super::ref_model::RefPath::NodeOutput {
+            step_id,
+            field_path,
+        } => {
+            let expected = format!("nodes.{step_id}.outputs.{field_path}");
+            typed_summary
+                .map(|summary| {
+                    summary
+                        .node_output_refs_known_refs()
+                        .iter()
+                        .any(|raw_ref| *raw_ref == expected)
+                })
+                .unwrap_or(false)
+        }
+    }
+}
+
+fn grounding_has_input_slot(
+    runtime: &Value,
+    typed_summary: Option<&super::super::state_summary::StateSummary>,
+    _full_ref: &str,
+    slot: &str,
+) -> bool {
+    if runtime
+        .pointer(format!("/inputs/{}", slot.replace('.', "/")).as_str())
+        .is_some()
+    {
+        return true;
+    }
+    if let Some(summary) = typed_summary {
+        let has_input_meta = summary.input_store_meta().and_then(|meta| {
+            meta.get(slot)
+                .or_else(|| value_at_dotted_path_object(meta, slot))
+        });
+        if has_input_meta.is_some()
+            && summary
+                .input_store_facts()
+                .and_then(|facts| {
+                    facts
+                        .get(slot)
+                        .or_else(|| value_at_dotted_path_object(facts, slot))
+                })
+                .is_some()
+        {
+            return true;
+        }
+    }
+    typed_summary
+        .and_then(|summary| summary.intent_slots_resolved_inputs())
+        .and_then(|inputs| inputs.get(slot))
+        .is_some()
+}
+
+fn value_at_dotted_path_object<'a>(
+    map: &'a serde_json::Map<String, Value>,
+    dotted: &str,
+) -> Option<&'a Value> {
+    let mut segments = dotted.split('.').filter(|part| !part.is_empty());
+    let first = segments.next()?;
+    let mut current = map.get(first)?;
+    for segment in segments {
+        current = current.get(segment)?;
+    }
+    Some(current)
 }
 
 #[cfg(test)]

@@ -169,7 +169,11 @@ impl TodoBoard {
         );
     }
 
-    pub fn intent_acceptance_complete(&self, state_summary: Option<&Value>) -> bool {
+    #[cfg(test)]
+    pub fn intent_acceptance_complete_from_state_summary(
+        &self,
+        state_summary: Option<&Value>,
+    ) -> bool {
         if self.current().is_some() {
             return false;
         }
@@ -184,6 +188,26 @@ impl TodoBoard {
         acceptance_rules
             .iter()
             .all(|rule| acceptance_rule_resolved_from_state_summary(state_summary, rule))
+    }
+
+    pub fn intent_acceptance_complete(
+        &self,
+        state_summary: Option<&super::state_summary::StateSummary>,
+    ) -> bool {
+        if self.current().is_some() {
+            return false;
+        }
+        let acceptance_rules = self
+            .todos
+            .iter()
+            .flat_map(|item| item.acceptance.iter().map(String::as_str))
+            .collect::<Vec<_>>();
+        if acceptance_rules.is_empty() {
+            return false;
+        }
+        acceptance_rules
+            .iter()
+            .all(|rule| acceptance_rule_resolved(state_summary, rule))
     }
 
     pub fn record_receipt_for_todo(&mut self, todo_id: &str, receipt: TodoReceipt) -> bool {
@@ -366,6 +390,7 @@ fn is_placeholder_follow_up_title(title: &str) -> bool {
     normalized.starts_with("continue intent segment ")
 }
 
+#[cfg(test)]
 fn acceptance_rule_resolved_from_state_summary(state_summary: Option<&Value>, rule: &str) -> bool {
     let Some(summary) = state_summary else {
         return false;
@@ -376,22 +401,38 @@ fn acceptance_rule_resolved_from_state_summary(state_summary: Option<&Value>, ru
     }
     if let Some(canonical_slot) = super::input_normalize::normalize_input_slot_key(rule) {
         let canonical_ref = format!("inputs.{canonical_slot}");
-        if super::known_input_refs_from_state_summary(Some(summary))
+        if super::reference_inventory::ReferenceInventory::build(Some(summary))
+            .input_refs()
             .iter()
             .any(|known| known == &canonical_ref)
         {
             return true;
         }
     }
-    value_at_dotted_path(summary.pointer("/intent_context/facts"), rule).is_some()
+    false
 }
 
-fn value_at_dotted_path<'a>(root: Option<&'a Value>, dotted: &str) -> Option<&'a Value> {
-    let mut current = root?;
-    for segment in dotted.split('.').filter(|part| !part.is_empty()) {
-        current = current.get(segment)?;
+fn acceptance_rule_resolved(
+    state_summary: Option<&super::state_summary::StateSummary>,
+    rule: &str,
+) -> bool {
+    let Some(summary) = state_summary else {
+        return false;
+    };
+    let rule = rule.trim();
+    if rule.is_empty() {
+        return false;
     }
-    Some(current)
+    if let Some(canonical_slot) = super::input_normalize::normalize_input_slot_key(rule) {
+        let canonical_ref = format!("inputs.{canonical_slot}");
+        if super::known_input_refs_from_typed_summary(Some(summary))
+            .iter()
+            .any(|known| known == &canonical_ref)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 #[derive(Debug, Clone, Deserialize)]

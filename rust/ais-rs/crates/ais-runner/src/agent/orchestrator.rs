@@ -1,14 +1,76 @@
 use super::context::budget_policy::{ContextPressureMode, ToolMemoryBudgetPolicy};
 use super::context_view::PlanningContextManager;
 use super::phase_machine::types::AgentPhase;
+use super::runtime_facts_store::RuntimeFactsStore;
+use super::state_summary::StateSummary;
 use super::*;
-use ais_engine::{EngineEventRecord, EngineRunStatus, EngineRunnerOptions, EngineRunnerState};
+use crate::policy::{volatile_facts_policy_from_pack, VolatileFactsPolicy};
+use ais_engine::{EngineRunStatus, EngineRunnerOptions, EngineRunnerState};
 use ais_sdk::documents::PlanSketchSegment;
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
 const GROUNDING_NON_ACTIONABLE_REPAIR_RETRY_LIMIT: u8 = 1;
 const GROUNDING_NON_ACTIONABLE_REASON_CODE: &str = "grounding_non_actionable_pause";
+
+const CONSECUTIVE_SAME_ERROR_TERMINAL_LIMIT: u32 = 3;
+const INFRA_ERROR_RAW_RETRY_LIMIT: u32 = 2;
+
+#[derive(Debug, Clone, Default)]
+struct ExecutionRetryTracker {
+    last_error_signature: Option<String>,
+    consecutive_same_error_count: u32,
+}
+
+impl ExecutionRetryTracker {
+    fn observe_error(&mut self, paused_reason: Option<&str>) -> ExecutionRetryAction {
+        let signature = super::extract_executor_error_signature(paused_reason);
+        let Some(ref sig) = signature else {
+            self.last_error_signature = None;
+            self.consecutive_same_error_count = 0;
+            return ExecutionRetryAction::RepairViaLlm;
+        };
+
+        if self.last_error_signature.as_ref() == Some(sig) {
+            self.consecutive_same_error_count = self.consecutive_same_error_count.saturating_add(1);
+        } else {
+            self.last_error_signature = Some(sig.clone());
+            self.consecutive_same_error_count = 1;
+        }
+
+        let severity = super::classify_executor_error_severity(paused_reason.unwrap_or_default());
+
+        match severity {
+            super::error_state::ExecutorErrorSeverity::InfrastructureUnavailable => {
+                if self.consecutive_same_error_count >= INFRA_ERROR_RAW_RETRY_LIMIT {
+                    return ExecutionRetryAction::Terminal;
+                }
+                ExecutionRetryAction::RawRetry
+            }
+            _ => {
+                if self.consecutive_same_error_count >= CONSECUTIVE_SAME_ERROR_TERMINAL_LIMIT {
+                    return ExecutionRetryAction::Terminal;
+                }
+                if self.consecutive_same_error_count == 2 {
+                    return ExecutionRetryAction::RawRetry;
+                }
+                ExecutionRetryAction::RepairViaLlm
+            }
+        }
+    }
+
+    fn reset(&mut self) {
+        self.last_error_signature = None;
+        self.consecutive_same_error_count = 0;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExecutionRetryAction {
+    RepairViaLlm,
+    RawRetry,
+    Terminal,
+}
 
 #[derive(Debug, Clone)]
 struct PlannedSegment {
@@ -21,22 +83,40 @@ struct PlannedSegment {
 }
 
 #[derive(Debug)]
+struct AgentRunConfig {
+    planner_round_limit: usize,
+    segment_limit: usize,
+}
+
+#[derive(Debug)]
+struct AgentRunState {
+    completed_segments: usize,
+    final_status: EngineRunStatus,
+    planning_rounds: usize,
+    planner_output_retries: usize,
+    execution_retry_tracker: ExecutionRetryTracker,
+}
+
+#[derive(Debug)]
+struct AgentStoreContext {
+    input_store: InputStore,
+    runtime_facts_store: RuntimeFactsStore,
+    todo_board: TodoBoard,
+    context_manager: PlanningContextManager,
+    tool_memory_projection: Option<Value>,
+    packed_summary: Option<Value>,
+    typed_summary: Option<StateSummary>,
+}
+
+#[derive(Debug)]
 pub(super) struct SegmentedAgentContext {
     pub(super) intent: String,
     pub(super) session: intent_segmented::SegmentPlanningSession,
-    input_store: InputStore,
-    todo_board: TodoBoard,
-    pub(super) state_summary: Option<Value>,
     pub(super) previous_error: Option<Value>,
     pub(super) last_segment: Option<PlanSketchSegment>,
-    completed_segments: usize,
-    final_status: EngineRunStatus,
-    pub(super) planning_rounds: usize,
-    pub(super) planner_output_retries: usize,
-    pub(super) planner_round_limit: usize,
-    segment_limit: usize,
-    context_manager: PlanningContextManager,
-    tool_memory_projection: Option<Value>,
+    run_config: AgentRunConfig,
+    run_state: AgentRunState,
+    store_context: AgentStoreContext,
     checkpoint_extensions: checkpoint_ext::AgentCheckpointExtensions,
     compile_autofill_attempted_todos: BTreeSet<String>,
 }
@@ -46,6 +126,7 @@ impl SegmentedAgentContext {
         intent: String,
         session: intent_segmented::SegmentPlanningSession,
         input_store: InputStore,
+        runtime_facts_store: RuntimeFactsStore,
         todo_board: TodoBoard,
         planner_round_limit: usize,
         segment_limit: usize,
@@ -55,51 +136,67 @@ impl SegmentedAgentContext {
         Self {
             intent,
             session,
-            input_store,
-            todo_board,
-            state_summary: None,
             previous_error: None,
             last_segment: None,
-            completed_segments: 0,
-            final_status: EngineRunStatus::Completed,
-            planning_rounds: 0,
-            planner_output_retries: 0,
-            planner_round_limit,
-            segment_limit,
-            context_manager: PlanningContextManager::with_token_budget(
-                planner_context_token_budget,
-            ),
-            tool_memory_projection: None,
+            run_config: AgentRunConfig {
+                planner_round_limit,
+                segment_limit,
+            },
+            run_state: AgentRunState {
+                completed_segments: 0,
+                final_status: EngineRunStatus::Completed,
+                planning_rounds: 0,
+                planner_output_retries: 0,
+                execution_retry_tracker: ExecutionRetryTracker::default(),
+            },
+            store_context: AgentStoreContext {
+                input_store,
+                runtime_facts_store,
+                todo_board,
+                context_manager: PlanningContextManager::with_token_budget(
+                    planner_context_token_budget,
+                ),
+                tool_memory_projection: None,
+                packed_summary: None,
+                typed_summary: None,
+            },
             checkpoint_extensions,
             compile_autofill_attempted_todos: BTreeSet::new(),
         }
     }
 
     fn can_continue(&self) -> bool {
-        self.completed_segments < self.segment_limit
+        self.run_state.completed_segments < self.run_config.segment_limit
     }
 
     pub(super) fn refresh_state_summary(&mut self, state: &EngineRunnerState, done: bool) {
-        self.state_summary = Some(self.context_manager.next_summary(
-            state,
-            self.completed_segments,
-            done,
-            self.previous_error.as_ref(),
-            Some(&self.input_store),
-            self.tool_memory_projection.as_ref(),
-        ));
+        let next = self
+            .store_context
+            .context_manager
+            .next_summary_result_with_runtime_facts(
+                state,
+                self.run_state.completed_segments,
+                done,
+                self.previous_error.as_ref(),
+                Some(&self.store_context.input_store),
+                Some(&self.store_context.runtime_facts_store),
+                self.store_context.tool_memory_projection.as_ref(),
+            );
+        self.store_context.packed_summary = Some(next.packed);
+        self.store_context.typed_summary = Some(next.typed);
     }
 
     fn update_tool_memory_projection(&mut self, projection: Option<Value>) {
-        self.tool_memory_projection = projection;
+        self.store_context.tool_memory_projection = projection;
     }
 
     pub(super) fn set_previous_error_and_refresh(
         &mut self,
         state: &EngineRunnerState,
         done: bool,
-        error: Value,
+        mut error: Value,
     ) {
+        Self::merge_autofill_history(self.previous_error.as_ref(), &mut error);
         self.previous_error = Some(error);
         self.refresh_state_summary(state, done);
     }
@@ -121,12 +218,34 @@ impl SegmentedAgentContext {
         &self.session
     }
 
-    pub(super) fn state_summary(&self) -> &Option<Value> {
-        &self.state_summary
+    pub(super) fn packed_summary(&self) -> &Option<Value> {
+        &self.store_context.packed_summary
+    }
+
+    #[cfg(test)]
+    pub(super) fn packed_summary_mut(&mut self) -> &mut Option<Value> {
+        &mut self.store_context.packed_summary
+    }
+
+    pub(super) fn typed_summary(&self) -> Option<&StateSummary> {
+        self.store_context.typed_summary.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(super) fn typed_summary_mut(&mut self) -> &mut Option<StateSummary> {
+        &mut self.store_context.typed_summary
     }
 
     pub(super) fn completed_segments_u8(&self) -> u8 {
-        self.completed_segments as u8
+        self.run_state.completed_segments as u8
+    }
+
+    pub(super) fn completed_segments(&self) -> usize {
+        self.run_state.completed_segments
+    }
+
+    pub(super) fn increment_completed_segments(&mut self) {
+        self.run_state.completed_segments = self.run_state.completed_segments.saturating_add(1);
     }
 
     pub(super) fn has_compile_autofill_attempt(&self, key: &str) -> bool {
@@ -137,16 +256,133 @@ impl SegmentedAgentContext {
         self.compile_autofill_attempted_todos.insert(key.into());
     }
 
+    fn merge_autofill_history(previous_error: Option<&Value>, error: &mut Value) {
+        fn collect_attempt_keys(source: &Value, out: &mut BTreeSet<String>) {
+            if let Some(existing) = source
+                .pointer("/autofill_history/attempt_keys")
+                .and_then(Value::as_array)
+            {
+                for key in existing.iter().filter_map(Value::as_str) {
+                    let key = key.trim();
+                    if !key.is_empty() {
+                        out.insert(key.to_string());
+                    }
+                }
+            }
+            if let Some(mode) = source
+                .pointer("/autofill/mode")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                out.insert(format!("mode:{mode}"));
+            }
+            if let Some(refs) = source
+                .pointer("/autofill/selected_query_refs")
+                .and_then(Value::as_array)
+            {
+                for reference in refs.iter().filter_map(Value::as_str) {
+                    let reference = reference.trim();
+                    if !reference.is_empty() {
+                        out.insert(format!("query_ref:{reference}"));
+                    }
+                }
+            }
+            if let Some(pool) = source
+                .pointer("/autofill/query_candidate_pool")
+                .and_then(Value::as_array)
+            {
+                for candidate in pool {
+                    if let Some(reference) = candidate
+                        .get("query_ref")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                    {
+                        out.insert(format!("query_ref:{reference}"));
+                    }
+                }
+            }
+        }
+
+        let mut attempt_keys = BTreeSet::<String>::new();
+        if let Some(previous) = previous_error {
+            collect_attempt_keys(previous, &mut attempt_keys);
+        }
+        collect_attempt_keys(error, &mut attempt_keys);
+
+        if attempt_keys.is_empty() {
+            return;
+        }
+        if let Some(object) = error.as_object_mut() {
+            object.insert(
+                "autofill_history".to_string(),
+                json!({
+                    "attempt_keys": attempt_keys.into_iter().collect::<Vec<_>>(),
+                }),
+            );
+        }
+    }
     pub(super) fn input_store_mut(&mut self) -> &mut InputStore {
-        &mut self.input_store
+        &mut self.store_context.input_store
+    }
+
+    pub(super) fn input_store(&self) -> &InputStore {
+        &self.store_context.input_store
+    }
+
+    pub(super) fn runtime_facts_store(&self) -> &RuntimeFactsStore {
+        &self.store_context.runtime_facts_store
     }
 
     pub(super) fn todo_board(&self) -> &TodoBoard {
-        &self.todo_board
+        &self.store_context.todo_board
     }
 
     pub(super) fn todo_board_mut(&mut self) -> &mut TodoBoard {
-        &mut self.todo_board
+        &mut self.store_context.todo_board
+    }
+
+    #[cfg(test)]
+    pub(super) fn tool_memory_projection(&self) -> &Option<Value> {
+        &self.store_context.tool_memory_projection
+    }
+
+    pub(super) fn planner_round_limit(&self) -> usize {
+        self.run_config.planner_round_limit
+    }
+
+    pub(super) fn planning_rounds(&self) -> usize {
+        self.run_state.planning_rounds
+    }
+
+    pub(super) fn increment_planning_rounds(&mut self) {
+        self.run_state.planning_rounds = self.run_state.planning_rounds.saturating_add(1);
+    }
+
+    pub(super) fn planner_output_retries(&self) -> usize {
+        self.run_state.planner_output_retries
+    }
+
+    pub(super) fn reset_planner_output_retries(&mut self) {
+        self.run_state.planner_output_retries = 0;
+    }
+
+    pub(super) fn increment_planner_output_retries(&mut self) {
+        self.run_state.planner_output_retries =
+            self.run_state.planner_output_retries.saturating_add(1);
+    }
+
+    pub(super) fn final_status(&self) -> EngineRunStatus {
+        self.run_state.final_status.clone()
+    }
+
+    pub(super) fn set_final_status(&mut self, status: EngineRunStatus) {
+        self.run_state.final_status = status;
+    }
+
+    fn execution_retry_tracker_mut(&mut self) -> &mut ExecutionRetryTracker {
+        &mut self.run_state.execution_retry_tracker
     }
 }
 
@@ -157,16 +393,21 @@ pub(super) fn execute_segmented_intent_agent(
     candidate_context: Option<CandidateContext>,
     prompt_catalog: &PromptCatalog,
 ) -> Result<String, RunnerError> {
-    super::phase_machine::run_main_flow(command.verbose || command.verbose_llm, |phase_tracker| {
-        execute_segmented_intent_agent_main(
-            command,
-            config,
-            pack,
-            candidate_context,
-            prompt_catalog,
-            phase_tracker,
-        )
-    })
+    let result = super::phase_machine::run_main_flow(
+        command.verbose || command.verbose_llm,
+        |phase_tracker| {
+            execute_segmented_intent_agent_main(
+                command,
+                config,
+                pack,
+                candidate_context,
+                prompt_catalog,
+                phase_tracker,
+            )
+        },
+    );
+    super::trace::ensure_sink_healthy()?;
+    result
 }
 
 fn execute_segmented_intent_agent_main(
@@ -177,6 +418,10 @@ fn execute_segmented_intent_agent_main(
     prompt_catalog: &PromptCatalog,
     phase_tracker: &mut super::phase_machine::MainFlowPhaseTracker<'_>,
 ) -> Result<String, RunnerError> {
+    // ── Phase 1: Initialization ─────────────────────────────────────────
+    // Provider setup, checkpoint restore, input store init, session bootstrap,
+    // decision policy, engine options, command builder, context creation.
+
     let intent = super::resolve_intent_text(command)?;
     let candidate_context = candidate_context.ok_or_else(|| {
         RunnerError::Llm(
@@ -190,6 +435,8 @@ fn execute_segmented_intent_agent_main(
                 .to_string(),
         )
     })?;
+    let volatile_facts_policy = volatile_facts_policy_from_pack(pack)
+        .map_err(|error| RunnerError::WorkspaceValidate(error.to_string()))?;
     let segmented_prompt_overrides = super::load_segmented_prompt_overrides(prompt_catalog);
     let llm_context_limit_tokens = super::resolve_llm_context_limit_tokens(config);
     let segmented_max_tool_rounds = super::resolve_segmented_max_tool_rounds(command, config);
@@ -197,6 +444,7 @@ fn execute_segmented_intent_agent_main(
         .with_candidate_context(Some(candidate_context.clone()))
         .with_prompt_overrides(segmented_prompt_overrides)
         .with_max_tool_rounds(segmented_max_tool_rounds)
+        .with_volatile_facts_policy(volatile_facts_policy)
         .with_context_limit_tokens(llm_context_limit_tokens)
         .with_llm_transcript(
             command.llm_transcript_path.clone(),
@@ -260,7 +508,23 @@ fn execute_segmented_intent_agent_main(
         checkpoint_plan_hash,
         mut checkpoint_ledger,
         checkpoint_extensions,
+        pending_resume_traces,
     ) = super::load_or_init_state(command, &active_plan_hash, runtime)?;
+    let mut audit_attempt = if resumed_from_checkpoint {
+        crate::audit_contract::next_attempt_from_extensions(checkpoint_extensions.as_ref())
+    } else {
+        crate::audit_contract::AuditStreamAttempt::fresh()
+    };
+    let _agent_trace_guard = super::trace::install_jsonl_sink(
+        command.agent_trace_jsonl.as_deref(),
+        run_id.as_str(),
+        &audit_attempt,
+    )?;
+    super::trace::flush_pending(
+        command.verbose || command.verbose_llm,
+        pending_resume_traces.as_slice(),
+    );
+    super::trace::ensure_sink_healthy()?;
     let checkpoint_extensions = super::decode_agent_checkpoint_extensions(
         &mut state.runtime,
         checkpoint_extensions.as_ref(),
@@ -278,21 +542,12 @@ fn execute_segmented_intent_agent_main(
     }
     let mut input_store =
         super::build_initial_input_store(&state.runtime, config, chain_scope.as_slice())?;
+    let mut runtime_facts_store = RuntimeFactsStore::default();
     if let Some(restored) = checkpoint_extensions.input_store() {
         input_store.merge(restored);
     }
-    if let Some(intent_facts) = checkpoint_extensions.intent_facts() {
-        for (key, value) in intent_facts {
-            super::upsert_store_value_with_source(
-                &mut input_store,
-                key.clone(),
-                value.clone(),
-                super::input_store::InputValueLayer::Seed,
-                "intent",
-                50,
-                format!("checkpoint.intent_facts.{key}"),
-            );
-        }
+    if let Some(restored) = checkpoint_extensions.runtime_facts_store() {
+        runtime_facts_store.merge(restored);
     }
     super::runtime_store::record_runtime_agent_field(
         &mut state.runtime,
@@ -306,7 +561,10 @@ fn execute_segmented_intent_agent_main(
         Value::Bool(capability_ready),
     );
     super::record_side_effect_lifecycle(&mut state.runtime, &checkpoint_ledger);
-    sync_todo_progress_receipt_tx_hashes_from_ledger(&mut state, &checkpoint_ledger);
+    super::receipt_view::project_todo_progress_receipts_from_ledger(
+        &mut state.runtime,
+        &checkpoint_ledger,
+    );
     let runtime_has_intent_grounding = state.runtime.pointer("/agent/intent_grounding").is_some();
     let runtime_has_todo_progress = state.runtime.pointer("/agent/todo_progress").is_some();
     let mut todo_board = TodoBoard::restore_or_bootstrap(&state.runtime, intent.as_str());
@@ -316,6 +574,12 @@ fn execute_segmented_intent_agent_main(
     let initial_router = build_router_executor_for_plan(&active_plan, config)
         .map_err(RunnerError::ConfigInvalidForPlan)?;
     let readonly_autofill_router = crate::config::build_router_executor(config).ok();
+    let ckpt = super::checkpoint_flow::CheckpointGuard {
+        command,
+        run_id: run_id.as_str(),
+        active_plan_hash: &active_plan_hash,
+        active_plan: &active_plan,
+    };
     if resumed_from_checkpoint {
         if let Some(paused_reason) = super::reconcile_pending_side_effects(
             &mut checkpoint_ledger,
@@ -324,16 +588,14 @@ fn execute_segmented_intent_agent_main(
         ) {
             super::record_side_effect_lifecycle(&mut state.runtime, &checkpoint_ledger);
             state.paused_reason = Some(paused_reason);
-            super::checkpoint_flow::checkpoint_round(
-                command,
-                run_id.as_str(),
-                &active_plan_hash,
-                &active_plan,
+            ckpt.save(
                 &state,
                 &checkpoint_ledger,
                 planner.planning_memory_checkpoint_value(),
                 &input_store,
+                &runtime_facts_store,
                 &checkpoint_extensions,
+                &audit_attempt,
             )?;
             record_planner_llm_usage(&mut state, &planner);
             return super::render_agent_output(
@@ -397,6 +659,7 @@ fn execute_segmented_intent_agent_main(
         intent.clone(),
         session,
         input_store,
+        runtime_facts_store,
         todo_board,
         usize::from(planner_round_limit),
         segment_limit,
@@ -405,6 +668,10 @@ fn execute_segmented_intent_agent_main(
     );
     refresh_tool_memory_projection(&mut context, &mut planner, &state);
     context.refresh_state_summary(&state, false);
+    // ── Phase 2: Grounding ─────────────────────────────────────────────
+    // Attempt to ground the intent via LLM, with non-actionable pause
+    // retry/fallback logic. Returns true when grounded, false when paused.
+
     phase_tracker.transition_to(AgentPhase::GroundIntent, "bootstrap_intent_grounding");
     super::trace::emit(
         trace_enabled,
@@ -415,90 +682,36 @@ fn execute_segmented_intent_agent_main(
             runtime_has_intent_grounding.to_string(),
         )],
     );
-    let mut grounding_repair_retries = 0u8;
-    let mut reuse_runtime_grounding = runtime_has_intent_grounding;
-    let grounding_ready = loop {
-        let grounded = match bootstrap_intent_grounding_if_needed(
-            command,
-            &mut planner,
-            &mut state,
-            &mut context,
-            &candidate_context,
-            readonly_autofill_router.as_ref(),
-            reuse_runtime_grounding,
-        ) {
-            Ok(value) => value,
-            Err(error) => {
-                if command.verbose {
-                    eprintln!(
-                        "[agent] grounding_failed entered_execute_round=false reason={}",
-                        error
-                    );
-                }
-                return Err(record_planning_failure_preserving_primary_error(
-                    command,
-                    run_id.as_str(),
-                    &active_plan_hash,
-                    &active_plan,
-                    &mut state,
-                    &checkpoint_ledger,
-                    planner.planning_memory_checkpoint_value(),
-                    &context.input_store,
-                    &context.checkpoint_extensions,
-                    context.planning_rounds as u64,
-                    error,
-                ));
-            }
-        };
-        if grounded {
-            break true;
-        }
-        let Some(non_actionable) = detect_grounding_non_actionable_pause(&state) else {
-            break false;
-        };
-        super::trace::emit(
-            trace_enabled,
-            "grounding",
-            "grounding_non_actionable_pause_detected",
-            &[
-                ("retry", grounding_repair_retries.to_string()),
-                (
-                    "max_retries",
-                    GROUNDING_NON_ACTIONABLE_REPAIR_RETRY_LIMIT.to_string(),
-                ),
-                ("reason", non_actionable.message.clone()),
-            ],
-        );
-        match grounding_non_actionable_action(grounding_repair_retries) {
-            GroundingNonActionableAction::TerminalFallback => {
-                apply_grounding_non_actionable_terminal_fallback(
-                    &mut state,
-                    &mut context,
-                    &non_actionable,
+    let grounding_ready = match run_grounding_loop(
+        command,
+        &mut planner,
+        &mut state,
+        &mut context,
+        &candidate_context,
+        readonly_autofill_router.as_ref(),
+        runtime_has_intent_grounding,
+        trace_enabled,
+    ) {
+        Ok(ready) => ready,
+        Err(error) => {
+            if command.verbose {
+                eprintln!(
+                    "[agent] grounding_failed entered_execute_round=false reason={}",
+                    error
                 );
-                break false;
             }
-            GroundingNonActionableAction::Retry => {
-                grounding_repair_retries = grounding_repair_retries.saturating_add(1);
-                super::trace::emit(
-                    trace_enabled,
-                    "grounding",
-                    "grounding_repair_retry",
-                    &[
-                        ("retry", grounding_repair_retries.to_string()),
-                        (
-                            "max_retries",
-                            GROUNDING_NON_ACTIONABLE_REPAIR_RETRY_LIMIT.to_string(),
-                        ),
-                    ],
-                );
-                seed_grounding_non_actionable_repair_context(
-                    &mut state,
-                    &mut context,
-                    &non_actionable,
-                );
-                reuse_runtime_grounding = false;
-            }
+            return Err(record_planning_failure_preserving_primary_error(
+                &ckpt,
+                &mut state,
+                &mut checkpoint_ledger,
+                planner.planning_memory_checkpoint_value(),
+                &context.input_store(),
+                &context.runtime_facts_store(),
+                &context.checkpoint_extensions,
+                context.planning_rounds() as u64,
+                error,
+                &mut audit_attempt,
+            ));
         }
     };
     super::trace::emit(
@@ -507,6 +720,26 @@ fn execute_segmented_intent_agent_main(
         "complete",
         &[("ready_for_todos", grounding_ready.to_string())],
     );
+    if matches!(context.final_status(), EngineRunStatus::Stopped) {
+        ckpt.save(
+            &state,
+            &checkpoint_ledger,
+            planner.planning_memory_checkpoint_value(),
+            &context.input_store(),
+            &context.runtime_facts_store(),
+            &context.checkpoint_extensions,
+            &audit_attempt,
+        )?;
+        record_planner_llm_usage(&mut state, &planner);
+        return super::render_agent_output(
+            command,
+            &mut state,
+            EngineRunStatus::Stopped,
+            0,
+            0,
+            resumed_from_checkpoint,
+        );
+    }
     if !grounding_ready {
         phase_tracker.transition_to(AgentPhase::ResolvePause, "pause_after_grounding");
         super::trace::emit(
@@ -515,16 +748,14 @@ fn execute_segmented_intent_agent_main(
             "paused_missing_required_input",
             &[("phase_hint", "grounding".to_string())],
         );
-        super::checkpoint_flow::checkpoint_round(
-            command,
-            run_id.as_str(),
-            &active_plan_hash,
-            &active_plan,
+        ckpt.save(
             &state,
             &checkpoint_ledger,
             planner.planning_memory_checkpoint_value(),
-            &context.input_store,
+            &context.input_store(),
+            &context.runtime_facts_store(),
             &context.checkpoint_extensions,
+            &audit_attempt,
         )?;
         record_planner_llm_usage(&mut state, &planner);
         return super::render_agent_output(
@@ -536,6 +767,10 @@ fn execute_segmented_intent_agent_main(
             resumed_from_checkpoint,
         );
     }
+    // ── Phase 3: Todo Bootstrap ─────────────────────────────────────────
+    // Bootstrap the todo board via LLM if not already present.
+    // Pauses when missing required input is detected.
+
     phase_tracker.transition_to(AgentPhase::PlanTodos, "bootstrap_todos");
     super::trace::emit(
         trace_enabled,
@@ -562,17 +797,16 @@ fn execute_segmented_intent_agent_main(
             );
         }
         return Err(record_planning_failure_preserving_primary_error(
-            command,
-            run_id.as_str(),
-            &active_plan_hash,
-            &active_plan,
+            &ckpt,
             &mut state,
-            &checkpoint_ledger,
+            &mut checkpoint_ledger,
             planner.planning_memory_checkpoint_value(),
-            &context.input_store,
+            &context.input_store(),
+            &context.runtime_facts_store(),
             &context.checkpoint_extensions,
-            context.planning_rounds as u64,
+            context.planning_rounds() as u64,
             error,
+            &mut audit_attempt,
         ));
     }
     super::trace::emit(
@@ -587,6 +821,26 @@ fn execute_segmented_intent_agent_main(
                 .unwrap_or_else(|| "-".to_string()),
         )],
     );
+    if matches!(context.final_status(), EngineRunStatus::Stopped) {
+        ckpt.save(
+            &state,
+            &checkpoint_ledger,
+            planner.planning_memory_checkpoint_value(),
+            &context.input_store(),
+            &context.runtime_facts_store(),
+            &context.checkpoint_extensions,
+            &audit_attempt,
+        )?;
+        record_planner_llm_usage(&mut state, &planner);
+        return super::render_agent_output(
+            command,
+            &mut state,
+            EngineRunStatus::Stopped,
+            0,
+            0,
+            resumed_from_checkpoint,
+        );
+    }
     if state.paused_reason.as_deref() == Some("missing_required_input") {
         phase_tracker.transition_to(AgentPhase::ResolvePause, "pause_after_todo");
         super::trace::emit(
@@ -595,16 +849,14 @@ fn execute_segmented_intent_agent_main(
             "paused_missing_required_input",
             &[("phase_hint", "todo".to_string())],
         );
-        super::checkpoint_flow::checkpoint_round(
-            command,
-            run_id.as_str(),
-            &active_plan_hash,
-            &active_plan,
+        ckpt.save(
             &state,
             &checkpoint_ledger,
             planner.planning_memory_checkpoint_value(),
-            &context.input_store,
+            &context.input_store(),
+            &context.runtime_facts_store(),
             &context.checkpoint_extensions,
+            &audit_attempt,
         )?;
         record_planner_llm_usage(&mut state, &planner);
         return super::render_agent_output(
@@ -619,11 +871,24 @@ fn execute_segmented_intent_agent_main(
     context.previous_error = None;
     refresh_tool_memory_projection(&mut context, &mut planner, &state);
     context.refresh_state_summary(&state, false);
+    drop(ckpt);
+
+    // ── Phase 4: Segment Loop (plan → compile → execute → pause) ────
+    // Iterates over the todo board: plans a segment via LLM, compiles it
+    // into an executable plan, runs the engine, then handles pause/retry
+    // logic. Kept inline due to heavy mutable-state interdependencies
+    // (state, context, planner, checkpoint_ledger, active_plan, etc.).
 
     while context.can_continue() {
+        let ckpt = super::checkpoint_flow::CheckpointGuard {
+            command,
+            run_id: run_id.as_str(),
+            active_plan_hash: &active_plan_hash,
+            active_plan: &active_plan,
+        };
         phase_tracker.transition_to(AgentPhase::PlanSegment, "plan_round");
-        context.todo_board.ensure_current();
-        super::runtime_store::record_todo_progress(&mut state.runtime, &context.todo_board);
+        context.todo_board_mut().ensure_current();
+        super::runtime_store::record_todo_progress(&mut state.runtime, &context.todo_board());
         super::trace::emit(
             trace_enabled,
             "plan_round",
@@ -631,20 +896,23 @@ fn execute_segmented_intent_agent_main(
             &[(
                 "todo_id",
                 context
-                    .todo_board
+                    .todo_board()
                     .current_todo_id()
                     .unwrap_or("-")
                     .to_string(),
             )],
         );
         let current_todo_id = context
-            .todo_board
+            .todo_board()
             .current_todo_id()
             .ok_or_else(|| RunnerError::Llm("todo board has no current todo".to_string()))?
             .to_string();
         if context.previous_error.is_none() {
             let precheck_refs =
-                precheck_missing_input_refs_for_current_todo(&context, context.state_summary().as_ref());
+                super::missing_resolution::precheck_missing_input_refs_for_current_todo(
+                    &context,
+                    context.typed_summary(),
+                );
             if !precheck_refs.is_empty() {
                 super::trace::emit(
                     trace_enabled,
@@ -655,29 +923,48 @@ fn execute_segmented_intent_agent_main(
                         ("missing_refs", precheck_refs.join(",")),
                     ],
                 );
-                let precheck_payload = precheck_missing_input_payload(
+                let precheck_payload = super::missing_resolution::precheck_missing_input_payload(
                     precheck_refs.as_slice(),
-                    context.completed_segments as u8,
+                    context.completed_segments() as u8,
                 );
-                let recovery_outcome = recover_missing_refs(
+                match super::phase_machine::pause::recover_missing_required_input_payload(
                     command,
                     &mut state,
                     &mut context,
-                    &precheck_payload,
                     &candidate_context,
                     readonly_autofill_router.as_ref(),
+                    &precheck_payload,
                     current_todo_id.as_str(),
                     false,
                     "plan_precheck",
-                );
-                if recovery_outcome.should_retry_round() {
-                    super::trace::emit(
-                        trace_enabled,
-                        "plan_precheck",
-                        "recovery_retry_scheduled",
-                        &[("todo_id", current_todo_id.clone())],
-                    );
-                    continue;
+                    false,
+                    true,
+                )? {
+                    super::phase_machine::pause::MissingRequiredInputRecoveryBackflow::Retry {
+                        answers,
+                        ..
+                    } => {
+                        super::trace::emit(
+                            trace_enabled,
+                            "plan_precheck",
+                            if answers.is_some() {
+                                "resolved_by_user_input"
+                            } else {
+                                "recovery_retry_scheduled"
+                            },
+                            &[("todo_id", current_todo_id.clone())],
+                        );
+                        continue;
+                    }
+                    super::phase_machine::pause::MissingRequiredInputRecoveryBackflow::Paused => {
+                        super::trace::emit(
+                            trace_enabled,
+                            "plan_precheck",
+                            "paused_missing_required_input",
+                            &[("todo_id", current_todo_id.clone())],
+                        );
+                        break;
+                    }
                 }
             }
         }
@@ -698,17 +985,16 @@ fn execute_segmented_intent_agent_main(
                     );
                 }
                 return Err(record_planning_failure_preserving_primary_error(
-                    command,
-                    run_id.as_str(),
-                    &active_plan_hash,
-                    &active_plan,
+                    &ckpt,
                     &mut state,
-                    &checkpoint_ledger,
+                    &mut checkpoint_ledger,
                     planner.planning_memory_checkpoint_value(),
-                    &context.input_store,
+                    &context.input_store(),
+                    &context.runtime_facts_store(),
                     &context.checkpoint_extensions,
-                    context.planning_rounds as u64,
+                    context.planning_rounds() as u64,
                     error,
+                    &mut audit_attempt,
                 ));
             }
         };
@@ -744,7 +1030,32 @@ fn execute_segmented_intent_agent_main(
                 done,
                 issues,
                 questions,
+                error_details,
             } => {
+                if reason_code == "intent_aborted" {
+                    super::trace::emit(
+                        trace_enabled,
+                        "plan_round",
+                        "abort_intent",
+                        &[("todo_id", current_todo_id.clone())],
+                    );
+                    super::runtime_store::record_runtime_agent_field(
+                        &mut state.runtime,
+                        "abort_intent",
+                        json!({
+                            "accepted": true,
+                            "phase": "plan_round",
+                            "reason_code": reason_code,
+                            "summary": message,
+                            "evidence": error_details.as_ref().and_then(|value| value.get("evidence")).cloned().unwrap_or_else(|| json!({})),
+                            "user_fix_hint": error_details.as_ref().and_then(|value| value.get("user_fix_hint")).cloned().unwrap_or(Value::Null),
+                        }),
+                    );
+                    state.paused_reason = None;
+                    context.set_final_status(EngineRunStatus::Stopped);
+                    context.clear_previous_error_and_refresh(&state, true);
+                    break;
+                }
                 super::trace::emit(
                     trace_enabled,
                     "plan_round",
@@ -756,12 +1067,14 @@ fn execute_segmented_intent_agent_main(
                     ],
                 );
                 if reason_code == "missing_required_input" {
-                    let payload = super::missing_input::payload(
+                    let payload = super::missing_input::payload_with_error_details(
                         message.as_deref(),
                         questions.as_slice(),
                         issues.as_slice(),
-                        context.completed_segments as u8,
+                        error_details.as_ref(),
+                        context.completed_segments() as u8,
                     );
+                    let trace_extra = [("todo_id", current_todo_id.clone())];
                     match super::phase_machine::pause::recover_missing_required_input_payload(
                         command,
                         &mut state,
@@ -775,74 +1088,14 @@ fn execute_segmented_intent_agent_main(
                         false,
                         true,
                     )? {
-                        super::phase_machine::pause::MissingRequiredInputRecoveryBackflow::RetryScheduled => {
-                            continue;
-                        }
-                        super::phase_machine::pause::MissingRequiredInputRecoveryBackflow::ResolvedByUserInput { answers } => {
-                            context.todo_board.mark_current_todo();
-                            super::runtime_store::record_todo_progress(
-                                &mut state.runtime,
-                                &context.todo_board,
-                            );
-                            context.set_previous_error_and_refresh(
-                                &state,
-                                done,
-                                super::missing_input::resolved_payload(
-                                    &answers,
-                                    context.completed_segments as u8,
-                                ),
-                            );
-                            super::checkpoint_flow::checkpoint_round(
-                                command,
-                                run_id.as_str(),
-                                &active_plan_hash,
-                                &active_plan,
-                                &state,
-                                &checkpoint_ledger,
-                                planner.planning_memory_checkpoint_value(),
-                                &context.input_store,
-                                &context.checkpoint_extensions,
-                            )?;
-                            if command.verbose {
-                                eprintln!(
-                                    "[agent] missing_required_input resolved via user answers keys={}",
-                                    answers.keys().cloned().collect::<Vec<_>>().join(",")
-                                );
+                        super::phase_machine::pause::MissingRequiredInputRecoveryBackflow::Retry { answers, .. } => {
+                            if let Some(answers) = answers {
+                                handle_resolved_by_user_input(command, &mut state, &mut context, &ckpt, &checkpoint_ledger, planner.planning_memory_checkpoint_value(), done, trace_enabled, "plan_round", &trace_extra, answers, &audit_attempt)?;
                             }
-                            super::trace::emit(
-                                trace_enabled,
-                                "pause_resolution",
-                                "resolved_by_user_input",
-                                &[("todo_id", current_todo_id.clone())],
-                            );
                             continue;
                         }
                         super::phase_machine::pause::MissingRequiredInputRecoveryBackflow::Paused => {
-                            context
-                                .todo_board
-                                .mark_current_blocked("missing_required_input");
-                            super::runtime_store::record_todo_progress(
-                                &mut state.runtime,
-                                &context.todo_board,
-                            );
-                            super::checkpoint_flow::checkpoint_round(
-                                command,
-                                run_id.as_str(),
-                                &active_plan_hash,
-                                &active_plan,
-                                &state,
-                                &checkpoint_ledger,
-                                planner.planning_memory_checkpoint_value(),
-                                &context.input_store,
-                                &context.checkpoint_extensions,
-                            )?;
-                            super::trace::emit(
-                                trace_enabled,
-                                "pause_resolution",
-                                "paused_missing_required_input",
-                                &[("todo_id", current_todo_id.clone())],
-                            );
-                            context.final_status = EngineRunStatus::Paused;
+                            handle_paused_missing_input(&mut state, &mut context, Some(&ckpt), &checkpoint_ledger, planner.planning_memory_checkpoint_value(), trace_enabled, &trace_extra, Some(&audit_attempt))?;
                             break;
                         }
                     }
@@ -882,11 +1135,11 @@ fn execute_segmented_intent_agent_main(
             planned_segment.todo_id.as_str(),
         );
 
-        context.todo_board.mark_current_in_progress(
+        context.todo_board_mut().mark_current_in_progress(
             planned_segment.summary.as_deref(),
             planned_segment.segment.segment_id.as_str(),
         );
-        super::runtime_store::record_todo_progress(&mut state.runtime, &context.todo_board);
+        super::runtime_store::record_todo_progress(&mut state.runtime, &context.todo_board());
         if command.verbose_llm {
             eprintln!(
                 "[agent] segment proposed id={} steps={} done={} cursor_next={} summary={}",
@@ -910,6 +1163,7 @@ fn execute_segmented_intent_agent_main(
             &candidate_context,
             pack,
             chain_scope.as_slice(),
+            volatile_facts_policy,
         ) {
             Ok(plan) => plan,
             Err(error_payload) => {
@@ -920,7 +1174,7 @@ fn execute_segmented_intent_agent_main(
                 );
                 if let Some(payload) = compile_error_missing_required_input_payload(
                     &error_payload,
-                    context.completed_segments as u8,
+                    context.completed_segments() as u8,
                 ) {
                     if try_schedule_compile_autofill_round(
                         command,
@@ -939,99 +1193,37 @@ fn execute_segmented_intent_agent_main(
                     {
                         super::missing_input::pause_with_payload(&mut state, &prompt_payload);
                         context
-                            .todo_board
+                            .todo_board_mut()
                             .mark_current_blocked("missing_required_input");
                         super::runtime_store::record_todo_progress(
                             &mut state.runtime,
-                            &context.todo_board,
+                            &context.todo_board(),
                         );
-                        super::checkpoint_flow::checkpoint_round(
-                            command,
-                            run_id.as_str(),
-                            &active_plan_hash,
-                            &active_plan,
+                        ckpt.save(
                             &state,
                             &checkpoint_ledger,
                             planner.planning_memory_checkpoint_value(),
-                            &context.input_store,
+                            &context.input_store(),
+                            &context.runtime_facts_store(),
                             &context.checkpoint_extensions,
+                            &audit_attempt,
                         )?;
-                        context.final_status = EngineRunStatus::Paused;
+                        context.set_final_status(EngineRunStatus::Paused);
                         break;
                     }
+                    let trace_extra = [("todo_id", current_todo_id.clone())];
                     match super::phase_machine::pause::resolve_missing_required_input_payload(
                         &mut state,
                         context.input_store_mut(),
                         &prompt_payload,
                         false,
                     )? {
-                        super::phase_machine::pause::MissingRequiredInputBackflow::ResolvedByUserInput {
-                            answers,
-                        } => {
-                            context.todo_board.mark_current_todo();
-                            super::runtime_store::record_todo_progress(
-                                &mut state.runtime,
-                                &context.todo_board,
-                            );
-                            context.set_previous_error_and_refresh(
-                                &state,
-                                planned_segment.done,
-                                super::missing_input::resolved_payload(
-                                    &answers,
-                                    context.completed_segments as u8,
-                                ),
-                            );
-                            super::checkpoint_flow::checkpoint_round(
-                                command,
-                                run_id.as_str(),
-                                &active_plan_hash,
-                                &active_plan,
-                                &state,
-                                &checkpoint_ledger,
-                                planner.planning_memory_checkpoint_value(),
-                                &context.input_store,
-                                &context.checkpoint_extensions,
-                            )?;
-                            if command.verbose {
-                                eprintln!(
-                                    "[agent] compile missing_required_input resolved via user answers keys={}",
-                                    answers.keys().cloned().collect::<Vec<_>>().join(",")
-                                );
-                            }
-                            super::trace::emit(
-                                trace_enabled,
-                                "pause_resolution",
-                                "resolved_by_user_input",
-                                &[("todo_id", current_todo_id.clone())],
-                            );
+                        super::phase_machine::pause::MissingRequiredInputBackflow::ResolvedByUserInput { answers } => {
+                            handle_resolved_by_user_input(command, &mut state, &mut context, &ckpt, &checkpoint_ledger, planner.planning_memory_checkpoint_value(), planned_segment.done, trace_enabled, "compile", &trace_extra, answers, &audit_attempt)?;
                             continue;
                         }
                         super::phase_machine::pause::MissingRequiredInputBackflow::Paused => {
-                            context
-                                .todo_board
-                                .mark_current_blocked("missing_required_input");
-                            super::runtime_store::record_todo_progress(
-                                &mut state.runtime,
-                                &context.todo_board,
-                            );
-                            super::checkpoint_flow::checkpoint_round(
-                                command,
-                                run_id.as_str(),
-                                &active_plan_hash,
-                                &active_plan,
-                                &state,
-                                &checkpoint_ledger,
-                                planner.planning_memory_checkpoint_value(),
-                                &context.input_store,
-                                &context.checkpoint_extensions,
-                            )?;
-                            super::trace::emit(
-                                trace_enabled,
-                                "pause_resolution",
-                                "paused_missing_required_input",
-                                &[("todo_id", current_todo_id.clone())],
-                            );
-                            context.final_status = EngineRunStatus::Paused;
+                            handle_paused_missing_input(&mut state, &mut context, Some(&ckpt), &checkpoint_ledger, planner.planning_memory_checkpoint_value(), trace_enabled, &trace_extra, Some(&audit_attempt))?;
                             break;
                         }
                     }
@@ -1041,16 +1233,14 @@ fn execute_segmented_intent_agent_main(
                     planned_segment.done,
                     super::compile_error_state_payload(
                         &error_payload,
-                        context.completed_segments as u8,
+                        context.completed_segments() as u8,
                     ),
                 );
                 continue;
             }
         };
-        let execution_precheck_refs = collect_segment_missing_input_refs(
-            &planned_segment.segment,
-            &context.input_store,
-        );
+        let execution_precheck_refs =
+            collect_segment_missing_refs(&planned_segment.segment, context.typed_summary());
         if !execution_precheck_refs.is_empty() {
             super::trace::emit(
                 trace_enabled,
@@ -1062,21 +1252,22 @@ fn execute_segmented_intent_agent_main(
                     ("missing_refs", execution_precheck_refs.join(",")),
                 ],
             );
-            let payload = precheck_missing_input_payload(
+            let payload = super::missing_resolution::precheck_missing_input_payload(
                 execution_precheck_refs.as_slice(),
-                context.completed_segments as u8,
+                context.completed_segments() as u8,
             );
-            let recovery_outcome = recover_missing_refs(
-                command,
-                &mut state,
-                &mut context,
-                &payload,
-                &candidate_context,
-                readonly_autofill_router.as_ref(),
-                planned_segment.todo_id.as_str(),
-                planned_segment.done,
-                "execute_precheck",
-            );
+            let recovery_outcome =
+                super::missing_resolution::missing_resolution_recover_missing_refs(
+                    command,
+                    &mut state,
+                    &mut context,
+                    &payload,
+                    &candidate_context,
+                    readonly_autofill_router.as_ref(),
+                    planned_segment.todo_id.as_str(),
+                    planned_segment.done,
+                    "execute_precheck",
+                );
             if recovery_outcome.should_retry_round() {
                 super::trace::emit(
                     trace_enabled,
@@ -1100,6 +1291,13 @@ fn execute_segmented_intent_agent_main(
                 ("segment_id", planned_segment.segment.segment_id.clone()),
             ],
         );
+        drop(ckpt);
+        let checkpoint_extensions = context.checkpoint_extensions.clone();
+        let AgentStoreContext {
+            runtime_facts_store,
+            input_store,
+            ..
+        } = &mut context.store_context;
         let execute_outcome = execute_round(
             command,
             run_id.as_str(),
@@ -1113,12 +1311,21 @@ fn execute_segmented_intent_agent_main(
             &mut active_plan_hash,
             &planned_segment.segment,
             &segment_plan,
+            &candidate_context,
             planner.planning_memory_checkpoint_value(),
-            &mut context.input_store,
-            &context.checkpoint_extensions,
+            runtime_facts_store,
+            input_store,
+            &checkpoint_extensions,
+            &mut audit_attempt,
             &mut total_events,
             planned_segment.todo_id.as_str(),
         )?;
+        let ckpt = super::checkpoint_flow::CheckpointGuard {
+            command,
+            run_id: run_id.as_str(),
+            active_plan_hash: &active_plan_hash,
+            active_plan: &active_plan,
+        };
         if command.verbose {
             eprintln!(
                 "[agent] execute_round_done segment_id={} status={} iterations={} events={}",
@@ -1143,30 +1350,36 @@ fn execute_segmented_intent_agent_main(
         );
         total_iterations = total_iterations.saturating_add(execute_outcome.iterations);
         let execute_status = execute_outcome.status.clone();
-        let todo_receipt = build_todo_receipt(
-            &planned_segment,
+        let todo_receipt = super::receipt_view::build_segment_todo_receipt(
+            planned_segment.todo_id.as_str(),
+            &planned_segment.segment,
             execute_status.clone(),
-            &mut state,
-            &checkpoint_ledger,
+            &state,
             execute_outcome.round_events.as_slice(),
+            Some(&checkpoint_ledger),
         );
         context
-            .todo_board
+            .todo_board_mut()
             .record_receipt_for_todo(planned_segment.todo_id.as_str(), todo_receipt);
 
         match execute_status {
             EngineRunStatus::Completed | EngineRunStatus::Stopped => {
-                context.completed_segments = context.completed_segments.saturating_add(1);
+                context.execution_retry_tracker_mut().reset();
+                context.increment_completed_segments();
                 context.session.cursor = planned_segment.cursor_next;
+                let typed_summary_snapshot = context.typed_summary().cloned();
                 let completion_gate_done = advance_todo_after_execute_completion(
-                    &mut context.todo_board,
-                    context.state_summary.as_ref(),
+                    context.todo_board_mut(),
+                    typed_summary_snapshot.as_ref(),
                     planned_segment.done,
                 );
-                super::runtime_store::record_todo_progress(&mut state.runtime, &context.todo_board);
+                super::runtime_store::record_todo_progress(
+                    &mut state.runtime,
+                    &context.todo_board(),
+                );
                 context.previous_error = None;
                 context.last_segment = Some(planned_segment.segment);
-                context.final_status = execute_outcome.status;
+                context.set_final_status(execute_outcome.status);
                 context.refresh_state_summary(&state, completion_gate_done);
                 if completion_gate_done {
                     break;
@@ -1174,7 +1387,7 @@ fn execute_segmented_intent_agent_main(
             }
             EngineRunStatus::Paused => {
                 phase_tracker.transition_to(AgentPhase::ResolvePause, "resolve_execution_pause");
-                let pause_round = context.completed_segments as u8;
+                let pause_round = context.completed_segments() as u8;
                 if let Some(payload) =
                     super::phase_machine::pause::missing_required_input_payload_from_pause(
                         &state,
@@ -1182,6 +1395,10 @@ fn execute_segmented_intent_agent_main(
                         pause_round,
                     )
                 {
+                    let trace_extra: [(&str, String); 2] = [
+                        ("todo_id", planned_segment.todo_id.clone()),
+                        ("segment_id", planned_segment.segment.segment_id.clone()),
+                    ];
                     match super::phase_machine::pause::recover_missing_required_input_payload(
                         command,
                         &mut state,
@@ -1195,94 +1412,38 @@ fn execute_segmented_intent_agent_main(
                         true,
                         true,
                     )? {
-                        super::phase_machine::pause::MissingRequiredInputRecoveryBackflow::RetryScheduled => {
-                            context.todo_board.mark_current_todo();
+                        super::phase_machine::pause::MissingRequiredInputRecoveryBackflow::Retry { answers, .. } => {
+                            context.todo_board_mut().mark_current_todo();
                             super::runtime_store::record_todo_progress(
                                 &mut state.runtime,
-                                &context.todo_board,
+                                &context.todo_board(),
                             );
-                            super::checkpoint_flow::checkpoint_round(
-                                command,
-                                run_id.as_str(),
-                                &active_plan_hash,
-                                &active_plan,
+                            ckpt.save(
                                 &state,
                                 &checkpoint_ledger,
                                 planner.planning_memory_checkpoint_value(),
-                                &context.input_store,
+                                &context.input_store(),
+                                &context.runtime_facts_store(),
                                 &context.checkpoint_extensions,
+                                &audit_attempt,
                             )?;
                             super::trace::emit(
                                 trace_enabled,
                                 "pause_resolution",
-                                "autofill_scheduled",
-                                &[
-                                    ("todo_id", planned_segment.todo_id.clone()),
-                                    ("segment_id", planned_segment.segment.segment_id.clone()),
-                                ],
+                                if answers.is_some() {
+                                    "resolved_by_user_input"
+                                } else {
+                                    "autofill_scheduled"
+                                },
+                                &trace_extra,
                             );
-                            continue;
-                        }
-                        super::phase_machine::pause::MissingRequiredInputRecoveryBackflow::ResolvedByUserInput { answers } => {
-                            context.todo_board.mark_current_todo();
-                            super::runtime_store::record_todo_progress(
-                                &mut state.runtime,
-                                &context.todo_board,
-                            );
-                            context.set_previous_error_and_refresh(
-                                &state,
-                                planned_segment.done,
-                                super::missing_input::resolved_payload(
-                                    &answers,
-                                    context.completed_segments as u8,
-                                ),
-                            );
-                            super::checkpoint_flow::checkpoint_round(
-                                command,
-                                run_id.as_str(),
-                                &active_plan_hash,
-                                &active_plan,
-                                &state,
-                                &checkpoint_ledger,
-                                planner.planning_memory_checkpoint_value(),
-                                &context.input_store,
-                                &context.checkpoint_extensions,
-                            )?;
-                            if command.verbose {
-                                eprintln!(
-                                    "[agent] execution missing_required_input resolved via user answers keys={}",
-                                    answers.keys().cloned().collect::<Vec<_>>().join(",")
-                                );
+                            if let Some(answers) = answers {
+                                handle_resolved_by_user_input(command, &mut state, &mut context, &ckpt, &checkpoint_ledger, planner.planning_memory_checkpoint_value(), planned_segment.done, trace_enabled, "execution", &trace_extra, answers, &audit_attempt)?;
                             }
-                            super::trace::emit(
-                                trace_enabled,
-                                "pause_resolution",
-                                "resolved_by_user_input",
-                                &[
-                                    ("todo_id", planned_segment.todo_id.clone()),
-                                    ("segment_id", planned_segment.segment.segment_id.clone()),
-                                ],
-                            );
                             continue;
                         }
                         super::phase_machine::pause::MissingRequiredInputRecoveryBackflow::Paused => {
-                            context
-                                .todo_board
-                                .mark_current_blocked("missing_required_input");
-                            super::runtime_store::record_todo_progress(
-                                &mut state.runtime,
-                                &context.todo_board,
-                            );
-                            super::trace::emit(
-                                trace_enabled,
-                                "pause_resolution",
-                                "paused_missing_required_input",
-                                &[
-                                    ("todo_id", planned_segment.todo_id.clone()),
-                                    ("segment_id", planned_segment.segment.segment_id.clone()),
-                                ],
-                            );
-                            context.final_status = EngineRunStatus::Paused;
+                            handle_paused_missing_input(&mut state, &mut context, None, &checkpoint_ledger, None, trace_enabled, &trace_extra, None)?;
                             break;
                         }
                     }
@@ -1296,29 +1457,27 @@ fn execute_segmented_intent_agent_main(
                     super::phase_machine::pause::ResolvePauseBackflow::MissingRequiredInputResolved {
                         answers,
                     } => {
-                        context.todo_board.mark_current_todo();
+                        context.todo_board_mut().mark_current_todo();
                         super::runtime_store::record_todo_progress(
                             &mut state.runtime,
-                            &context.todo_board,
+                            &context.todo_board(),
                         );
                         context.set_previous_error_and_refresh(
                             &state,
                             planned_segment.done,
                             super::missing_input::resolved_payload(
                                 &answers,
-                                context.completed_segments as u8,
+                                context.completed_segments() as u8,
                             ),
                         );
-                        super::checkpoint_flow::checkpoint_round(
-                            command,
-                            run_id.as_str(),
-                            &active_plan_hash,
-                            &active_plan,
+                        ckpt.save(
                             &state,
                             &checkpoint_ledger,
                             planner.planning_memory_checkpoint_value(),
-                            &context.input_store,
+                            &context.input_store(),
+                            &context.runtime_facts_store(),
                             &context.checkpoint_extensions,
+                            &audit_attempt,
                         )?;
                         if command.verbose {
                             eprintln!(
@@ -1339,11 +1498,11 @@ fn execute_segmented_intent_agent_main(
                     }
                     super::phase_machine::pause::ResolvePauseBackflow::MissingRequiredInputPaused => {
                         context
-                            .todo_board
+                            .todo_board_mut()
                             .mark_current_blocked("missing_required_input");
                         super::runtime_store::record_todo_progress(
                             &mut state.runtime,
-                            &context.todo_board,
+                            &context.todo_board(),
                         );
                         super::trace::emit(
                             trace_enabled,
@@ -1354,17 +1513,17 @@ fn execute_segmented_intent_agent_main(
                                 ("segment_id", planned_segment.segment.segment_id.clone()),
                             ],
                         );
-                        context.final_status = EngineRunStatus::Paused;
+                        context.set_final_status(EngineRunStatus::Paused);
                         break;
                     }
                     super::phase_machine::pause::ResolvePauseBackflow::PauseTerminal {
                         blocked_reason,
                     } => {
-                        context.final_status = EngineRunStatus::Paused;
-                        context.todo_board.mark_current_blocked(blocked_reason);
+                        context.set_final_status(EngineRunStatus::Paused);
+                        context.todo_board_mut().mark_current_blocked(blocked_reason);
                         super::runtime_store::record_todo_progress(
                             &mut state.runtime,
-                            &context.todo_board,
+                            &context.todo_board(),
                         );
                         super::trace::emit(
                             trace_enabled,
@@ -1387,7 +1546,16 @@ fn execute_segmented_intent_agent_main(
                     super::phase_machine::pause::ResolvePauseBackflow::RepairScheduled {
                         previous_error,
                     } => {
-                        context.final_status = EngineRunStatus::Paused;
+                        let retry_action = context
+                            .execution_retry_tracker_mut()
+                            .observe_error(state.paused_reason.as_deref());
+                        let consecutive_same_error = context
+                            .execution_retry_tracker_mut()
+                            .consecutive_same_error_count;
+                        let last_error_signature = context
+                            .execution_retry_tracker_mut()
+                            .last_error_signature
+                            .clone();
                         super::trace::emit(
                             trace_enabled,
                             "pause_resolution",
@@ -1395,49 +1563,183 @@ fn execute_segmented_intent_agent_main(
                             &[
                                 ("todo_id", planned_segment.todo_id.clone()),
                                 ("segment_id", planned_segment.segment.segment_id.clone()),
+                                ("retry_action", format!("{:?}", retry_action)),
+                                (
+                                    "consecutive_same_error",
+                                    consecutive_same_error.to_string(),
+                                ),
                             ],
                         );
-                        context.set_previous_error_and_refresh(
-                            &state,
-                            planned_segment.done,
-                            previous_error,
-                        );
-                        super::runtime_store::record_todo_progress(
-                            &mut state.runtime,
-                            &context.todo_board,
-                        );
-                        context.last_segment = Some(planned_segment.segment);
+                        match retry_action {
+                            ExecutionRetryAction::Terminal => {
+                                let blocked_reason = format!(
+                                    "repeated_executor_error:{}",
+                                    last_error_signature
+                                        .as_deref()
+                                        .unwrap_or("unknown")
+                                );
+                                context.set_final_status(EngineRunStatus::Paused);
+                                context.todo_board_mut().mark_current_blocked(&blocked_reason);
+                                super::runtime_store::record_todo_progress(
+                                    &mut state.runtime,
+                                    &context.todo_board(),
+                                );
+                                super::trace::emit(
+                                    trace_enabled,
+                                    "pause_resolution",
+                                    "pause_terminal_repeated_error",
+                                    &[
+                                        ("todo_id", planned_segment.todo_id.clone()),
+                                        ("segment_id", planned_segment.segment.segment_id.clone()),
+                                        (
+                                            "consecutive_failures",
+                                            consecutive_same_error.to_string(),
+                                        ),
+                                    ],
+                                );
+                                break;
+                            }
+                            ExecutionRetryAction::RawRetry => {
+                                context.set_final_status(EngineRunStatus::Paused);
+                                context.set_previous_error_and_refresh(
+                                    &state,
+                                    planned_segment.done,
+                                    previous_error,
+                                );
+                                super::runtime_store::record_todo_progress(
+                                    &mut state.runtime,
+                                    &context.todo_board(),
+                                );
+                                context.last_segment = Some(planned_segment.segment);
+                            }
+                            ExecutionRetryAction::RepairViaLlm => {
+                                context.set_final_status(EngineRunStatus::Paused);
+                                context.set_previous_error_and_refresh(
+                                    &state,
+                                    planned_segment.done,
+                                    previous_error,
+                                );
+                                super::runtime_store::record_todo_progress(
+                                    &mut state.runtime,
+                                    &context.todo_board(),
+                                );
+                                context.last_segment = Some(planned_segment.segment);
+                            }
+                        }
                     }
                 }
             }
         }
     }
 
+    let ckpt = super::checkpoint_flow::CheckpointGuard {
+        command,
+        run_id: run_id.as_str(),
+        active_plan_hash: &active_plan_hash,
+        active_plan: &active_plan,
+    };
+    let (normalized_final_status, normalized_paused_reason) =
+        super::normalize_agent_terminal_contract(context.final_status(), &state);
+    state.paused_reason = normalized_paused_reason;
     if matches!(
-        context.final_status,
+        normalized_final_status,
         EngineRunStatus::Completed | EngineRunStatus::Stopped
     ) {
-        super::checkpoint_flow::checkpoint_round(
-            command,
-            run_id.as_str(),
-            &active_plan_hash,
-            &active_plan,
+        ckpt.save(
             &state,
             &checkpoint_ledger,
             planner.planning_memory_checkpoint_value(),
-            &context.input_store,
+            &context.input_store(),
+            &context.runtime_facts_store(),
             &context.checkpoint_extensions,
+            &audit_attempt,
         )?;
     }
     record_planner_llm_usage(&mut state, &planner);
     super::render_agent_output(
         command,
         &mut state,
-        context.final_status,
+        normalized_final_status,
         total_iterations,
         total_events,
         resumed_from_checkpoint,
     )
+}
+
+/// Runs the grounding phase loop: attempts to ground the intent, handling
+/// non-actionable pause retries and terminal fallbacks.
+///
+/// Returns `Ok(true)` when grounding succeeds and the agent can proceed to todos.
+/// Returns `Ok(false)` when grounding pauses (missing input or terminal fallback).
+/// Returns `Err` on fatal grounding failures (caller wraps with checkpoint save).
+fn run_grounding_loop<P: LlmProvider>(
+    command: &AgentCommand,
+    planner: &mut LlmSegmentedIntentPlanner<P>,
+    state: &mut EngineRunnerState,
+    context: &mut SegmentedAgentContext,
+    candidate_context: &CandidateContext,
+    readonly_autofill_router: Option<&ais_engine::RouterExecutor>,
+    runtime_has_intent_grounding: bool,
+    trace_enabled: bool,
+) -> Result<bool, RunnerError> {
+    let mut grounding_repair_retries = 0u8;
+    let mut reuse_runtime_grounding = runtime_has_intent_grounding;
+    loop {
+        let grounded = bootstrap_intent_grounding_if_needed(
+            command,
+            planner,
+            state,
+            context,
+            candidate_context,
+            readonly_autofill_router,
+            reuse_runtime_grounding,
+        )?;
+        if grounded {
+            return Ok(true);
+        }
+        if matches!(context.final_status(), EngineRunStatus::Stopped) {
+            return Ok(false);
+        }
+        let Some(non_actionable) = detect_grounding_non_actionable_pause(state) else {
+            return Ok(false);
+        };
+        super::trace::emit(
+            trace_enabled,
+            "grounding",
+            "grounding_non_actionable_pause_detected",
+            &[
+                ("retry", grounding_repair_retries.to_string()),
+                (
+                    "max_retries",
+                    GROUNDING_NON_ACTIONABLE_REPAIR_RETRY_LIMIT.to_string(),
+                ),
+                ("reason", non_actionable.message.clone()),
+            ],
+        );
+        match grounding_non_actionable_action(grounding_repair_retries) {
+            GroundingNonActionableAction::TerminalFallback => {
+                apply_grounding_non_actionable_terminal_fallback(state, context, &non_actionable);
+                return Ok(false);
+            }
+            GroundingNonActionableAction::Retry => {
+                grounding_repair_retries = grounding_repair_retries.saturating_add(1);
+                super::trace::emit(
+                    trace_enabled,
+                    "grounding",
+                    "grounding_repair_retry",
+                    &[
+                        ("retry", grounding_repair_retries.to_string()),
+                        (
+                            "max_retries",
+                            GROUNDING_NON_ACTIONABLE_REPAIR_RETRY_LIMIT.to_string(),
+                        ),
+                    ],
+                );
+                seed_grounding_non_actionable_repair_context(state, context, &non_actionable);
+                reuse_runtime_grounding = false;
+            }
+        }
+    }
 }
 
 fn record_planner_llm_usage<P>(
@@ -1484,7 +1786,7 @@ fn resolve_tool_pressure_mode(
     runtime_usage: Option<&Value>,
 ) -> ContextPressureMode {
     if let Some(mode) = context
-        .state_summary
+        .packed_summary()
         .as_ref()
         .and_then(|summary| summary.pointer("/context_budget/pressure_mode"))
         .and_then(Value::as_str)
@@ -1630,24 +1932,36 @@ fn compile_guard(
     candidate_context: &CandidateContext,
     pack: Option<&ais_sdk::PackDocument>,
     chain_scope: &[String],
+    volatile_facts_policy: VolatileFactsPolicy,
 ) -> Result<PlanDocument, Value> {
-    let known_refs = super::known_input_refs_from_state_summary(context.state_summary.as_ref());
+    let known_refs = super::known_input_refs_from_typed_summary(context.typed_summary())
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
     let grounding_fact_keys =
-        super::grounding_fact_keys_from_state_summary(context.state_summary.as_ref());
+        super::grounding_fact_keys_from_typed_summary(context.typed_summary())
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
     planned.segment = super::canonicalize_segment_input_refs(
         &planned.segment,
         &known_refs,
         &grounding_fact_keys,
     )?;
-    super::validate_segment_todo_scope(
+    super::validate_segment_todo_scope_with_runtime_facts_and_policy(
         &planned.segment,
         candidate_context,
         context
-            .state_summary
-            .as_ref()
-            .and_then(|summary| summary.pointer("/todo_state/current_todo")),
+            .typed_summary()
+            .and_then(|summary| summary.todo_state_view().current_todo_execution_scope()),
+        context.typed_summary(),
+        Some(context.runtime_facts_store()),
+        Some(context.input_store()),
+        volatile_facts_policy,
     )?;
-    super::compile_segment_plan_with_inputs(
+    super::compile_segment_plan_with_inputs_and_policy(
         context.intent.as_str(),
         &context.session,
         &planned.segment,
@@ -1655,6 +1969,9 @@ fn compile_guard(
         pack,
         chain_scope,
         known_refs.as_slice(),
+        volatile_facts_policy,
+        context.runtime_facts_store(),
+        context.input_store(),
     )
 }
 
@@ -1682,58 +1999,15 @@ fn compile_error_compact(error: &Value) -> String {
 }
 
 fn compile_error_missing_required_input_payload(error_payload: &Value, round: u8) -> Option<Value> {
-    let issues = error_payload
-        .get("issues")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let mut missing_refs = BTreeSet::<String>::new();
-    let mut missing_input_issues = Vec::<Value>::new();
-    for issue in issues {
-        let reference = issue.get("reference").and_then(Value::as_str).unwrap_or("");
-        let kind = issue.get("kind").and_then(Value::as_str).unwrap_or("");
-        if reference == "unknown_input_ref" {
-            missing_input_issues.push(issue.clone());
-            if let Some(suggested_ref) = issue.get("suggested_ref").and_then(Value::as_str) {
-                collect_missing_input_ref(suggested_ref, Some(&issue), &mut missing_refs);
-            }
-            for candidate in issue
-                .get("candidates")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flat_map(|items| items.iter())
-                .filter_map(Value::as_str)
-            {
-                collect_missing_input_ref(candidate, Some(&issue), &mut missing_refs);
-            }
-            if let Some(message) = issue.get("message").and_then(Value::as_str) {
-                collect_missing_input_refs_from_message(message, &mut missing_refs);
-            }
-            continue;
-        }
-        if is_write_gate_missing_input_issue(&issue, kind) {
-            missing_input_issues.push(issue.clone());
-            if let Some(required_fact) = issue.get("required_fact").and_then(Value::as_str) {
-                collect_missing_input_ref(required_fact, Some(&issue), &mut missing_refs);
-            }
-            if let Some(message) = issue.get("message").and_then(Value::as_str) {
-                collect_missing_input_refs_from_message(message, &mut missing_refs);
-            }
-            continue;
-        }
-    }
-
-    if missing_input_issues.is_empty() {
+    let collected = super::missing_registry::collect_compile_missing_input(error_payload);
+    if collected.issues.is_empty() {
         return None;
     }
-    if let Some(message) = error_payload.get("message").and_then(Value::as_str) {
-        collect_missing_input_refs_from_message(message, &mut missing_refs);
-    }
-    if missing_refs.is_empty() {
+    if collected.missing_refs.is_empty() {
         return None;
     }
 
-    let missing_refs_vec = missing_refs.into_iter().collect::<Vec<_>>();
+    let missing_refs_vec = collected.missing_refs;
     let suggested_paths = missing_refs_vec.clone();
     let questions = missing_refs_vec
         .iter()
@@ -1751,7 +2025,7 @@ fn compile_error_missing_required_input_payload(error_payload: &Value, round: u8
     Some(super::missing_input::payload_with_context(
         Some("missing inputs required for plan compile"),
         questions.as_slice(),
-        missing_input_issues.as_slice(),
+        collected.issues.as_slice(),
         missing_refs_vec.as_slice(),
         suggested_paths.as_slice(),
         round,
@@ -1769,7 +2043,7 @@ fn compile_missing_input_prompt_payload(state: &EngineRunnerState, payload: &Val
         .pointer("/agent/compile_autofill/reason")
         .and_then(Value::as_str)
         .unwrap_or("compile_autofill_unknown");
-    let missing_refs = super::missing_ref_recovery::missing_required_input_refs(payload);
+    let missing_refs = super::missing_resolution::missing_required_refs(payload);
     let recovery_status = if status == "unresolved" {
         "compile_autofill_exhausted"
     } else {
@@ -1786,112 +2060,17 @@ fn compile_missing_input_prompt_payload(state: &EngineRunnerState, payload: &Val
     )
 }
 
-fn is_write_gate_missing_input_issue(issue: &Value, kind: &str) -> bool {
-    if kind != "write_gate_missing" {
-        return false;
-    }
-    let reason_code = issue
-        .get("reason_code")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    if reason_code.starts_with("missing_") {
-        return true;
-    }
-    let required_fact = issue
-        .get("required_fact")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    if super::input_normalize::normalize_missing_input_ref(required_fact).is_some() {
-        return true;
-    }
-    let mut message_refs = BTreeSet::new();
-    let has_message_refs = issue
-        .get("message")
-        .and_then(Value::as_str)
-        .is_some_and(|message| {
-            collect_missing_input_refs_from_message(message, &mut message_refs);
-            !message_refs.is_empty()
-        });
-    has_message_refs || reason_code == "missing_required_input"
-}
-
 fn advance_todo_after_execute_completion(
     todo_board: &mut TodoBoard,
-    state_summary: Option<&Value>,
+    typed_summary: Option<&StateSummary>,
     planner_done: bool,
 ) -> bool {
     todo_board.mark_current_done();
-    let acceptance_complete = todo_board.intent_acceptance_complete(state_summary);
+    let acceptance_complete = todo_board.intent_acceptance_complete(typed_summary);
     if !planner_done && todo_board.current().is_none() && !acceptance_complete {
         todo_board.open_follow_up_todo();
     }
     planner_done || acceptance_complete
-}
-
-fn precheck_missing_input_refs_for_current_todo(
-    context: &SegmentedAgentContext,
-    state_summary: Option<&Value>,
-) -> Vec<String> {
-    let Some(current_todo) = context.todo_board.current() else {
-        return Vec::new();
-    };
-    let mut refs = BTreeSet::<String>::new();
-    for fact in &current_todo.required_facts {
-        let Some(slot) = super::input_normalize::normalize_missing_input_ref(fact) else {
-            continue;
-        };
-        let canonical_ref = format!("inputs.{slot}");
-        if !runtime_has_input_ref(state_summary, canonical_ref.as_str()) {
-            refs.insert(canonical_ref);
-        }
-    }
-    refs.into_iter().collect::<Vec<_>>()
-}
-
-fn precheck_missing_input_payload(missing_refs: &[String], round: u8) -> Value {
-    let questions = missing_refs
-        .iter()
-        .map(|reference| {
-            serde_json::json!({
-                "id": reference,
-                "question": format!("Provide `{reference}`"),
-                "required": true,
-                "options": [],
-            })
-        })
-        .collect::<Vec<_>>();
-    super::missing_input::payload_with_context(
-        Some("todo precheck missing required inputs"),
-        questions.as_slice(),
-        &[],
-        missing_refs,
-        missing_refs,
-        round,
-    )
-}
-
-pub(super) fn recover_missing_refs(
-    command: &AgentCommand,
-    state: &mut EngineRunnerState,
-    context: &mut SegmentedAgentContext,
-    missing_input_payload: &Value,
-    candidate_context: &CandidateContext,
-    readonly_autofill_router: Option<&ais_engine::RouterExecutor>,
-    scope_id: &str,
-    done: bool,
-    phase_hint: &'static str,
-) -> super::missing_ref_recovery::RecoveryOutcome {
-    super::missing_ref_recovery::recover_missing_refs(
-        command,
-        state,
-        context,
-        missing_input_payload,
-        candidate_context,
-        readonly_autofill_router,
-        scope_id,
-        done,
-        phase_hint,
-    )
 }
 
 fn try_schedule_compile_autofill_round(
@@ -1907,8 +2086,8 @@ fn try_schedule_compile_autofill_round(
     let trace_enabled = command.verbose || command.verbose_llm;
     emit_unknown_input_ref_repair_suggested(trace_enabled, compile_error_payload, todo_id);
     let initial_missing_refs =
-        super::missing_ref_recovery::missing_required_input_refs(missing_input_payload);
-    let static_outcome = apply_static_missing_ref_refill(
+        super::missing_resolution::missing_required_refs(missing_input_payload);
+    let static_outcome = super::missing_resolution::apply_static_missing_ref_refill(
         state,
         context,
         initial_missing_refs.as_slice(),
@@ -1917,7 +2096,9 @@ fn try_schedule_compile_autofill_round(
     );
     let missing_refs = initial_missing_refs
         .into_iter()
-        .filter(|path| !runtime_has_input_ref(context.state_summary.as_ref(), path))
+        .filter(|path| {
+            !super::missing_resolution::runtime_has_ref_typed(context.typed_summary(), path)
+        })
         .collect::<Vec<_>>();
     let ambiguous_bindings = static_outcome
         .ambiguous_bindings
@@ -1956,7 +2137,7 @@ fn try_schedule_compile_autofill_round(
                     "resolved_refs": static_outcome.resolved_refs.clone(),
                     "unresolved_refs": missing_refs.clone(),
                     "ambiguous_bindings": ambiguous_bindings,
-                    "available_input_refs": available_input_ref_catalog(context.state_summary.as_ref()),
+                    "available_input_refs": available_input_ref_catalog(context.typed_summary()),
                     "query_candidate_pool": [],
                 }),
             );
@@ -2062,9 +2243,9 @@ fn try_schedule_compile_autofill_round(
         3,
     );
     let selected_query_refs =
-        super::missing_ref_recovery::selected_query_refs_from_missing_resolution(&resolution);
+        super::missing_resolution::selected_query_refs_from_missing_resolution(&resolution);
     if selected_query_refs.is_empty() {
-        let available_input_refs = available_input_ref_catalog(context.state_summary.as_ref());
+        let available_input_refs = available_input_ref_catalog(context.typed_summary());
         if !context
             .compile_autofill_attempted_todos
             .contains(adjudicate_retry_key.as_str())
@@ -2086,7 +2267,7 @@ fn try_schedule_compile_autofill_round(
                         "unresolved_refs": missing_refs.clone(),
                         "ambiguous_bindings": [],
                         "available_input_refs": available_input_refs,
-                        "query_candidate_pool": super::missing_ref_recovery::query_candidate_pool_from_missing_resolution(&resolution),
+                        "query_candidate_pool": super::missing_resolution::query_candidate_pool_from_missing_resolution(&resolution),
                         "resolver": resolution,
                     }),
                 );
@@ -2161,7 +2342,8 @@ fn try_schedule_compile_autofill_round(
         serde_json::json!({
             "status": "scheduled",
             "todo_id": todo_id,
-            "missing_refs": super::missing_ref_recovery::missing_required_input_refs(missing_input_payload),
+            "missing_refs": super::missing_resolution::missing_required_input_refs(missing_input_payload),
+            "missing_refs_all": super::missing_resolution::missing_required_refs(missing_input_payload),
             "selected_query_refs": selected_query_refs,
         }),
     );
@@ -2444,688 +2626,8 @@ fn emit_unknown_input_ref_repair_suggested(
     }
 }
 
-pub(super) fn available_input_ref_catalog(state_summary: Option<&Value>) -> Vec<Value> {
-    let mut refs = Vec::<Value>::new();
-    let Some(summary) = state_summary else {
-        return refs;
-    };
-    let mut seen = BTreeSet::<String>::new();
-    let meta_map = summary
-        .pointer("/input_store/meta")
-        .and_then(Value::as_object);
-    let facts = summary
-        .pointer("/input_store/facts")
-        .and_then(Value::as_object);
-
-    // Bindable refs are sourced from InputStore projection only.
-    for raw_ref in super::known_input_refs_from_state_summary(Some(summary)) {
-        let slot = raw_ref.strip_prefix("inputs.").unwrap_or(raw_ref.as_str());
-        let value = facts.and_then(|map| {
-            map.get(slot)
-                .or_else(|| map.get(raw_ref.as_str()))
-                .or_else(|| value_at_dotted_path_object(map, slot))
-        });
-        let meta = meta_map.and_then(|entries| {
-            entries
-                .get(slot)
-                .or_else(|| entries.get(raw_ref.as_str()))
-                .or_else(|| value_at_dotted_path_object(entries, slot))
-        });
-        refs.push(serde_json::json!({
-            "ref": raw_ref,
-            "has_value": value.is_some(),
-            "value_type": value.map(infer_binding_value_type).unwrap_or("unknown"),
-            "source_priority": meta
-                .and_then(|item| item.get("source_priority"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
-            "source": meta
-                .and_then(|item| item.get("source"))
-                .and_then(Value::as_str)
-                .unwrap_or("unknown"),
-        }));
-        seen.insert(format!("inputs.{slot}"));
-    }
-    refs
-}
-
-fn infer_binding_value_type(value: &Value) -> &'static str {
-    match value {
-        Value::Bool(_) => "boolean",
-        Value::Number(_) => "numeric",
-        Value::String(text) => {
-            let trimmed = text.trim();
-            if trimmed.starts_with("eip155:") {
-                "chain"
-            } else if trimmed.len() == 42
-                && trimmed.starts_with("0x")
-                && trimmed
-                    .as_bytes()
-                    .iter()
-                    .skip(2)
-                    .all(|byte| byte.is_ascii_hexdigit())
-            {
-                "address"
-            } else {
-                "text"
-            }
-        }
-        _ => "unknown",
-    }
-}
-
-fn value_at_dotted_path_object<'a>(
-    map: &'a serde_json::Map<String, Value>,
-    dotted: &str,
-) -> Option<&'a Value> {
-    let mut segments = dotted.split('.').filter(|part| !part.is_empty());
-    let first = segments.next()?;
-    let mut current = map.get(first)?;
-    for segment in segments {
-        current = current.get(segment)?;
-    }
-    Some(current)
-}
-
-pub(super) fn runtime_has_input_ref(state_summary: Option<&Value>, input_ref: &str) -> bool {
-    let Some(canonical_slot) = super::input_normalize::normalize_input_slot_key(input_ref) else {
-        return false;
-    };
-    let canonical_ref = format!("inputs.{canonical_slot}");
-    if super::known_input_refs_from_state_summary(state_summary)
-        .iter()
-        .any(|known| known == &canonical_ref)
-    {
-        return true;
-    }
-    if state_summary
-        .and_then(|summary| summary.pointer("/intent_context/facts"))
-        .and_then(|facts| {
-            facts
-                .as_object()
-                .and_then(|object| object.get(canonical_slot.as_str()))
-                .or_else(|| value_at_dotted_path(facts, canonical_slot.as_str()))
-        })
-        .is_some()
-    {
-        return true;
-    }
-    matches!(canonical_slot.as_str(), "owner" | "wallet.default")
-        && state_summary
-            .and_then(|summary| summary.pointer("/intent_context/facts/owner"))
-            .is_some()
-}
-
-#[derive(Debug, Clone, Default)]
-pub(super) struct StaticRefillOutcome {
-    pub(super) resolved_refs: Vec<String>,
-    pub(super) ambiguous_bindings: Vec<AmbiguousBinding>,
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct AmbiguousBinding {
-    pub(super) missing_ref: String,
-    pub(super) candidate_refs: Vec<String>,
-}
-
-pub(super) fn apply_static_missing_ref_refill(
-    state: &mut EngineRunnerState,
-    context: &mut SegmentedAgentContext,
-    missing_refs: &[String],
-    phase_hint: &str,
-    scope_id: &str,
-) -> StaticRefillOutcome {
-    let summary_snapshot = context.state_summary.clone();
-    let mut resolved = BTreeSet::<String>::new();
-    let mut ambiguous = Vec::<AmbiguousBinding>::new();
-    for raw_ref in missing_refs {
-        let Some(slot) = super::input_normalize::normalize_input_slot_key(raw_ref) else {
-            continue;
-        };
-        let canonical_ref = format!("inputs.{slot}");
-        if runtime_has_input_ref(summary_snapshot.as_ref(), canonical_ref.as_str()) {
-            resolved.insert(canonical_ref);
-            continue;
-        }
-        match resolve_static_input_binding(summary_snapshot.as_ref(), slot.as_str()) {
-            StaticInputBindingDecision::Resolved(value) => {
-                let provenance = format!("autofill.static.{phase_hint}.{scope_id}.{slot}");
-                super::input_normalize::set_runtime_input_value(
-                    &mut state.runtime,
-                    slot.as_str(),
-                    value.clone(),
-                );
-                let _ = super::upsert_store_value_with_source(
-                    context.input_store_mut(),
-                    slot.as_str(),
-                    value,
-                    super::input_store::InputValueLayer::Derived,
-                    "autofill_static",
-                    85,
-                    provenance,
-                );
-                resolved.insert(canonical_ref);
-            }
-            StaticInputBindingDecision::Ambiguous(candidate_refs) => {
-                ambiguous.push(AmbiguousBinding {
-                    missing_ref: canonical_ref,
-                    candidate_refs,
-                });
-            }
-            StaticInputBindingDecision::Unresolved => {}
-        }
-    }
-    if !resolved.is_empty() {
-        context.refresh_state_summary(state, false);
-    }
-    StaticRefillOutcome {
-        resolved_refs: resolved.into_iter().collect::<Vec<_>>(),
-        ambiguous_bindings: ambiguous,
-    }
-}
-
-fn resolve_static_input_binding(
-    state_summary: Option<&Value>,
-    slot: &str,
-) -> StaticInputBindingDecision {
-    let Some(summary) = state_summary else {
-        return StaticInputBindingDecision::Unresolved;
-    };
-    let mut candidates = vec![slot.to_string()];
-    for alias in static_alias_slots(slot) {
-        if !candidates.contains(&alias) {
-            candidates.push(alias);
-        }
-    }
-    for candidate in candidates {
-        if let Some(value) = summary
-            .pointer("/input_store/facts")
-            .and_then(|facts| {
-                facts
-                    .as_object()
-                    .and_then(|object| object.get(candidate.as_str()))
-                    .or_else(|| value_at_dotted_path(facts, candidate.as_str()))
-            })
-            .cloned()
-            .map(|value| unwrap_input_value(&value))
-        {
-            return StaticInputBindingDecision::Resolved(value);
-        }
-        if let Some(value) = summary
-            .pointer("/intent_context/facts")
-            .and_then(|facts| {
-                facts
-                    .as_object()
-                    .and_then(|object| object.get(candidate.as_str()))
-                    .or_else(|| value_at_dotted_path(facts, candidate.as_str()))
-            })
-            .cloned()
-            .map(|value| unwrap_input_value(&value))
-        {
-            return StaticInputBindingDecision::Resolved(value);
-        }
-        if let Some(value) = summary
-            .pointer("/intent_slots/resolved_inputs")
-            .and_then(Value::as_object)
-            .and_then(|resolved_inputs| resolved_inputs.get(candidate.as_str()))
-            .cloned()
-            .map(|value| unwrap_input_value(&value))
-        {
-            return StaticInputBindingDecision::Resolved(value);
-        }
-    }
-    resolve_static_input_value_by_semantic_match(summary, slot)
-}
-
-pub(super) fn resolve_static_input_value_for_slot(
-    state_summary: Option<&Value>,
-    slot: &str,
-) -> Option<Value> {
-    match resolve_static_input_binding(state_summary, slot) {
-        StaticInputBindingDecision::Resolved(value) => Some(value),
-        StaticInputBindingDecision::Ambiguous(_) | StaticInputBindingDecision::Unresolved => None,
-    }
-}
-
-enum StaticInputBindingDecision {
-    Resolved(Value),
-    Ambiguous(Vec<String>),
-    Unresolved,
-}
-
-fn resolve_static_input_value_by_semantic_match(
-    summary: &Value,
-    slot: &str,
-) -> StaticInputBindingDecision {
-    let Some(requirement) = TypedBindingRequirement::from_slot(slot) else {
-        return StaticInputBindingDecision::Unresolved;
-    };
-    let mut scored = typed_binding_candidates(summary)
-        .into_iter()
-        .filter_map(|candidate| {
-            score_typed_binding_candidate(&requirement, &candidate).map(|score| (score, candidate))
-        })
-        .collect::<Vec<_>>();
-    if scored.is_empty() {
-        return StaticInputBindingDecision::Unresolved;
-    }
-    scored.sort_by(|left, right| right.0.cmp(&left.0));
-    let Some((best_score, best_candidate)) = scored.first() else {
-        return StaticInputBindingDecision::Unresolved;
-    };
-    if *best_score < 50 {
-        return StaticInputBindingDecision::Unresolved;
-    }
-    let second_score = scored.get(1).map(|item| item.0).unwrap_or_default();
-    let confident = *best_score >= 180 || best_score.saturating_sub(second_score) >= 15;
-    if confident {
-        return StaticInputBindingDecision::Resolved(best_candidate.value.clone());
-    }
-    let candidate_refs = scored
-        .iter()
-        .take(3)
-        .map(|(_, candidate)| canonicalize_binding_candidate_ref(candidate.key.as_str()))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    if candidate_refs.len() < 2 {
-        return StaticInputBindingDecision::Unresolved;
-    }
-    StaticInputBindingDecision::Ambiguous(candidate_refs)
-}
-
-fn canonicalize_binding_candidate_ref(raw_key: &str) -> String {
-    if let Some(slot) = super::input_normalize::normalize_input_slot_key(raw_key) {
-        return format!("inputs.{slot}");
-    }
-    raw_key.to_string()
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BindingValueType {
-    Address,
-    Boolean,
-    Numeric,
-    Chain,
-    Text,
-    Unknown,
-}
-
-#[derive(Debug, Clone)]
-struct TypedBindingRequirement {
-    normalized_slot: String,
-    tokens: Vec<String>,
-    expected_type: BindingValueType,
-}
-
-impl TypedBindingRequirement {
-    fn from_slot(slot: &str) -> Option<Self> {
-        let tokens = semantic_tokens(slot);
-        if tokens.is_empty() {
-            return None;
-        }
-        Some(Self {
-            normalized_slot: normalize_semantic_key(slot),
-            expected_type: infer_slot_type(slot, tokens.as_slice()),
-            tokens,
-        })
-    }
-}
-
-#[derive(Debug, Clone)]
-struct TypedBindingCandidate {
-    key: String,
-    normalized_key: String,
-    tokens: Vec<String>,
-    value: Value,
-    value_type: BindingValueType,
-    source_priority: u16,
-}
-
-fn typed_binding_candidates(summary: &Value) -> Vec<TypedBindingCandidate> {
-    let mut candidates = Vec::<TypedBindingCandidate>::new();
-    if let Some(facts) = summary
-        .pointer("/input_store/facts")
-        .and_then(Value::as_object)
-    {
-        let meta_map = summary
-            .pointer("/input_store/meta")
-            .and_then(Value::as_object);
-        for (key, value) in facts {
-            let source_priority = meta_map
-                .and_then(|meta| meta.get(key.as_str()))
-                .and_then(|entry| entry.get("source_priority"))
-                .and_then(Value::as_u64)
-                .unwrap_or(60)
-                .min(u16::MAX as u64) as u16;
-            push_typed_binding_candidate(
-                &mut candidates,
-                key.as_str(),
-                unwrap_input_value(value),
-                source_priority,
-            );
-        }
-    }
-    if let Some(facts) = summary
-        .pointer("/intent_context/facts")
-        .and_then(Value::as_object)
-    {
-        for (key, value) in facts {
-            push_typed_binding_candidate(
-                &mut candidates,
-                key.as_str(),
-                unwrap_input_value(value),
-                55,
-            );
-        }
-    }
-    if let Some(facts) = summary
-        .pointer("/intent_slots/resolved_inputs")
-        .and_then(Value::as_object)
-    {
-        for (key, value) in facts {
-            let source_priority = value
-                .get("confidence")
-                .and_then(Value::as_u64)
-                .map(|confidence| 50 + confidence.min(50))
-                .unwrap_or(50)
-                .min(u16::MAX as u64) as u16;
-            push_typed_binding_candidate(
-                &mut candidates,
-                key.as_str(),
-                unwrap_input_value(value),
-                source_priority,
-            );
-        }
-    }
-    candidates
-}
-
-fn push_typed_binding_candidate(
-    candidates: &mut Vec<TypedBindingCandidate>,
-    key: &str,
-    value: Value,
-    source_priority: u16,
-) {
-    let tokens = semantic_tokens(key);
-    if tokens.is_empty() {
-        return;
-    }
-    candidates.push(TypedBindingCandidate {
-        key: key.to_string(),
-        normalized_key: normalize_semantic_key(key),
-        value_type: infer_value_type(&value),
-        value,
-        source_priority,
-        tokens,
-    });
-}
-
-fn score_typed_binding_candidate(
-    requirement: &TypedBindingRequirement,
-    candidate: &TypedBindingCandidate,
-) -> Option<u16> {
-    if !binding_type_compatible(requirement.expected_type, candidate.value_type) {
-        return None;
-    }
-    if requirement.normalized_slot == candidate.normalized_key {
-        return Some(220 + candidate.source_priority / 5);
-    }
-
-    let overlap = semantic_overlap(requirement.tokens.as_slice(), candidate.tokens.as_slice());
-    if overlap.shared_total == 0 {
-        return None;
-    }
-
-    let mut score = 0u16;
-    score = score.saturating_add((overlap.shared_non_generic as u16).saturating_mul(35));
-    score = score.saturating_add((overlap.shared_total as u16).saturating_mul(8));
-    if requirement.expected_type == candidate.value_type {
-        score = score.saturating_add(25);
-    }
-    score = score.saturating_add(candidate.source_priority.min(100) / 4);
-    if overlap.slot_has_address && overlap.candidate_has_address {
-        score = score.saturating_add(20);
-    }
-    if overlap.slot_has_decimals && overlap.candidate_has_decimals {
-        score = score.saturating_add(20);
-    }
-    if candidate.key.starts_with(requirement.tokens[0].as_str()) {
-        score = score.saturating_add(10);
-    }
-    Some(score)
-}
-
-#[derive(Default)]
-struct SemanticOverlap {
-    shared_total: usize,
-    shared_non_generic: usize,
-    slot_has_address: bool,
-    candidate_has_address: bool,
-    slot_has_decimals: bool,
-    candidate_has_decimals: bool,
-}
-
-fn semantic_overlap(slot_tokens: &[String], candidate_tokens: &[String]) -> SemanticOverlap {
-    let mut overlap = SemanticOverlap::default();
-    overlap.slot_has_address = slot_tokens.iter().any(|token| token == "address");
-    overlap.candidate_has_address = candidate_tokens.iter().any(|token| token == "address");
-    overlap.slot_has_decimals = slot_tokens.iter().any(|token| token == "decimals");
-    overlap.candidate_has_decimals = candidate_tokens.iter().any(|token| token == "decimals");
-
-    let candidate_set = candidate_tokens
-        .iter()
-        .map(|token| token.as_str())
-        .collect::<BTreeSet<_>>();
-    for token in slot_tokens {
-        if !candidate_set.contains(token.as_str()) {
-            continue;
-        }
-        overlap.shared_total = overlap.shared_total.saturating_add(1);
-        if !is_generic_semantic_token(token.as_str()) {
-            overlap.shared_non_generic = overlap.shared_non_generic.saturating_add(1);
-        }
-    }
-    overlap
-}
-
-fn binding_type_compatible(expected: BindingValueType, actual: BindingValueType) -> bool {
-    expected == BindingValueType::Unknown
-        || actual == BindingValueType::Unknown
-        || expected == actual
-        || (expected == BindingValueType::Numeric && actual == BindingValueType::Text)
-        || (expected == BindingValueType::Boolean && actual == BindingValueType::Text)
-}
-
-fn infer_slot_type(slot: &str, tokens: &[String]) -> BindingValueType {
-    if is_address_like_slot(slot)
-        || has_any_token(
-            tokens,
-            &[
-                "address",
-                "owner",
-                "recipient",
-                "wallet",
-                "account",
-                "signer",
-            ],
-        )
-    {
-        return BindingValueType::Address;
-    }
-    if has_any_token(
-        tokens,
-        &[
-            "amount",
-            "threshold",
-            "decimals",
-            "bps",
-            "nonce",
-            "limit",
-            "deadline",
-            "gas",
-            "fee",
-            "price",
-        ],
-    ) {
-        return BindingValueType::Numeric;
-    }
-    if has_any_token(tokens, &["chain", "chainid", "chainref"]) {
-        return BindingValueType::Chain;
-    }
-    if has_any_token(
-        tokens,
-        &[
-            "bool", "enabled", "enable", "disabled", "allow", "should", "is", "has", "use",
-        ],
-    ) {
-        return BindingValueType::Boolean;
-    }
-    BindingValueType::Unknown
-}
-
-fn infer_value_type(value: &Value) -> BindingValueType {
-    match value {
-        Value::Bool(_) => BindingValueType::Boolean,
-        Value::Number(_) => BindingValueType::Numeric,
-        Value::String(text) => {
-            let trimmed = text.trim();
-            if is_evm_address_str(trimmed) {
-                return BindingValueType::Address;
-            }
-            if trimmed.starts_with("eip155:") {
-                return BindingValueType::Chain;
-            }
-            if trimmed.eq_ignore_ascii_case("true") || trimmed.eq_ignore_ascii_case("false") {
-                return BindingValueType::Boolean;
-            }
-            if trimmed.parse::<f64>().is_ok() {
-                return BindingValueType::Numeric;
-            }
-            BindingValueType::Text
-        }
-        _ => BindingValueType::Unknown,
-    }
-}
-
-fn has_any_token(tokens: &[String], expected: &[&str]) -> bool {
-    tokens
-        .iter()
-        .any(|token| expected.contains(&token.as_str()))
-}
-
-fn is_evm_address_str(value: &str) -> bool {
-    value.len() == 42
-        && value.starts_with("0x")
-        && value
-            .as_bytes()
-            .iter()
-            .skip(2)
-            .all(|byte| byte.is_ascii_hexdigit())
-}
-
-fn is_generic_semantic_token(token: &str) -> bool {
-    matches!(
-        token,
-        "inputs" | "input" | "value" | "field" | "data" | "ref" | "address" | "amount"
-    )
-}
-
-fn semantic_tokens(key: &str) -> Vec<String> {
-    key.to_ascii_lowercase()
-        .split(|ch: char| !ch.is_ascii_alphanumeric())
-        .filter(|segment| !segment.is_empty())
-        .map(str::to_string)
-        .collect::<Vec<_>>()
-}
-
-fn normalize_semantic_key(key: &str) -> String {
-    semantic_tokens(key).join("")
-}
-
-fn is_address_like_slot(slot: &str) -> bool {
-    slot.ends_with(".address") || slot.ends_with("_address")
-}
-
-fn unwrap_input_value(value: &Value) -> Value {
-    value
-        .as_object()
-        .and_then(|object| object.get("value"))
-        .cloned()
-        .unwrap_or_else(|| value.clone())
-}
-
-fn static_alias_slots(slot: &str) -> Vec<String> {
-    let mut aliases = Vec::<String>::new();
-    match slot {
-        "native_transfer_amount" => aliases.push("native_amount".to_string()),
-        "token_transfer_amount" => aliases.push("token_amount".to_string()),
-        "recipient" => aliases.push("recipient_address".to_string()),
-        "recipient_address" => aliases.push("recipient".to_string()),
-        "token.address" => {
-            aliases.push("token_address".to_string());
-            aliases.push("token".to_string());
-        }
-        "token_address" => aliases.push("token.address".to_string()),
-        "chain_ref" => {
-            aliases.push("chain".to_string());
-            aliases.push("chain_id".to_string());
-        }
-        "chain_id" => {
-            aliases.push("chain".to_string());
-            aliases.push("chain_ref".to_string());
-        }
-        "chain" => {
-            aliases.push("chain_id".to_string());
-            aliases.push("chain_ref".to_string());
-        }
-        _ => {}
-    }
-    if slot.ends_with(".address") {
-        aliases.push(slot.replace(".address", "_address"));
-    }
-    if slot.ends_with("_address") {
-        aliases.push(slot.replace("_address", ".address"));
-    }
-    aliases
-}
-
-fn value_at_dotted_path<'a>(root: &'a Value, dotted: &str) -> Option<&'a Value> {
-    let mut current = root;
-    for segment in dotted.split('.').filter(|part| !part.is_empty()) {
-        current = current.get(segment)?;
-    }
-    Some(current)
-}
-
-fn collect_missing_input_refs_from_message(message: &str, missing_refs: &mut BTreeSet<String>) {
-    for (index, chunk) in message.split('`').enumerate() {
-        if index % 2 == 1 {
-            collect_missing_input_ref(chunk, None, missing_refs);
-        }
-    }
-    if let Some(suffix) = message
-        .split_once("suggested_ref=")
-        .map(|(_, value)| value.trim())
-    {
-        let candidate = suffix
-            .split(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ';' | ')' | '('))
-            .next()
-            .unwrap_or_default();
-        collect_missing_input_ref(candidate, None, missing_refs);
-    }
-}
-
-fn collect_missing_input_ref(
-    raw: &str,
-    metadata: Option<&Value>,
-    missing_refs: &mut BTreeSet<String>,
-) {
-    if let Some(path) = super::input_normalize::normalize_missing_input_ref(raw) {
-        for leaf in super::input_normalize::expand_missing_input_slot(path.as_str(), metadata) {
-            missing_refs.insert(format!("inputs.{leaf}"));
-        }
-    }
+pub(super) fn available_input_ref_catalog(typed_summary: Option<&StateSummary>) -> Vec<Value> {
+    super::ref_catalog::available_input_ref_catalog_typed(typed_summary)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3142,9 +2644,12 @@ fn execute_round(
     active_plan_hash: &mut String,
     segment: &PlanSketchSegment,
     segment_plan: &PlanDocument,
+    candidate_context: &CandidateContext,
     planning_memory: Option<Value>,
+    runtime_facts_store: &mut RuntimeFactsStore,
     input_store: &mut InputStore,
     checkpoint_extensions: &checkpoint_ext::AgentCheckpointExtensions,
+    audit_attempt: &mut crate::audit_contract::AuditStreamAttempt,
     total_events: &mut usize,
     todo_id: &str,
 ) -> Result<super::phase_machine::segment_exec::ExecuteRoundOutcome, RunnerError> {
@@ -3161,9 +2666,12 @@ fn execute_round(
         active_plan_hash,
         segment,
         segment_plan,
+        candidate_context,
         planning_memory,
+        runtime_facts_store,
         input_store,
         checkpoint_extensions,
+        audit_attempt,
         total_events,
         todo_id,
     )
@@ -3173,218 +2681,123 @@ fn bind_segment_todo_id(segment: &mut PlanSketchSegment, todo_id: &str) {
     super::phase_machine::segment_exec::bind_segment_todo_id(segment, todo_id);
 }
 
-fn collect_segment_missing_input_refs(
+fn collect_segment_missing_refs(
     segment: &PlanSketchSegment,
-    input_store: &InputStore,
+    typed_summary: Option<&StateSummary>,
 ) -> Vec<String> {
-    super::phase_machine::segment_exec::collect_segment_missing_input_refs(segment, input_store)
-}
-
-fn build_todo_receipt(
-    planned_segment: &PlannedSegment,
-    status: EngineRunStatus,
-    state: &mut EngineRunnerState,
-    checkpoint_ledger: &RunnerCheckpointLedger,
-    round_events: &[EngineEventRecord],
-) -> super::todos::TodoReceipt {
-    let mut receipt = super::phase_machine::segment_exec::build_todo_receipt(
-        planned_segment.todo_id.as_str(),
-        &planned_segment.segment,
-        status,
-        state,
-        round_events,
-    );
-    receipt.tx_hashes = checkpoint_ledger.tx_hashes_for_nodes(receipt.node_ids.as_slice());
-    project_todo_node_output_tx_hashes_from_ledger(
-        state,
-        receipt.node_ids.as_slice(),
-        checkpoint_ledger,
-    );
-    receipt
-}
-
-fn sync_todo_progress_receipt_tx_hashes_from_ledger(
-    state: &mut EngineRunnerState,
-    checkpoint_ledger: &RunnerCheckpointLedger,
-) {
-    let receipt_nodes = collect_todo_progress_receipt_node_ids(&state.runtime);
-    if receipt_nodes.is_empty() {
-        return;
-    }
-    for (_, node_ids) in &receipt_nodes {
-        project_todo_node_output_tx_hashes_from_ledger(
-            state,
-            node_ids.as_slice(),
-            checkpoint_ledger,
-        );
-    }
-    for (todo_id, node_ids) in receipt_nodes {
-        let tx_hashes = checkpoint_ledger.tx_hashes_for_nodes(node_ids.as_slice());
-        overwrite_todo_progress_receipt_tx_hashes(&mut state.runtime, todo_id.as_str(), tx_hashes);
-    }
-}
-
-fn collect_todo_progress_receipt_node_ids(runtime: &Value) -> Vec<(String, Vec<String>)> {
-    let mut out = BTreeSet::<(String, Vec<String>)>::new();
-    if let Some(current) = runtime.pointer("/agent/todo_progress/current_todo") {
-        if let Some(entry) = todo_receipt_node_ids(current) {
-            out.insert(entry);
-        }
-    }
-    if let Some(todos) = runtime
-        .pointer("/agent/todo_progress/todos")
-        .and_then(Value::as_array)
-    {
-        for todo in todos {
-            if let Some(entry) = todo_receipt_node_ids(todo) {
-                out.insert(entry);
-            }
-        }
-    }
-    out.into_iter().collect::<Vec<_>>()
-}
-
-fn todo_receipt_node_ids(todo: &Value) -> Option<(String, Vec<String>)> {
-    let todo_id = todo.get("id").and_then(Value::as_str).map(str::trim)?;
-    if todo_id.is_empty() {
-        return None;
-    }
-    let node_ids = todo
-        .pointer("/receipt/node_ids")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    if node_ids.is_empty() {
-        return None;
-    }
-    Some((todo_id.to_string(), node_ids))
-}
-
-fn overwrite_todo_progress_receipt_tx_hashes(
-    runtime: &mut Value,
-    todo_id: &str,
-    tx_hashes: Vec<String>,
-) {
-    let tx_hashes_value = tx_hashes.into_iter().map(Value::String).collect::<Vec<_>>();
-    if let Some(current_todo) = runtime.pointer_mut("/agent/todo_progress/current_todo") {
-        overwrite_todo_receipt_tx_hashes(current_todo, todo_id, tx_hashes_value.as_slice());
-    }
-    if let Some(todos) = runtime
-        .pointer_mut("/agent/todo_progress/todos")
-        .and_then(Value::as_array_mut)
-    {
-        for todo in todos {
-            overwrite_todo_receipt_tx_hashes(todo, todo_id, tx_hashes_value.as_slice());
-        }
-    }
-}
-
-fn overwrite_todo_receipt_tx_hashes(todo: &mut Value, todo_id: &str, tx_hashes: &[Value]) {
-    let Some(todo_obj) = todo.as_object_mut() else {
-        return;
-    };
-    let Some(id) = todo_obj.get("id").and_then(Value::as_str) else {
-        return;
-    };
-    if id != todo_id {
-        return;
-    }
-    let Some(receipt_obj) = todo_obj.get_mut("receipt").and_then(Value::as_object_mut) else {
-        return;
-    };
-    receipt_obj.insert("tx_hashes".to_string(), Value::Array(tx_hashes.to_vec()));
-}
-
-fn project_todo_node_output_tx_hashes_from_ledger(
-    state: &mut EngineRunnerState,
-    node_ids: &[String],
-    checkpoint_ledger: &RunnerCheckpointLedger,
-) {
-    for node_id in node_ids {
-        let Some(tx_hash) = checkpoint_ledger.preferred_tx_hash_for_node(node_id.as_str()) else {
-            continue;
-        };
-        set_runtime_node_output_tx_hash(state, node_id.as_str(), tx_hash);
-    }
-}
-
-fn set_runtime_node_output_tx_hash(state: &mut EngineRunnerState, node_id: &str, tx_hash: String) {
-    let Some(runtime_obj) = state.runtime.as_object_mut() else {
-        return;
-    };
-    let nodes = runtime_obj
-        .entry("nodes".to_string())
-        .or_insert_with(|| Value::Object(Map::new()));
-    if !nodes.is_object() {
-        *nodes = Value::Object(Map::new());
-    }
-    let Some(nodes_obj) = nodes.as_object_mut() else {
-        return;
-    };
-    let node = nodes_obj
-        .entry(node_id.to_string())
-        .or_insert_with(|| Value::Object(Map::new()));
-    if !node.is_object() {
-        *node = Value::Object(Map::new());
-    }
-    let Some(node_obj) = node.as_object_mut() else {
-        return;
-    };
-    let outputs = node_obj
-        .entry("outputs".to_string())
-        .or_insert_with(|| Value::Object(Map::new()));
-    if !outputs.is_object() {
-        *outputs = Value::Object(Map::new());
-    }
-    if let Some(outputs_obj) = outputs.as_object_mut() {
-        outputs_obj.insert("tx_hash".to_string(), Value::String(tx_hash));
-    }
+    super::phase_machine::segment_exec::collect_segment_missing_refs(segment, |reference| {
+        super::missing_resolution::runtime_has_ref_typed(typed_summary, reference)
+    })
 }
 
 fn run_status_name(status: EngineRunStatus) -> &'static str {
     super::phase_machine::segment_exec::run_status_name(status)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn record_planning_failure_preserving_primary_error(
+fn handle_resolved_by_user_input(
     command: &AgentCommand,
-    run_id: &str,
-    active_plan_hash: &str,
-    active_plan: &PlanDocument,
     state: &mut EngineRunnerState,
+    context: &mut SegmentedAgentContext,
+    ckpt: &super::checkpoint_flow::CheckpointGuard<'_>,
     checkpoint_ledger: &RunnerCheckpointLedger,
     planning_memory: Option<Value>,
-    input_store: &InputStore,
-    checkpoint_extensions: &checkpoint_ext::AgentCheckpointExtensions,
-    round: u64,
-    planning_error: RunnerError,
-) -> RunnerError {
-    if let Err(checkpoint_error) =
-        super::checkpoint_flow::record_planning_failure_event_and_checkpoint(
-            command,
-            run_id,
-            active_plan_hash,
-            active_plan,
+    done: bool,
+    trace_enabled: bool,
+    phase_label: &str,
+    trace_extra: &[(&str, String)],
+    answers: serde_json::Map<String, Value>,
+    audit_attempt: &crate::audit_contract::AuditStreamAttempt,
+) -> Result<(), RunnerError> {
+    context.todo_board_mut().mark_current_todo();
+    super::runtime_store::record_todo_progress(&mut state.runtime, &context.todo_board());
+    context.set_previous_error_and_refresh(
+        state,
+        done,
+        super::missing_input::resolved_payload(&answers, context.completed_segments() as u8),
+    );
+    ckpt.save(
+        state,
+        checkpoint_ledger,
+        planning_memory,
+        &context.input_store(),
+        &context.runtime_facts_store(),
+        &context.checkpoint_extensions,
+        audit_attempt,
+    )?;
+    if command.verbose {
+        eprintln!(
+            "[agent] {phase_label} missing_required_input resolved via user answers keys={}",
+            answers.keys().cloned().collect::<Vec<_>>().join(",")
+        );
+    }
+    super::trace::emit(
+        trace_enabled,
+        "pause_resolution",
+        "resolved_by_user_input",
+        trace_extra,
+    );
+    Ok(())
+}
+
+fn handle_paused_missing_input(
+    state: &mut EngineRunnerState,
+    context: &mut SegmentedAgentContext,
+    ckpt: Option<&super::checkpoint_flow::CheckpointGuard<'_>>,
+    checkpoint_ledger: &RunnerCheckpointLedger,
+    planning_memory: Option<Value>,
+    trace_enabled: bool,
+    trace_extra: &[(&str, String)],
+    audit_attempt: Option<&crate::audit_contract::AuditStreamAttempt>,
+) -> Result<(), RunnerError> {
+    context
+        .todo_board_mut()
+        .mark_current_blocked("missing_required_input");
+    super::runtime_store::record_todo_progress(&mut state.runtime, &context.todo_board());
+    if let (Some(ckpt), Some(audit_attempt)) = (ckpt, audit_attempt) {
+        ckpt.save(
             state,
             checkpoint_ledger,
             planning_memory,
-            input_store,
-            checkpoint_extensions,
-            &planning_error,
-            round,
-        )
-    {
-        if command.verbose || command.verbose_llm {
+            &context.input_store(),
+            &context.runtime_facts_store(),
+            &context.checkpoint_extensions,
+            audit_attempt,
+        )?;
+    }
+    super::trace::emit(
+        trace_enabled,
+        "pause_resolution",
+        "paused_missing_required_input",
+        trace_extra,
+    );
+    context.set_final_status(EngineRunStatus::Paused);
+    Ok(())
+}
+
+fn record_planning_failure_preserving_primary_error(
+    ckpt: &super::checkpoint_flow::CheckpointGuard<'_>,
+    state: &mut EngineRunnerState,
+    checkpoint_ledger: &mut RunnerCheckpointLedger,
+    planning_memory: Option<Value>,
+    input_store: &InputStore,
+    runtime_facts_store: &RuntimeFactsStore,
+    checkpoint_extensions: &checkpoint_ext::AgentCheckpointExtensions,
+    round: u64,
+    planning_error: RunnerError,
+    audit_attempt: &mut crate::audit_contract::AuditStreamAttempt,
+) -> RunnerError {
+    if let Err(checkpoint_error) = ckpt.save_with_planning_failure(
+        state,
+        checkpoint_ledger,
+        planning_memory,
+        input_store,
+        runtime_facts_store,
+        checkpoint_extensions,
+        &planning_error,
+        round,
+        audit_attempt,
+    ) {
+        if ckpt.command.verbose || ckpt.command.verbose_llm {
             eprintln!(
                 "[agent] planning_failure_checkpoint_record_failed primary_error={} checkpoint_error={}",
                 planning_error, checkpoint_error

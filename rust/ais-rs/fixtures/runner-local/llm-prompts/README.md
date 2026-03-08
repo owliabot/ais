@@ -43,3 +43,4 @@ Notes:
 
 - Missing/invalid files do not break runtime; runner falls back to built-in prompts.
 - For list prompts, each non-empty line becomes one rule (markdown bullet prefixes are normalized).
+- These prompt overrides do not own the stable issue taxonomy. Operator/audit semantics such as `missing_action_gate_dep`, `missing_gate_data_backing`, `stale_volatile_fact`, and `missing_token_decimals` are runner contracts documented in `rust/ais-rs/crates/ais-runner/README.md`, not freeform prompt text.

@@ -320,13 +320,10 @@ fn build_tool_memory_projection_with_caps(
         };
         let tool_name = key.split(':').next().unwrap_or_default();
         match tool_name {
-            "list_candidates" => {
-                if let Some(entry) = summarize_list_candidates(content.as_str()) {
+            "catalog.discover" => {
+                if let Some(entry) = summarize_catalog_discover_inventory(content.as_str()) {
                     list_inventory_raw.push((recency_rank, entry));
-                }
-            }
-            "catalog.search" => {
-                if let Some(entry) = summarize_catalog_search(content.as_str()) {
+                } else if let Some(entry) = summarize_catalog_discover_search(content.as_str()) {
                     catalog_search_raw.push((recency_rank, entry));
                 }
             }
@@ -376,7 +373,7 @@ fn build_tool_memory_projection_with_caps(
     if tool_memory_projection_empty(&projection) {
         return None;
     }
-    let estimated_tokens = estimate_tokens_json(&projection);
+    let estimated_tokens = super::token_count::count_tokens_json(&projection) as usize;
     if let Some(object) = projection.as_object_mut() {
         object.insert(
             "token_budget".to_string(),
@@ -388,7 +385,7 @@ fn build_tool_memory_projection_with_caps(
         );
         object.insert(
             "estimator".to_string(),
-            Value::String("chars_div_4".to_string()),
+            Value::String(super::token_count::ESTIMATOR_SOURCE.to_string()),
         );
     }
     Some(projection)
@@ -417,16 +414,13 @@ fn build_tool_memory_projection_skeleton(
         };
         let tool_name = key.split(':').next().unwrap_or_default();
         match tool_name {
-            "list_candidates" => {
-                if let Some(entry) = summarize_list_candidates(content.as_str()) {
+            "catalog.discover" => {
+                if let Some(entry) = summarize_catalog_discover_inventory(content.as_str()) {
                     let signature = serde_json::to_string(&entry).unwrap_or_default();
                     if seen_list.insert(signature) {
                         list_inventory = list_inventory.saturating_add(1);
                     }
-                }
-            }
-            "catalog.search" => {
-                if let Some(entry) = summarize_catalog_search(content.as_str()) {
+                } else if let Some(entry) = summarize_catalog_discover_search(content.as_str()) {
                     let signature = catalog_entry_signature(&entry);
                     if seen_catalog.insert(signature) {
                         catalog_search = catalog_search.saturating_add(1);
@@ -503,7 +497,7 @@ fn build_tool_memory_projection_skeleton(
             },
         },
     });
-    let estimated_tokens = estimate_tokens_json(&projection);
+    let estimated_tokens = super::token_count::count_tokens_json(&projection) as usize;
     if let Some(object) = projection.as_object_mut() {
         object.insert(
             "token_budget".to_string(),
@@ -515,7 +509,7 @@ fn build_tool_memory_projection_skeleton(
         );
         object.insert(
             "estimator".to_string(),
-            Value::String("chars_div_4".to_string()),
+            Value::String(super::token_count::ESTIMATOR_SOURCE.to_string()),
         );
     }
     Some(projection)
@@ -531,8 +525,11 @@ fn normalize_tool_memory_token_budget(max_tokens: usize) -> usize {
     requested.clamp(min_tokens, max_tokens)
 }
 
-fn summarize_catalog_search(content: &str) -> Option<Value> {
+fn summarize_catalog_discover_search(content: &str) -> Option<Value> {
     let payload = serde_json::from_str::<Value>(content).ok()?;
+    if payload.get("protocols").is_some() {
+        return None;
+    }
     let mut entry = Map::<String, Value>::new();
     if let Some(query) = payload.get("query").and_then(Value::as_str) {
         if !query.trim().is_empty() {
@@ -604,7 +601,7 @@ fn summarize_catalog_search(content: &str) -> Option<Value> {
     Some(Value::Object(entry))
 }
 
-fn summarize_list_candidates(content: &str) -> Option<Value> {
+fn summarize_catalog_discover_inventory(content: &str) -> Option<Value> {
     let payload = serde_json::from_str::<Value>(content).ok()?;
     let protocols = payload.get("protocols").and_then(Value::as_array)?;
     let mut compact_protocols = Vec::<Value>::new();
@@ -1124,16 +1121,6 @@ fn guide_projection_entry_count(value: &Value) -> Option<usize> {
         .map(|items| items.len())
         .unwrap_or(0);
     Some(schema_len.saturating_add(topic_len))
-}
-
-fn estimate_tokens_json(value: &Value) -> usize {
-    serde_json::to_string(value)
-        .ok()
-        .map(|encoded| {
-            let chars = encoded.chars().count();
-            chars.saturating_add(3) / 4
-        })
-        .unwrap_or(usize::MAX)
 }
 
 #[cfg(test)]

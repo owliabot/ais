@@ -25,6 +25,7 @@ const PRIORITY_SLOTS: &[&str] = &[
 
 #[derive(Debug, Clone)]
 pub(super) struct InputSlotProjection {
+    #[allow(dead_code)]
     pub(super) value: Value,
     pub(super) resolved: BTreeMap<String, Value>,
     pub(super) missing: Vec<String>,
@@ -117,6 +118,7 @@ pub(super) fn build_input_slots_projection(
     }
 }
 
+#[allow(dead_code)]
 pub(super) fn build_canonical_context_projection(resolved: &BTreeMap<String, Value>) -> Value {
     let mut chain_refs = Vec::<Value>::new();
     let mut account_refs = Vec::<Value>::new();
@@ -402,9 +404,6 @@ fn node_step_id_hint(node_id: &str) -> String {
 fn collect_output_field_paths(value: &Value, max_fields: usize) -> Vec<String> {
     let mut out = Vec::<String>::new();
     collect_output_field_paths_inner(value, "", 0, max_fields.max(1), &mut out);
-    if out.is_empty() {
-        out.push("outputs".to_string());
-    }
     out.sort();
     out.dedup();
     out
@@ -429,7 +428,7 @@ fn collect_output_field_paths_inner(
     match value {
         Value::Object(map) => {
             if map.is_empty() {
-                if !prefix.is_empty() {
+                if !prefix.is_empty() && runtime_value_readable(value) {
                     out.push(prefix.to_string());
                 }
                 return;
@@ -458,22 +457,37 @@ fn collect_output_field_paths_inner(
                         );
                     }
                     Value::Array(_) => {
-                        out.push(path);
+                        if runtime_value_readable(nested) {
+                            out.push(path);
+                        }
                     }
-                    _ => out.push(path),
+                    _ => {
+                        if runtime_value_readable(nested) {
+                            out.push(path);
+                        }
+                    }
                 }
             }
         }
         Value::Array(_) => {
-            if !prefix.is_empty() {
+            if !prefix.is_empty() && runtime_value_readable(value) {
                 out.push(prefix.to_string());
             }
         }
         _ => {
-            if !prefix.is_empty() {
+            if !prefix.is_empty() && runtime_value_readable(value) {
                 out.push(prefix.to_string());
             }
         }
+    }
+}
+
+fn runtime_value_readable(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(object) => !object.is_empty(),
+        Value::Bool(_) | Value::Number(_) | Value::String(_) => true,
     }
 }
 
@@ -489,14 +503,15 @@ fn value_type_hint(value: &Value) -> &'static str {
 }
 
 fn collect_input_store_input_slots(store: &InputStore, out: &mut BTreeMap<String, Value>) {
-    for slot in store.list_ref_strings() {
-        let Some(value) = store.get(slot.as_str()).map(|entry| entry.value.clone()) else {
+    for slot in store.list_projected_ref_strings() {
+        let Some(value) = store.get_projected(slot.as_str()).map(|entry| entry.value) else {
             continue;
         };
         out.entry(slot).or_insert_with(|| value);
     }
 }
 
+#[allow(dead_code)]
 fn extract_chain_ref(slot: &str, value: &Value) -> Option<String> {
     let leaf = slot_leaf(slot).to_ascii_lowercase();
     if !matches!(
@@ -512,6 +527,7 @@ fn extract_chain_ref(slot: &str, value: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+#[allow(dead_code)]
 fn extract_account_ref(slot: &str, value: &Value) -> Option<String> {
     let leaf = slot_leaf(slot).to_ascii_lowercase();
     let hint = [
@@ -537,6 +553,7 @@ fn extract_account_ref(slot: &str, value: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+#[allow(dead_code)]
 fn extract_asset_ref(value: &Value) -> Option<serde_json::Map<String, Value>> {
     let object = value.as_object()?;
     let address = object
@@ -573,6 +590,7 @@ fn extract_asset_ref(value: &Value) -> Option<serde_json::Map<String, Value>> {
     Some(out)
 }
 
+#[allow(dead_code)]
 fn extract_amount_ref(slot: &str, value: &Value) -> Option<serde_json::Map<String, Value>> {
     let leaf = slot_leaf(slot).to_ascii_lowercase();
     let is_amount_slot =
@@ -602,6 +620,7 @@ fn extract_amount_ref(slot: &str, value: &Value) -> Option<serde_json::Map<Strin
     }
 }
 
+#[allow(dead_code)]
 fn slot_leaf(slot: &str) -> &str {
     slot.rsplit('.').next().unwrap_or(slot)
 }

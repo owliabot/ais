@@ -39,6 +39,9 @@ policy:
     auto_execute_max_risk_level: 2
     require_approval_min_risk_level: 3
     llm_may_approve_max_risk_level: 3    # optional
+  execution:
+    volatile_facts:
+      max_age_ms: 30000                  # optional, default 30000
   protocol_install:
     mode: "safe"                         # optional: "safe" | "assist" | "yolo"
     allowed_sources: ["local_path", "registry_ref"]
@@ -114,6 +117,14 @@ Threshold interaction (recommended):
 
 - `auto_execute_max_risk_level` and `require_approval_min_risk_level` define the default confirmation boundary.
 - In `assist`/`yolo` modes, hosts SHOULD still record an auditable confirmation summary/hash for each auto-approved action.
+
+Execution freshness policy (normative):
+
+- `policy.execution.volatile_facts.max_age_ms` defines the freshness window for volatile host observations reused by write validation and reusable-query elimination.
+- The field MUST be a positive integer in milliseconds.
+- If omitted, hosts/runners SHOULD default to `30000`.
+- This policy applies to volatile query-derived signals such as balance / allowance that carry `observed_at_ms`.
+- Hosts/runners SHOULD surface the effective threshold in stale diagnostics/audit output (`max_age_ms`) together with the observation timestamp/age when available.
 
 Protocol-install policy (normative):
 

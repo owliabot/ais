@@ -116,11 +116,11 @@ pub(crate) fn repeated_plan_check_failure_payload(
     }
     if issue_reason_codes
         .iter()
-        .any(|code| code == "missing_gate_query_dep" || code == "missing_query_assert_branch_chain")
+        .any(|code| code == "missing_gate_data_backing")
     {
         suggested_fixes.insert(
             2,
-            "For each reported gate step, add depends_on to one or more query step ids."
+            "For each reported gate step, ensure it is backed by either same-segment query ancestry or explicit nodes.<step>.outputs references."
                 .to_string(),
         );
     }
@@ -165,6 +165,7 @@ pub(crate) fn plan_check_has_control_step_candidate_not_found(content: &str) -> 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PlanCheckIssueSummary {
     reason_code: String,
+    family_reason_code: Option<String>,
     step_id: String,
     message: String,
     reference: String,
@@ -183,6 +184,12 @@ impl PlanCheckIssueSummary {
             "path": self.path,
         });
         if let Some(object) = value.as_object_mut() {
+            if let Some(family_reason_code) = self.family_reason_code.clone() {
+                object.insert(
+                    "family_reason_code".to_string(),
+                    Value::String(family_reason_code),
+                );
+            }
             if let Some(suggested_ref) = self.suggested_ref.clone() {
                 object.insert("suggested_ref".to_string(), Value::String(suggested_ref));
             }
@@ -214,11 +221,14 @@ fn plan_check_issue_summaries(value: &Value) -> Vec<PlanCheckIssueSummary> {
         .iter()
         .map(|item| PlanCheckIssueSummary {
             reason_code: item
-                .get("gate_reason_code")
+                .get("reason_code")
                 .and_then(Value::as_str)
-                .or_else(|| item.get("reason_code").and_then(Value::as_str))
                 .unwrap_or("unknown")
                 .to_string(),
+            family_reason_code: item
+                .get("family_reason_code")
+                .and_then(Value::as_str)
+                .map(str::to_string),
             step_id: item
                 .get("step_id")
                 .and_then(Value::as_str)

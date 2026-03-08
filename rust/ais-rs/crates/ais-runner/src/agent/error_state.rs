@@ -362,7 +362,7 @@ fn planner_hint_for_sub_reason(sub_reason_code: PlannerSubReasonCode) -> Value {
             "rules": [
                 "query/action steps require candidate_ref.",
                 "assert/branch are built-in control steps and may omit candidate_ref.",
-                "when candidate_ref is present, it must come from discovered candidates (catalog.search/get_candidate_detail).",
+                "when candidate_ref is present, it must come from discovered candidates (catalog.discover/get_candidate_detail).",
                 "Do not invent refs; reuse known candidate refs and keep semantics unchanged while fixing shape."
             ]
         }),
@@ -406,6 +406,68 @@ fn classify_execution_pause(paused_reason: Option<&str>) -> ExecutionPauseClassi
         sub_reason_code: ExecutionSubReasonCode::NonRetryablePause,
         retryable: false,
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ExecutorErrorSeverity {
+    InfrastructureUnavailable,
+    ContractLogicError,
+    Unknown,
+}
+
+const INFRA_ERROR_PATTERNS: &[&str] = &[
+    "error sending request",
+    "connection refused",
+    "connection reset",
+    "connection closed",
+    "dns error",
+    "dns resolution",
+    "timed out",
+    "timeout",
+    "no route to host",
+    "network is unreachable",
+    "broken pipe",
+];
+
+const CONTRACT_ERROR_PATTERNS: &[&str] = &[
+    "revert",
+    "execution reverted",
+    "out of gas",
+    "insufficient funds",
+    "nonce too low",
+    "nonce too high",
+    "invalid opcode",
+    "stack underflow",
+    "stack overflow",
+];
+
+pub(super) fn classify_executor_error_severity(error_message: &str) -> ExecutorErrorSeverity {
+    let lowered = error_message.to_ascii_lowercase();
+    for pattern in INFRA_ERROR_PATTERNS {
+        if lowered.contains(pattern) {
+            return ExecutorErrorSeverity::InfrastructureUnavailable;
+        }
+    }
+    for pattern in CONTRACT_ERROR_PATTERNS {
+        if lowered.contains(pattern) {
+            return ExecutorErrorSeverity::ContractLogicError;
+        }
+    }
+    ExecutorErrorSeverity::Unknown
+}
+
+pub(super) fn extract_executor_error_signature(paused_reason: Option<&str>) -> Option<String> {
+    let reason = paused_reason?;
+    if !reason.starts_with("executor_error:") {
+        return None;
+    }
+    let message = reason.strip_prefix("executor_error:").unwrap_or(reason);
+    let truncated = if message.len() > 120 {
+        &message[..120]
+    } else {
+        message
+    };
+    Some(truncated.trim().to_string())
 }
 
 fn code_as_str<T: Serialize>(code: &T) -> String {

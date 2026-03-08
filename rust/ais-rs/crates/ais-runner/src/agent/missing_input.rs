@@ -12,6 +12,18 @@ pub(super) fn payload(
     payload_with_context(message, questions, issues, &[], &[], round)
 }
 
+pub(super) fn payload_with_error_details(
+    message: Option<&str>,
+    questions: &[Value],
+    issues: &[Value],
+    error_details: Option<&Value>,
+    round: u8,
+) -> Value {
+    let mut out = payload_with_context(message, questions, issues, &[], &[], round);
+    merge_error_details_hints(&mut out, error_details);
+    compact_json_for_llm(&out)
+}
+
 pub(super) fn payload_with_context(
     message: Option<&str>,
     questions: &[Value],
@@ -31,6 +43,40 @@ pub(super) fn payload_with_context(
         "issues": issues,
         "round": round,
     }))
+}
+
+fn merge_error_details_hints(payload: &mut Value, error_details: Option<&Value>) {
+    let Some(details_object) = error_details.and_then(Value::as_object) else {
+        return;
+    };
+    let Some(payload_object) = payload.as_object_mut() else {
+        return;
+    };
+    payload_object.insert(
+        "error_details".to_string(),
+        Value::Object(details_object.clone()),
+    );
+    if payload_object.get("recovery_exhaustion").is_none() {
+        if let Some(recovery_exhaustion) = details_object.get("recovery_exhaustion") {
+            payload_object.insert(
+                "recovery_exhaustion".to_string(),
+                recovery_exhaustion.clone(),
+            );
+        }
+    }
+    for key in [
+        "decisions",
+        "binding_decisions",
+        "query_decisions",
+        "autofill",
+    ] {
+        if payload_object.get(key).is_some() {
+            continue;
+        }
+        if let Some(value) = details_object.get(key) {
+            payload_object.insert(key.to_string(), value.clone());
+        }
+    }
 }
 
 pub(super) fn resolved_payload(answers: &Map<String, Value>, round: u8) -> Value {
@@ -187,6 +233,8 @@ pub(super) fn payload_from_pause(
         suggested_paths.as_slice(),
         round,
     );
+    let mut payload = payload;
+    merge_error_details_hints(&mut payload, details.get("error_details"));
     let mut payload = normalize_missing_required_input_payload(&payload);
     if let Some(recovery_exhaustion) = details.get("recovery_exhaustion") {
         if let Some(object) = payload.as_object_mut() {
@@ -221,10 +269,8 @@ pub(super) fn normalize_missing_required_input_payload(payload: &Value) -> Value
     };
     let missing_refs_raw = string_array_field(object.get("missing_refs"));
     let suggested_paths_raw = string_array_field(object.get("suggested_paths"));
-    let source_refs = normalize_source_refs(
-        missing_refs_raw.as_slice(),
-        suggested_paths_raw.as_slice(),
-    );
+    let source_refs =
+        normalize_source_refs(missing_refs_raw.as_slice(), suggested_paths_raw.as_slice());
     let questions = object
         .get("questions")
         .and_then(Value::as_array)
@@ -234,18 +280,26 @@ pub(super) fn normalize_missing_required_input_payload(payload: &Value) -> Value
         normalize_question_entries(questions.as_slice(), source_refs.as_slice());
     object.insert(
         "missing_refs".to_string(),
-        Value::Array(source_refs.iter().map(|item| Value::String(item.clone())).collect()),
+        Value::Array(
+            source_refs
+                .iter()
+                .map(|item| Value::String(item.clone()))
+                .collect(),
+        ),
     );
     object.insert(
         "suggested_paths".to_string(),
-        Value::Array(source_refs.iter().map(|item| Value::String(item.clone())).collect()),
+        Value::Array(
+            source_refs
+                .iter()
+                .map(|item| Value::String(item.clone()))
+                .collect(),
+        ),
     );
     object.insert("questions".to_string(), Value::Array(normalized_questions));
-    if let Some(recovery_exhaustion) = normalize_recovery_exhaustion(
-        object.get("recovery_exhaustion"),
-        object.get("recovery"),
-        source_refs.as_slice(),
-    ) {
+    if let Some(recovery_exhaustion) =
+        normalize_recovery_exhaustion(object.get("recovery_exhaustion"), source_refs.as_slice())
+    {
         object.insert("recovery_exhaustion".to_string(), recovery_exhaustion);
     }
     out
@@ -253,9 +307,20 @@ pub(super) fn normalize_missing_required_input_payload(payload: &Value) -> Value
 
 fn normalize_recovery_exhaustion(
     recovery_exhaustion: Option<&Value>,
-    recovery: Option<&Value>,
     source_refs: &[String],
 ) -> Option<Value> {
+    let status = recovery_exhaustion
+        .and_then(|value| value.get("status"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let source = recovery_exhaustion
+        .and_then(|value| value.get("source"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
     let unresolved_refs_raw = recovery_exhaustion
         .and_then(|value| value.get("unresolved_refs"))
         .and_then(Value::as_array)
@@ -288,16 +353,6 @@ fn normalize_recovery_exhaustion(
         })
         .unwrap_or_default();
     if reasons.is_empty() {
-        if let Some(reason) = recovery
-            .and_then(|value| value.get("reason"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            reasons.push(reason.to_string());
-        }
-    }
-    if reasons.is_empty() {
         reasons.push("recovery_exhausted".to_string());
     }
     let attempt_trace_id = recovery_exhaustion
@@ -306,23 +361,41 @@ fn normalize_recovery_exhaustion(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
-        .or_else(|| {
-            recovery
-                .and_then(|value| value.get("attempt_trace_id"))
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| "missing_ref_recovery:unknown".to_string());
+        .unwrap_or_else(|| "missing_resolution:unknown".to_string());
+    let inferred_status = status.or_else(|| infer_recovery_status(attempt_trace_id.as_str()));
+    let inferred_source = source.or_else(|| infer_recovery_source(attempt_trace_id.as_str()));
     if unresolved_refs.is_empty() {
         return None;
     }
-    Some(serde_json::json!({
+    let mut normalized = serde_json::json!({
         "unresolved_refs": unresolved_refs,
         "reasons": reasons,
         "attempt_trace_id": attempt_trace_id,
-    }))
+    });
+    if let Some(object) = normalized.as_object_mut() {
+        if let Some(status) = inferred_status {
+            object.insert("status".to_string(), Value::String(status));
+        }
+        if let Some(source) = inferred_source {
+            object.insert("source".to_string(), Value::String(source));
+        }
+    }
+    Some(normalized)
+}
+
+fn infer_recovery_status(attempt_trace_id: &str) -> Option<String> {
+    let candidate = attempt_trace_id.rsplit(':').next()?.trim();
+    matches!(
+        candidate,
+        "need_user_input" | "exhausted_unavailable" | "compile_autofill_exhausted"
+    )
+    .then(|| candidate.to_string())
+}
+
+fn infer_recovery_source(attempt_trace_id: &str) -> Option<String> {
+    let mut parts = attempt_trace_id.split(':');
+    let first = parts.next()?.trim();
+    (!first.is_empty()).then(|| first.to_string())
 }
 
 fn normalize_recovery_unresolved_refs(raw_refs: &[String], source_refs: &[String]) -> Vec<String> {
@@ -405,7 +478,7 @@ fn canonicalize_source_ref(raw: &str, source_refs: &BTreeSet<String>) -> Option<
 }
 
 fn canonical_source_ref(raw: &str) -> Option<String> {
-    super::input_normalize::normalize_missing_input_ref(raw).map(|slot| format!("inputs.{slot}"))
+    super::input_normalize::canonical_missing_ref(raw)
 }
 
 fn map_param_ref_to_source(raw: &str, source_refs: &BTreeSet<String>) -> Option<String> {

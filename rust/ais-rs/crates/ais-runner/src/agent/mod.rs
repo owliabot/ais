@@ -3,28 +3,45 @@ mod budget;
 mod candidates;
 mod checkpoint_ext;
 mod checkpoint_flow;
+mod checkpoint_view;
 mod context;
 mod context_view;
 mod error_state;
+mod execution_view;
+mod grounding_resolution;
 mod input_normalize;
 mod input_store;
 mod intent_context;
 mod intent_segmented;
 mod r#loop;
+mod message_compactor;
 mod missing_input;
-mod missing_ref_recovery;
+mod missing_registry;
+mod missing_resolution;
 mod orchestrator;
 mod phase_machine;
+mod planner_diagnostics;
 mod planning_memory;
 mod prompts;
+mod receipt_view;
+mod ref_catalog;
+mod ref_model;
+mod reference_inventory;
+mod runtime_facts_store;
 mod runtime_store;
 mod sanitize;
+mod state_summary;
 mod summary;
 mod todos;
+mod token_count;
 mod tools;
 mod trace;
 mod write_gates;
 
+use crate::audit_contract::{
+    augment_jsonl_line, next_attempt_from_extensions, write_attempt_into_extensions,
+    AuditStreamAttempt,
+};
 use crate::checkpoint_ledger::RunnerCheckpointLedger;
 use crate::cli::{AgentCommand, AgentProfile, OutputFormat};
 use crate::config::{
@@ -33,7 +50,7 @@ use crate::config::{
 use crate::error::RunnerError;
 use crate::policy::{
     approvals_mode_from_pack, llm_may_approve_max_risk_level_from_pack, load_pack_document,
-    policy_from_pack,
+    policy_from_pack, VolatileFactsPolicy,
 };
 use crate::run::process_replace_plan_commands;
 use ais_core::{stable_hash_hex, StableJsonOptions};
@@ -76,6 +93,7 @@ use candidates::{
 };
 use input_store::{
     InputStore, InputStoreUpsertResult, InputValueLayer, InputValueMeta, InputValueStability,
+    VolatileInputSignal,
 };
 use intent_segmented::{
     IntentGroundingDraft, IntentGroundingRequest, LlmSegmentedIntentPlanner, SegmentBeginRequest,
@@ -84,6 +102,8 @@ use intent_segmented::{
 };
 use prompts::{ControllerPromptCatalog, OperatorTemplateCatalog, PromptCatalog};
 use r#loop::{run_agent_loop, AgentLoopConfig, CommandBuilder};
+pub(super) use runtime_facts_store::RuntimeFactsStore;
+use state_summary::StateSummary;
 use std::sync::Mutex;
 use todos::TodoBoard;
 
@@ -187,14 +207,15 @@ fn upsert_input_value(
     if matches!(
         result,
         InputStoreUpsertResult::Inserted | InputStoreUpsertResult::Replaced
-    ) && input_store.has(canonical_key.as_str())
-    {
-        if let Some(entry) = input_store.get(canonical_key.as_str()) {
-            input_normalize::set_runtime_input_value(
-                runtime,
-                canonical_key.as_str(),
-                entry.value.clone(),
-            );
+    ) {
+        for slot in input_store.list_semantic_ref_strings() {
+            if let Some(entry) = input_store.get_semantic(slot.as_str()) {
+                input_normalize::set_runtime_input_value(
+                    runtime,
+                    slot.as_str(),
+                    entry.value.clone(),
+                );
+            }
         }
     }
     result
@@ -228,22 +249,6 @@ pub(super) fn upsert_store_value_with_source(
     provenance: impl Into<String>,
 ) -> InputStoreUpsertResult {
     let key_ref = key.as_ref();
-    let stability = if key_ref.to_ascii_lowercase().contains("decimal") {
-        InputValueStability::Stable
-    } else if source.eq_ignore_ascii_case("query")
-        && (key_ref.to_ascii_lowercase().contains("balance")
-            || key_ref.to_ascii_lowercase().contains("allowance"))
-    {
-        InputValueStability::Volatile
-    } else {
-        InputValueStability::Unknown
-    };
-    let observed_at_ms = source.eq_ignore_ascii_case("query").then_some(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0),
-    );
     store.upsert(
         key_ref,
         value,
@@ -253,8 +258,33 @@ pub(super) fn upsert_store_value_with_source(
             provenance: Some(provenance.into()),
             confidence: None,
             layer,
-            stability,
-            observed_at_ms,
+            stability: InputValueStability::Unknown,
+            observed_at_ms: None,
+        },
+    )
+}
+
+pub(super) fn upsert_runtime_fact_with_source(
+    store: &mut RuntimeFactsStore,
+    key: impl AsRef<str>,
+    value: Value,
+    layer: InputValueLayer,
+    source: &str,
+    source_priority: u32,
+    provenance: impl Into<String>,
+) -> InputStoreUpsertResult {
+    let key_ref = key.as_ref();
+    store.upsert(
+        key_ref,
+        value,
+        InputValueMeta {
+            source: source.to_string(),
+            source_priority,
+            provenance: Some(provenance.into()),
+            confidence: None,
+            layer,
+            stability: InputValueStability::Unknown,
+            observed_at_ms: None,
         },
     )
 }
@@ -328,129 +358,160 @@ pub fn execute_agent(command: &AgentCommand) -> Result<String, RunnerError> {
         checkpoint_plan,
         checkpoint_plan_hash,
         mut checkpoint_ledger,
-        _checkpoint_extensions,
+        checkpoint_extensions,
+        pending_resume_traces,
     ) = load_or_init_state(command, &active_plan_hash, runtime)?;
-    if let Some(plan) = checkpoint_plan {
-        active_plan = plan;
-        active_plan_hash = checkpoint_plan_hash.unwrap_or(hash_plan(&active_plan)?);
-    }
-    let router = build_router_executor_for_plan(&active_plan, &config)
-        .map_err(RunnerError::ConfigInvalidForPlan)?;
-    if resumed_from_checkpoint {
-        record_side_effect_lifecycle(&mut state.runtime, &checkpoint_ledger);
-        if let Some(paused_reason) =
-            reconcile_pending_side_effects(&mut checkpoint_ledger, &router, &mut state)
-        {
-            record_side_effect_lifecycle(&mut state.runtime, &checkpoint_ledger);
-            state.paused_reason = Some(paused_reason);
-            maybe_save_checkpoint(
-                command,
-                run_id.as_str(),
-                &active_plan_hash,
-                &active_plan,
-                &state,
-                &checkpoint_ledger,
-                None,
-            )?;
-            return render_agent_output(
-                command,
-                &state,
-                EngineRunStatus::Paused,
-                0,
-                0,
-                resumed_from_checkpoint,
-            );
-        }
-    }
-
-    let mut total_events = 0usize;
-    let derived_mode = command
-        .approvals_mode
-        .or_else(|| pack.as_ref().and_then(approvals_mode_from_pack))
-        .unwrap_or(crate::cli::ApprovalsMode::Safe);
-    let assist_threshold = if derived_mode == crate::cli::ApprovalsMode::Assist {
-        pack.as_ref()
-            .and_then(llm_may_approve_max_risk_level_from_pack)
+    let mut audit_attempt = if resumed_from_checkpoint {
+        next_attempt_from_extensions(checkpoint_extensions.as_ref())
     } else {
-        None
+        AuditStreamAttempt::fresh()
     };
-    let mut decision_policy = build_decision_policy(
-        command,
-        &config,
-        derived_mode,
-        assist_threshold,
-        candidate_context,
-        &prompt_catalog,
+    let _agent_trace_guard = trace::install_jsonl_sink(
+        command.agent_trace_jsonl.as_deref(),
+        run_id.as_str(),
+        &audit_attempt,
     )?;
-
-    let max_iterations = command
-        .max_iterations
-        .unwrap_or_else(|| active_plan.nodes.len().saturating_mul(8).max(16));
-    let loop_config = AgentLoopConfig { max_iterations };
-    let mut engine_options = EngineRunnerOptions::default();
-    if let Some(pack) = &pack {
-        engine_options.policy = policy_from_pack(pack)
-            .map_err(|error| RunnerError::WorkspaceValidate(error.to_string()))?;
-    }
-    let mut command_builder = CommandBuilder::new(run_id.as_str());
-    let resumed_command_max = command_builder.set_next_index_from_seen_ids(&state.seen_command_ids);
-    if resumed_from_checkpoint && (command.verbose || command.verbose_llm) {
-        eprintln!(
-            "[checkpoint] command_id_resume mode=continue run_id={} seen_ids={} max_suffix={}",
-            run_id,
-            state.seen_command_ids.len(),
-            resumed_command_max
-        );
-    }
-    let mut total_iterations = 0usize;
-    let final_status = loop {
-        let loop_result = run_agent_loop(
-            run_id.as_str(),
-            &active_plan,
-            &mut state,
-            &router,
-            &DefaultSolver,
-            &engine_options,
-            &loop_config,
-            &mut command_builder,
-            &mut decision_policy,
-            |state, events| {
-                total_events += events.len();
-                write_event_sinks(command, events)?;
-                checkpoint_ledger.absorb_events(events);
-                checkpoint_ledger.mark_approved_nodes(
-                    &state.approved_node_ids,
-                    wall_clock_timestamp_rfc3339().as_str(),
-                );
+    trace::flush_pending(
+        command.verbose || command.verbose_llm,
+        pending_resume_traces.as_slice(),
+    );
+    trace::ensure_sink_healthy()?;
+    let result = (|| -> Result<String, RunnerError> {
+        if let Some(plan) = checkpoint_plan {
+            active_plan = plan;
+            active_plan_hash = checkpoint_plan_hash.unwrap_or(hash_plan(&active_plan)?);
+        }
+        let router = build_router_executor_for_plan(&active_plan, &config)
+            .map_err(RunnerError::ConfigInvalidForPlan)?;
+        if resumed_from_checkpoint {
+            record_side_effect_lifecycle(&mut state.runtime, &checkpoint_ledger);
+            if let Some(paused_reason) =
+                reconcile_pending_side_effects(&mut checkpoint_ledger, &router, &mut state)
+            {
+                record_side_effect_lifecycle(&mut state.runtime, &checkpoint_ledger);
+                state.paused_reason = Some(paused_reason);
+                let checkpoint_view =
+                    checkpoint_view::CheckpointView::from_state(&state, &checkpoint_ledger);
                 maybe_save_checkpoint(
                     command,
                     run_id.as_str(),
                     &active_plan_hash,
                     &active_plan,
-                    state,
+                    &state,
+                    checkpoint_view.runtime(),
                     &checkpoint_ledger,
                     None,
+                    &audit_attempt,
                 )?;
-                Ok(())
-            },
-        )?;
-        total_iterations += loop_result.iterations;
-        match loop_result.status {
-            EngineRunStatus::Completed | EngineRunStatus::Stopped => {
-                break loop_result.status;
+                trace::ensure_sink_healthy()?;
+                return render_agent_output(
+                    command,
+                    &state,
+                    EngineRunStatus::Paused,
+                    0,
+                    0,
+                    resumed_from_checkpoint,
+                );
             }
-            EngineRunStatus::Paused => break EngineRunStatus::Paused,
         }
-    };
 
-    Ok(render_agent_output(
-        command,
-        &state,
-        final_status,
-        total_iterations,
-        total_events,
-        resumed_from_checkpoint,
-    )?)
+        let mut total_events = 0usize;
+        let derived_mode = command
+            .approvals_mode
+            .or_else(|| pack.as_ref().and_then(approvals_mode_from_pack))
+            .unwrap_or(crate::cli::ApprovalsMode::Safe);
+        let assist_threshold = if derived_mode == crate::cli::ApprovalsMode::Assist {
+            pack.as_ref()
+                .and_then(llm_may_approve_max_risk_level_from_pack)
+        } else {
+            None
+        };
+        let mut decision_policy = build_decision_policy(
+            command,
+            &config,
+            derived_mode,
+            assist_threshold,
+            candidate_context,
+            &prompt_catalog,
+        )?;
+
+        let max_iterations = command
+            .max_iterations
+            .unwrap_or_else(|| active_plan.nodes.len().saturating_mul(8).max(16));
+        let loop_config = AgentLoopConfig { max_iterations };
+        let mut engine_options = EngineRunnerOptions::default();
+        if let Some(pack) = &pack {
+            engine_options.policy = policy_from_pack(pack)
+                .map_err(|error| RunnerError::WorkspaceValidate(error.to_string()))?;
+        }
+        let mut command_builder = CommandBuilder::new(run_id.as_str());
+        let resumed_command_max =
+            command_builder.set_next_index_from_seen_ids(&state.seen_command_ids);
+        if resumed_from_checkpoint && (command.verbose || command.verbose_llm) {
+            eprintln!(
+                "[checkpoint] command_id_resume mode=continue run_id={} seen_ids={} max_suffix={}",
+                run_id,
+                state.seen_command_ids.len(),
+                resumed_command_max
+            );
+        }
+        let mut total_iterations = 0usize;
+        let final_status = loop {
+            let loop_result = run_agent_loop(
+                run_id.as_str(),
+                &active_plan,
+                &mut state,
+                &router,
+                &DefaultSolver,
+                &engine_options,
+                &loop_config,
+                &mut command_builder,
+                &mut decision_policy,
+                |state, events| {
+                    total_events += events.len();
+                    write_event_sinks(command, events, &mut audit_attempt)?;
+                    checkpoint_ledger.absorb_events(events);
+                    checkpoint_ledger.mark_approved_nodes(
+                        &state.approved_node_ids,
+                        wall_clock_timestamp_rfc3339().as_str(),
+                    );
+                    let checkpoint_view =
+                        checkpoint_view::CheckpointView::from_state(state, &checkpoint_ledger);
+                    maybe_save_checkpoint(
+                        command,
+                        run_id.as_str(),
+                        &active_plan_hash,
+                        &active_plan,
+                        state,
+                        checkpoint_view.runtime(),
+                        &checkpoint_ledger,
+                        None,
+                        &audit_attempt,
+                    )?;
+                    Ok(())
+                },
+            )?;
+            total_iterations += loop_result.iterations;
+            match loop_result.status {
+                EngineRunStatus::Completed | EngineRunStatus::Stopped => {
+                    break loop_result.status;
+                }
+                EngineRunStatus::Paused => break EngineRunStatus::Paused,
+            }
+        };
+
+        trace::ensure_sink_healthy()?;
+        render_agent_output(
+            command,
+            &state,
+            final_status,
+            total_iterations,
+            total_events,
+            resumed_from_checkpoint,
+        )
+    })();
+    trace::ensure_sink_healthy()?;
+    result
 }
 
 fn execute_segmented_intent_agent(
@@ -542,6 +603,8 @@ fn compile_segment_plan(
     pack: Option<&ais_sdk::PackDocument>,
     chain_scope: &[String],
 ) -> Result<PlanDocument, Value> {
+    let runtime_facts_store = RuntimeFactsStore::default();
+    let input_store = InputStore::default();
     compile_segment_plan_with_inputs(
         intent,
         session,
@@ -550,9 +613,12 @@ fn compile_segment_plan(
         pack,
         chain_scope,
         &[],
+        &runtime_facts_store,
+        &input_store,
     )
 }
 
+#[cfg(test)]
 fn compile_segment_plan_with_inputs(
     intent: &str,
     session: &intent_segmented::SegmentPlanningSession,
@@ -561,6 +627,34 @@ fn compile_segment_plan_with_inputs(
     pack: Option<&ais_sdk::PackDocument>,
     chain_scope: &[String],
     known_input_refs: &[String],
+    runtime_facts_store: &RuntimeFactsStore,
+    input_store: &InputStore,
+) -> Result<PlanDocument, Value> {
+    compile_segment_plan_with_inputs_and_policy(
+        intent,
+        session,
+        segment,
+        candidate_context,
+        pack,
+        chain_scope,
+        known_input_refs,
+        VolatileFactsPolicy::default(),
+        runtime_facts_store,
+        input_store,
+    )
+}
+
+fn compile_segment_plan_with_inputs_and_policy(
+    intent: &str,
+    session: &intent_segmented::SegmentPlanningSession,
+    segment: &PlanSketchSegment,
+    candidate_context: &CandidateContext,
+    pack: Option<&ais_sdk::PackDocument>,
+    chain_scope: &[String],
+    known_input_refs: &[String],
+    volatile_facts_policy: VolatileFactsPolicy,
+    runtime_facts_store: &RuntimeFactsStore,
+    input_store: &InputStore,
 ) -> Result<PlanDocument, Value> {
     let pack_snapshot_hash = derive_pack_snapshot_hash(pack).map_err(|error| {
         serde_json::json!({
@@ -577,6 +671,9 @@ fn compile_segment_plan_with_inputs(
         pack_snapshot_hash.as_str(),
         chain_scope,
         known_input_refs,
+        volatile_facts_policy,
+        Some(runtime_facts_store),
+        Some(input_store),
     )
 }
 
@@ -589,6 +686,36 @@ pub(super) fn compile_segment_plan_with_snapshot_hash(
     pack_snapshot_hash: &str,
     chain_scope: &[String],
     known_input_refs: &[String],
+    runtime_facts_store: Option<&RuntimeFactsStore>,
+    input_store: Option<&InputStore>,
+) -> Result<PlanDocument, Value> {
+    compile_segment_plan_with_snapshot_hash_and_policy(
+        intent,
+        session_id,
+        cursor,
+        segment,
+        candidate_context,
+        pack_snapshot_hash,
+        chain_scope,
+        known_input_refs,
+        VolatileFactsPolicy::default(),
+        runtime_facts_store,
+        input_store,
+    )
+}
+
+pub(super) fn compile_segment_plan_with_snapshot_hash_and_policy(
+    intent: &str,
+    session_id: &str,
+    cursor: &str,
+    segment: &PlanSketchSegment,
+    candidate_context: &CandidateContext,
+    pack_snapshot_hash: &str,
+    chain_scope: &[String],
+    known_input_refs: &[String],
+    volatile_facts_policy: VolatileFactsPolicy,
+    runtime_facts_store: Option<&RuntimeFactsStore>,
+    input_store: Option<&InputStore>,
 ) -> Result<PlanDocument, Value> {
     compile_segment_plan_with_snapshot_hash_and_inputs(
         intent,
@@ -599,6 +726,9 @@ pub(super) fn compile_segment_plan_with_snapshot_hash(
         pack_snapshot_hash,
         chain_scope,
         known_input_refs,
+        volatile_facts_policy,
+        runtime_facts_store,
+        input_store,
     )
 }
 
@@ -611,14 +741,37 @@ fn compile_segment_plan_with_snapshot_hash_and_inputs(
     pack_snapshot_hash: &str,
     chain_scope: &[String],
     known_input_refs: &[String],
+    volatile_facts_policy: VolatileFactsPolicy,
+    runtime_facts_store: Option<&RuntimeFactsStore>,
+    input_store: Option<&InputStore>,
 ) -> Result<PlanDocument, Value> {
+    if segment_requires_runtime_validation_state(segment)
+        && runtime_facts_store.is_none()
+        && input_store.is_none()
+    {
+        return Err(serde_json::json!({
+            "reason_code": "compile_error",
+            "message": "segment compile requires runtime validation state for action steps",
+            "issues": [{
+                "kind": "compile_error",
+                "reason_code": "missing_runtime_validation_state",
+                "message": "action segment compile requires input_store or runtime_facts_store for write-gate validation"
+            }]
+        }));
+    }
     let normalized_segment = normalize_segment_asset_inputs_for_compile(
         segment,
         candidate_context,
         chain_scope.first().map(String::as_str),
         known_input_refs,
     );
-    validate_segment_write_gates(&normalized_segment, candidate_context, None)?;
+    validate_segment_write_gates_with_policy(
+        &normalized_segment,
+        candidate_context,
+        runtime_facts_store,
+        input_store,
+        volatile_facts_policy,
+    )?;
 
     let mut resolver = ResolverContext::new();
     for protocol in &candidate_context.protocols {
@@ -668,6 +821,10 @@ fn compile_segment_plan_with_snapshot_hash_and_inputs(
     }
 }
 
+fn segment_requires_runtime_validation_state(segment: &PlanSketchSegment) -> bool {
+    segment.steps.iter().any(|step| step.kind == "action")
+}
+
 fn normalize_segment_asset_inputs_for_compile(
     segment: &PlanSketchSegment,
     candidate_context: &CandidateContext,
@@ -675,6 +832,12 @@ fn normalize_segment_asset_inputs_for_compile(
     known_input_refs: &[String],
 ) -> PlanSketchSegment {
     let mut out = segment.clone();
+    let query_step_ids = out
+        .steps
+        .iter()
+        .filter(|step| step.kind == "query")
+        .map(|step| step.id.clone())
+        .collect::<BTreeSet<_>>();
     let known_chain_ref = known_input_refs
         .iter()
         .filter_map(|raw| input_normalize::normalize_input_slot_key(raw))
@@ -715,7 +878,7 @@ fn normalize_segment_asset_inputs_for_compile(
             let Some(existing) = step.inputs.get(param_name).cloned() else {
                 continue;
             };
-            if asset_input_already_structured(&existing) {
+            if asset_input_already_structured(&existing, param_name, known_input_refs) {
                 continue;
             }
             step.inputs.insert(
@@ -728,19 +891,212 @@ fn normalize_segment_asset_inputs_for_compile(
                 }),
             );
         }
+        if step.kind == "query" && step.stores.is_empty() {
+            auto_inject_query_stores(step, detail);
+        }
+    }
+
+    for step in &mut out.steps {
+        if step.kind != "assert" && step.kind != "branch" {
+            continue;
+        }
+        let Some(when) = step.when.as_ref() else {
+            continue;
+        };
+        let query_deps = extract_query_step_ids_from_when_cel(
+            when.cel.as_str(),
+            query_step_ids.iter().map(String::as_str),
+        );
+        for dep in query_deps {
+            if !step
+                .depends_on
+                .iter()
+                .any(|existing| existing == dep.as_str())
+            {
+                step.depends_on.push(dep);
+            }
+        }
     }
 
     out
 }
 
-fn asset_input_already_structured(value: &Value) -> bool {
+fn extract_query_step_ids_from_when_cel<'a>(
+    cel: &str,
+    query_step_ids: impl IntoIterator<Item = &'a str>,
+) -> Vec<String> {
+    let query_step_ids = query_step_ids
+        .into_iter()
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
+    if query_step_ids.is_empty() {
+        return Vec::new();
+    }
+    let mut refs = extract_node_refs_from_text(cel);
+    refs.sort();
+    refs.dedup();
+
+    let mut deps = BTreeSet::<String>::new();
+    for raw_ref in refs {
+        if query_step_ids.contains(raw_ref.as_str()) {
+            deps.insert(raw_ref);
+            continue;
+        }
+        if let Some(suffix) = raw_ref
+            .rsplit_once("__")
+            .map(|(_, suffix)| suffix.trim())
+            .filter(|suffix| !suffix.is_empty())
+        {
+            if query_step_ids.contains(suffix) {
+                deps.insert(suffix.to_string());
+                continue;
+            }
+        }
+        if let Some(suffix) = raw_ref
+            .rsplit_once('/')
+            .map(|(_, suffix)| suffix.trim())
+            .filter(|suffix| !suffix.is_empty())
+        {
+            if query_step_ids.contains(suffix) {
+                deps.insert(suffix.to_string());
+            }
+        }
+    }
+    deps.into_iter().collect::<Vec<_>>()
+}
+
+pub(super) fn extract_node_refs_from_text(text: &str) -> Vec<String> {
+    let bytes = text.as_bytes();
+    let mut refs = Vec::<String>::new();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if bytes[i..].starts_with(b"nodes.") {
+            let start = i + "nodes.".len();
+            let mut end = start;
+            while end < bytes.len() {
+                let ch = bytes[end] as char;
+                if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '/') {
+                    end = end.saturating_add(1);
+                } else {
+                    break;
+                }
+            }
+            if end > start {
+                if let Some(raw) = text.get(start..end) {
+                    refs.push(raw.to_string());
+                }
+            }
+            i = end;
+            continue;
+        }
+
+        if bytes[i..].starts_with(b"nodes[") {
+            let mut cursor = i + "nodes[".len();
+            while cursor < bytes.len() && (bytes[cursor] as char).is_ascii_whitespace() {
+                cursor = cursor.saturating_add(1);
+            }
+            if cursor >= bytes.len() {
+                break;
+            }
+            let quote = bytes[cursor] as char;
+            if quote != '"' && quote != '\'' {
+                i = i.saturating_add(1);
+                continue;
+            }
+            cursor = cursor.saturating_add(1);
+            let start = cursor;
+            while cursor < bytes.len() && (bytes[cursor] as char) != quote {
+                cursor = cursor.saturating_add(1);
+            }
+            if cursor <= bytes.len() {
+                if let Some(raw) = text.get(start..cursor) {
+                    if !raw.trim().is_empty() {
+                        refs.push(raw.to_string());
+                    }
+                }
+            }
+            i = cursor.saturating_add(1);
+            continue;
+        }
+
+        i = i.saturating_add(1);
+    }
+
+    refs
+}
+
+fn asset_input_already_structured(
+    value: &Value,
+    param_name: &str,
+    known_input_refs: &[String],
+) -> bool {
     let Some(object) = value.as_object() else {
         return false;
     };
+    if object
+        .get("ref")
+        .and_then(Value::as_str)
+        .is_some_and(|reference| {
+            asset_ref_resolves_to_full_input_slot(reference, param_name, known_input_refs)
+        })
+    {
+        return true;
+    }
     if let Some(asset_object) = object.get("object").and_then(Value::as_object) {
         return asset_object.get("address").is_some();
     }
     object.get("address").is_some()
+}
+
+fn asset_ref_resolves_to_full_input_slot(
+    reference: &str,
+    param_name: &str,
+    known_input_refs: &[String],
+) -> bool {
+    let Some(param_slot) = input_normalize::normalize_input_slot_key(param_name) else {
+        return false;
+    };
+    let Some(reference_slot) = input_normalize::normalize_input_slot_key(reference) else {
+        return false;
+    };
+    if reference_slot != param_slot {
+        return false;
+    }
+    let canonical_ref = format!("inputs.{reference_slot}");
+    known_input_refs
+        .iter()
+        .any(|known| known.trim() == canonical_ref.as_str())
+}
+
+fn auto_inject_query_stores(step: &mut ais_sdk::documents::PlanSketchStep, detail: &Value) {
+    let Some(returns) = detail.get("returns").and_then(Value::as_array) else {
+        return;
+    };
+    let clean_step_id = step
+        .id
+        .trim()
+        .strip_prefix("q_")
+        .or_else(|| step.id.trim().strip_prefix("query_"))
+        .unwrap_or(step.id.trim());
+    for ret in returns {
+        let Some(field_name) = ret
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        else {
+            continue;
+        };
+        let slot = if field_name == "balance" || field_name == "result" || field_name == "value" {
+            clean_step_id.to_string()
+        } else if clean_step_id.ends_with(field_name) || field_name.contains(clean_step_id) {
+            field_name.to_string()
+        } else {
+            format!("{clean_step_id}_{field_name}")
+        };
+        step.stores.entry(field_name.to_string()).or_insert(slot);
+    }
 }
 
 #[cfg(test)]
@@ -768,6 +1124,9 @@ fn compile_segment_plan_with_snapshot_hash_and_facts(
         pack_snapshot_hash,
         chain_scope,
         known_input_refs.as_slice(),
+        VolatileFactsPolicy::default(),
+        None,
+        input_store,
     )
 }
 
@@ -783,25 +1142,17 @@ fn build_known_input_refs(known_input_refs: &[String]) -> Vec<String> {
         .collect::<Vec<_>>()
 }
 
-pub(super) fn known_input_refs_from_state_summary(state_summary: Option<&Value>) -> Vec<String> {
-    let mut refs = BTreeSet::<String>::new();
-    for raw_ref in state_summary
-        .and_then(|summary| summary.pointer("/input_registry/known_refs"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flat_map(|items| items.iter())
-        .filter_map(Value::as_str)
-    {
-        if let Some(canonical_slot) = input_normalize::normalize_input_slot_key(raw_ref) {
-            refs.insert(format!("inputs.{canonical_slot}"));
-        }
-    }
-    refs.into_iter().collect::<Vec<_>>()
+pub(super) fn known_input_refs_from_typed_summary(
+    state_summary: Option<&state_summary::StateSummary>,
+) -> Vec<String> {
+    reference_inventory::ReferenceInventory::build_typed(state_summary).input_refs()
 }
 
-pub(super) fn grounding_fact_keys_from_state_summary(state_summary: Option<&Value>) -> Vec<String> {
+pub(super) fn grounding_fact_keys_from_typed_summary(
+    state_summary: Option<&state_summary::StateSummary>,
+) -> Vec<String> {
     let mut keys = BTreeSet::<String>::new();
-    for raw_key in intent_context::grounding_fact_keys_from_state_summary(state_summary) {
+    for raw_key in intent_context::grounding_fact_keys_from_typed_summary(state_summary) {
         if let Some(normalized) = normalize_fact_hint_key(raw_key.as_str()) {
             keys.insert(normalized);
         }
@@ -863,45 +1214,81 @@ enum TodoExecutionScope {
     WriteOnly,
 }
 
-pub(super) fn validate_segment_todo_scope(
+#[cfg(test)]
+pub(super) fn validate_segment_todo_scope_with_runtime_facts(
     segment: &PlanSketchSegment,
     candidate_context: &CandidateContext,
-    current_todo: Option<&Value>,
+    current_todo_scope: Option<&str>,
+    typed_summary: Option<&StateSummary>,
+    runtime_facts_store: Option<&RuntimeFactsStore>,
+    input_store: Option<&InputStore>,
 ) -> Result<(), Value> {
-    let scope = infer_todo_execution_scope(current_todo);
-    if scope != TodoExecutionScope::QueryOnly {
-        return Ok(());
-    }
+    validate_segment_todo_scope_with_runtime_facts_and_policy(
+        segment,
+        candidate_context,
+        current_todo_scope,
+        typed_summary,
+        runtime_facts_store,
+        input_store,
+        VolatileFactsPolicy::default(),
+    )
+}
+
+pub(super) fn validate_segment_todo_scope_with_runtime_facts_and_policy(
+    segment: &PlanSketchSegment,
+    candidate_context: &CandidateContext,
+    current_todo_scope: Option<&str>,
+    typed_summary: Option<&StateSummary>,
+    runtime_facts_store: Option<&RuntimeFactsStore>,
+    input_store: Option<&InputStore>,
+    volatile_facts_policy: VolatileFactsPolicy,
+) -> Result<(), Value> {
     let mut issues = Vec::<Value>::new();
-    for step in &segment.steps {
-        let is_write_step = if step.kind == "action" {
-            true
-        } else if let Some(candidate_ref) = step.candidate_ref.as_deref() {
-            candidate_context
-                .detail_by_ref
-                .get(candidate_ref)
-                .is_some_and(candidate_detail_is_write_action)
-        } else {
-            false
-        };
-        if !is_write_step {
-            continue;
+    let scope = infer_todo_execution_scope_typed(typed_summary, current_todo_scope);
+    if scope == TodoExecutionScope::QueryOnly {
+        for step in &segment.steps {
+            let is_write_step = if step.kind == "action" {
+                true
+            } else if let Some(candidate_ref) = step.candidate_ref.as_deref() {
+                candidate_context
+                    .detail_by_ref
+                    .get(candidate_ref)
+                    .is_some_and(candidate_detail_is_write_action)
+            } else {
+                false
+            };
+            if !is_write_step {
+                continue;
+            }
+            issues.push(serde_json::json!({
+                "kind":"todo_scope_violation",
+                "reason_code":"todo_scope_violation",
+                "message":"current todo scope is query_only; write/action steps are not allowed in this segment",
+                "step_id": step.id,
+                "candidate_ref": step.candidate_ref,
+                "segment_id": segment.segment_id,
+            }));
         }
-        issues.push(serde_json::json!({
-            "kind":"todo_scope_violation",
-            "reason_code":"todo_scope_violation",
-            "message":"current todo scope is query_only; write/action steps are not allowed in this segment",
-            "step_id": step.id,
-            "candidate_ref": step.candidate_ref,
-            "segment_id": segment.segment_id,
-        }));
     }
+    issues.extend(collect_redundant_query_step_issues(
+        segment,
+        candidate_context,
+        typed_summary,
+        runtime_facts_store,
+        input_store,
+        volatile_facts_policy,
+    ));
     if issues.is_empty() {
         return Ok(());
     }
+    let reason_code = issues
+        .first()
+        .and_then(|issue| issue.get("reason_code"))
+        .and_then(Value::as_str)
+        .unwrap_or("segment_validation_failed");
     Err(serde_json::json!({
-        "reason_code":"todo_scope_violation",
-        "message":"segment violates current todo scope",
+        "reason_code":reason_code,
+        "message":"segment failed host validation",
         "issues": issues
     }))
 }
@@ -910,11 +1297,23 @@ fn candidate_detail_is_write_action(detail: &Value) -> bool {
     detail.get("kind").and_then(Value::as_str) == Some("action")
 }
 
-fn infer_todo_execution_scope(current_todo: Option<&Value>) -> TodoExecutionScope {
-    let Some(todo) = current_todo.and_then(Value::as_object) else {
-        return TodoExecutionScope::Mixed;
-    };
-    if let Some(explicit) = todo.get("execution_scope").and_then(Value::as_str) {
+fn infer_todo_execution_scope_typed(
+    typed_summary: Option<&StateSummary>,
+    current_todo_scope: Option<&str>,
+) -> TodoExecutionScope {
+    if let Some(summary) = typed_summary {
+        let view = summary.todo_state_view();
+        if view.current_todo().is_some() {
+            return infer_todo_execution_scope_from_view(&view);
+        }
+    }
+    infer_todo_execution_scope_from_hint(current_todo_scope)
+}
+
+fn infer_todo_execution_scope_from_view(
+    todo_view: &crate::agent::state_summary::TodoStateView<'_>,
+) -> TodoExecutionScope {
+    if let Some(explicit) = todo_view.current_todo_execution_scope() {
         match explicit.trim().to_ascii_lowercase().as_str() {
             "query_only" => return TodoExecutionScope::QueryOnly,
             "write_only" => return TodoExecutionScope::WriteOnly,
@@ -923,20 +1322,32 @@ fn infer_todo_execution_scope(current_todo: Option<&Value>) -> TodoExecutionScop
         }
     }
     let mut corpus = Vec::<String>::new();
-    if let Some(title) = todo.get("title").and_then(Value::as_str) {
+    if let Some(title) = todo_view.current_todo_title() {
         corpus.push(title.to_ascii_lowercase());
     }
     for field in ["acceptance", "required_facts", "produced_facts"] {
-        for raw in todo
-            .get(field)
-            .and_then(Value::as_array)
-            .into_iter()
-            .flat_map(|items| items.iter())
-            .filter_map(Value::as_str)
-        {
+        for raw in todo_view.current_todo_string_list(field) {
             corpus.push(raw.to_ascii_lowercase());
         }
     }
+    infer_todo_execution_scope_from_corpus(corpus)
+}
+
+fn infer_todo_execution_scope_from_hint(current_todo_scope: Option<&str>) -> TodoExecutionScope {
+    match current_todo_scope
+        .map(str::trim)
+        .filter(|scope| !scope.is_empty())
+        .map(|scope| scope.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("query_only") => TodoExecutionScope::QueryOnly,
+        Some("write_only") => TodoExecutionScope::WriteOnly,
+        Some("mixed") => TodoExecutionScope::Mixed,
+        _ => TodoExecutionScope::Mixed,
+    }
+}
+
+fn infer_todo_execution_scope_from_corpus(corpus: Vec<String>) -> TodoExecutionScope {
     let has_write = corpus.iter().any(|entry| {
         [
             "transfer", "swap", "approve", "send", "execute", "write", "withdraw", "deposit",
@@ -959,6 +1370,154 @@ fn infer_todo_execution_scope(current_todo: Option<&Value>) -> TodoExecutionScop
         return TodoExecutionScope::QueryOnly;
     }
     TodoExecutionScope::Mixed
+}
+
+fn collect_redundant_query_step_issues(
+    segment: &PlanSketchSegment,
+    candidate_context: &CandidateContext,
+    typed_summary: Option<&StateSummary>,
+    runtime_facts_store: Option<&RuntimeFactsStore>,
+    input_store: Option<&InputStore>,
+    volatile_facts_policy: VolatileFactsPolicy,
+) -> Vec<Value> {
+    let now_ms = current_unix_ms();
+    let inventory = execution_view::ReusableOutputInventory::with_policy(
+        typed_summary,
+        runtime_facts_store,
+        input_store,
+        volatile_facts_policy,
+    );
+    let mut issues = Vec::<Value>::new();
+
+    for step in &segment.steps {
+        if step.kind != "query" {
+            continue;
+        }
+        let Some(candidate_ref) = step.candidate_ref.as_deref() else {
+            continue;
+        };
+        let Some(detail) = candidate_context.detail_by_ref.get(candidate_ref) else {
+            continue;
+        };
+        let projected_refs = query_step_projected_output_refs(step, detail);
+        let reusable_refs = projected_refs
+            .iter()
+            .filter_map(|reference| inventory.reusable_reference(reference.as_str(), now_ms))
+            .collect::<Vec<_>>();
+
+        if !projected_refs.is_empty() && reusable_refs.len() == projected_refs.len() {
+            issues.push(serde_json::json!({
+                "kind":"redundant_query_step",
+                "reason_code":"redundant_query_step",
+                "message":"query step is redundant; host reusable inventory already satisfies its projected outputs",
+                "step_id": step.id,
+                "candidate_ref": candidate_ref,
+                "segment_id": segment.segment_id,
+                "projected_refs": projected_refs,
+                "reusable_refs": reusable_refs.iter().map(|item| item.reference.clone()).collect::<Vec<_>>(),
+                "inventory_sources": reusable_refs.iter().map(|item| item.source.clone()).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>(),
+            }));
+            continue;
+        }
+
+        let volatile_signals = query_step_volatile_signals(step, detail);
+        if !volatile_signals.is_empty()
+            && volatile_signals
+                .iter()
+                .all(|signal| inventory.has_fresh_volatile_signal(*signal, now_ms))
+        {
+            let signal_names = volatile_signals
+                .iter()
+                .map(|signal| match signal {
+                    VolatileInputSignal::Balance => "balance",
+                    VolatileInputSignal::Allowance => "allowance",
+                })
+                .collect::<Vec<_>>();
+            issues.push(serde_json::json!({
+                "kind":"redundant_query_step",
+                "reason_code":"redundant_query_step",
+                "message":"query step is redundant; fresh reusable volatile outputs already exist in host inventory",
+                "step_id": step.id,
+                "candidate_ref": candidate_ref,
+                "segment_id": segment.segment_id,
+                "volatile_signals": signal_names,
+                "max_age_ms": volatile_facts_policy.max_age_ms,
+            }));
+        }
+    }
+
+    issues
+}
+
+fn query_step_projected_output_refs(
+    step: &ais_sdk::documents::PlanSketchStep,
+    detail: &Value,
+) -> Vec<String> {
+    let mut normalized_step = step.clone();
+    if normalized_step.stores.is_empty() {
+        auto_inject_query_stores(&mut normalized_step, detail);
+    }
+    normalized_step
+        .stores
+        .values()
+        .filter_map(|target| projected_store_target_to_reusable_ref(target.as_str()))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+}
+
+fn projected_store_target_to_reusable_ref(target: &str) -> Option<String> {
+    if let Some(reference) = input_normalize::canonical_missing_ref(target) {
+        if reference.starts_with("inputs.") || reference.starts_with("facts.") {
+            return Some(reference);
+        }
+    }
+    input_normalize::normalize_input_slot_key(target).map(|slot| format!("inputs.{slot}"))
+}
+
+fn query_step_volatile_signals(
+    step: &ais_sdk::documents::PlanSketchStep,
+    detail: &Value,
+) -> Vec<VolatileInputSignal> {
+    let mut out = BTreeSet::<&'static str>::new();
+    for reference in query_step_projected_output_refs(step, detail) {
+        let lowered = reference.to_ascii_lowercase();
+        if lowered.contains("balance") {
+            out.insert("balance");
+        }
+        if lowered.contains("allowance") {
+            out.insert("allowance");
+        }
+    }
+    if let Some(returns) = detail.get("returns").and_then(Value::as_array) {
+        for field in returns
+            .iter()
+            .filter_map(|item| item.get("name"))
+            .filter_map(Value::as_str)
+        {
+            let lowered = field.trim().to_ascii_lowercase();
+            if lowered.contains("balance") {
+                out.insert("balance");
+            }
+            if lowered.contains("allowance") {
+                out.insert("allowance");
+            }
+        }
+    }
+    out.into_iter()
+        .filter_map(|name| match name {
+            "balance" => Some(VolatileInputSignal::Balance),
+            "allowance" => Some(VolatileInputSignal::Allowance),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+}
+
+fn current_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn canonicalize_segment_input_refs_value(
@@ -1355,18 +1914,42 @@ fn collect_known_input_refs_from_input_store_semantics(
     store: &InputStore,
 ) -> std::collections::BTreeSet<String> {
     let mut refs = std::collections::BTreeSet::<String>::new();
-    for slot in store.list_ref_strings() {
+    for slot in store.list_projected_ref_strings() {
         refs.insert(format!("inputs.{slot}"));
     }
     refs
 }
 
+#[cfg(test)]
 fn validate_segment_write_gates(
     segment: &PlanSketchSegment,
     candidate_context: &CandidateContext,
+    runtime_facts_store: Option<&RuntimeFactsStore>,
     input_store: Option<&InputStore>,
 ) -> Result<(), Value> {
-    write_gates::validate_segment_write_gates(segment, candidate_context, input_store)
+    validate_segment_write_gates_with_policy(
+        segment,
+        candidate_context,
+        runtime_facts_store,
+        input_store,
+        VolatileFactsPolicy::default(),
+    )
+}
+
+fn validate_segment_write_gates_with_policy(
+    segment: &PlanSketchSegment,
+    candidate_context: &CandidateContext,
+    runtime_facts_store: Option<&RuntimeFactsStore>,
+    input_store: Option<&InputStore>,
+    volatile_facts_policy: VolatileFactsPolicy,
+) -> Result<(), Value> {
+    write_gates::validate_segment_write_gates_with_policy(
+        segment,
+        candidate_context,
+        runtime_facts_store,
+        input_store,
+        volatile_facts_policy,
+    )
 }
 
 fn derive_pack_snapshot_hash(pack: Option<&ais_sdk::PackDocument>) -> Result<String, RunnerError> {
@@ -1428,7 +2011,12 @@ fn resolve_planner_context_token_budget(command: &AgentCommand, config: &RunnerC
                 .as_ref()
                 .and_then(|llm| llm.planner_context_token_budget)
         })
-        .unwrap_or(context_view::DEFAULT_PLANNER_CONTEXT_TOKEN_BUDGET)
+        .unwrap_or_else(|| {
+            let context_limit = resolve_llm_context_limit_tokens(config);
+            context::budget_policy::ToolMemoryBudgetPolicy::default_token_budget_for_context_limit(
+                context_limit,
+            )
+        })
         .max(1)
 }
 
@@ -1461,43 +2049,15 @@ fn build_initial_input_store(
 }
 
 fn decode_agent_checkpoint_extensions(
-    runtime: &mut Value,
+    _runtime: &mut Value,
     checkpoint_extensions: Option<&Map<String, Value>>,
     verbose_llm: bool,
 ) -> checkpoint_ext::AgentCheckpointExtensions {
     let extensions = checkpoint_ext::AgentCheckpointExtensions::decode(checkpoint_extensions);
-    if let Some(todo_progress) = extensions.todo_progress() {
-        record_runtime_agent_field(runtime, "todo_progress", todo_progress.clone());
-    }
-    if let Some(intent_facts) = extensions.intent_facts() {
-        if runtime
-            .pointer("/agent/intent_grounding/intent_facts")
-            .is_none()
-        {
-            let mut grounding = runtime
-                .pointer("/agent/intent_grounding")
-                .and_then(Value::as_object)
-                .cloned()
-                .unwrap_or_default();
-            grounding.insert(
-                "intent_facts".to_string(),
-                Value::Object(intent_facts.clone().into_iter().collect()),
-            );
-            record_runtime_agent_field(runtime, "intent_grounding", Value::Object(grounding));
-        }
-    }
     if verbose_llm {
         eprintln!(
             "[checkpoint] input_store projection restored={}",
             extensions.input_store().is_some()
-        );
-        eprintln!(
-            "[checkpoint] todo_progress restored={}",
-            extensions.todo_progress().is_some()
-        );
-        eprintln!(
-            "[checkpoint] intent_facts restored={}",
-            extensions.intent_facts().is_some()
         );
     }
     extensions
@@ -1703,7 +2263,7 @@ fn build_state_summary(
     previous_error: Option<&Value>,
     input_store: Option<&InputStore>,
 ) -> Value {
-    context_view::build_projected_summary(
+    build_state_summary_with_runtime_facts(
         state,
         completed_segments,
         done,
@@ -1713,8 +2273,42 @@ fn build_state_summary(
     )
 }
 
+#[cfg(test)]
+fn build_state_summary_with_runtime_facts(
+    state: &EngineRunnerState,
+    completed_segments: usize,
+    done: bool,
+    previous_error: Option<&Value>,
+    input_store: Option<&InputStore>,
+    runtime_facts_store: Option<&RuntimeFactsStore>,
+) -> Value {
+    let typed = context::projector::build_projected_summary_base_with_runtime_facts(
+        state,
+        completed_segments,
+        done,
+        previous_error,
+        input_store,
+        runtime_facts_store,
+        None,
+    );
+    context::budgeter::budget_and_compact_summary(
+        typed.to_value(),
+        state,
+        context_view::DEFAULT_PLANNER_CONTEXT_TOKEN_BUDGET,
+        context::packing::PackPhaseHint::Default,
+    )
+}
+
 fn should_attempt_intent_repair(paused_reason: Option<&str>) -> bool {
     error_state::should_attempt_intent_repair(paused_reason)
+}
+
+fn extract_executor_error_signature(paused_reason: Option<&str>) -> Option<String> {
+    error_state::extract_executor_error_signature(paused_reason)
+}
+
+fn classify_executor_error_severity(error_message: &str) -> error_state::ExecutorErrorSeverity {
+    error_state::classify_executor_error_severity(error_message)
 }
 
 fn should_retry_segmented_planner_output(error: &RunnerError) -> bool {
@@ -1804,10 +2398,10 @@ fn maybe_collect_missing_input_answers_with_recovery(
     questions: &[Value],
     recovery_exhaustion: Option<&Value>,
 ) -> Result<Option<Map<String, Value>>, RunnerError> {
-    if questions.is_empty() {
-        return Ok(None);
+    let mut parsed_questions = parse_missing_input_questions(questions);
+    if parsed_questions.is_empty() {
+        parsed_questions = fallback_missing_input_questions(recovery_exhaustion);
     }
-    let parsed_questions = parse_missing_input_questions(questions);
     if parsed_questions.is_empty() {
         return Ok(None);
     }
@@ -1860,6 +2454,28 @@ fn maybe_collect_missing_input_answers_with_recovery(
         return Ok(None);
     }
     Ok(Some(answers))
+}
+
+fn fallback_missing_input_questions(
+    recovery_exhaustion: Option<&Value>,
+) -> Vec<MissingInputQuestionPrompt> {
+    let unresolved_refs = recovery_exhaustion
+        .and_then(|value| value.get("unresolved_refs"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flat_map(|items| items.iter())
+        .filter_map(Value::as_str)
+        .filter_map(input_normalize::canonical_missing_ref)
+        .collect::<std::collections::BTreeSet<_>>();
+    unresolved_refs
+        .into_iter()
+        .map(|reference| MissingInputQuestionPrompt {
+            id: reference.clone(),
+            question: format!("Provide a value for {reference}."),
+            options: Vec::new(),
+            required: Some(true),
+        })
+        .collect::<Vec<_>>()
 }
 
 fn render_missing_input_recovery_summary(recovery_exhaustion: Option<&Value>) -> Option<String> {
@@ -2152,6 +2768,7 @@ fn validate_agent_profile(command: &AgentCommand) -> Result<(), RunnerError> {
 
 fn load_segmented_prompt_overrides(prompt_catalog: &PromptCatalog) -> SegmentedPromptOverrides {
     SegmentedPromptOverrides {
+        system_core_prompt: prompt_catalog.load_prompt("agent.system_core"),
         base_rules: prompt_catalog.load_lines_prompt("segmented.base_rules"),
         phase_rules_begin: prompt_catalog.load_lines_prompt("segmented.phase.begin"),
         phase_rules_grounding: prompt_catalog.load_lines_prompt("segmented.phase.grounding"),
@@ -2175,9 +2792,10 @@ fn build_decision_policy(
     prompt_catalog: &PromptCatalog,
 ) -> Result<AgentDecisionPolicy<Box<dyn LlmProvider>>, RunnerError> {
     let provider = load_llm_provider(command, config)?;
+    let controller_system_prompt = composed_controller_system_prompt(prompt_catalog);
     let llm = provider.map(|provider| {
         let mut llm = brain::LlmBrain::new(provider);
-        if let Some(prompt) = prompt_catalog.load_prompt("agent.controller.system") {
+        if let Some(prompt) = controller_system_prompt.clone() {
             llm = llm.with_system_prompt(prompt);
         }
         if let Some(context) = candidate_context.clone() {
@@ -2193,6 +2811,17 @@ fn build_decision_policy(
     };
 
     Ok(AgentDecisionPolicy::new(mode, assist_threshold, llm))
+}
+
+fn composed_controller_system_prompt(prompt_catalog: &PromptCatalog) -> Option<String> {
+    let system_core = prompt_catalog.load_prompt("agent.system_core");
+    let controller = prompt_catalog.load_prompt("agent.controller.system");
+    match (system_core, controller) {
+        (None, None) => None,
+        (Some(core), None) => Some(core.trim().to_string()),
+        (None, Some(controller)) => Some(controller.trim().to_string()),
+        (Some(core), Some(controller)) => Some(format!("{}\n\n{}", core.trim(), controller.trim())),
+    }
 }
 
 fn load_llm_provider(
@@ -2333,6 +2962,7 @@ fn load_or_init_state(
         Option<String>,
         RunnerCheckpointLedger,
         Option<Map<String, Value>>,
+        Vec<trace::PendingTraceRecord>,
     ),
     RunnerError,
 > {
@@ -2351,6 +2981,7 @@ fn load_or_init_state(
             None,
             RunnerCheckpointLedger::default(),
             None,
+            Vec::new(),
         ));
     };
 
@@ -2376,6 +3007,7 @@ fn load_or_init_state(
             None,
             RunnerCheckpointLedger::default(),
             None,
+            Vec::new(),
         ));
     }
 
@@ -2439,6 +3071,7 @@ fn load_or_init_state(
                 &checkpoint.approvals_ledger,
                 &checkpoint.side_effects,
             );
+            let mut pending_traces = Vec::<trace::PendingTraceRecord>::new();
             let mut completed_node_ids = checkpoint.engine_state.completed_node_ids;
             checkpoint_ledger
                 .reconcile_completed_from_confirmed_side_effects(&mut completed_node_ids);
@@ -2456,27 +3089,26 @@ fn load_or_init_state(
                     .collect::<BTreeSet<_>>()
                     .into_iter()
                     .collect::<Vec<_>>();
-                if command.verbose || command.verbose_llm {
-                    trace::emit(
-                        true,
-                        "resume",
-                        "side_effect_reused",
-                        &[
-                            ("count", node_ids.len().to_string()),
-                            ("node_ids", node_ids.join(",")),
-                            ("confirmation_hashes", confirmation_hashes.join(",")),
-                        ],
-                    );
-                    trace::emit(
-                        true,
-                        "resume",
-                        "resume_skip_confirmed_write",
-                        &[
-                            ("count", node_ids.len().to_string()),
-                            ("node_ids", node_ids.join(",")),
-                        ],
-                    );
-                }
+                pending_traces.push(trace::PendingTraceRecord::new(
+                    "resume",
+                    "side_effect_reused",
+                    vec![
+                        ("count".to_string(), node_ids.len().to_string()),
+                        ("node_ids".to_string(), node_ids.join(",")),
+                        (
+                            "confirmation_hashes".to_string(),
+                            confirmation_hashes.join(","),
+                        ),
+                    ],
+                ));
+                pending_traces.push(trace::PendingTraceRecord::new(
+                    "resume",
+                    "resume_skip_confirmed_write",
+                    vec![
+                        ("count".to_string(), node_ids.len().to_string()),
+                        ("node_ids".to_string(), node_ids.join(",")),
+                    ],
+                ));
                 record_runtime_agent_field(
                     &mut active_runtime,
                     "resume_skip_confirmed_write",
@@ -2516,6 +3148,7 @@ fn load_or_init_state(
                 Some(checkpoint.plan_hash),
                 checkpoint_ledger,
                 (!checkpoint.extensions.is_empty()).then_some(checkpoint.extensions),
+                pending_traces,
             ))
         }
         Err(ais_engine::CheckpointStoreError::Io(_)) => Ok((
@@ -2529,6 +3162,7 @@ fn load_or_init_state(
             None,
             RunnerCheckpointLedger::default(),
             None,
+            Vec::new(),
         )),
         Err(error) => Err(RunnerError::CheckpointLoad {
             path: checkpoint_path.display().to_string(),
@@ -2600,6 +3234,7 @@ fn dedupe_plan_nodes_by_id(plan: &mut PlanDocument) -> usize {
 fn write_event_sinks(
     command: &AgentCommand,
     events: &[ais_engine::EngineEventRecord],
+    audit_attempt: &mut AuditStreamAttempt,
 ) -> Result<(), RunnerError> {
     if command.verbose {
         for record in events {
@@ -2643,10 +3278,13 @@ fn write_event_sinks(
         }
     }
 
+    let mut persisted_engine_sink = false;
     if let Some(target) = &command.events_jsonl {
         if target == "-" {
             for event in events {
                 let line = encode_event_jsonl_line(event)
+                    .map_err(|error| RunnerError::EventsIo(error.to_string()))?;
+                let line = augment_jsonl_line(line.as_str(), audit_attempt)
                     .map_err(|error| RunnerError::EventsIo(error.to_string()))?;
                 print!("{line}");
             }
@@ -2659,9 +3297,12 @@ fn write_event_sinks(
             for event in events {
                 let line = encode_event_jsonl_line(event)
                     .map_err(|error| RunnerError::EventsIo(error.to_string()))?;
+                let line = augment_jsonl_line(line.as_str(), audit_attempt)
+                    .map_err(|error| RunnerError::EventsIo(error.to_string()))?;
                 file.write_all(line.as_bytes())
                     .map_err(|error| RunnerError::EventsIo(error.to_string()))?;
             }
+            persisted_engine_sink = true;
         }
     }
 
@@ -2675,10 +3316,15 @@ fn write_event_sinks(
         for event in events {
             let line = encode_trace_jsonl_line(event, &redact)
                 .map_err(|error| RunnerError::TraceIo(error.to_string()))?;
+            let line = augment_jsonl_line(line.as_str(), audit_attempt)
+                .map_err(|error| RunnerError::TraceIo(error.to_string()))?;
             file.write_all(line.as_bytes())
                 .map_err(|error| RunnerError::TraceIo(error.to_string()))?;
         }
+        persisted_engine_sink = true;
     }
+
+    audit_attempt.record_persisted_events_if(persisted_engine_sink, events);
 
     Ok(())
 }
@@ -2767,32 +3413,35 @@ fn maybe_save_checkpoint(
     plan_hash: &str,
     plan: &ais_sdk::PlanDocument,
     state: &EngineRunnerState,
+    runtime_snapshot: &Value,
     ledger: &RunnerCheckpointLedger,
     checkpoint_extensions: Option<Map<String, Value>>,
+    audit_attempt: &AuditStreamAttempt,
 ) -> Result<(), RunnerError> {
     let Some(path) = &command.checkpoint else {
         return Ok(());
     };
+    let paused_reason = effective_agent_paused_reason(state);
     let mut checkpoint = create_checkpoint_document(
         run_id.to_string(),
         plan_hash.to_string(),
         CheckpointEngineState {
             completed_node_ids: state.completed_node_ids.clone(),
-            paused_reason: state.paused_reason.clone(),
+            paused_reason,
             seen_command_ids: state.seen_command_ids.clone(),
             pending_retries: state.pending_retries.clone(),
             plan_epoch: state.plan_epoch,
             plan_hash_history: state.plan_hash_history.clone(),
         },
-        Some(state.runtime.clone()),
+        Some(runtime_snapshot.clone()),
         Some(serde_json::to_value(plan)?),
         None,
     );
     checkpoint.approvals_ledger = ledger.approvals();
     checkpoint.side_effects = ledger.side_effects();
-    if let Some(extensions) = checkpoint_extensions {
-        checkpoint.extensions = extensions;
-    }
+    let mut extensions = checkpoint_extensions.unwrap_or_default();
+    write_attempt_into_extensions(&mut extensions, audit_attempt);
+    checkpoint.extensions = extensions;
     save_checkpoint_to_path(path, &checkpoint).map_err(|error| RunnerError::CheckpointSave {
         path: path.display().to_string(),
         reason: error.to_string(),
@@ -2809,6 +3458,48 @@ fn maybe_save_checkpoint(
     Ok(())
 }
 
+pub(super) fn effective_agent_paused_reason(state: &EngineRunnerState) -> Option<String> {
+    if let Some(reason) = state
+        .paused_reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(reason.to_string());
+    }
+    let payload = state.runtime.pointer("/agent/missing_required_input")?;
+    let consumed = payload
+        .get("consumed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if consumed {
+        return None;
+    }
+    let reason_code = payload
+        .get("reason_code")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    (reason_code == "missing_required_input").then(|| "missing_required_input".to_string())
+}
+
+pub(super) fn normalize_agent_terminal_contract(
+    status: EngineRunStatus,
+    state: &EngineRunnerState,
+) -> (EngineRunStatus, Option<String>) {
+    let paused_reason = effective_agent_paused_reason(state);
+    match status {
+        EngineRunStatus::Paused => {
+            if paused_reason.is_some() {
+                (EngineRunStatus::Paused, paused_reason)
+            } else {
+                (EngineRunStatus::Completed, None)
+            }
+        }
+        EngineRunStatus::Completed | EngineRunStatus::Stopped => (status, None),
+    }
+}
+
 fn render_agent_output(
     command: &AgentCommand,
     state: &EngineRunnerState,
@@ -2817,6 +3508,7 @@ fn render_agent_output(
     total_events: usize,
     resumed_from_checkpoint: bool,
 ) -> Result<String, RunnerError> {
+    let (status, paused_reason) = normalize_agent_terminal_contract(status, state);
     let status_text = match status {
         EngineRunStatus::Completed => "completed",
         EngineRunStatus::Paused => "paused",
@@ -2828,7 +3520,7 @@ fn render_agent_output(
         OutputFormat::Json => Ok(serde_json::to_string_pretty(&serde_json::json!({
             "schema": "ais-runner-agent/0.0.1",
             "status": status_text,
-            "paused_reason": state.paused_reason,
+            "paused_reason": paused_reason,
             "resumed_from_checkpoint": resumed_from_checkpoint,
             "iterations": iterations,
             "events_emitted": total_events,
@@ -2838,7 +3530,7 @@ fn render_agent_output(
             let default_summary = format!(
                 "AIS agent\nstatus: {}\npaused_reason: {}\nresumed_from_checkpoint: {}\niterations: {}\nevents: {}",
                 status_text,
-                state.paused_reason.clone().unwrap_or_else(|| "none".to_string()),
+                paused_reason.clone().unwrap_or_else(|| "none".to_string()),
                 resumed_from_checkpoint,
                 iterations,
                 total_events,
@@ -2849,10 +3541,7 @@ fn render_agent_output(
                     ("status", status_text.to_string()),
                     (
                         "paused_reason",
-                        state
-                            .paused_reason
-                            .clone()
-                            .unwrap_or_else(|| "none".to_string()),
+                        paused_reason.clone().unwrap_or_else(|| "none".to_string()),
                     ),
                     (
                         "resumed_from_checkpoint",
