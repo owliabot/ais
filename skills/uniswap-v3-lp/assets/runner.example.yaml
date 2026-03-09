@@ -1,0 +1,29 @@
+schema: "ais-runner/0.0.1"
+
+# Runner config template — Uniswap V3 LP (mainnet)
+#
+# TRANSACTION SIGNING MODEL:
+# AIS assembles unsigned transactions (calldata + to + value).
+# Clawlet receives the unsigned tx and handles signing + broadcast.
+# No signer configured here.
+#
+# See references/openclaw-bot.md for clawlet integration design.
+
+chains:
+  "eip155:1":
+    rpc_url: "https://mainnet.infura.io/v3/YOUR_KEY"   # or Alchemy
+    timeout_ms: 30000
+    wait_for_receipt: true
+    receipt_poll:
+      interval_ms: 5000
+      max_attempts: 20
+    # No signer — clawlet handles signing externally
+
+# llm:
+#   provider: "openai"
+#   model: "gpt-4o"
+#   api_key: "sk-..."
+
+
+# wallet_address goes in the --runtime file, not here.
+# See references/openclaw-bot.md for runtime file format.

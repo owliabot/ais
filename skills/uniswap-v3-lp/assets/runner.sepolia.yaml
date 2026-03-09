@@ -1,0 +1,48 @@
+schema: "ais-runner/0.0.1"
+
+# Runner config — Uniswap V3 LP on Sepolia (eip155:11155111)
+#
+# TRANSACTION SIGNING MODEL:
+# AIS assembles unsigned transactions (calldata + to + value).
+# Clawlet receives the unsigned tx and handles signing + broadcast.
+# Therefore NO signer is configured here — AIS does not touch private keys.
+#
+# Integration flow:
+#   ais-runner run workflow  →  unsigned tx  →  clawlet  →  chain
+#
+# Two integration options:
+#
+# Option A — Clawlet signer plugin (recommended, requires implementation):
+#   Implement ClawletSigner in ais-evm-executor that calls clawlet's sign+send API.
+#   Then set: signer.type: "clawlet" + endpoint + account
+#   See references/openclaw-bot.md for implementation spec.
+#
+# Option B — Dry-run + pipe (interim workaround):
+#   Run ais-runner with --dry-run to get unsigned tx JSON, then pipe to clawlet:
+#   ais-runner run workflow --dry-run --format json | clawlet tx send --stdin
+
+chains:
+  "eip155:11155111":
+    rpc_url: "https://rpc.sepolia.org"   # replace with Alchemy/Infura for reliability
+    timeout_ms: 30000
+    wait_for_receipt: true
+    receipt_poll:
+      interval_ms: 3000
+      max_attempts: 20
+    # No signer here — clawlet handles signing externally
+
+# Uncomment for agent (natural-language intent) mode:
+# llm:
+#   provider: "openai"
+#   model: "gpt-4o"
+#   api_key: "sk-..."
+
+
+# Sepolia contract addresses (already in protocol — for reference only):
+#   Factory:          0x0227628f3F023bb0B980b67D528571c95c6DaC1c
+#   PositionManager:  0x1238536071E1c677A632429e3655c799b22cDA52
+#   WETH:             0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14
+#   USDC (test):      0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238
+
+# wallet_address goes in the --runtime file, not here.
+# See references/openclaw-bot.md for runtime file format.
