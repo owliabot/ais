@@ -582,9 +582,9 @@ fn builtin_round(args: &[CelValue]) -> Result<CelValue, EvalError> {
 
 fn builtin_mul_div(args: &[CelValue]) -> Result<CelValue, EvalError> {
     ensure_arity(args, 3, "mul_div")?;
-    let a = as_integer_strict(&args[0], "mul_div arg0 must be integer")?;
-    let b = as_integer_strict(&args[1], "mul_div arg1 must be integer")?;
-    let denom = as_integer_strict(&args[2], "mul_div arg2 must be integer")?;
+    let a = as_integer_like(&args[0], "mul_div arg0 must be integer")?;
+    let b = as_integer_like(&args[1], "mul_div arg1 must be integer")?;
+    let denom = as_integer_like(&args[2], "mul_div arg2 must be integer")?;
     if denom.is_zero() {
         return Err(EvalError::Numeric(NumericError::DivisionByZero));
     }
@@ -710,6 +710,15 @@ fn as_integer_strict(value: &CelValue, message: &str) -> Result<BigInt, EvalErro
         CelValue::Integer(value) => Ok(value.clone()),
         CelValue::Decimal(decimal) if decimal.scale() == 0 => Ok(decimal.mantissa().clone()),
         _ => Err(EvalError::TypeMismatch(message.to_string())),
+    }
+}
+
+fn as_integer_like(value: &CelValue, message: &str) -> Result<BigInt, EvalError> {
+    match value {
+        CelValue::String(raw) => raw
+            .parse::<BigInt>()
+            .map_err(|_| EvalError::TypeMismatch(message.to_string())),
+        _ => as_integer_strict(value, message),
     }
 }
 

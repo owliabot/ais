@@ -1,4 +1,10 @@
 use crate::documents::{PlanDocument, ProtocolDocument, WorkflowDocument};
+use crate::planner::lower_composite::lower_composite_node;
+use crate::protocol::{
+    annotate_composite_step_protocol_bindings, build_operation_extension, build_pack_extension,
+    build_policy_extension, build_protocol_extension, pack_document_hash, resolve_operation_spec,
+    ResolvedOperationKind,
+};
 use crate::resolver::{
     calculated_override_order_from_map, CalculatedOverrideError, ResolverContext,
 };
@@ -201,7 +207,17 @@ pub fn compile_workflow(
         .as_deref()
         .or(options.default_chain.as_deref());
 
+    let workflow_pack_resolution = workflow_pack(workflow, context);
+    if let Err(issue) = workflow_pack_resolution {
+        return CompileWorkflowResult::Err {
+            issues: vec![issue],
+        };
+    }
+    let workflow_pack = workflow_pack_resolution.ok().flatten();
+    let workflow_pack_hash = workflow_pack.and_then(pack_document_hash);
+
     let mut plan_nodes = Vec::new();
+    let mut emitted_node_ids = HashSet::<String>::new();
     let mut compile_issues = Vec::new();
     for node_id in sorted_ids {
         let Some(node) = node_by_id.get(&node_id) else {
@@ -209,13 +225,31 @@ pub fn compile_workflow(
         };
         match compile_node(
             node,
+            &node_by_id,
             workflow_default_chain,
             workflow_name,
             workflow_version,
+            workflow_pack,
+            workflow_pack_hash.as_deref(),
             context,
             options.include_implicit_deps,
         ) {
-            Ok(plan_node) => plan_nodes.push(plan_node),
+            Ok(mut lowered_nodes) => {
+                let duplicate_issues = validate_emitted_node_ids(
+                    lowered_nodes.as_slice(),
+                    &mut emitted_node_ids,
+                    &[
+                        FieldPathSegment::Key("nodes".to_string()),
+                        FieldPathSegment::Index(node.index),
+                        FieldPathSegment::Key("id".to_string()),
+                    ],
+                );
+                if duplicate_issues.is_empty() {
+                    plan_nodes.append(&mut lowered_nodes);
+                } else {
+                    compile_issues.extend(duplicate_issues);
+                }
+            }
             Err(mut node_issues) => compile_issues.append(&mut node_issues),
         }
     }
@@ -257,22 +291,24 @@ struct NodeCompileInput {
 }
 
 #[derive(Debug)]
-struct ResolvedWorkflowOperation<'a> {
+struct ResolvedWorkflowOperation {
     executable_kind: &'static str,
     source_leaf_key: &'static str,
     source_leaf_value: String,
-    operation_spec: &'a Value,
     control_step_kind: Option<String>,
 }
 
 fn compile_node(
     node: &NodeCompileInput,
+    nodes_by_id: &HashMap<String, NodeCompileInput>,
     default_chain: Option<&str>,
     workflow_name: &str,
     workflow_version: &str,
+    pack: Option<&crate::documents::PackDocument>,
+    pack_hash: Option<&str>,
     context: &ResolverContext,
     include_implicit_deps: bool,
-) -> Result<Value, Vec<StructuredIssue>> {
+) -> Result<Vec<Value>, Vec<StructuredIssue>> {
     let base_path = vec![
         FieldPathSegment::Key("nodes".to_string()),
         FieldPathSegment::Index(node.index),
@@ -336,7 +372,35 @@ fn compile_node(
         kind,
     )?;
 
-    let Some(execution) = select_execution_for_chain(resolved.operation_spec, &chain) else {
+    let operation_kind = match resolved.executable_kind {
+        "action_ref" => ResolvedOperationKind::Action,
+        "query_ref" => ResolvedOperationKind::Query,
+        _ => {
+            return Err(vec![issue(
+                "plan_build_error",
+                path_with_key(&base_path, "type"),
+                "workflow node resolved to unsupported executable kind",
+                "workflow.node.type_invalid",
+            )]);
+        }
+    };
+    let Some(resolved_spec) = resolve_operation_spec(
+        protocol_key.as_str(),
+        protocol,
+        resolved.source_leaf_value.as_str(),
+        operation_kind,
+        &chain,
+        pack,
+    ) else {
+        return Err(vec![issue(
+            "reference_error",
+            path_with_key(&base_path, "chain"),
+            &format!("no deployment mapping for chain `{chain}` in {protocol_key}"),
+            "workflow.node.deployment_missing_for_chain",
+        )]);
+    };
+
+    let Some(execution) = select_execution_for_chain(&resolved_spec.merged_spec, &chain) else {
         return Err(vec![issue(
             "reference_error",
             path_with_key(&base_path, "chain"),
@@ -352,6 +416,23 @@ fn compile_node(
     if !assert_issues.is_empty() {
         return Err(assert_issues);
     }
+
+    let execution = match annotate_composite_step_protocol_bindings(
+        &execution,
+        protocol_key.as_str(),
+        protocol,
+        chain.as_str(),
+    ) {
+        Ok(execution) => execution,
+        Err(error) => {
+            return Err(vec![issue(
+                "plan_build_error",
+                path_with_key(&base_path, "execution"),
+                &error,
+                "workflow.node.composite_chain_invalid",
+            )]);
+        }
+    };
 
     let mut plan_node = Map::new();
     plan_node.insert("id".to_string(), Value::String(node.id.clone()));
@@ -383,13 +464,14 @@ fn compile_node(
     if let Some(args) = node.node_obj.get("args").and_then(Value::as_object) {
         plan_node.insert("bindings".to_string(), json!({ "params": args }));
     }
-    if let Some(overrides) = node
-        .node_obj
-        .get("calculated_overrides")
-        .and_then(Value::as_object)
-    {
+    if let Some(overrides) = merged_calculated_overrides(
+        &resolved_spec.merged_spec,
+        node.node_obj
+            .get("calculated_overrides")
+            .and_then(Value::as_object),
+    ) {
         let mut override_issues = Vec::<StructuredIssue>::new();
-        let order = match calculated_override_order_from_map(overrides) {
+        let order = match calculated_override_order_from_map(&overrides) {
             Ok(order) => order,
             Err(errors) => {
                 override_issues.extend(map_calculated_override_errors(errors, &base_path));
@@ -429,18 +511,30 @@ fn compile_node(
         }),
     );
     source.insert("node_id".to_string(), Value::String(node.id.clone()));
-    source.insert("protocol".to_string(), Value::String(protocol_key));
+    source.insert("protocol".to_string(), Value::String(protocol_key.clone()));
     source.insert(
         resolved.source_leaf_key.to_string(),
         Value::String(resolved.source_leaf_value.clone()),
     );
     plan_node.insert("source".to_string(), Value::Object(source));
+    insert_protocol_extension(
+        &mut plan_node,
+        protocol_key.as_str(),
+        &resolved_spec.deployment,
+    );
+    insert_operation_extension(&mut plan_node, &resolved_spec);
+    insert_required_query_extensions(
+        &mut plan_node,
+        required_query_names(&resolved_spec),
+        workflow_query_bindings(node, nodes_by_id, protocol_ref, include_implicit_deps),
+    );
+    insert_pack_extension(&mut plan_node, resolved_spec.pack.as_ref(), pack, pack_hash);
     if let Some(control_step_kind) = resolved.control_step_kind.as_deref() {
         insert_control_step_kind_extension(&mut plan_node, control_step_kind);
     }
 
-    if let Some(description) = resolved
-        .operation_spec
+    if let Some(description) = resolved_spec
+        .merged_spec
         .as_object()
         .and_then(|obj| obj.get("description"))
         .cloned()
@@ -448,21 +542,324 @@ fn compile_node(
         plan_node.insert("description".to_string(), description);
     }
 
-    copy_risk_metadata_from_operation_spec(resolved.operation_spec, &mut plan_node);
-    if resolved.executable_kind == "action_ref" {
-        copy_policy_gate_metadata_from_action_spec(resolved.operation_spec, &mut plan_node);
-    }
+    copy_risk_metadata_from_operation_spec(&resolved_spec.merged_spec, &mut plan_node);
+    merge_policy_extension(&mut plan_node, build_policy_extension(&resolved_spec));
 
-    Ok(Value::Object(plan_node))
+    let plan_node = Value::Object(plan_node);
+    match lower_composite_node(&plan_node) {
+        Ok(Some(lowered)) => Ok(lowered),
+        Ok(None) => Ok(vec![plan_node]),
+        Err(error) => Err(vec![issue(
+            "plan_build_error",
+            path_with_key(&base_path, "execution"),
+            &error,
+            "workflow.node.composite_invalid",
+        )]),
+    }
 }
 
-fn resolve_workflow_operation<'a>(
+fn merged_calculated_overrides(
+    operation_spec: &Value,
+    local_overrides: Option<&Map<String, Value>>,
+) -> Option<Map<String, Value>> {
+    let mut merged = operation_spec
+        .as_object()
+        .and_then(|spec| spec.get("calculated_fields"))
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(local_overrides) = local_overrides {
+        for (key, value) in local_overrides {
+            merged.insert(key.clone(), value.clone());
+        }
+    }
+    if merged.is_empty() {
+        None
+    } else {
+        Some(merged)
+    }
+}
+
+fn validate_emitted_node_ids(
+    emitted_nodes: &[Value],
+    seen_node_ids: &mut HashSet<String>,
+    path: &[FieldPathSegment],
+) -> Vec<StructuredIssue> {
+    let mut issues = Vec::<StructuredIssue>::new();
+    for node in emitted_nodes {
+        let Some(node_id) = node
+            .as_object()
+            .and_then(|object| object.get("id"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            issues.push(issue(
+                "plan_build_error",
+                path.to_vec(),
+                "lowered node is missing `id`",
+                "workflow.node.lowered_missing_id",
+            ));
+            continue;
+        };
+        if !seen_node_ids.insert(node_id.to_string()) {
+            issues.push(issue(
+                "dag_error",
+                path.to_vec(),
+                &format!("duplicate emitted node id after lowering: {node_id}"),
+                "workflow.node.lowered_duplicate_id",
+            ));
+        }
+    }
+    issues
+}
+
+fn insert_protocol_extension(
+    plan_node: &mut Map<String, Value>,
+    protocol_ref: &str,
+    deployment: &crate::protocol::ResolvedDeployment,
+) {
+    let extensions = plan_node
+        .entry("extensions".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    let Some(extensions_obj) = extensions.as_object_mut() else {
+        return;
+    };
+    extensions_obj.insert(
+        "protocol".to_string(),
+        build_protocol_extension(protocol_ref, deployment),
+    );
+}
+
+fn insert_pack_extension(
+    plan_node: &mut Map<String, Value>,
+    pack: Option<&crate::protocol::ResolvedPackOperation>,
+    pack_document: Option<&crate::documents::PackDocument>,
+    pack_hash: Option<&str>,
+) {
+    let Some(pack) = pack else {
+        return;
+    };
+    let extensions = plan_node
+        .entry("extensions".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    let Some(extensions_obj) = extensions.as_object_mut() else {
+        return;
+    };
+    let mut pack_extension = build_pack_extension(pack);
+    let Some(pack_extension_obj) = pack_extension.as_object_mut() else {
+        return;
+    };
+    if let Some(name) = pack_name(pack_document) {
+        pack_extension_obj.insert("name".to_string(), Value::String(name));
+    }
+    if let Some(version) = pack_version(pack_document) {
+        pack_extension_obj.insert("version".to_string(), Value::String(version));
+    }
+    if let Some(hash) = pack_hash {
+        pack_extension_obj.insert("hash".to_string(), Value::String(hash.to_string()));
+    }
+    extensions_obj.insert("pack".to_string(), pack_extension);
+}
+
+fn insert_operation_extension(
+    plan_node: &mut Map<String, Value>,
+    resolved_spec: &crate::protocol::ResolvedOperationSpec,
+) {
+    let extensions = plan_node
+        .entry("extensions".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    let Some(extensions_obj) = extensions.as_object_mut() else {
+        return;
+    };
+    extensions_obj.insert(
+        "operation".to_string(),
+        build_operation_extension(resolved_spec),
+    );
+}
+
+fn insert_required_query_extensions(
+    plan_node: &mut Map<String, Value>,
+    required_queries: Vec<String>,
+    query_bindings: Map<String, Value>,
+) {
+    if required_queries.is_empty() && query_bindings.is_empty() {
+        return;
+    }
+    let Some(operation) = plan_node
+        .get_mut("extensions")
+        .and_then(Value::as_object_mut)
+        .and_then(|extensions| extensions.get_mut("operation"))
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    if !required_queries.is_empty() {
+        operation.insert(
+            "requires_queries".to_string(),
+            Value::Array(required_queries.into_iter().map(Value::String).collect()),
+        );
+    }
+    if !query_bindings.is_empty() {
+        operation.insert("query_bindings".to_string(), Value::Object(query_bindings));
+    }
+}
+
+fn merge_policy_extension(plan_node: &mut Map<String, Value>, policy_extension: Value) {
+    let Some(policy_extension_obj) = policy_extension.as_object() else {
+        return;
+    };
+    if policy_extension_obj.is_empty() {
+        return;
+    }
+    let extensions = plan_node
+        .entry("extensions".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    let Some(extensions_obj) = extensions.as_object_mut() else {
+        return;
+    };
+    let policy = extensions_obj
+        .entry("policy".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    let Some(policy_obj) = policy.as_object_mut() else {
+        return;
+    };
+    for (key, value) in policy_extension_obj {
+        policy_obj.insert(key.clone(), value.clone());
+    }
+}
+
+fn required_query_names(resolved_spec: &crate::protocol::ResolvedOperationSpec) -> Vec<String> {
+    resolved_spec
+        .merged_spec
+        .as_object()
+        .and_then(|spec| spec.get("requires_queries"))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn workflow_query_bindings(
+    node: &NodeCompileInput,
+    nodes_by_id: &HashMap<String, NodeCompileInput>,
+    protocol_ref: &str,
+    include_implicit_deps: bool,
+) -> Map<String, Value> {
+    let mut bindings = Map::<String, Value>::new();
+    let dep_ids = node_dependency_ids(node, include_implicit_deps);
+    for dep_id in dep_ids {
+        let Some(dep_node) = nodes_by_id.get(dep_id.as_str()) else {
+            continue;
+        };
+        let Some(query_name) = dep_node
+            .node_obj
+            .get("query")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        else {
+            continue;
+        };
+        if dep_node.node_obj.get("type").and_then(Value::as_str) != Some("query_ref") {
+            continue;
+        }
+        if dep_node.node_obj.get("protocol").and_then(Value::as_str) != Some(protocol_ref) {
+            continue;
+        }
+        bindings.entry(query_name.to_string()).or_insert_with(|| {
+            json!({
+                "node_id": dep_node.id,
+                "query_ref": format!("{protocol_ref}/{query_name}")
+            })
+        });
+    }
+    bindings
+}
+
+fn node_dependency_ids(node: &NodeCompileInput, include_implicit_deps: bool) -> Vec<String> {
+    let mut deps = node.explicit_deps.clone();
+    if include_implicit_deps {
+        for dep in &node.implicit_deps {
+            if !deps.contains(dep) {
+                deps.push(dep.clone());
+            }
+        }
+    }
+    deps
+}
+
+fn workflow_pack<'a>(
+    workflow: &WorkflowDocument,
+    context: &'a ResolverContext,
+) -> Result<Option<&'a crate::documents::PackDocument>, StructuredIssue> {
+    let Some(requires_pack) = workflow.requires_pack.as_ref().and_then(Value::as_object) else {
+        return Ok(None);
+    };
+    let Some(name) = requires_pack.get("name").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let Some(version) = requires_pack.get("version").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let pack_key = format!("{name}@{version}");
+    context
+        .packs
+        .get(pack_key.as_str())
+        .map(Some)
+        .ok_or_else(|| {
+            issue(
+                "reference_error",
+                vec![
+                    FieldPathSegment::Key("requires_pack".to_string()),
+                    FieldPathSegment::Key("name".to_string()),
+                ],
+                &format!("required pack not found: {pack_key}"),
+                "workflow.requires_pack.missing",
+            )
+        })
+}
+
+fn pack_name(pack: Option<&crate::documents::PackDocument>) -> Option<String> {
+    pack.and_then(|pack| {
+        pack.name.clone().or_else(|| {
+            pack.meta
+                .as_ref()
+                .and_then(Value::as_object)
+                .and_then(|meta| meta.get("name"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+    })
+}
+
+fn pack_version(pack: Option<&crate::documents::PackDocument>) -> Option<String> {
+    pack.and_then(|pack| {
+        pack.version.clone().or_else(|| {
+            pack.meta
+                .as_ref()
+                .and_then(Value::as_object)
+                .and_then(|meta| meta.get("version"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+    })
+}
+
+fn resolve_workflow_operation(
     node_obj: &Map<String, Value>,
     base_path: &[FieldPathSegment],
-    protocol: &'a ProtocolDocument,
+    protocol: &ProtocolDocument,
     protocol_key: &str,
     kind: &str,
-) -> Result<ResolvedWorkflowOperation<'a>, Vec<StructuredIssue>> {
+) -> Result<ResolvedWorkflowOperation, Vec<StructuredIssue>> {
     let action = node_obj.get("action").and_then(Value::as_str);
     let query = node_obj.get("query").and_then(Value::as_str);
 
@@ -485,7 +882,7 @@ fn resolve_workflow_operation<'a>(
                     "workflow.node.action_required",
                 )]);
             };
-            let Some(spec) = protocol.actions.get(action) else {
+            let Some(_spec) = protocol.actions.get(action) else {
                 return Err(vec![issue(
                     "reference_error",
                     path_with_key(base_path, "action"),
@@ -497,7 +894,6 @@ fn resolve_workflow_operation<'a>(
                 executable_kind: "action_ref",
                 source_leaf_key: "action",
                 source_leaf_value: action.to_string(),
-                operation_spec: spec,
                 control_step_kind: None,
             })
         }
@@ -510,7 +906,7 @@ fn resolve_workflow_operation<'a>(
                     "workflow.node.query_required",
                 )]);
             };
-            let Some(spec) = protocol.queries.get(query) else {
+            let Some(_spec) = protocol.queries.get(query) else {
                 return Err(vec![issue(
                     "reference_error",
                     path_with_key(base_path, "query"),
@@ -522,13 +918,12 @@ fn resolve_workflow_operation<'a>(
                 executable_kind: "query_ref",
                 source_leaf_key: "query",
                 source_leaf_value: query.to_string(),
-                operation_spec: spec,
                 control_step_kind: None,
             })
         }
         "assert" | "branch" => match (action, query) {
             (Some(action), None) => {
-                let Some(spec) = protocol.actions.get(action) else {
+                let Some(_spec) = protocol.actions.get(action) else {
                     return Err(vec![issue(
                         "reference_error",
                         path_with_key(base_path, "action"),
@@ -540,12 +935,11 @@ fn resolve_workflow_operation<'a>(
                     executable_kind: "action_ref",
                     source_leaf_key: "action",
                     source_leaf_value: action.to_string(),
-                    operation_spec: spec,
                     control_step_kind: Some(kind.to_string()),
                 })
             }
             (None, Some(query)) => {
-                let Some(spec) = protocol.queries.get(query) else {
+                let Some(_spec) = protocol.queries.get(query) else {
                     return Err(vec![issue(
                         "reference_error",
                         path_with_key(base_path, "query"),
@@ -557,7 +951,6 @@ fn resolve_workflow_operation<'a>(
                     executable_kind: "query_ref",
                     source_leaf_key: "query",
                     source_leaf_value: query.to_string(),
-                    operation_spec: spec,
                     control_step_kind: Some(kind.to_string()),
                 })
             }
@@ -638,83 +1031,6 @@ fn copy_risk_metadata_from_operation_spec(
             );
         }
     }
-}
-
-fn copy_policy_gate_metadata_from_action_spec(
-    operation_spec: &Value,
-    plan_node: &mut Map<String, Value>,
-) {
-    let Some(obj) = operation_spec.as_object() else {
-        return;
-    };
-    let Some(params) = obj.get("params").and_then(Value::as_array) else {
-        return;
-    };
-
-    let mut role_to_param = Map::<String, Value>::new();
-
-    let slippage_param = find_param_by_name(params, "slippage_bps");
-    if let Some(name) = slippage_param {
-        role_to_param.insert("slippage_bps".to_string(), Value::String(name));
-    }
-
-    if let Some(name) = find_param_by_name(params, "spend_amount") {
-        role_to_param.insert("spend_amount".to_string(), Value::String(name));
-    }
-
-    let risk_tags = obj
-        .get("risk_tags")
-        .and_then(Value::as_array)
-        .map(|tags| {
-            tags.iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let is_approval_related = risk_tags.iter().any(|tag| tag == "approval");
-    if is_approval_related {
-        if let Some(name) = find_param_by_name(params, "spender_address") {
-            role_to_param.insert("spender_address".to_string(), Value::String(name));
-        }
-        if let Some(name) = find_param_by_name(params, "approval_amount") {
-            role_to_param.insert("approval_amount".to_string(), Value::String(name));
-        }
-    }
-
-    if role_to_param.is_empty() {
-        return;
-    }
-
-    let required_fields = role_to_param.keys().cloned().collect::<Vec<_>>();
-
-    let extensions = plan_node
-        .entry("extensions".to_string())
-        .or_insert_with(|| Value::Object(Map::new()));
-    let Some(extensions_obj) = extensions.as_object_mut() else {
-        return;
-    };
-    let policy = extensions_obj
-        .entry("policy".to_string())
-        .or_insert_with(|| Value::Object(Map::new()));
-    let Some(policy_obj) = policy.as_object_mut() else {
-        return;
-    };
-
-    policy_obj.insert("param_roles".to_string(), Value::Object(role_to_param));
-    policy_obj.insert(
-        "required_fields".to_string(),
-        Value::Array(required_fields.into_iter().map(Value::String).collect()),
-    );
-}
-
-fn find_param_by_name(params: &[Value], expected: &str) -> Option<String> {
-    params
-        .iter()
-        .filter_map(Value::as_object)
-        .find(|param| param.get("name").and_then(Value::as_str) == Some(expected))
-        .and_then(|param| param.get("name").and_then(Value::as_str))
-        .map(str::to_string)
 }
 
 fn validate_assert_semantics(

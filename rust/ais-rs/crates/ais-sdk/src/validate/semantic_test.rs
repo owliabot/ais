@@ -9,7 +9,6 @@ fn protocol_semantic_checks_report_paths() {
     actions.insert(
         "swap".to_string(),
         json!({
-            "capabilities_required": [""],
             "execution": {
                 "eip155:1": {
                     "type": "BAD-TYPE"
@@ -24,10 +23,7 @@ fn protocol_semantic_checks_report_paths() {
         deployments: Vec::new(),
         actions,
         queries: Map::new(),
-        risks: Vec::new(),
         supported_assets: Vec::new(),
-        capabilities_required: vec![" ".to_string()],
-        tests: Vec::new(),
         extensions: Map::new(),
     });
 
@@ -41,18 +37,34 @@ fn protocol_semantic_checks_report_paths() {
     ));
     assert!(has_issue(
         &issues,
-        "capabilities.non_empty",
-        "$.capabilities_required[0]"
-    ));
-    assert!(has_issue(
-        &issues,
-        "protocol.capabilities.non_empty",
-        "$.actions.swap.capabilities_required[0]"
-    ));
-    assert!(has_issue(
-        &issues,
         "protocol.execution.type_format",
         "$.actions.swap.execution.eip155:1.type"
+    ));
+}
+
+#[test]
+fn protocol_semantic_checks_deployment_contracts_shape() {
+    let document = AisDocument::Protocol(ProtocolDocument {
+        schema: "ais/0.0.2".to_string(),
+        meta: json!({
+            "protocol": "demo",
+            "version": "0.0.2"
+        }),
+        deployments: vec![json!({
+            "chain": "eip155:1",
+            "contracts": "0xrouter"
+        })],
+        actions: Map::new(),
+        queries: Map::new(),
+        supported_assets: Vec::new(),
+        extensions: Map::new(),
+    });
+
+    let issues = validate_document_semantics(&document);
+    assert!(has_issue(
+        &issues,
+        "protocol.deployments.contracts_object",
+        "$.deployments[0].contracts"
     ));
 }
 

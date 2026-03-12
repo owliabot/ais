@@ -52,6 +52,7 @@ enum CompileSubReasonCode {
     UnknownInputRef,
     CandidateNotFound,
     MissingRequiredInput,
+    TokenPolicy,
     ShapeOrContract,
     CompileError,
 }
@@ -228,6 +229,7 @@ pub(super) fn compile_error_state_payload(error_payload: &Value, round: u8) -> V
         .cloned()
         .unwrap_or(Value::Array(vec![]));
     let sub_reason_code = classify_compile_sub_reason_code(&reason_code, &issues);
+    let token_policy_signal = compile_token_policy_signal(&issues);
     compact_json_for_llm(&json!({
         "phase": "compile",
         "reason_code": reason_code,
@@ -235,6 +237,7 @@ pub(super) fn compile_error_state_payload(error_payload: &Value, round: u8) -> V
         "phase_reason_code": format!("compile.{}", code_as_str(&sub_reason_code)),
         "message": message,
         "issues": issues,
+        "token_policy_signal": token_policy_signal,
         "repair_order": ["shape", "ref", "slot", "semantic"],
         "round": round,
     }))
@@ -305,6 +308,13 @@ fn classify_compile_sub_reason_code(
         return CompileSubReasonCode::MissingRequiredInput;
     }
     if issue_items.iter().any(|item| {
+        item.get("reason_code")
+            .and_then(Value::as_str)
+            .is_some_and(|reason_code| reason_code.starts_with("token_symbol_"))
+    }) {
+        return CompileSubReasonCode::TokenPolicy;
+    }
+    if issue_items.iter().any(|item| {
         item.get("reference")
             .and_then(Value::as_str)
             .is_some_and(|reference| {
@@ -316,6 +326,46 @@ fn classify_compile_sub_reason_code(
         return CompileSubReasonCode::ShapeOrContract;
     }
     CompileSubReasonCode::CompileError
+}
+
+fn compile_token_policy_signal(issues: &Value) -> Value {
+    let Some(issue) = issues
+        .as_array()
+        .and_then(|issues| {
+            issues.iter().find(|issue| {
+                issue
+                    .get("reason_code")
+                    .and_then(Value::as_str)
+                    .is_some_and(|reason_code| reason_code.starts_with("token_symbol_"))
+            })
+        })
+        .cloned()
+    else {
+        return Value::Null;
+    };
+    let reason_code = issue
+        .get("reason_code")
+        .and_then(Value::as_str)
+        .unwrap_or("token_policy");
+    let guidance = match reason_code {
+        "token_symbol_input_not_allowed" => {
+            "Use an explicit token address/object instead of a symbol for this pack."
+        }
+        "token_symbol_not_allowlisted" => {
+            "Choose an allowlisted token symbol or supply an approved token address."
+        }
+        "token_symbol_unresolved" => {
+            "Resolve the token to a chain-specific address before planning the action."
+        }
+        _ => "Adjust the token input to satisfy pack token policy.",
+    };
+    json!({
+        "reason_code": reason_code,
+        "symbol": issue.get("symbol").cloned().unwrap_or(Value::Null),
+        "chain": issue.get("chain").cloned().unwrap_or(Value::Null),
+        "message": issue.get("message").cloned().unwrap_or(Value::Null),
+        "guidance": guidance,
+    })
 }
 
 fn classify_planner_output_error(error: &RunnerError) -> Option<PlannerOutputPattern> {

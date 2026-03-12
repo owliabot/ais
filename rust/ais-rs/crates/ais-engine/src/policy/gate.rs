@@ -1,6 +1,7 @@
 use crate::execution_type::is_core_execution_type;
+use ais_sdk::{evaluate_value_ref_with_options, ResolverContext, ValueRef, ValueRefEvalOptions};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +65,12 @@ pub struct PolicyGateInput {
     pub hard_block_fields: Vec<String>,
     #[serde(default)]
     pub constraint_templates: Vec<PolicyConstraintTemplateRef>,
+    #[serde(default)]
+    pub params: Map<String, Value>,
+    #[serde(default)]
+    pub policy: Map<String, Value>,
+    #[serde(default)]
+    pub effective_constraints: Vec<PolicyAssertConstraint>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -71,6 +78,16 @@ pub struct PolicyConstraintTemplateRef {
     pub name: String,
     #[serde(default)]
     pub params: Map<String, Value>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PolicyAssertConstraint {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub effect: String,
+    pub assert: String,
+    #[serde(default)]
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -90,6 +107,8 @@ pub enum PolicyGateReasonCode {
     ConstraintTemplateViolated,
     ConstraintTemplateUnknown,
     ConstraintTemplateInvalidParams,
+    PolicyConstraintViolated,
+    PolicyConstraintEvalError,
 }
 
 impl PolicyGateReasonCode {
@@ -109,6 +128,8 @@ impl PolicyGateReasonCode {
             Self::ConstraintTemplateViolated => "constraint_template_violated",
             Self::ConstraintTemplateUnknown => "constraint_template_unknown",
             Self::ConstraintTemplateInvalidParams => "constraint_template_invalid_params",
+            Self::PolicyConstraintViolated => "policy_constraint_violated",
+            Self::PolicyConstraintEvalError => "policy_constraint_eval_error",
         }
     }
 }
@@ -136,6 +157,7 @@ pub enum PolicyGateOutput {
 
 pub fn extract_policy_gate_input(
     node: &Value,
+    _runtime: Option<&Value>,
     resolved_params: Option<&Map<String, Value>>,
     action_ref: Option<String>,
     risk_level: Option<u8>,
@@ -162,6 +184,12 @@ pub fn extract_policy_gate_input(
     let param_roles = read_policy_param_roles(node_object);
     let required_fields = read_policy_required_fields(node_object);
     let constraint_templates = read_policy_constraint_templates(node_object);
+    let policy = node
+        .pointer("/extensions/policy")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let effective_constraints = read_policy_effective_constraints(node_object);
 
     let spend_amount =
         get_string_by_param_role(&params, &param_roles, "spend_amount", "spend_amount");
@@ -220,6 +248,9 @@ pub fn extract_policy_gate_input(
         unknown_fields,
         hard_block_fields,
         constraint_templates,
+        params,
+        policy,
+        effective_constraints,
     }
 }
 
@@ -248,6 +279,14 @@ pub fn enforce_policy_gate(
     if let Some(output) = enforce_constraint_templates(input) {
         return output;
     }
+    let policy_constraint_check = enforce_policy_constraints(input);
+    if let Some(output) = policy_constraint_check.output {
+        return output;
+    }
+
+    let mut missing_fields = input.missing_fields.clone();
+    missing_fields.extend(policy_constraint_check.missing_fields);
+    missing_fields = dedup_sort(missing_fields);
 
     if let Some(output) = enforce_allowlist(input, options) {
         return output;
@@ -256,21 +295,14 @@ pub fn enforce_policy_gate(
         return output;
     }
 
-    if !input.missing_fields.is_empty() {
+    if !missing_fields.is_empty() {
         if options.hard_block_on_missing {
             return PolicyGateOutput::HardBlock {
                 reason_code: PolicyGateReasonCode::MissingFields,
                 reason: reason_message(&PolicyGateReasonCode::MissingFields).to_string(),
                 details: map_from_entries(vec![(
                     "missing_fields",
-                    Value::Array(
-                        input
-                            .missing_fields
-                            .iter()
-                            .cloned()
-                            .map(Value::String)
-                            .collect(),
-                    ),
+                    Value::Array(missing_fields.iter().cloned().map(Value::String).collect()),
                 )]),
             };
         }
@@ -279,14 +311,7 @@ pub fn enforce_policy_gate(
             reason: reason_message(&PolicyGateReasonCode::MissingFields).to_string(),
             details: map_from_entries(vec![(
                 "missing_fields",
-                Value::Array(
-                    input
-                        .missing_fields
-                        .iter()
-                        .cloned()
-                        .map(Value::String)
-                        .collect(),
-                ),
+                Value::Array(missing_fields.iter().cloned().map(Value::String).collect()),
             )]),
         };
     }
@@ -491,6 +516,270 @@ fn enforce_constraint_templates(input: &PolicyGateInput) -> Option<PolicyGateOut
         reason: reason_message(&PolicyGateReasonCode::ConstraintTemplateViolated).to_string(),
         details,
     })
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+struct PolicyConstraintCheck {
+    output: Option<PolicyGateOutput>,
+    missing_fields: Vec<String>,
+}
+
+fn enforce_policy_constraints(input: &PolicyGateInput) -> PolicyConstraintCheck {
+    if input.effective_constraints.is_empty() {
+        return PolicyConstraintCheck::default();
+    }
+
+    let context = ResolverContext::new();
+    let inputs_root = Value::Object(policy_inputs_root(input));
+    let params_root = Value::Object(input.params.clone());
+    let policy_root = Value::Object(input.policy.clone());
+    let eval_options = ValueRefEvalOptions {
+        root_overrides: BTreeMap::from([
+            ("inputs".to_string(), inputs_root.clone()),
+            ("params".to_string(), params_root.clone()),
+            ("policy".to_string(), policy_root.clone()),
+        ]),
+    };
+
+    let mut failed_ids = Vec::<Value>::new();
+    let mut violations = Vec::<Value>::new();
+    let mut has_hard_block = false;
+    let mut missing_fields = Vec::<String>::new();
+
+    for constraint in &input.effective_constraints {
+        let constraint_missing = collect_constraint_missing_fields(
+            constraint.assert.as_str(),
+            &inputs_root,
+            &params_root,
+            &policy_root,
+        );
+        if !constraint_missing.is_empty() {
+            missing_fields.extend(constraint_missing);
+            continue;
+        }
+        let value_ref = ValueRef::Cel {
+            cel: constraint.assert.clone(),
+        };
+        let value = match evaluate_value_ref_with_options(&value_ref, &context, &eval_options) {
+            Ok(value) => value,
+            Err(error) => {
+                return PolicyConstraintCheck {
+                    output: Some(PolicyGateOutput::HardBlock {
+                        reason_code: PolicyGateReasonCode::PolicyConstraintEvalError,
+                        reason: reason_message(&PolicyGateReasonCode::PolicyConstraintEvalError)
+                            .to_string(),
+                        details: map_from_entries(vec![
+                            (
+                                "constraint_id",
+                                constraint_id_value(constraint).unwrap_or(Value::Null),
+                            ),
+                            ("assert", Value::String(constraint.assert.clone())),
+                            ("error", Value::String(error.to_string())),
+                        ]),
+                    }),
+                    missing_fields: dedup_sort(missing_fields),
+                };
+            }
+        };
+        let passed = match value {
+            Value::Bool(value) => value,
+            other => {
+                return PolicyConstraintCheck {
+                    output: Some(PolicyGateOutput::HardBlock {
+                        reason_code: PolicyGateReasonCode::PolicyConstraintEvalError,
+                        reason: reason_message(&PolicyGateReasonCode::PolicyConstraintEvalError)
+                            .to_string(),
+                        details: map_from_entries(vec![
+                            (
+                                "constraint_id",
+                                constraint_id_value(constraint).unwrap_or(Value::Null),
+                            ),
+                            ("assert", Value::String(constraint.assert.clone())),
+                            (
+                                "result_type",
+                                Value::String(json_type_name(&other).to_string()),
+                            ),
+                        ]),
+                    }),
+                    missing_fields: dedup_sort(missing_fields),
+                };
+            }
+        };
+        if passed {
+            continue;
+        }
+
+        if let Some(id) = constraint_id_value(constraint) {
+            failed_ids.push(id);
+        }
+        let effect = constraint_effect(constraint);
+        if matches!(effect, ConstraintEffect::HardBlock) {
+            has_hard_block = true;
+        }
+        violations.push(json!({
+            "id": constraint.id,
+            "effect": match effect {
+                ConstraintEffect::HardBlock => "hard_block",
+                ConstraintEffect::NeedUserConfirm => "need_user_confirm",
+            },
+            "assert": constraint.assert,
+            "message": constraint.message,
+        }));
+    }
+
+    if violations.is_empty() {
+        return PolicyConstraintCheck {
+            output: None,
+            missing_fields: dedup_sort(missing_fields),
+        };
+    }
+
+    let details = map_from_entries(vec![
+        ("failed_constraints", Value::Array(failed_ids)),
+        ("violations", Value::Array(violations)),
+    ]);
+
+    if has_hard_block {
+        return PolicyConstraintCheck {
+            output: Some(PolicyGateOutput::HardBlock {
+                reason_code: PolicyGateReasonCode::PolicyConstraintViolated,
+                reason: reason_message(&PolicyGateReasonCode::PolicyConstraintViolated).to_string(),
+                details,
+            }),
+            missing_fields: dedup_sort(missing_fields),
+        };
+    }
+
+    PolicyConstraintCheck {
+        output: Some(PolicyGateOutput::NeedUserConfirm {
+            reason_code: PolicyGateReasonCode::PolicyConstraintViolated,
+            reason: reason_message(&PolicyGateReasonCode::PolicyConstraintViolated).to_string(),
+            details,
+        }),
+        missing_fields: dedup_sort(missing_fields),
+    }
+}
+
+fn collect_constraint_missing_fields(
+    expression: &str,
+    inputs_root: &Value,
+    params_root: &Value,
+    policy_root: &Value,
+) -> Vec<String> {
+    let mut missing = BTreeSet::<String>::new();
+    for reference in extract_constraint_refs(expression) {
+        let Some((root, remainder)) = reference.split_once('.') else {
+            continue;
+        };
+        let root_value = match root {
+            "inputs" => inputs_root,
+            "params" => params_root,
+            "policy" => policy_root,
+            _ => continue,
+        };
+        if !value_path_exists(root_value, remainder) {
+            missing.insert(reference);
+        }
+    }
+    missing.into_iter().collect()
+}
+
+fn extract_constraint_refs(expression: &str) -> BTreeSet<String> {
+    let chars = expression.chars().collect::<Vec<_>>();
+    let mut refs = BTreeSet::<String>::new();
+    let mut index = 0usize;
+
+    while index < chars.len() {
+        let current = chars[index];
+        if !is_ref_ident_start(current) {
+            index += 1;
+            continue;
+        }
+        if index > 0 {
+            let previous = chars[index - 1];
+            if is_ref_ident_char(previous) || previous == '.' {
+                index += 1;
+                continue;
+            }
+        }
+
+        let start = index;
+        index += 1;
+        while index < chars.len() && is_ref_ident_char(chars[index]) {
+            index += 1;
+        }
+        let root = chars[start..index].iter().collect::<String>();
+        if !matches!(root.as_str(), "inputs" | "params" | "policy") {
+            continue;
+        }
+
+        let mut cursor = index;
+        let mut path = root;
+        let mut has_segment = false;
+        while cursor < chars.len() && chars[cursor] == '.' {
+            let dot_index = cursor;
+            cursor += 1;
+            if cursor >= chars.len() || !is_ref_segment_start(chars[cursor]) {
+                cursor = dot_index;
+                break;
+            }
+            let segment_start = cursor;
+            cursor += 1;
+            while cursor < chars.len() && is_ref_ident_char(chars[cursor]) {
+                cursor += 1;
+            }
+            path.push('.');
+            path.extend(chars[segment_start..cursor].iter());
+            has_segment = true;
+        }
+
+        if has_segment {
+            refs.insert(path);
+            index = cursor;
+        }
+    }
+
+    refs
+}
+
+fn is_ref_ident_start(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphabetic()
+}
+
+fn is_ref_segment_start(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
+}
+
+fn is_ref_ident_char(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
+}
+
+fn value_path_exists(root: &Value, path: &str) -> bool {
+    let mut current = root;
+    for segment in path.split('.') {
+        if segment.trim().is_empty() {
+            return false;
+        }
+        match current {
+            Value::Object(object) => {
+                let Some(next) = object.get(segment) else {
+                    return false;
+                };
+                current = next;
+            }
+            Value::Array(items) => {
+                let Ok(index) = segment.parse::<usize>() else {
+                    return false;
+                };
+                let Some(next) = items.get(index) else {
+                    return false;
+                };
+                current = next;
+            }
+            _ => return false,
+        }
+    }
+    true
 }
 
 fn enforce_thresholds(
@@ -771,6 +1060,113 @@ fn read_policy_constraint_templates(
         .collect()
 }
 
+fn read_policy_effective_constraints(
+    node_object: Option<&serde_json::Map<String, Value>>,
+) -> Vec<PolicyAssertConstraint> {
+    let Some(node_object) = node_object else {
+        return Vec::new();
+    };
+    let Some(constraints) = node_object
+        .get("extensions")
+        .and_then(Value::as_object)
+        .and_then(|extensions| extensions.get("policy"))
+        .and_then(Value::as_object)
+        .and_then(|policy| policy.get("effective_constraints"))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+
+    constraints
+        .iter()
+        .filter_map(|item| serde_json::from_value::<PolicyAssertConstraint>(item.clone()).ok())
+        .filter(|constraint| !constraint.assert.trim().is_empty())
+        .collect()
+}
+
+fn policy_inputs_root(input: &PolicyGateInput) -> Map<String, Value> {
+    let mut inputs = Map::<String, Value>::new();
+    inputs.insert("chain".to_string(), Value::String(input.chain.clone()));
+    if let Some(execution_type) = &input.execution_type {
+        inputs.insert(
+            "execution_type".to_string(),
+            Value::String(execution_type.clone()),
+        );
+    }
+    if let Some(action_ref) = &input.action_ref {
+        inputs.insert("action_ref".to_string(), Value::String(action_ref.clone()));
+    }
+    if let Some(risk_level) = input.risk_level {
+        inputs.insert(
+            "risk_level".to_string(),
+            Value::Number((risk_level as u64).into()),
+        );
+    }
+    if !input.risk_tags.is_empty() {
+        inputs.insert(
+            "risk_tags".to_string(),
+            Value::Array(input.risk_tags.iter().cloned().map(Value::String).collect()),
+        );
+    }
+    if let Some(spend_amount) = &input.spend_amount {
+        inputs.insert(
+            "spend_amount".to_string(),
+            Value::String(spend_amount.clone()),
+        );
+    }
+    if let Some(slippage_bps) = input.slippage_bps {
+        inputs.insert(
+            "slippage_bps".to_string(),
+            Value::Number(slippage_bps.into()),
+        );
+    }
+    if let Some(approval_amount) = &input.approval_amount {
+        inputs.insert(
+            "approval_amount".to_string(),
+            Value::String(approval_amount.clone()),
+        );
+    }
+    if let Some(unlimited_approval) = input.unlimited_approval {
+        inputs.insert(
+            "unlimited_approval".to_string(),
+            Value::Bool(unlimited_approval),
+        );
+    }
+    if let Some(spender_address) = &input.spender_address {
+        inputs.insert(
+            "spender_address".to_string(),
+            Value::String(spender_address.clone()),
+        );
+    }
+    inputs
+}
+
+fn constraint_id_value(constraint: &PolicyAssertConstraint) -> Option<Value> {
+    constraint
+        .id
+        .as_ref()
+        .map(|id| Value::String(id.clone()))
+        .or_else(|| Some(Value::String(constraint.assert.clone())))
+}
+
+fn constraint_effect(constraint: &PolicyAssertConstraint) -> ConstraintEffect {
+    match constraint.effect.as_str() {
+        "hard_block" => ConstraintEffect::HardBlock,
+        _ => ConstraintEffect::NeedUserConfirm,
+    }
+}
+
+fn json_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
 fn map_from_entries(entries: Vec<(&str, Value)>) -> Map<String, Value> {
     let mut out = Map::new();
     for (key, value) in entries {
@@ -819,6 +1215,8 @@ fn reason_message(code: &PolicyGateReasonCode) -> &'static str {
         PolicyGateReasonCode::ConstraintTemplateInvalidParams => {
             "constraint template parameters are invalid"
         }
+        PolicyGateReasonCode::PolicyConstraintViolated => "policy constraint requires review",
+        PolicyGateReasonCode::PolicyConstraintEvalError => "policy constraint evaluation failed",
     }
 }
 

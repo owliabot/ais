@@ -162,10 +162,7 @@ fn detail_cards_include_params_and_returns() {
                 "execution":{"eip155:1":{"type":"evm_read"}}
             }),
         )]),
-        risks: Vec::new(),
         supported_assets: Vec::new(),
-        capabilities_required: Vec::new(),
-        tests: Vec::new(),
         extensions: Map::new(),
     };
     let catalog = build_catalog(
@@ -243,10 +240,7 @@ fn protocol_doc(
         deployments: vec![json!({"chain":"eip155:1","contracts":{}})],
         actions: action_map,
         queries: query_map,
-        risks: Vec::new(),
         supported_assets: Vec::new(),
-        capabilities_required: Vec::new(),
-        tests: Vec::new(),
         extensions: Map::new(),
     }
 }

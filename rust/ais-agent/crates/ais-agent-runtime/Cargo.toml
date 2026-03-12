@@ -1,0 +1,27 @@
+[package]
+name = "ais-agent-runtime"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ais-agent-control = { path = "../ais-agent-control" }
+ais-agent-core = { path = "../ais-agent-core" }
+ais-agent-drivers = { path = "../ais-agent-drivers" }
+ais-agent-evm = { path = "../ais-agent-evm" }
+ais-agent-host = { path = "../ais-agent-host" }
+ais-agent-solana = { path = "../ais-agent-solana" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+ais-agent-chain-shared = { path = "../ais-agent-chain-shared" }
+alloy.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+bincode.workspace = true
+solana-sdk.workspace = true
+tokio = { version = "1", features = ["rt", "macros"] }
+tracing-subscriber = { version = "0.3", features = ["fmt"] }

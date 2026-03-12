@@ -356,21 +356,8 @@ fn pack_identity(pack: &PackDocument) -> (String, String) {
 }
 
 fn merge_capabilities(protocol: &ProtocolDocument, spec: &Value) -> Vec<String> {
-    let mut values = Vec::<String>::new();
-    values.extend(protocol.capabilities_required.clone());
-    values.extend(
-        spec.as_object()
-            .and_then(|obj| obj.get("capabilities_required"))
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .map(str::to_string),
-    );
-    values.retain(|value| !value.trim().is_empty());
-    values.sort();
-    values.dedup();
-    values
+    let _ = (protocol, spec);
+    Vec::new()
 }
 
 fn normalize_risk_level(value: Option<&Value>) -> u8 {

@@ -591,7 +591,10 @@ fn is_query_candidate_ref(candidate_ref: &str, candidate_context: &CandidateCont
 
 fn action_required_queries(detail: Option<&Value>) -> Option<Vec<String>> {
     let detail = detail?;
-    let queries = detail.get("requires_queries")?.as_array()?;
+    let queries = detail
+        .pointer("/semantic_hints/prerequisites/requires_queries")
+        .and_then(Value::as_array)
+        .or_else(|| detail.get("requires_queries").and_then(Value::as_array))?;
     let names = queries
         .iter()
         .filter_map(Value::as_str)

@@ -1,6 +1,7 @@
 mod compile_plan_skeleton;
 mod compile_plan_sketch;
 mod compile_workflow;
+mod lower_composite;
 mod preview;
 mod readiness;
 
@@ -16,5 +17,6 @@ pub use preview::{
     DryRunJsonReport, DryRunNodeReport, DryRunSummary,
 };
 pub use readiness::{
-    get_node_readiness, get_node_readiness_async, NodeReadinessResult, NodeRunState,
+    get_node_readiness, get_node_readiness_async, value_ref_eval_options_for_node,
+    NodeReadinessResult, NodeRunState,
 };

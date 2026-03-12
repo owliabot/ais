@@ -1,0 +1,17 @@
+[package]
+name = "ais-agent-evm"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ais-agent-core = { path = "../ais-agent-core" }
+ais-agent-chain-shared = { path = "../ais-agent-chain-shared" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+alloy.workspace = true
+alloy-primitives.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }

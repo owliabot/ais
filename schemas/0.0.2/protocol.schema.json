@@ -53,9 +53,7 @@
     },
     "contracts_18": {
       "type": "object",
-      "additionalProperties": {
-        "type": "string"
-      }
+      "additionalProperties": {}
     },
     "Def_16": {
       "type": "object",
@@ -66,12 +64,6 @@
         },
         "contracts": {
           "$ref": "#/$defs/contracts_18"
-        },
-        "rpc_hints": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
         },
         "extensions": {
           "$ref": "#/$defs/extensions_13"
@@ -132,6 +124,9 @@
         "pattern": {
           "type": "string"
         },
+        "cel": {
+          "type": "string"
+        },
         "extensions": {
           "$ref": "#/$defs/extensions_13"
         }
@@ -156,7 +151,14 @@
         "default": {},
         "example": {},
         "constraints": {
-          "$ref": "#/$defs/constraints_41"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/constraints_41"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "asset_ref": {
           "type": "string"
@@ -183,6 +185,16 @@
         },
         "description": {
           "type": "string"
+        },
+        "constraints": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/constraints_41"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "extensions": {
           "$ref": "#/$defs/extensions_13"
@@ -261,6 +273,19 @@
       ],
       "additionalProperties": false
     },
+    "Union77_6_77": {
+      "type": "object",
+      "properties": {
+        "detect": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "detect"
+      ],
+      "additionalProperties": false
+    },
     "max_slippage_bps_56": {
       "anyOf": [
         {
@@ -277,6 +302,9 @@
         },
         {
           "$ref": "#/$defs/Union75_5_75"
+        },
+        {
+          "$ref": "#/$defs/Union77_6_77"
         }
       ]
     },
@@ -831,12 +859,6 @@
             "type": "string"
           }
         },
-        "capabilities_required": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
         "extensions": {
           "$ref": "#/$defs/extensions_13"
         }
@@ -901,12 +923,6 @@
           "items": {
             "$ref": "#/$defs/Def_49"
           }
-        },
-        "cache_ttl": {
-          "type": "integer"
-        },
-        "consistency": {
-          "$ref": "#/$defs/consistency_144"
         },
         "execution": {
           "$ref": "#/$defs/execution_81"
@@ -984,6 +1000,13 @@
         "addresses": {
           "$ref": "#/$defs/addresses_161"
         },
+        "deployments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Def_162"
+          },
+          "minItems": 1
+        },
         "coingecko_id": {
           "type": "string"
         },
@@ -997,10 +1020,42 @@
           "$ref": "#/$defs/extensions_13"
         }
       },
+      "required": ["symbol"],
+      "allOf": [
+        {
+          "anyOf": [
+            {
+              "required": ["decimals", "addresses"]
+            },
+            {
+              "required": ["deployments"]
+            }
+          ]
+        }
+      ],
+      "additionalProperties": false
+    },
+    "Def_162": {
+      "type": "object",
+      "properties": {
+        "chain": {
+          "type": "string",
+          "pattern": "^(eip155|solana|cosmos|bip122|aptos|sui):[a-zA-Z0-9._-]+$"
+        },
+        "address": {
+          "type": "string"
+        },
+        "decimals": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_13"
+        }
+      },
       "required": [
-        "symbol",
-        "decimals",
-        "addresses"
+        "chain",
+        "address"
       ],
       "additionalProperties": false
     },
@@ -1074,28 +1129,10 @@
         "queries": {
           "$ref": "#/$defs/queries_138"
         },
-        "risks": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/Def_150"
-          }
-        },
         "supported_assets": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/Def_156"
-          }
-        },
-        "capabilities_required": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "tests": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/Def_169"
           }
         },
         "extensions": {

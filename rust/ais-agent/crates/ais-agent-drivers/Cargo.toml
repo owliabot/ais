@@ -1,0 +1,16 @@
+[package]
+name = "ais-agent-drivers"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ais-agent-core = { path = "../ais-agent-core" }
+ais-agent-chain-shared = { path = "../ais-agent-chain-shared" }
+ais-agent-evm = { path = "../ais-agent-evm" }
+ais-agent-solana = { path = "../ais-agent-solana" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+alloy-primitives.workspace = true
+solana-sdk.workspace = true

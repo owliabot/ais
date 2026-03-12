@@ -3,7 +3,7 @@
 Status: Draft  
 Spec Version: 0.0.2  
 
-Packs select protocol specs and define policies (risk approvals, hard constraints, token policy, providers/plugins).
+Packs select protocol specs and define policies (risk approvals, constraints, token policy, plugins).
 
 ## 0. Strict fields and `extensions`
 
@@ -53,11 +53,11 @@ policy:
   constraints:
     - id: "limit-slippage"
       effect: "hard_block"               # "hard_block" | "need_user_confirm"
-      expr: "input.slippage_bps <= 50"
+      assert: "inputs.slippage_bps <= 50"
       message: "slippage exceeds policy limit"
     - id: "high-spend-confirm"
       effect: "need_user_confirm"
-      expr: "uint(input.spend_amount) > 1000000"
+      assert: "uint(inputs.spend_amount) <= 1000000"
       message: "spend amount exceeds soft threshold"
 
 token_policy:
@@ -68,9 +68,6 @@ token_policy:
   allowlist:
     - { chain: "eip155:8453", symbol: "USDC", address: "0x...", decimals: 6 }
 
-providers:
-  quote: { enabled: [ { provider: "uniswap-v3-quoter", chains: ["eip155:8453"], priority: 10 } ] }
-
 plugins:
   execution:
     enabled:
@@ -78,13 +75,27 @@ plugins:
         chains: ["eip155:1"]
 
 overrides:
+  action_rules:
+    - actions:
+        - "uniswap-v3.swap-exact-in"
+        - "uniswap-v3.swap-exact-out"
+      constraints:
+        - id: "swap-slippage-limit"
+          effect: "hard_block"
+          assert: "params.slippage_bps <= 30"
+          message: "slippage exceeds swap limit"
   actions:
     "uniswap-v3.swap-exact-in":
       risk_tags: ["dex", "swap"]
+      constraints:
+        - id: "exact-in-tight-slippage"
+          effect: "hard_block"
+          assert: "params.slippage_bps <= 20"
+          message: "slippage exceeds exact-in limit"
 ```
 
 Notes:
-- `providers.*` and `plugins.*` act as **allowlists** when a pack is active. See `specs/ais-1-capabilities.md`.
+- `plugins.*` act as **allowlists** when a pack is active. See `specs/ais-1-capabilities.md`.
 
 Additional plugin rules (normative):
 - `plugins.execution.enabled` is an allowlist for **plugin execution types** (non-core `execution.type` values).
@@ -139,20 +150,45 @@ Protocol-install policy (normative):
   - execution handler registration checks, or
   - plugin/action allowlists defined by active pack.
 
-CEL constraints (normative):
+Pack constraints (normative):
 
-- `policy.constraints[]` is the canonical extensible constraint mechanism.
+- `policy.constraints[]` is the canonical global constraint mechanism.
+- `overrides.actions.<actionKey>.constraints[]` defines additional constraints for exactly one action.
+- `overrides.action_rules[]` defines shared constraints for a non-empty list of action keys.
 - Each constraint entry:
   - `id` (stable identifier)
   - `effect` (`hard_block` or `need_user_confirm`)
-  - `expr` (CEL expression evaluated against normalized policy-gate input)
+  - `assert` (CEL boolean pass predicate)
   - `message` (optional human-readable reason)
-- Constraint evaluation order:
+- `assert` semantics:
+  - `assert == true` means the constraint passes.
+  - `assert == false` means the constraint fails.
+  - non-boolean or evaluation-error results SHOULD be treated conservatively as failure (recommended: `hard_block` with a stable reason code).
+- Recommended CEL roots:
+  - `inputs.*` for global constraints under `policy.constraints[]`
+  - `params.*` for action-specific or multi-action override constraints
+  - `policy.*` MAY be exposed by hosts/runners, but SHOULD remain narrowly defined and stable if enabled
+- Effective constraint collection order for an action:
   1) `hard_block_fields` / missingness base rules (see policy-gate spec)
-  2) CEL constraints in list order
+  2) `policy.constraints[]` in list order
+  3) matched `overrides.action_rules[].constraints[]` in declaration order
+  4) `overrides.actions.<actionKey>.constraints[]` in list order
 - Conflict/precedence:
-  - Any matching `hard_block` constraint wins over confirm/ok.
-  - If no hard block matches but at least one `need_user_confirm` matches, output confirm.
+  - Any failed `hard_block` constraint wins over confirm/ok.
+  - If no hard block fails but at least one `need_user_confirm` constraint fails, output confirm.
+  - Override-scoped constraints may add stricter checks, but MUST NOT weaken a failing global `hard_block`.
+
+Migration note (recommended):
+
+- Legacy fixed-threshold fields such as `policy.hard_constraints_defaults`, `policy.hard_constraints`, and `overrides.actions.<actionKey>.hard_constraints` SHOULD be migrated to `constraints[]`.
+- Semantic migration:
+  - old mental model: a constraint expression “matched” when it described a violation condition
+  - new mental model: `assert` MUST describe the allowed condition that must hold
+  - therefore, old trigger-style predicates SHOULD be inverted when migrating to `assert`
+- Example migrations:
+  - `max_slippage_bps: 50` -> `assert: "inputs.slippage_bps <= 50"`
+  - action override `max_slippage_bps: 30` -> `assert: "params.slippage_bps <= 30"`
+  - old trigger-style `expr: "inputs.slippage_bps > 50"` -> `assert: "inputs.slippage_bps <= 50"`
 
 ## 1. Approval decision algorithm (normative)
 

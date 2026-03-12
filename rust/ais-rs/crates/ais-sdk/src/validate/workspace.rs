@@ -1,4 +1,5 @@
 use crate::documents::{PackDocument, ProtocolDocument, WorkflowDocument};
+use crate::validate::semantic::validate_protocol_deployments;
 use crate::validate::workflow::validate_workflow_imports;
 use ais_core::{FieldPath, FieldPathSegment, IssueSeverity, StructuredIssue};
 use serde_json::{json, Value};
@@ -18,6 +19,8 @@ pub fn validate_workspace_references(docs: WorkspaceDocuments<'_>) -> Vec<Struct
     let mut protocol_versions_by_id: HashMap<String, HashSet<String>> = HashMap::new();
 
     for protocol in docs.protocols {
+        validate_protocol_deployments(protocol, &mut issues);
+
         let Some((protocol_id, version)) = protocol_identity(protocol) else {
             issues.push(issue(
                 "workspace_error",

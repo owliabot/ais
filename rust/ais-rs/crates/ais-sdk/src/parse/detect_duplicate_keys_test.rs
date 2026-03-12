@@ -60,3 +60,15 @@ nodes:
     assert_eq!(issues.len(), 1);
     assert_eq!(issues[0].reference.as_deref(), Some("yaml.duplicate_key"));
 }
+
+#[test]
+fn chain_map_keys_with_namespaced_colons_are_not_treated_as_duplicates() {
+    let input = r#"
+decimals:
+  eip155:1: 18
+  eip155:8453: 18
+  eip155:42161: 18
+"#;
+    let issues = detect_yaml_duplicate_keys(input);
+    assert!(issues.is_empty());
+}

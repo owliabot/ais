@@ -1,6 +1,7 @@
 use crate::resolver::{
-    evaluate_value_ref_async, evaluate_value_ref_with_options, ResolverContext, ValueRef,
-    ValueRefEvalError, ValueRefEvalOptions,
+    evaluate_value_ref_async, evaluate_value_ref_with_options, resolve_calculated_bindings,
+    resolve_calculated_bindings_async, resolve_node_bindings, resolve_query_bindings,
+    ResolverContext, ValueRef, ValueRefEvalError, ValueRefEvalOptions,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -30,6 +31,8 @@ pub fn get_node_readiness(
     context: &ResolverContext,
     options: &ValueRefEvalOptions,
 ) -> NodeReadinessResult {
+    let prepared = prepare_node_eval_sync(node, context, options);
+    let condition_options = prepared.eval_options.as_ref().unwrap_or(options);
     if let Some(condition) = node.as_object().and_then(|object| object.get("condition")) {
         let condition_ref = match parse_value_ref(condition, "condition") {
             Ok(value_ref) => value_ref,
@@ -42,7 +45,7 @@ pub fn get_node_readiness(
                 };
             }
         };
-        match safe_eval_sync(&condition_ref, context, options) {
+        match safe_eval_sync(&condition_ref, context, condition_options) {
             SafeEvalResult::Err {
                 missing_refs,
                 errors,
@@ -51,7 +54,7 @@ pub fn get_node_readiness(
                     state: NodeRunState::Blocked,
                     missing_refs,
                     errors,
-                    resolved_params: None,
+                    resolved_params: prepared.resolved_params.clone(),
                 };
             }
             SafeEvalResult::Ok { value } => match value {
@@ -60,7 +63,7 @@ pub fn get_node_readiness(
                         state: NodeRunState::Skipped,
                         missing_refs: Vec::new(),
                         errors: Vec::new(),
-                        resolved_params: None,
+                        resolved_params: prepared.resolved_params.clone(),
                     };
                 }
                 Value::Bool(true) => {}
@@ -72,47 +75,21 @@ pub fn get_node_readiness(
                             "condition must evaluate to boolean, got: {}",
                             json_type_name(&value)
                         )],
-                        resolved_params: None,
+                        resolved_params: prepared.resolved_params.clone(),
                     };
                 }
             },
         }
     }
 
-    let mut resolved_params = Map::new();
-    let mut missing_refs = Vec::<String>::new();
-    let mut errors = Vec::<String>::new();
-
-    if let Some(params) = node
-        .as_object()
-        .and_then(|object| object.get("bindings"))
-        .and_then(Value::as_object)
-        .and_then(|bindings| bindings.get("params"))
-        .and_then(Value::as_object)
-    {
-        for (key, value) in params {
-            match parse_value_ref(value, &format!("bindings.params.{key}")) {
-                Ok(value_ref) => match safe_eval_sync(&value_ref, context, options) {
-                    SafeEvalResult::Ok { value } => {
-                        resolved_params.insert(key.clone(), value);
-                    }
-                    SafeEvalResult::Err {
-                        missing_refs: eval_missing_refs,
-                        errors: eval_errors,
-                    } => {
-                        missing_refs.extend(eval_missing_refs);
-                        errors.extend(eval_errors);
-                    }
-                },
-                Err(error) => errors.push(error),
-            }
-        }
-    }
+    let resolved_params = prepared.resolved_params.unwrap_or_default();
+    let mut missing_refs = prepared.missing_refs;
+    let mut errors = prepared.errors;
 
     if let Some(execution) = node.as_object().and_then(|object| object.get("execution")) {
-        let execution_options = options_with_resolved_params(options, &resolved_params);
+        let execution_options = prepared.eval_options.as_ref().unwrap_or(options);
         for value_ref in collect_value_refs_deep(execution) {
-            match safe_eval_sync(&value_ref, context, &execution_options) {
+            match safe_eval_sync(&value_ref, context, execution_options) {
                 SafeEvalResult::Ok { .. } => {}
                 SafeEvalResult::Err {
                     missing_refs: eval_missing_refs,
@@ -149,6 +126,8 @@ pub async fn get_node_readiness_async(
     context: &ResolverContext,
     options: &ValueRefEvalOptions,
 ) -> NodeReadinessResult {
+    let prepared = prepare_node_eval_async(node, context, options).await;
+    let condition_options = prepared.eval_options.as_ref().unwrap_or(options);
     if let Some(condition) = node.as_object().and_then(|object| object.get("condition")) {
         let condition_ref = match parse_value_ref(condition, "condition") {
             Ok(value_ref) => value_ref,
@@ -161,7 +140,7 @@ pub async fn get_node_readiness_async(
                 };
             }
         };
-        match safe_eval_async(&condition_ref, context, options).await {
+        match safe_eval_async(&condition_ref, context, condition_options).await {
             SafeEvalResult::Err {
                 missing_refs,
                 errors,
@@ -170,7 +149,7 @@ pub async fn get_node_readiness_async(
                     state: NodeRunState::Blocked,
                     missing_refs,
                     errors,
-                    resolved_params: None,
+                    resolved_params: prepared.resolved_params.clone(),
                 };
             }
             SafeEvalResult::Ok { value } => match value {
@@ -179,7 +158,7 @@ pub async fn get_node_readiness_async(
                         state: NodeRunState::Skipped,
                         missing_refs: Vec::new(),
                         errors: Vec::new(),
-                        resolved_params: None,
+                        resolved_params: prepared.resolved_params.clone(),
                     };
                 }
                 Value::Bool(true) => {}
@@ -191,47 +170,21 @@ pub async fn get_node_readiness_async(
                             "condition must evaluate to boolean, got: {}",
                             json_type_name(&value)
                         )],
-                        resolved_params: None,
+                        resolved_params: prepared.resolved_params.clone(),
                     };
                 }
             },
         }
     }
 
-    let mut resolved_params = Map::new();
-    let mut missing_refs = Vec::<String>::new();
-    let mut errors = Vec::<String>::new();
-
-    if let Some(params) = node
-        .as_object()
-        .and_then(|object| object.get("bindings"))
-        .and_then(Value::as_object)
-        .and_then(|bindings| bindings.get("params"))
-        .and_then(Value::as_object)
-    {
-        for (key, value) in params {
-            match parse_value_ref(value, &format!("bindings.params.{key}")) {
-                Ok(value_ref) => match safe_eval_async(&value_ref, context, options).await {
-                    SafeEvalResult::Ok { value } => {
-                        resolved_params.insert(key.clone(), value);
-                    }
-                    SafeEvalResult::Err {
-                        missing_refs: eval_missing_refs,
-                        errors: eval_errors,
-                    } => {
-                        missing_refs.extend(eval_missing_refs);
-                        errors.extend(eval_errors);
-                    }
-                },
-                Err(error) => errors.push(error),
-            }
-        }
-    }
+    let resolved_params = prepared.resolved_params.unwrap_or_default();
+    let mut missing_refs = prepared.missing_refs;
+    let mut errors = prepared.errors;
 
     if let Some(execution) = node.as_object().and_then(|object| object.get("execution")) {
-        let execution_options = options_with_resolved_params(options, &resolved_params);
+        let execution_options = prepared.eval_options.as_ref().unwrap_or(options);
         for value_ref in collect_value_refs_deep(execution) {
-            match safe_eval_async(&value_ref, context, &execution_options).await {
+            match safe_eval_async(&value_ref, context, execution_options).await {
                 SafeEvalResult::Ok { .. } => {}
                 SafeEvalResult::Err {
                     missing_refs: eval_missing_refs,
@@ -263,13 +216,171 @@ pub async fn get_node_readiness_async(
     }
 }
 
-fn options_with_resolved_params(
+pub fn value_ref_eval_options_for_node(
+    node: &Value,
     options: &ValueRefEvalOptions,
-    resolved_params: &Map<String, Value>,
+    resolved_params: Option<&Map<String, Value>>,
 ) -> ValueRefEvalOptions {
-    let mut root_overrides = options.root_overrides.clone();
-    root_overrides.insert("params".to_string(), Value::Object(resolved_params.clone()));
-    ValueRefEvalOptions { root_overrides }
+    resolve_node_bindings(node, None, resolved_params, None).to_eval_options(options)
+}
+
+#[derive(Debug, Clone, Default)]
+struct PreparedNodeEval {
+    resolved_params: Option<Map<String, Value>>,
+    missing_refs: Vec<String>,
+    errors: Vec<String>,
+    eval_options: Option<ValueRefEvalOptions>,
+}
+
+fn prepare_node_eval_sync(
+    node: &Value,
+    context: &ResolverContext,
+    options: &ValueRefEvalOptions,
+) -> PreparedNodeEval {
+    let node_options =
+        resolve_node_bindings(node, Some(&context.runtime), None, None).to_eval_options(options);
+    let (resolved_params, mut missing_refs, mut errors) =
+        resolve_params_sync(node, context, &node_options);
+    let resolved_params = has_param_bindings(node).then_some(resolved_params);
+    let calculated = resolve_calculated_bindings(node, context, options, resolved_params.as_ref());
+    let query = resolve_query_bindings(node, Some(&context.runtime));
+    missing_refs.extend(query.missing_refs.iter().cloned());
+    missing_refs.extend(calculated.missing_refs.iter().cloned());
+    errors.extend(calculated.errors.iter().cloned());
+    let calculated_root = node
+        .get("calculated_overrides")
+        .and_then(Value::as_object)
+        .map(|_| &calculated.calculated);
+    let eval_options = resolve_node_bindings(
+        node,
+        Some(&context.runtime),
+        resolved_params.as_ref(),
+        calculated_root,
+    )
+    .to_eval_options(options);
+    PreparedNodeEval {
+        resolved_params,
+        missing_refs,
+        errors,
+        eval_options: Some(eval_options),
+    }
+}
+
+async fn prepare_node_eval_async(
+    node: &Value,
+    context: &ResolverContext,
+    options: &ValueRefEvalOptions,
+) -> PreparedNodeEval {
+    let node_options =
+        resolve_node_bindings(node, Some(&context.runtime), None, None).to_eval_options(options);
+    let (resolved_params, mut missing_refs, mut errors) =
+        resolve_params_async(node, context, &node_options).await;
+    let resolved_params = has_param_bindings(node).then_some(resolved_params);
+    let calculated =
+        resolve_calculated_bindings_async(node, context, options, resolved_params.as_ref()).await;
+    let query = resolve_query_bindings(node, Some(&context.runtime));
+    missing_refs.extend(query.missing_refs.iter().cloned());
+    missing_refs.extend(calculated.missing_refs.iter().cloned());
+    errors.extend(calculated.errors.iter().cloned());
+    let calculated_root = node
+        .get("calculated_overrides")
+        .and_then(Value::as_object)
+        .map(|_| &calculated.calculated);
+    let eval_options = resolve_node_bindings(
+        node,
+        Some(&context.runtime),
+        resolved_params.as_ref(),
+        calculated_root,
+    )
+    .to_eval_options(options);
+    PreparedNodeEval {
+        resolved_params,
+        missing_refs,
+        errors,
+        eval_options: Some(eval_options),
+    }
+}
+
+fn has_param_bindings(node: &Value) -> bool {
+    node.pointer("/bindings/params")
+        .and_then(Value::as_object)
+        .is_some()
+}
+
+fn resolve_params_sync(
+    node: &Value,
+    context: &ResolverContext,
+    options: &ValueRefEvalOptions,
+) -> (Map<String, Value>, Vec<String>, Vec<String>) {
+    let mut resolved_params = Map::new();
+    let mut missing_refs = Vec::<String>::new();
+    let mut errors = Vec::<String>::new();
+
+    if let Some(params) = node
+        .as_object()
+        .and_then(|object| object.get("bindings"))
+        .and_then(Value::as_object)
+        .and_then(|bindings| bindings.get("params"))
+        .and_then(Value::as_object)
+    {
+        for (key, value) in params {
+            match parse_value_ref(value, &format!("bindings.params.{key}")) {
+                Ok(value_ref) => match safe_eval_sync(&value_ref, context, options) {
+                    SafeEvalResult::Ok { value } => {
+                        resolved_params.insert(key.clone(), value);
+                    }
+                    SafeEvalResult::Err {
+                        missing_refs: eval_missing_refs,
+                        errors: eval_errors,
+                    } => {
+                        missing_refs.extend(eval_missing_refs);
+                        errors.extend(eval_errors);
+                    }
+                },
+                Err(error) => errors.push(error),
+            }
+        }
+    }
+
+    (resolved_params, missing_refs, errors)
+}
+
+async fn resolve_params_async(
+    node: &Value,
+    context: &ResolverContext,
+    options: &ValueRefEvalOptions,
+) -> (Map<String, Value>, Vec<String>, Vec<String>) {
+    let mut resolved_params = Map::new();
+    let mut missing_refs = Vec::<String>::new();
+    let mut errors = Vec::<String>::new();
+
+    if let Some(params) = node
+        .as_object()
+        .and_then(|object| object.get("bindings"))
+        .and_then(Value::as_object)
+        .and_then(|bindings| bindings.get("params"))
+        .and_then(Value::as_object)
+    {
+        for (key, value) in params {
+            match parse_value_ref(value, &format!("bindings.params.{key}")) {
+                Ok(value_ref) => match safe_eval_async(&value_ref, context, options).await {
+                    SafeEvalResult::Ok { value } => {
+                        resolved_params.insert(key.clone(), value);
+                    }
+                    SafeEvalResult::Err {
+                        missing_refs: eval_missing_refs,
+                        errors: eval_errors,
+                    } => {
+                        missing_refs.extend(eval_missing_refs);
+                        errors.extend(eval_errors);
+                    }
+                },
+                Err(error) => errors.push(error),
+            }
+        }
+    }
+
+    (resolved_params, missing_refs, errors)
 }
 
 #[derive(Debug, Clone, PartialEq)]

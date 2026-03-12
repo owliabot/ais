@@ -171,7 +171,17 @@ pub fn load_runner_config(path: &Path) -> Result<RunnerConfig, RunnerConfigError
         path: path.display().to_string(),
         source,
     })?;
-    let expanded = expand_env_placeholders(raw.as_str()).map_err(RunnerConfigError::Parse)?;
+    let expanded = match expand_env_placeholders(raw.as_str()) {
+        Ok(expanded) => expanded,
+        Err(error) => {
+            let mut issues = collect_env_placeholder_issues(path, raw.as_str());
+            StructuredIssue::sort_stable(&mut issues);
+            if !issues.is_empty() {
+                return Err(RunnerConfigError::Validation(issues));
+            }
+            return Err(RunnerConfigError::Parse(error));
+        }
+    };
     let config: RunnerConfig = match path.extension().and_then(|ext| ext.to_str()) {
         Some("json") => serde_json::from_str(expanded.as_str())
             .map_err(|error| RunnerConfigError::Parse(format!("json decode error: {error}")))?,
@@ -904,6 +914,99 @@ fn expand_env_placeholders(input: &str) -> Result<String, String> {
     }
     out.push_str(&input[cursor..]);
     Ok(out)
+}
+
+fn collect_env_placeholder_issues(path: &Path, raw: &str) -> Vec<StructuredIssue> {
+    let value = match path.extension().and_then(|ext| ext.to_str()) {
+        Some("json") => serde_json::from_str::<Value>(raw).ok(),
+        Some("yaml") | Some("yml") => serde_yaml::from_str::<Value>(raw).ok(),
+        _ => serde_yaml::from_str::<Value>(raw)
+            .ok()
+            .or_else(|| serde_json::from_str::<Value>(raw).ok()),
+    };
+    let Some(value) = value else {
+        return Vec::new();
+    };
+
+    let mut issues = Vec::<StructuredIssue>::new();
+    collect_env_placeholder_issues_for_value(&value, Vec::new(), &mut issues);
+    issues
+}
+
+fn collect_env_placeholder_issues_for_value(
+    value: &Value,
+    path: Vec<FieldPathSegment>,
+    issues: &mut Vec<StructuredIssue>,
+) {
+    match value {
+        Value::Object(object) => {
+            for (key, nested) in object {
+                let mut nested_path = path.clone();
+                nested_path.push(FieldPathSegment::Key(key.clone()));
+                collect_env_placeholder_issues_for_value(nested, nested_path, issues);
+            }
+        }
+        Value::Array(items) => {
+            for (index, nested) in items.iter().enumerate() {
+                let mut nested_path = path.clone();
+                nested_path.push(FieldPathSegment::Index(index));
+                collect_env_placeholder_issues_for_value(nested, nested_path, issues);
+            }
+        }
+        Value::String(text) => {
+            issues.extend(
+                inspect_env_placeholders(text)
+                    .into_iter()
+                    .map(|placeholder_issue| {
+                        config_issue(
+                            placeholder_issue.reference,
+                            path.clone(),
+                            placeholder_issue.message,
+                        )
+                    }),
+            );
+        }
+        _ => {}
+    }
+}
+
+struct EnvPlaceholderIssue {
+    reference: &'static str,
+    message: String,
+}
+
+fn inspect_env_placeholders(input: &str) -> Vec<EnvPlaceholderIssue> {
+    let mut issues = Vec::<EnvPlaceholderIssue>::new();
+    let mut cursor = 0;
+    while let Some(start_offset) = input[cursor..].find("${") {
+        let start = cursor + start_offset;
+        let var_start = start + 2;
+        let Some(end_offset) = input[var_start..].find('}') else {
+            issues.push(EnvPlaceholderIssue {
+                reference: "runner.config.env_placeholder.syntax",
+                message: "unterminated env placeholder `${...`".to_string(),
+            });
+            break;
+        };
+        let end = var_start + end_offset;
+        let key = &input[var_start..end];
+        if key.is_empty() {
+            issues.push(EnvPlaceholderIssue {
+                reference: "runner.config.env_placeholder.syntax",
+                message: "empty env placeholder `${}`".to_string(),
+            });
+            cursor = end + 1;
+            continue;
+        }
+        if std::env::var(key).is_err() {
+            issues.push(EnvPlaceholderIssue {
+                reference: "runner.config.env_placeholder.missing",
+                message: format!("missing env var for placeholder `${{{key}}}`"),
+            });
+        }
+        cursor = end + 1;
+    }
+    issues
 }
 
 struct UnwiredSolanaRpcClientFactory;

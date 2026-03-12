@@ -57,18 +57,15 @@ meta:
   tags: ["dex"]                       # optional
   maintainer: "..."                   # optional
 
-capabilities_required: ["cel:v1"]     # optional
-
 deployments:
   - chain: "eip155:1"                 # CAIP-2
     contracts: { router: "0x..." }    # named addresses
 
-supported_assets: [ ... ]             # optional (multi-chain mapping)
-risks: [ ... ]                        # optional (protocol-level risk notes)
+supported_assets: [ ... ]             # optional (protocol-level asset registry)
 
 actions: { "<action_id>": <Action> }  # REQUIRED
 queries: { "<query_id>": <Query> }    # optional
-tests: [ ... ]                        # optional
+extensions: { ... }                   # optional
 ```
 
 ## 2. Action
@@ -90,7 +87,6 @@ actions:
         description: "..."
         required: true
         default: null
-        constraints: { min: 0 }
 
     returns:
       - { name: tx_hash, type: string }
@@ -109,6 +105,7 @@ actions:
 Notes:
 - `calculated_fields[*].expr` is a **ValueRef** (typically `{cel:"..."}`).
 - All action/query execution specs are defined in AIS-2.
+- Protocol SHOULD focus on protocol behavior only; host execution policy, runner routing, and pack safety constraints belong outside protocol.
 
 ## 3. Query
 
@@ -140,3 +137,60 @@ Tuple rule (normative):
   - an object when all tuple component names are present and unique, otherwise
   - an array (positional)
   and store it under that single return name (no implicit flattening into multiple returns).
+
+## 4. Recommended boundary
+
+Protocol specs SHOULD stay narrow:
+
+- keep protocol behavior in protocol:
+  - deployments
+  - action/query params and returns
+  - prerequisite queries
+  - calculated fields
+  - execution recipes
+- move safety/governance policy to pack:
+  - approval policy
+  - execution constraints
+  - token policy
+- move environment/runtime settings to runner config:
+  - RPC routing
+  - signer setup
+  - executor selection
+
+Recommended `supported_assets` shape:
+
+```yaml
+supported_assets:
+  - symbol: "USDC"
+    name: "USD Coin"
+    deployments:
+      - chain: "eip155:1"
+        address: "0x..."
+        decimals: 6
+      - chain: "eip155:8453"
+        address: "0x..."
+        decimals: 6
+```
+
+Compatibility note:
+
+- legacy chain-map shapes such as `addresses.{chain}` / `decimals.{chain}` may remain ingestible during migration
+- new specs SHOULD prefer the per-deployment array shape
+
+## 5. Removed legacy fields
+
+The following fields are outside the current protocol semantic boundary and SHOULD be treated as removed from the active authoring surface:
+
+- top-level `capabilities_required`
+- top-level `risks`
+- top-level `tests`
+- `deployments[*].rpc_hints`
+- `actions[*].capabilities_required`
+- `queries[*].cache_ttl`
+- `queries[*].consistency`
+
+Boundary guidance:
+
+- runner routing, signer/RPC setup, and executor selection belong to runner config
+- safety/governance constraints belong to pack policy, not protocol
+- cache/read-consistency hints are implementation metadata, not protocol behavior

@@ -22,6 +22,9 @@ fn sample_gate_input() -> PolicyGateInput {
         unknown_fields: vec![],
         hard_block_fields: vec![],
         constraint_templates: vec![],
+        params: Map::new(),
+        policy: Map::new(),
+        effective_constraints: vec![],
     }
 }
 

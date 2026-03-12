@@ -24,7 +24,7 @@ version: 3
 - Failure/repair contract: return `status=invalid|unavailable` with `error.reason_code`. Repair order: `shape -> ref -> slot -> semantic`.
 
 ## Domain
-- `assert`/`branch`/`until`/`retry` are PlanSketch control semantics (not catalog candidates); `candidate_ref` is required for `query`/`action` and optional for `assert`/`branch` control steps.
+- `assert`/`branch`/`until`/`retry` are PlanSketch control semantics (not catalog candidates); `candidate_ref` is required for `query`/`action` and optional for `assert`/`branch` control steps. `step.chain` is optional for single-chain segments and required on executable steps when planning across multiple chains.
 - Write safety: value-moving actions must satisfy `action -> assert|branch` gating. Gate backing is valid only when it comes from same-segment query ancestry or explicit historical `nodes.<step>.outputs.*` references.
 - `depends_on` is for same-segment scheduling/gate reachability only. Do not invent same-segment query deps when a condition intentionally reads stable historical `nodes.<step>.outputs.*`.
 - Volatile facts (`balance`, `allowance`) are query-observed signals. A fresh same-segment query is required before a write when the write depends on those signals and the segment is not explicitly backed by historical node outputs.

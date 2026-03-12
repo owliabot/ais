@@ -13,7 +13,7 @@
 - `workspace/evm-native-utils.ais.yaml`
 - `workspace/erc20.ais.yaml`
 - `workspace/safe-defi.ais-pack.yaml`
-- `config/runner.local.yaml`: 本地链运行配置（含 demo 私钥）
+- `config/runner.local.yaml`: 本地链运行配置（`OPENROUTER_API_KEY` / `AIS_RUNNER_LOCAL_EVM_PRIVATE_KEY` 占位符）
 - `runtime/runtime.local.json`: 示例输入参数
 - `plan/intent-native-erc20.plan.json`: 目标计划（供审阅/回归）
 - `llm/intent-native-erc20.success.jsonl`: scripted LLM 响应（`propose_plan`）
@@ -23,7 +23,15 @@
 
 - 在本机启动 `anvil`：`http://127.0.0.1:8545`
 - `runtime.runtime.local.json` 中的 ERC20 地址应为本地已部署 token
-- 当前 demo 私钥仅用于本地演示，勿用于真实资金
+- 导出环境变量：
+
+```bash
+export OPENROUTER_API_KEY=dummy-local-script-key
+export AIS_RUNNER_LOCAL_EVM_PRIVATE_KEY=0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d
+```
+
+- `--llm-script-jsonl` 场景不会真实调用 OpenRouter，但 `llm.api_key` 仍需提供非空占位值
+- `AIS_RUNNER_LOCAL_EVM_PRIVATE_KEY` 仅用于本地 `anvil` 演示，勿用于真实资金
 
 ## Scenario A: 成功路径（YOLO 自动确认）
 

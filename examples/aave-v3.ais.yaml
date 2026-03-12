@@ -9,11 +9,6 @@ meta:
   tags: ["lending", "borrowing", "yield", "defi"]
   maintainer: "aave.eth"
 
-capabilities_required:
-  - "cel_v1"
-  - "evm_read"
-  - "evm_call"
-
 deployments:
   - chain: "eip155:1"
     contracts:
@@ -30,32 +25,31 @@ deployments:
 supported_assets:
   - symbol: "WETH"
     name: "Wrapped Ether"
-    decimals:
-      eip155:1: 18
-      eip155:8453: 18
-      eip155:42161: 18
-    addresses:
-      eip155:1: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
-      eip155:8453: "0x4200000000000000000000000000000000000006"
-      eip155:42161: "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"
+    deployments:
+      - chain: "eip155:1"
+        address: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+        decimals: 18
+      - chain: "eip155:8453"
+        address: "0x4200000000000000000000000000000000000006"
+        decimals: 18
+      - chain: "eip155:42161"
+        address: "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"
+        decimals: 18
     tags: ["wrapped", "collateral"]
 
   - symbol: "USDC"
     name: "USD Coin"
-    decimals:
-      eip155:1: 6
-      eip155:8453: 6
-      eip155:42161: 6
-    addresses:
-      eip155:1: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
-      eip155:8453: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
-      eip155:42161: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+    deployments:
+      - chain: "eip155:1"
+        address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+        decimals: 6
+      - chain: "eip155:8453"
+        address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+        decimals: 6
+      - chain: "eip155:42161"
+        address: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+        decimals: 6
     tags: ["stable", "collateral"]
-
-risks:
-  - level: "warning"
-    text: "Withdrawing collateral can reduce health factor and may lead to liquidation if debt exists."
-    applies_to: ["withdraw"]
 
 actions:
   supply-raw:
@@ -161,9 +155,6 @@ actions:
     requires_queries:
       - "allowance-token"
 
-    hard_constraints:
-      allow_unlimited_approval: { lit: false }
-
     calculated_fields:
       amount_atomic:
         expr: { cel: "to_atomic(params.amount, params.token)" }
@@ -267,8 +258,6 @@ queries:
     returns:
       - name: allowance_atomic
         type: uint256
-
-    cache_ttl: 10
     execution:
       "eip155:*":
         type: evm_read

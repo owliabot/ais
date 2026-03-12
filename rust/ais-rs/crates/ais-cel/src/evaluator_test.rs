@@ -114,6 +114,21 @@ fn builtin_math_functions_work() {
         evaluate_expression("mul_div(1000, 9950, 10000)", &context).expect("eval"),
         CelValue::Integer(bi(995))
     );
+    assert_eq!(
+        evaluate_expression("mul_div('1000', 9950, 10000)", &context).expect("eval"),
+        CelValue::Integer(bi(995))
+    );
+}
+
+#[test]
+fn builtin_mul_div_rejects_non_integer_strings() {
+    let context = CelContext::new();
+    let error = evaluate_expression("mul_div('1.5', 9950, 10000)", &context)
+        .expect_err("non-integer numeric string must fail");
+    assert_eq!(
+        error.to_string(),
+        "type mismatch: mul_div arg0 must be integer"
+    );
 }
 
 #[test]

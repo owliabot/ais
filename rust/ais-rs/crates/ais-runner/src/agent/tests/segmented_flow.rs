@@ -3780,6 +3780,46 @@ fn compile_error_state_payload_classifies_unknown_input_ref_issue() {
 }
 
 #[test]
+fn compile_error_state_payload_exposes_token_policy_signal() {
+    let payload = super::compile_error_state_payload(
+        &json!({
+            "reason_code":"compile_error",
+            "message":"segment compile failed during token resolution",
+            "issues":[{
+                "kind":"compile_error",
+                "reason_code":"token_symbol_not_allowlisted",
+                "message":"token symbol `WETH` is not allowlisted for chain `eip155:1`",
+                "chain":"eip155:1",
+                "symbol":"WETH"
+            }]
+        }),
+        4,
+    );
+    assert_eq!(
+        payload.get("sub_reason_code").and_then(Value::as_str),
+        Some("token_policy")
+    );
+    assert_eq!(
+        payload
+            .pointer("/token_policy_signal/reason_code")
+            .and_then(Value::as_str),
+        Some("token_symbol_not_allowlisted")
+    );
+    assert_eq!(
+        payload
+            .pointer("/token_policy_signal/symbol")
+            .and_then(Value::as_str),
+        Some("WETH")
+    );
+    assert_eq!(
+        payload
+            .pointer("/token_policy_signal/guidance")
+            .and_then(Value::as_str),
+        Some("Choose an allowlisted token symbol or supply an approved token address.")
+    );
+}
+
+#[test]
 fn compile_segment_plan_fails_when_when_cel_references_unknown_input_slot() {
     let fixture_root = segmented_native_erc20_fixture_root();
     let pack_path = fixture_root.join("workspace/safe-defi.ais-pack.yaml");
@@ -3827,7 +3867,9 @@ fn compile_segment_plan_fails_when_when_cel_references_unknown_input_slot() {
         "c0",
         &segment,
         &candidate_context,
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        super::derive_pack_snapshot_hash(candidate_context.pack.as_ref())
+            .expect("pack hash")
+            .as_str(),
         &["eip155:1".to_string()],
         Some(&input_store,
         ),
@@ -3958,7 +4000,9 @@ fn compile_segment_plan_accepts_bound_input_store_token_decimals_for_write_gate(
         "c2",
         &segment,
         &candidate_context,
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        super::derive_pack_snapshot_hash(candidate_context.pack.as_ref())
+            .expect("pack hash")
+            .as_str(),
         &["eip155:31338".to_string()],
         Some(&input_store),
     )
@@ -4106,7 +4150,9 @@ fn compile_segment_plan_preserves_full_asset_object_ref_for_write_gate() {
         "c2",
         &segment,
         &candidate_context,
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        super::derive_pack_snapshot_hash(candidate_context.pack.as_ref())
+            .expect("pack hash")
+            .as_str(),
         &["eip155:31338".to_string()],
         Some(&input_store),
     )
@@ -4500,6 +4546,440 @@ fn normalize_segment_asset_inputs_uses_existing_input_ref_without_inventing_toke
     assert!(
         !value.to_string().contains("inputs.token.address"),
         "normalized segment must not invent token.address: {value}"
+    );
+}
+
+fn token_policy_demo_protocol() -> ais_sdk::ProtocolDocument {
+    serde_json::from_value(json!({
+        "schema":"ais/0.0.2",
+        "meta":{"protocol":"demo","version":"0.0.2"},
+        "deployments":[{"chain":"eip155:1","contracts":{"router":"0x1111111111111111111111111111111111111111"}}],
+        "supported_assets":[
+            {
+                "symbol":"USDC",
+                "name":"USD Coin",
+                "addresses":{"eip155:1":"0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"},
+                "decimals":{"eip155:1":6},
+                "tags":["stable"]
+            },
+            {
+                "symbol":"WETH",
+                "name":"Wrapped Ether",
+                "addresses":{"eip155:1":"0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"},
+                "decimals":{"eip155:1":18},
+                "tags":["wrapped"]
+            }
+        ],
+        "actions":{
+            "swap":{
+                "description":"swap demo",
+                "params":[
+                    {"name":"token","type":"asset","required":true},
+                    {"name":"amount","type":"uint256","required":true}
+                ],
+                "execution":{
+                    "eip155:*":{
+                        "type":"evm_call",
+                        "to":{"ref":"contracts.router"},
+                        "abi":{"type":"function","name":"swap","inputs":[],"outputs":[]},
+                        "args":{"asset":{"ref":"params.token.address"},"amount":{"ref":"params.amount"}}
+                    }
+                }
+            }
+        },
+        "queries":{
+            "quote":{
+                "description":"quote demo",
+                "params":[
+                    {"name":"token","type":"asset","required":true},
+                    {"name":"amount","type":"uint256","required":true}
+                ],
+                "returns":[
+                    {"name":"quote","type":"uint256"}
+                ],
+                "execution":{
+                    "eip155:*":{
+                        "type":"evm_read",
+                        "target":{"ref":"contracts.router"},
+                        "abi":{"type":"function","name":"quote","inputs":[],"outputs":[]},
+                        "args":{"asset":{"ref":"params.token.address"},"amount":{"ref":"params.amount"}}
+                    }
+                }
+            }
+        }
+    }))
+    .expect("protocol")
+}
+
+fn token_policy_demo_pack(
+    allow_symbol_input: bool,
+    require_allowlist: bool,
+    require_confirm_address: bool,
+) -> ais_sdk::PackDocument {
+    serde_json::from_value(json!({
+        "schema":"ais-pack/0.0.2",
+        "name":"safe-defi",
+        "version":"0.0.2",
+        "includes":[{"protocol":"demo","version":"0.0.2","source":"registry"}],
+        "token_policy":{
+            "resolution":{
+                "allow_symbol_input":allow_symbol_input,
+                "require_allowlist_for_symbol_resolution":require_allowlist,
+                "require_user_confirm_asset_address":require_confirm_address
+            },
+            "allowlist":[
+                {
+                    "chain":"eip155:1",
+                    "symbol":"USDC",
+                    "address":"0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+                    "decimals":6,
+                    "tags":["stable"]
+                }
+            ]
+        }
+    }))
+    .expect("pack")
+}
+
+fn token_policy_candidate_context(
+    pack: ais_sdk::PackDocument,
+) -> super::CandidateContext {
+    let protocol = token_policy_demo_protocol();
+    let mut candidate_context = super::CandidateContext::default();
+    candidate_context.protocols.push(protocol.clone());
+    candidate_context.pack = Some(pack);
+    candidate_context.detail_by_ref.insert(
+        "demo@0.0.2/quote".to_string(),
+        json!({
+            "kind":"query",
+            "params":[
+                {"name":"token","type":"asset","required":true},
+                {"name":"amount","type":"uint256","required":true}
+            ],
+            "returns":[{"name":"quote","type":"uint256"}]
+        }),
+    );
+    candidate_context
+}
+
+fn multi_chain_candidate_context() -> super::CandidateContext {
+    let protocol: ais_sdk::ProtocolDocument = serde_json::from_value(json!({
+        "schema":"ais/0.0.2",
+        "meta":{"protocol":"multi-chain","version":"0.0.1"},
+        "deployments":[
+            {"chain":"eip155:1","contracts":{"router":"0x1111111111111111111111111111111111111111"}},
+            {"chain":"eip155:8453","contracts":{"router":"0x2222222222222222222222222222222222222222"}}
+        ],
+        "actions":{},
+        "queries":{
+            "ping":{
+                "description":"ping",
+                "params":[{"name":"owner","type":"address","required":true}],
+                "returns":[{"name":"ok","type":"bool"}],
+                "execution":{
+                    "eip155:*":{
+                        "type":"evm_read",
+                        "target":{"ref":"contracts.router"},
+                        "abi":{"type":"function","name":"ping","inputs":[],"outputs":[]},
+                        "args":{"owner":{"ref":"params.owner"}}
+                    }
+                }
+            }
+        }
+    }))
+    .expect("protocol");
+
+    let mut candidate_context = super::CandidateContext::default();
+    candidate_context.protocols.push(protocol);
+    candidate_context.detail_by_ref.insert(
+        "multi-chain@0.0.1/ping".to_string(),
+        json!({
+            "kind":"query",
+            "params":[{"name":"owner","type":"address","required":true}],
+            "returns":[{"name":"ok","type":"bool"}]
+        }),
+    );
+    candidate_context
+}
+
+#[test]
+fn compile_segment_plan_resolves_allowlisted_symbol_asset_inputs() {
+    let segment: ais_sdk::documents::PlanSketchSegment = serde_json::from_value(json!({
+        "segment_id":"seg_asset_symbol",
+        "cursor_in":"0",
+        "cursor_out":"1",
+        "done":false,
+        "steps":[
+            {
+                "id":"a1",
+                "kind":"query",
+                "candidate_ref":"demo@0.0.2/quote",
+                "inputs":{
+                    "token":"USDC",
+                    "amount":"100"
+                }
+            }
+        ]
+    }))
+    .expect("segment");
+    let candidate_context =
+        token_policy_candidate_context(token_policy_demo_pack(true, true, true));
+    let input_store = super::InputStore::default();
+
+    let plan = super::compile_segment_plan_with_snapshot_hash_and_facts(
+        "swap usdc",
+        "sess-token-symbol",
+        "cursor-1",
+        &segment,
+        &candidate_context,
+        super::derive_pack_snapshot_hash(candidate_context.pack.as_ref())
+            .expect("pack hash")
+            .as_str(),
+        &["eip155:1".to_string()],
+        Some(&input_store),
+    )
+    .expect("plan");
+    let node = plan.nodes.first().expect("node");
+    assert_eq!(
+        node.pointer("/bindings/params/token/object/address/lit"),
+        Some(&json!("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"))
+    );
+    assert_eq!(
+        node.pointer("/extensions/plan_sketch/token_resolution/token/source"),
+        Some(&json!("pack_allowlist"))
+    );
+    assert_eq!(
+        node.pointer("/extensions/plan_sketch/token_resolution/token/confirmation_required"),
+        Some(&json!(true))
+    );
+}
+
+#[test]
+fn compile_segment_plan_allows_explicit_multi_chain_steps_without_hidden_default_chain() {
+    let segment: ais_sdk::documents::PlanSketchSegment = serde_json::from_value(json!({
+        "segment_id":"seg_multi_chain",
+        "cursor_in":"0",
+        "cursor_out":"1",
+        "done":false,
+        "steps":[
+            {
+                "id":"q1",
+                "kind":"query",
+                "chain":"eip155:1",
+                "candidate_ref":"multi-chain@0.0.1/ping",
+                "inputs":{"owner":"0xabc"}
+            },
+            {
+                "id":"q2",
+                "kind":"query",
+                "chain":"eip155:8453",
+                "candidate_ref":"multi-chain@0.0.1/ping",
+                "inputs":{"owner":"0xdef"},
+                "depends_on":["q1"]
+            }
+        ]
+    }))
+    .expect("segment");
+    let candidate_context = multi_chain_candidate_context();
+    let input_store = super::InputStore::default();
+
+    let plan = super::compile_segment_plan_with_snapshot_hash_and_facts(
+        "run multi-chain pings",
+        "sess-multi-chain",
+        "cursor-1",
+        &segment,
+        &candidate_context,
+        "",
+        &["eip155:1".to_string(), "eip155:8453".to_string()],
+        Some(&input_store),
+    )
+    .expect("plan");
+
+    assert_eq!(plan.nodes.len(), 2);
+    assert_eq!(plan.nodes[0].pointer("/chain"), Some(&json!("eip155:1")));
+    assert_eq!(plan.nodes[1].pointer("/chain"), Some(&json!("eip155:8453")));
+    assert_eq!(
+        plan.nodes[0].pointer("/extensions/operation/target_chain"),
+        Some(&json!("eip155:1"))
+    );
+    assert_eq!(
+        plan.nodes[1].pointer("/extensions/operation/target_chain"),
+        Some(&json!("eip155:8453"))
+    );
+}
+
+#[test]
+fn compile_segment_plan_requires_step_chain_when_scope_is_multi_chain() {
+    let segment: ais_sdk::documents::PlanSketchSegment = serde_json::from_value(json!({
+        "segment_id":"seg_multi_chain_missing",
+        "cursor_in":"0",
+        "cursor_out":"1",
+        "done":false,
+        "steps":[
+            {
+                "id":"q1",
+                "kind":"query",
+                "candidate_ref":"multi-chain@0.0.1/ping",
+                "inputs":{"owner":"0xabc"}
+            }
+        ]
+    }))
+    .expect("segment");
+    let candidate_context = multi_chain_candidate_context();
+    let input_store = super::InputStore::default();
+
+    let error = super::compile_segment_plan_with_snapshot_hash_and_facts(
+        "run multi-chain ping",
+        "sess-multi-chain",
+        "cursor-1",
+        &segment,
+        &candidate_context,
+        "",
+        &["eip155:1".to_string(), "eip155:8453".to_string()],
+        Some(&input_store),
+    )
+    .expect_err("must fail");
+    assert_eq!(error.get("reason_code").and_then(Value::as_str), Some("compile_error"));
+    assert!(
+        error.to_string().contains("step chain is required")
+            || error.to_string().contains("deterministic chain"),
+        "expected missing step-chain diagnostic, got: {error}"
+    );
+}
+
+#[test]
+fn compile_segment_plan_rejects_symbol_not_on_required_allowlist() {
+    let segment: ais_sdk::documents::PlanSketchSegment = serde_json::from_value(json!({
+        "segment_id":"seg_asset_symbol_blocked",
+        "cursor_in":"0",
+        "cursor_out":"1",
+        "done":false,
+        "steps":[
+            {
+                "id":"a1",
+                "kind":"query",
+                "candidate_ref":"demo@0.0.2/quote",
+                "inputs":{
+                    "token":"WETH",
+                    "amount":"100"
+                }
+            }
+        ]
+    }))
+    .expect("segment");
+    let candidate_context =
+        token_policy_candidate_context(token_policy_demo_pack(true, true, true));
+    let input_store = super::InputStore::default();
+
+    let error = super::compile_segment_plan_with_snapshot_hash_and_facts(
+        "swap weth",
+        "sess-token-symbol-blocked",
+        "cursor-1",
+        &segment,
+        &candidate_context,
+        super::derive_pack_snapshot_hash(candidate_context.pack.as_ref())
+            .expect("pack hash")
+            .as_str(),
+        &["eip155:1".to_string()],
+        Some(&input_store),
+    )
+    .expect_err("must reject");
+    assert_eq!(
+        error.pointer("/issues/0/reason_code").and_then(Value::as_str),
+        Some("token_symbol_not_allowlisted")
+    );
+}
+
+#[test]
+fn compile_segment_plan_surfaces_direct_address_confirmation_requirement() {
+    let segment: ais_sdk::documents::PlanSketchSegment = serde_json::from_value(json!({
+        "segment_id":"seg_asset_address_confirm",
+        "cursor_in":"0",
+        "cursor_out":"1",
+        "done":false,
+        "steps":[
+            {
+                "id":"a1",
+                "kind":"query",
+                "candidate_ref":"demo@0.0.2/quote",
+                "inputs":{
+                    "token":"0x9999999999999999999999999999999999999999",
+                    "amount":"100"
+                }
+            }
+        ]
+    }))
+    .expect("segment");
+    let candidate_context =
+        token_policy_candidate_context(token_policy_demo_pack(false, false, true));
+    let input_store = super::InputStore::default();
+
+    let plan = super::compile_segment_plan_with_snapshot_hash_and_facts(
+        "swap direct address",
+        "sess-token-address-confirm",
+        "cursor-1",
+        &segment,
+        &candidate_context,
+        super::derive_pack_snapshot_hash(candidate_context.pack.as_ref())
+            .expect("pack hash")
+            .as_str(),
+        &["eip155:1".to_string()],
+        Some(&input_store),
+    )
+    .expect("plan");
+    let node = plan.nodes.first().expect("node");
+    assert_eq!(
+        node.pointer("/extensions/plan_sketch/token_resolution/token/input_kind"),
+        Some(&json!("address"))
+    );
+    assert_eq!(
+        node.pointer("/extensions/plan_sketch/token_resolution/token/confirmation_required"),
+        Some(&json!(true))
+    );
+    assert_eq!(
+        node.pointer("/extensions/plan_sketch/token_resolution/token/resolved"),
+        Some(&json!(false))
+    );
+}
+
+#[test]
+fn compile_segment_plan_rejects_pack_snapshot_hash_mismatch() {
+    let segment: ais_sdk::documents::PlanSketchSegment = serde_json::from_value(json!({
+        "segment_id":"seg_pack_hash_mismatch",
+        "cursor_in":"0",
+        "cursor_out":"1",
+        "done":false,
+        "steps":[
+            {
+                "id":"a1",
+                "kind":"query",
+                "candidate_ref":"demo@0.0.2/quote",
+                "inputs":{
+                    "token":"USDC",
+                    "amount":"100"
+                }
+            }
+        ]
+    }))
+    .expect("segment");
+    let candidate_context =
+        token_policy_candidate_context(token_policy_demo_pack(true, true, true));
+    let input_store = super::InputStore::default();
+
+    let error = super::compile_segment_plan_with_snapshot_hash_and_facts(
+        "swap usdc",
+        "sess-pack-hash-mismatch",
+        "cursor-1",
+        &segment,
+        &candidate_context,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        &["eip155:1".to_string()],
+        Some(&input_store),
+    )
+    .expect_err("must reject mismatched pack snapshot hash");
+    assert_eq!(
+        error.pointer("/issues/0/reason_code").and_then(Value::as_str),
+        Some("pack_snapshot_hash_mismatch")
     );
 }
 

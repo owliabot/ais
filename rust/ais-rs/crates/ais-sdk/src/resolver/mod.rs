@@ -1,8 +1,16 @@
+mod bindings;
+mod calculated_bindings;
 mod calculated_overrides;
 mod context;
 mod reference;
 mod value_ref;
 
+pub use bindings::{
+    resolve_node_bindings, resolve_query_bindings, ResolvedNodeBindings, ResolvedQueryBindings,
+};
+pub use calculated_bindings::{
+    resolve_calculated_bindings, resolve_calculated_bindings_async, CalculatedBindingsResult,
+};
 pub use calculated_overrides::{
     calculated_override_order, calculated_override_order_from_map, CalculatedOverrideError,
 };

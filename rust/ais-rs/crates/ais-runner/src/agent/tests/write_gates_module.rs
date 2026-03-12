@@ -48,6 +48,60 @@ fn write_gate_accepts_recursive_query_assert_branch_action_chain() {
 }
 
 #[test]
+fn write_gate_uses_semantic_hint_required_queries_when_flat_field_is_missing() {
+    let segment: ais_sdk::documents::PlanSketchSegment = serde_json::from_value(json!({
+        "segment_id":"seg_gate_semantic_hints",
+        "cursor_in":"0",
+        "cursor_out":"1",
+        "done":false,
+        "steps":[
+            {
+                "id":"q_allowance",
+                "kind":"query",
+                "candidate_ref":"demo@0.0.1/allowance",
+                "inputs":{}
+            },
+            {
+                "id":"g_allowance",
+                "kind":"assert",
+                "depends_on":["q_allowance"],
+                "inputs":{},
+                "when":{"cel":"nodes.q_allowance.outputs.allowance > 0"}
+            },
+            {
+                "id":"a_swap",
+                "kind":"action",
+                "candidate_ref":"demo@0.0.1/swap",
+                "depends_on":["g_allowance"],
+                "inputs":{}
+            }
+        ]
+    }))
+    .expect("segment");
+    let mut context = CandidateContext::default();
+    context.detail_by_ref.insert(
+        "demo@0.0.1/allowance".to_string(),
+        json!({"kind":"query","returns":[{"name":"allowance"}]}),
+    );
+    context.detail_by_ref.insert(
+        "demo@0.0.1/swap".to_string(),
+        json!({
+            "kind":"action",
+            "risk_tags":[],
+            "semantic_hints":{
+                "prerequisites":{
+                    "requires_queries":["allowance"],
+                    "requires_query_count":1
+                }
+            }
+        }),
+    );
+
+    validate_segment_write_gates(&segment, &context, None, None)
+        .expect("semantic_hints requires_queries should satisfy write-gate query check");
+}
+
+#[test]
 fn write_gate_rejects_chain_without_data_backing() {
     let segment: PlanSketchSegment = serde_json::from_value(json!({
             "segment_id": "seg-1",

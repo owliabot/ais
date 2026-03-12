@@ -125,13 +125,29 @@ Engine runtime primitives for AIS execution loop.
 ## Dependencies
 
 - `ais-core`: runtime patch model/apply/guard policy + audit hash
-- `ais-sdk`: readiness model + ValueRef evaluation for pre-executor execution materialization
+- `ais-sdk`: readiness model + shared `ResolvedNodeBindings` / ValueRef evaluation for pre-executor execution materialization
 - `serde`, `serde_json`: JSON schema-compatible serialization
 - `thiserror`: typed sequence validation error
 
 ## Test fixtures
 
 - Fixture-backed tests consume `rust/ais-rs/fixtures/plan-events` for plan diff, replay, checkpoint, and redaction regression coverage.
+
+## Complex Protocol Support Boundaries
+
+- Engine no longer needs protocol-DSL awareness for the target example families:
+  - no raw `composite` reaches executor dispatch
+  - no deployment-derived `contracts.*` depends on solver patching
+  - no protocol `calculated.*` or prerequisite `query.*` values require host-side ad hoc precompute to reach dispatch/policy-gate materialization
+- Example-backed runner coverage now exercises engine-facing nodes produced from:
+  - `aave-v3.supply-raw`
+  - `aave-v3.withdraw`
+  - `aave-v3.supply`
+  - `safe-defi-pack` constrained `uniswap-v3.swap-exact-in`
+- Remaining gaps for the broader protocol examples are upstream schema-ingestion issues in raw source files, not engine execution semantics. Engine assumptions for closeout stay:
+  - nodes arrive already lowered to base execution kinds
+  - policy/query/calculated/contracts roots are provided through compiled node metadata + shared binding builders
+  - pack constraints are enforced from lowered `extensions.policy.*`, not from raw pack DSL at runtime
 
 ## Current status
 
@@ -152,8 +168,9 @@ Engine runtime primitives for AIS execution loop.
   - `AISRS-FT-012` (input-interaction command/event protocol): adds `user_input` / `user_select` commands and `need_user_input` event for structured runtime input补参与错误回执。
   - `AISRS-ENG-005` (runtime patch apply with forced guard + patch_applied/patch_rejected audit events)
   - `AISRS-ENG-006` (solver trait + default solver: auto contracts / need_user_confirm)
-  - blocked readiness due unresolved `missing_refs` now pauses as `need_user_input` (`reason_code=missing_required_input`) instead of `need_user_confirm`, so runtime补参与风险确认语义分离。
-  - `AISRS-ENG-007` (executor trait + exact chain router with mismatch rejection)
+- blocked readiness due unresolved `missing_refs` now pauses as `need_user_input` (`reason_code=missing_required_input`) instead of `need_user_confirm`, so runtime补参与风险确认语义分离。
+- deployment-backed contract refs are no longer auto-patched by `DefaultSolver`; unresolved `contracts.*` is treated as a system binding failure (`need_user_confirm`) rather than user-remediable missing input, so protocol deployment debt does not leak into normal missing-input recovery.
+- `AISRS-ENG-007` (executor trait + exact chain router with mismatch rejection)
   - executor router now uses explicit `chain + execution.type` registration with `core|plugin` handler kind, and rejects unregistered execution types with a stable `UnregisteredExecutionType` error.
   - executor/router now expose side-effect reconciliation routing (`reconcile_side_effect`) keyed by side-effect `chain + execution_type`, so resume reconciliation can be delegated to chain executors.
   - `AISRS-ENG-008` (policy gate extract + enforce with missing/unknown semantics, allowlist, risk-threshold)
@@ -180,7 +197,15 @@ Engine runtime primitives for AIS execution loop.
   - `AISRS-ENG-024` (workflow until/retry semantics; until false enters retry loop with max-attempt guard)
   - `AISRS-ENG-025` (workflow timeout_ms semantics; retry lifecycle timeout produces deterministic pause reason/events)
   - `AGT-P4-100` (events/trace realtime timestamp): engine runner now emits wall-clock UTC RFC3339 timestamps for event `ts` and side-effect `observed_at` fallback instead of fixed epoch placeholder, while keeping envelope schema/field compatibility unchanged.
-  - Engine runner now materializes node execution ValueRef (including `bindings.params` root override) before dispatching to chain executors, keeping executor layer transport-focused.
-  - For query nodes (identified by `type=query_ref` or `source.query`), default write path `nodes.<id>.outputs` projects `executor_result.outputs` when present, so workflow expressions can consistently use `nodes.<id>.outputs.<field>`.
+- Engine runner now materializes node execution ValueRef (including `bindings.params` root override) before dispatching to chain executors, keeping executor layer transport-focused.
+- Engine runner now shares ais-sdk node eval binding semantics for both `params.*` and protocol deployment `contracts.*`, so compiled nodes with `extensions.protocol.contracts` can materialize execution targets like `to: { ref: "contracts.pool" }` before executor dispatch.
+- `CPS-301 shared bindings`: engine condition / until / assert checks and execution materialization now all consume `ais-sdk::resolve_node_bindings(...)`, so runtime-visible roots (`params`, `contracts`, `policy`, and runtime `query` / `calculated`) are produced once instead of being split between readiness and executor-time codepaths.
+- `CPS-302 calculated binding materialization`: before dispatching or simulating a node, engine runner now evaluates node `calculated_overrides` through `ais-sdk::resolve_calculated_bindings(...)` and persists the resolved values under `runtime.nodes.<node_id>.calculated`. Protocol `calculated_fields` therefore flow into executor-time args/conditions without bespoke host precompute.
+- `CPS-303 prerequisite query bindings`: engine runner now consumes `ais-sdk::resolve_query_bindings(...)` before simulate/dispatch, so nodes with `extensions.operation.{requires_queries,query_bindings}` can materialize `query.*` roots directly from prerequisite query-node outputs (`runtime.nodes.<producer>.outputs`) instead of relying on host-populated `runtime.query`.
+- `CPS-304 pack assert policy root`: policy gate now evaluates ordered generic `extensions.policy.effective_constraints[]` with `assert` semantics (`true` pass, `false` fail) and exposes the raw `extensions.policy` object as the `policy.*` root during gate evaluation. Pack constraints therefore execute against compile-lowered policy metadata without relying on legacy protocol-level `hard_constraints`.
+- `POST-010 raw pack assert missing-input alignment`: when a raw pack `assert` references missing `inputs.*` / `params.*` / `policy.*`, policy gate now defers that constraint into the normal `missing_fields` path instead of hard-blocking with `policy_constraint_eval_error`. Only true CEL syntax/type failures still surface as evaluation errors.
+- `POST-007 node-scoped runtime controls`: engine `condition` / `until` / `assert` checks now pre-resolve node `bindings.params`, prerequisite `query.*`, and node `calculated_overrides` before CEL evaluation, so control gates see the same node-scoped derived roots as dispatch materialization.
+- `POST-013 multi-chain execute regression`: engine regression coverage now proves adjacent executable nodes on different chains and executor families are dispatched by each node's exact `chain + execution.type` at runtime, not by any segment-wide default route.
+- For query nodes (identified by `type=query_ref` or `source.query`), default write path `nodes.<id>.outputs` projects `executor_result.outputs` when present, so workflow expressions can consistently use `nodes.<id>.outputs.<field>`.
   - `assert_failed` engine error events now include `message`, `phase`, and original `assert` payload to support runtime troubleshooting in runner verbose logs.
   - `need_user_confirm` multi-step resume now preserves in-loop completed progress before early pause return, preventing already-confirmed write nodes from being replayed when a later node in the same run requests another confirmation.

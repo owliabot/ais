@@ -1,0 +1,169 @@
+# Rust AIS-Agent Workspace
+
+Purpose:
+- host the new greenfield `ais-agent` implementation
+- keep chain-execution harness logic separate from `rust/ais-rs`
+- freeze crate boundaries early so implementation does not drift back toward a monolith
+
+Primary architecture reference:
+- [ARCHITECTURE.md](/home/xcshuan/work/owlia/ais/rust/ais-agent/ARCHITECTURE.md)
+
+Crate graph:
+- `ais-agent-control`
+  - command, event, and id contracts
+- `ais-agent-core`
+  - core domain and runtime aggregates
+- `ais-agent-runtime`
+  - runtime stepper, runtime-backed host service, persistence orchestration, and event emission
+- `ais-agent-expr`
+  - reduced-scope expression engine
+- `ais-agent-chain-shared`
+  - chain-agnostic chain capability and reflection contracts
+- `ais-agent-evm`
+  - EVM chain-family capability implementations and EVM reflection builders
+- `ais-agent-solana`
+  - Solana chain-family capability implementations and Solana reflection builders
+- `ais-agent-drivers`
+  - protocol, reflection, and API-native driver layer
+- `ais-agent-host`
+  - host-facing session, inspect, signer, and ingest surfaces
+- `ais-agent-transport`
+  - JSONL and HTTP adapters over host/core contracts
+- `ais-agent-cli`
+  - thin local and daemon entry points
+
+Hard boundary rules:
+- `ais-agent-core` must not depend on transport or CLI crates, and should not own control-plane DTOs or expression engine internals.
+- `ais-agent-drivers` may depend on `ais-agent-core`, `ais-agent-chain-shared`, and chain-family crates, never the reverse.
+- `ais-agent-runtime` may depend on `ais-agent-core`, `ais-agent-control`, and `ais-agent-host`, but those crates must not depend on runtime.
+- chain-family reflection implementations live in their own chain crates, not in `ais-agent-drivers`.
+- `ais-agent-transport` may depend on `ais-agent-control` and `ais-agent-host`, but must stay adapter-only.
+- `ais-agent-cli` should stay thin and avoid embedding runtime business logic.
+- no crate in this workspace should import modules from `rust/ais-rs`
+
+Current status:
+- M0 through M5 milestones are implemented
+- runtime milestones now completed:
+  - `M6 Runtime Stepper`
+  - `M7 Persistence And Concurrency`
+  - `M8 Streaming And Live Ports`
+- closeout verification now includes:
+  - host-driven e2e regression harness
+  - effect verification regression coverage
+  - restart/resume and signer-wait regression coverage
+  - final boundary audit
+- runtime implementation now includes:
+  - `ais-agent-runtime` crate
+  - real stepper and scheduler
+  - runtime-backed host service
+  - append/latest checkpoint archive semantics
+  - restore/apply helpers
+  - optimistic concurrency guards
+  - host-session-scoped replay over the real runtime service
+- chain capability code has been split by crate:
+  - shared contracts
+  - EVM family
+  - Solana family
+- runtime streaming/live-port closeout now includes:
+  - `AGR-801` event envelope and sequencing
+  - `AGR-803` async host/runtime/transport/CLI control path
+  - `AGR-802` polling-friendly event transport surfaces over JSONL and HTTP
+  - `AGR-804` first real live EVM slices:
+    - `alloy`-backed read observations
+    - `alloy`/`anvil`-backed simulation-state environment
+  - `AGR-805` host-collaboration regression coverage over:
+    - commands
+    - inspect
+    - event polling
+    - evidence/signer answer paths
+- live execution work is now in progress:
+  - `M9 EVM Live Execution Binding` completed
+  - `AGL-901` completed
+  - `AGL-902` completed
+  - `AGL-903` completed
+    - `alloy`-backed EVM broadcast live path
+    - `alloy`-backed EVM receipt polling live path
+    - explicit `awaiting_confirmation` boundary
+    - restart after broadcast before receipt preserved and resumable
+  - `AGL-904` completed
+    - runtime-owned effect-contract inventory persisted in checkpoints
+    - live EVM verify path now consumes `pre + receipt + post`
+    - real `satisfied / violated / pending` regressions on the write path
+  - `AGL-905` completed
+    - full guarded EVM execution regression now proves:
+      - `observe -> simulate -> signer -> broadcast -> receipt -> verify -> complete`
+    - host collaboration remains constrained to:
+      - commands
+      - inspect
+      - event polling
+      - signer approval submission
+  - `AGL-1001` completed
+    - driver fragments now carry typed fragment-level live-binding hints
+    - standard-driver and EVM reflection output now prove the same binding shape
+  - `AGL-1002` completed
+    - runtime now has a single fragment-attach path for:
+      - standard-like driver output
+      - EVM reflection output
+    - those fragments now enter the same runtime live execution semantics instead of a second driver-specific path
+  - `AGL-1003` completed
+    - API-native direct-envelope outputs now normalize into:
+      - runtime envelopes
+      - effect contracts
+      - guarded action fragments
+    - runtime now binds API-native direct-envelope and raw-envelope paths through the same guarded execution semantics:
+      - simulate
+      - govern
+      - signer
+      - broadcast
+      - verify
+    - raw-envelope binding still hard-requires an effect contract
+  - `AGL-1004` completed
+    - runtime now has a mixed-path regression matrix proving that:
+      - standard
+      - reflection
+      - API-native direct-envelope
+      - raw-envelope
+      all converge into the same guarded runtime execution signature
+  - `M10 Driver To Runtime Binding` completed
+  - `AGL-1101` completed
+    - typed Solana minimal observe/simulate/actuate/verify binding contract frozen
+  - `AGL-1102` completed
+    - flat `evm_* / solana_* / post_*` action payload fields removed
+    - action payloads now use chain-scoped `live` wrappers instead:
+      - `ObserveLiveBinding`
+      - `SimulateLiveBinding`
+      - `ActuateLiveBinding`
+      - `VerifyLiveBinding`
+  - `AGL-1103` completed
+    - `SolanaTransactionRequest` now has explicit transaction modes:
+      - `Legacy`
+      - `V0 { address_lookup_tables }`
+    - LUT inputs stay on `solana_sdk` concrete types
+  - `AGL-1104` completed
+    - real Solana read live port now covers:
+      - slot
+      - account lamports
+      - SPL token-account balance
+      - account data
+      - signature status
+    - real Solana simulate live port now covers:
+      - legacy transactions
+      - v0 transactions with lookup-table accounts
+    - runtime `Observe` / `Simulate` transitions now execute those Solana live ports directly
+  - `AGL-1105` completed
+    - real Solana live write path now covers:
+      - signed transaction broadcast
+      - signature-status receipt polling
+      - confirmation-depth projection
+      - explicit `awaiting_confirmation` boundary
+    - runtime regression now proves:
+      - legacy Solana broadcast -> verify
+      - v0 + LUT Solana broadcast -> verify
+  - `AGL-1106` completed
+    - host/runtime/transport now prove a minimal Solana guarded collaboration loop through:
+      - inspect
+      - event polling
+      - signer submission
+      - step
+      - confirmation pause
+  - `M11 Solana Minimal Live Execution` completed

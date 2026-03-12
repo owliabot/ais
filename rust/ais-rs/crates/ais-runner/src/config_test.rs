@@ -281,6 +281,109 @@ chains:
 }
 
 #[test]
+fn load_runner_config_expands_env_placeholders_for_llm_and_signer_secrets() {
+    let api_key_env = format!("AIS_RUNNER_TEST_OPENROUTER_KEY_{}", std::process::id());
+    let private_key_env = format!("AIS_RUNNER_TEST_EVM_KEY_{}", std::process::id());
+    let api_key = "test-openrouter-key";
+    let private_key = "0x1111111111111111111111111111111111111111111111111111111111111111";
+    unsafe {
+        std::env::set_var(api_key_env.as_str(), api_key);
+        std::env::set_var(private_key_env.as_str(), private_key);
+    }
+
+    let path = write_temp_file(
+        "runner-config-secret-env",
+        format!(
+            r#"
+schema: ais-runner/0.0.1
+llm:
+  provider: openrouter
+  model: openai/gpt-4.1-mini
+  api_key: ${{{api_key_env}}}
+chains:
+  eip155:1:
+    rpc_url: https://rpc.evm.example
+    signer:
+      type: evm_private_key
+      private_key: ${{{private_key_env}}}
+"#
+        )
+        .as_str(),
+    );
+
+    let config = load_runner_config(path.as_path()).expect("config must load");
+    let llm = config.llm.as_ref().expect("llm config");
+    assert_eq!(llm.api_key, api_key);
+    let signer = &config
+        .chains
+        .get("eip155:1")
+        .expect("chain")
+        .signer
+        .as_ref()
+        .expect("signer");
+    match signer {
+        super::SignerConfig::EvmPrivateKey { private_key: value } => {
+            assert_eq!(value, private_key);
+        }
+        other => panic!("unexpected signer: {other:?}"),
+    }
+}
+
+#[test]
+fn load_runner_config_reports_missing_secret_env_placeholders_as_validation_issues() {
+    let api_key_env = format!(
+        "AIS_RUNNER_TEST_MISSING_OPENROUTER_KEY_{}",
+        std::process::id()
+    );
+    let private_key_env = format!("AIS_RUNNER_TEST_MISSING_EVM_KEY_{}", std::process::id());
+    unsafe {
+        std::env::remove_var(api_key_env.as_str());
+        std::env::remove_var(private_key_env.as_str());
+    }
+
+    let path = write_temp_file(
+        "runner-config-missing-secret-env",
+        format!(
+            r#"
+schema: ais-runner/0.0.1
+llm:
+  provider: openrouter
+  model: openai/gpt-4.1-mini
+  api_key: ${{{api_key_env}}}
+chains:
+  eip155:1:
+    rpc_url: https://rpc.evm.example
+    signer:
+      type: evm_private_key
+      private_key: ${{{private_key_env}}}
+"#
+        )
+        .as_str(),
+    );
+
+    let error = load_runner_config(path.as_path()).expect_err("must reject");
+    match error {
+        RunnerConfigError::Validation(issues) => {
+            let refs = issues
+                .iter()
+                .filter_map(|issue| issue.reference.as_deref())
+                .collect::<Vec<_>>();
+            assert!(refs.contains(&"runner.config.env_placeholder.missing"));
+            assert!(issues
+                .iter()
+                .any(|issue| issue.field_path.to_string() == "$.llm.api_key"));
+            assert!(issues.iter().any(|issue| {
+                issue.field_path.to_string().contains("private_key")
+                    && issue
+                        .message
+                        .contains(format!("${{{private_key_env}}}").as_str())
+            }));
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+}
+
+#[test]
 fn load_runner_config_parses_llm_config() {
     let path = write_temp_file(
         "runner-config-llm",

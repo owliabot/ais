@@ -89,6 +89,7 @@ fn large_catalog_candidate_context(action_count: usize, query_count: usize) -> C
             execution_plugins: vec![],
         },
         protocols: vec![],
+        pack: None,
     }
 }
 
@@ -179,6 +180,7 @@ fn filtered_list_candidate_context() -> CandidateContext {
             execution_plugins: vec![],
         },
         protocols: vec![],
+        pack: None,
     }
 }
 
@@ -2000,6 +2002,33 @@ fn fixture_prompt_rules_align_with_runtime_prompt_sources_of_truth() {
         builder.phase_rules_revise.as_slice(),
         revise_fixture,
     );
+
+    let contracts_fixture = include_str!(
+        "../../../../../fixtures/runner-local/llm-prompts/prompts/segmented.contracts_summary.md"
+    );
+    let contracts_summary = builder.contracts_summary.join("\n");
+    assert_anchor_tokens(
+        &contracts_summary,
+        &[
+            "semantic_hints",
+            "token_policy_signal",
+            "query",
+            "calculated",
+            "policy",
+            "contracts",
+        ],
+    );
+    assert_anchor_tokens(
+        contracts_fixture,
+        &[
+            "semantic_hints",
+            "token_policy_signal",
+            "query",
+            "calculated",
+            "policy",
+            "contracts",
+        ],
+    );
 }
 
 fn assert_phase_anchor_alignment(
@@ -3476,6 +3505,15 @@ fn render_grounding_prompt_includes_actionable_not_ready_examples() {
         value.pointer("/grounding_contract/actionability_examples/bad/1/questions"),
         Some(&json!([]))
     );
+    let grounding_rules = value
+        .pointer("/grounding_contract/rules")
+        .and_then(Value::as_array)
+        .expect("grounding rules");
+    assert!(grounding_rules.iter().any(|rule| {
+        rule.as_str()
+            .map(|text| text.contains("token_policy_signal"))
+            .unwrap_or(false)
+    }));
 }
 
 #[test]
@@ -3670,6 +3708,11 @@ fn system_prompt_builder_emits_stable_version_and_hash() {
     assert!(rendered_a
         .prompt
         .contains("follow-up writes must query again"));
+    assert!(rendered_a.prompt.contains("semantic_hints"));
+    assert!(rendered_a.prompt.contains("token_policy_signal"));
+    assert!(rendered_a
+        .prompt
+        .contains("query, calculated, policy, ctx, and contracts"));
 }
 
 #[test]

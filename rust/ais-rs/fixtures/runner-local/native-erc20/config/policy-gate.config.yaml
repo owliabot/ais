@@ -12,8 +12,7 @@ chains:
     receipt_poll: { interval_ms: 1000, max_attempts: 60 }
     signer:
       type: "evm_private_key"
-      # Dummy key for local-only verification. Do not use for real funds.
-      private_key: "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+      private_key: ${AIS_RUNNER_LOCAL_EVM_PRIVATE_KEY}
 
 runtime:
   ctx:

@@ -75,6 +75,8 @@ pub struct PlanSketchStep {
     pub id: String,
     pub kind: String,
     #[serde(default)]
+    pub chain: Option<String>,
+    #[serde(default)]
     pub candidate_ref: Option<String>,
     pub inputs: Map<String, Value>,
     #[serde(default)]

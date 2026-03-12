@@ -58,6 +58,47 @@ impl Executor for NodeCountingExecutor {
     }
 }
 
+struct RoutedRecordingExecutor {
+    name: String,
+    calls: Rc<RefCell<Vec<String>>>,
+}
+
+impl Executor for RoutedRecordingExecutor {
+    fn execute(&self, node: &Value, _runtime: &mut Value) -> Result<ExecutorOutput, String> {
+        let node_id = node
+            .as_object()
+            .and_then(|object| object.get("id"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let chain = node
+            .as_object()
+            .and_then(|object| object.get("chain"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let execution_type = node
+            .as_object()
+            .and_then(|object| object.get("execution"))
+            .and_then(Value::as_object)
+            .and_then(|execution| execution.get("type"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        self.calls
+            .borrow_mut()
+            .push(format!("{}:{node_id}:{chain}:{execution_type}", self.name));
+        Ok(ExecutorOutput {
+            result: json!({
+                "ok": true,
+                "executor": self.name,
+                "node_id": node_id,
+                "chain": chain,
+                "execution_type": execution_type
+            }),
+            writes: Map::new(),
+            side_effects: Vec::new(),
+        })
+    }
+}
+
 struct UntilExecutor {
     calls: Rc<RefCell<usize>>,
     succeed_after: usize,
@@ -620,6 +661,59 @@ fn run_plan_no_progress_emits_engine_paused() {
 }
 
 #[test]
+fn unresolved_contract_refs_pause_as_need_user_confirm_not_need_user_input() {
+    let plan = PlanDocument {
+        schema: "ais-plan/0.0.3".to_string(),
+        meta: Some(json!({"name": "missing-contract"})),
+        nodes: vec![json!({
+            "id": "swap-contract-missing-1",
+            "kind": "execution",
+            "chain": "eip155:1",
+            "execution": {
+                "type": "evm_call",
+                "to": {"ref": "contracts.router"},
+                "abi": {"type": "function", "name": "swap", "inputs": [], "outputs": []},
+                "method": "swap",
+                "args": {}
+            },
+            "writes": [{"path": "nodes.swap-contract-missing-1.outputs", "mode": "set"}]
+        })],
+        extensions: Map::new(),
+    };
+    let mut state = EngineRunnerState::default();
+    let mut router = RouterExecutor::new();
+    router.register("evm", "eip155:1", Box::new(MockExecutor));
+
+    let result = run_plan_once(
+        "run-missing-contract",
+        &plan,
+        &mut state,
+        &router,
+        &DefaultSolver,
+        &[],
+        &EngineRunnerOptions::default(),
+    );
+
+    assert_eq!(result.status, EngineRunStatus::Paused);
+    assert_eq!(
+        state.paused_reason.as_deref(),
+        Some("need_user_confirm:swap-contract-missing-1")
+    );
+    assert!(result.events.iter().any(|record| {
+        record.event.event_type == crate::events::EngineEventType::NeedUserConfirm
+            && record
+                .event
+                .data
+                .get("reason")
+                .and_then(Value::as_str)
+                .is_some_and(|reason| reason == "unresolved_system_refs")
+    }));
+    assert!(!result.events.iter().any(|record| {
+        record.event.event_type == crate::events::EngineEventType::NeedUserInput
+    }));
+}
+
+#[test]
 fn query_ref_default_write_projects_result_outputs() {
     let plan = query_plan();
     let mut state = EngineRunnerState::default();
@@ -838,6 +932,105 @@ fn second_confirm_pause_does_not_reexecute_already_completed_write_node() {
     assert_eq!(
         calls.borrow().clone(),
         vec!["swap-1".to_string(), "swap-2".to_string(),]
+    );
+}
+
+#[test]
+fn adjacent_multi_chain_nodes_route_to_their_exact_executors_at_runtime() {
+    let plan = PlanDocument {
+        schema: "ais-plan/0.0.3".to_string(),
+        meta: Some(json!({"name": "multi-chain-route"})),
+        nodes: vec![
+            json!({
+                "id": "lock-eth",
+                "kind": "execution",
+                "chain": "eip155:1",
+                "execution": {
+                    "type": "evm_call",
+                    "to": {"lit": "0x0000000000000000000000000000000000000001"},
+                    "abi": {"type": "function", "name": "lock", "inputs": [], "outputs": []},
+                    "method": "lock",
+                    "args": {}
+                },
+                "writes": [{"path":"nodes.lock-eth.outputs","mode":"set"}]
+            }),
+            json!({
+                "id": "mint-sol",
+                "kind": "execution",
+                "chain": "solana:mainnet",
+                "bindings": {
+                    "params": {
+                        "lock_ok": {"ref": "nodes.lock-eth.outputs.ok"}
+                    }
+                },
+                "execution": {
+                    "type": "solana_instruction",
+                    "program_id": {"lit": "11111111111111111111111111111111"},
+                    "instruction": "mint_wrapped",
+                    "args": {
+                        "lock_ok": {"ref": "params.lock_ok"}
+                    }
+                },
+                "writes": [{"path":"nodes.mint-sol.outputs","mode":"set"}]
+            }),
+        ],
+        extensions: Map::new(),
+    };
+    let mut state = EngineRunnerState::default();
+    let calls = Rc::new(RefCell::new(Vec::<String>::new()));
+    let mut router = RouterExecutor::new();
+    router.register_core(
+        "evm-mainnet",
+        "eip155:1",
+        ["evm_call"],
+        Box::new(RoutedRecordingExecutor {
+            name: "evm-mainnet".to_string(),
+            calls: Rc::clone(&calls),
+        }),
+    );
+    router.register_core(
+        "solana-mainnet",
+        "solana:mainnet",
+        ["solana_instruction"],
+        Box::new(RoutedRecordingExecutor {
+            name: "solana-mainnet".to_string(),
+            calls: Rc::clone(&calls),
+        }),
+    );
+
+    let result = run_plan_once(
+        "run-multi-chain-route",
+        &plan,
+        &mut state,
+        &router,
+        &DefaultSolver,
+        &[],
+        &EngineRunnerOptions::default(),
+    );
+
+    assert_eq!(result.status, EngineRunStatus::Completed);
+    assert_eq!(
+        state.completed_node_ids,
+        vec!["lock-eth".to_string(), "mint-sol".to_string()]
+    );
+    assert_eq!(
+        calls.borrow().clone(),
+        vec![
+            "evm-mainnet:lock-eth:eip155:1:evm_call".to_string(),
+            "solana-mainnet:mint-sol:solana:mainnet:solana_instruction".to_string(),
+        ]
+    );
+    assert_eq!(
+        state.runtime.pointer("/nodes/lock-eth/outputs/executor"),
+        Some(&json!("evm-mainnet"))
+    );
+    assert_eq!(
+        state.runtime.pointer("/nodes/mint-sol/outputs/executor"),
+        Some(&json!("solana-mainnet"))
+    );
+    assert_eq!(
+        state.runtime.pointer("/nodes/mint-sol/outputs/chain"),
+        Some(&json!("solana:mainnet"))
     );
 }
 
@@ -1496,6 +1689,81 @@ fn policy_missing_fields_routes_to_need_user_input_with_questions() {
 }
 
 #[test]
+fn policy_pack_assert_missing_fields_route_to_need_user_input_with_questions() {
+    let plan = PlanDocument {
+        schema: "ais-plan/0.0.3".to_string(),
+        meta: Some(json!({"name": "pack-assert-missing-input"})),
+        nodes: vec![json!({
+            "id": "pack-assert-1",
+            "kind": "execution",
+            "chain": "eip155:1",
+            "extensions": {
+                "policy": {
+                    "effective_constraints": [
+                        {
+                            "id": "max-slippage",
+                            "effect": "need_user_confirm",
+                            "assert": "inputs.slippage_bps <= 30"
+                        }
+                    ]
+                }
+            },
+            "execution": {
+                "type": "evm_call",
+                "method": "swap",
+                "args": {}
+            },
+            "writes": [{"path":"nodes.pack-assert-1.outputs","mode":"set"}]
+        })],
+        extensions: Map::new(),
+    };
+    let mut state = EngineRunnerState::default();
+    let mut router = RouterExecutor::new();
+    router.register("evm_call", "eip155:1", Box::new(MockExecutor));
+
+    let result = run_plan_once(
+        "run-pack-assert-missing-input",
+        &plan,
+        &mut state,
+        &router,
+        &DefaultSolver,
+        &[],
+        &EngineRunnerOptions::default(),
+    );
+
+    assert_eq!(result.status, EngineRunStatus::Paused);
+    assert_eq!(
+        state.paused_reason.as_deref(),
+        Some("need_user_input:pack-assert-1")
+    );
+    let need = result
+        .events
+        .iter()
+        .find(|record| record.event.event_type == crate::events::EngineEventType::NeedUserInput)
+        .expect("need_user_input event");
+    assert_eq!(
+        need.event.data.get("reason_code").and_then(Value::as_str),
+        Some("missing_required_input")
+    );
+    let details = need
+        .event
+        .data
+        .get("details")
+        .and_then(Value::as_object)
+        .expect("details");
+    assert!(details
+        .get("missing_refs")
+        .and_then(Value::as_array)
+        .is_some_and(|items| items
+            .iter()
+            .any(|item| item == &json!("inputs.slippage_bps"))));
+    assert!(details
+        .get("questions")
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty()));
+}
+
+#[test]
 fn execution_is_materialized_before_executor_dispatch() {
     let plan = sample_plan();
     let mut state = EngineRunnerState::default();
@@ -1529,6 +1797,227 @@ fn execution_is_materialized_before_executor_dispatch() {
     assert_eq!(
         node.pointer("/execution/args/amountIn"),
         Some(&Value::String("42".to_string()))
+    );
+}
+
+#[test]
+fn execution_materializes_protocol_contract_refs_before_dispatch() {
+    let plan = PlanDocument {
+        schema: "ais-plan/0.0.3".to_string(),
+        meta: Some(json!({"name": "runner-contracts"})),
+        nodes: vec![json!({
+            "id": "swap-contracts-1",
+            "kind": "execution",
+            "chain": "eip155:1",
+            "extensions": {
+                "protocol": {
+                    "contracts": {
+                        "router": "0x1111111111111111111111111111111111111111"
+                    }
+                }
+            },
+            "execution": {
+                "type": "evm_call",
+                "to": {"ref": "contracts.router"},
+                "abi": {"type": "function", "name": "swapExactTokensForTokens", "inputs": [], "outputs": []},
+                "method": "swapExactTokensForTokens",
+                "args": {}
+            },
+            "writes": [{"path": "nodes.swap-contracts-1.outputs", "mode": "set"}]
+        })],
+        extensions: Map::new(),
+    };
+    let mut state = EngineRunnerState::default();
+    let captured = Rc::new(RefCell::new(None::<Value>));
+
+    let mut router = RouterExecutor::new();
+    router.register(
+        "evm",
+        "eip155:1",
+        Box::new(CaptureNodeExecutor {
+            last_node: captured.clone(),
+        }),
+    );
+
+    let result = run_plan_once(
+        "run-materialize-contracts",
+        &plan,
+        &mut state,
+        &router,
+        &DefaultSolver,
+        &[],
+        &EngineRunnerOptions::default(),
+    );
+
+    assert_eq!(result.status, EngineRunStatus::Completed);
+    let node = captured
+        .borrow()
+        .clone()
+        .expect("executor should receive node");
+    assert_eq!(
+        node.pointer("/execution/to"),
+        Some(&Value::String(
+            "0x1111111111111111111111111111111111111111".to_string()
+        ))
+    );
+}
+
+#[test]
+fn execution_materializes_policy_query_and_calculated_roots_before_dispatch() {
+    let plan = PlanDocument {
+        schema: "ais-plan/0.0.3".to_string(),
+        meta: Some(json!({"name": "runner-shared-bindings"})),
+        nodes: vec![json!({
+            "id": "swap-bindings-1",
+            "kind": "execution",
+            "chain": "eip155:1",
+            "extensions": {
+                "policy": {
+                    "required_fields": ["spender"]
+                }
+            },
+            "execution": {
+                "type": "evm_call",
+                "to": {"lit": "0x0000000000000000000000000000000000000001"},
+                "abi": {"type": "function", "name": "swapExactTokensForTokens", "inputs": [], "outputs": []},
+                "method": "swapExactTokensForTokens",
+                "args": {
+                    "required": {"ref": "policy.required_fields[0]"},
+                    "quoted": {"ref": "query.quote.amount_out"},
+                    "amount": {"ref": "calculated.amount_atomic"}
+                }
+            },
+            "writes": [{"path": "nodes.swap-bindings-1.outputs", "mode": "set"}]
+        })],
+        extensions: Map::new(),
+    };
+    let mut state = EngineRunnerState {
+        runtime: json!({
+            "query": {
+                "quote": {
+                    "amount_out": "123"
+                }
+            },
+            "calculated": {
+                "amount_atomic": "1000000"
+            }
+        }),
+        ..EngineRunnerState::default()
+    };
+    let captured = Rc::new(RefCell::new(None::<Value>));
+
+    let mut router = RouterExecutor::new();
+    router.register(
+        "evm",
+        "eip155:1",
+        Box::new(CaptureNodeExecutor {
+            last_node: captured.clone(),
+        }),
+    );
+
+    let result = run_plan_once(
+        "run-materialize-shared-bindings",
+        &plan,
+        &mut state,
+        &router,
+        &DefaultSolver,
+        &[],
+        &EngineRunnerOptions::default(),
+    );
+
+    assert_eq!(result.status, EngineRunStatus::Completed);
+    let node = captured
+        .borrow()
+        .clone()
+        .expect("executor should receive node");
+    assert_eq!(
+        node.pointer("/execution/args/required"),
+        Some(&Value::String("spender".to_string()))
+    );
+    assert_eq!(
+        node.pointer("/execution/args/quoted"),
+        Some(&Value::String("123".to_string()))
+    );
+    assert_eq!(
+        node.pointer("/execution/args/amount"),
+        Some(&Value::String("1000000".to_string()))
+    );
+}
+
+#[test]
+fn execution_materializes_required_query_bindings_from_runtime_nodes() {
+    let plan = PlanDocument {
+        schema: "ais-plan/0.0.3".to_string(),
+        meta: Some(json!({"name": "runner-required-query-bindings"})),
+        nodes: vec![json!({
+            "id": "swap-query-bindings-1",
+            "kind": "execution",
+            "chain": "eip155:1",
+            "extensions": {
+                "operation": {
+                    "requires_queries": ["allowance-token"],
+                    "query_bindings": {
+                        "allowance-token": {
+                            "node_id": "q_allowance",
+                            "query_ref": "aave-v3@0.0.2/allowance-token"
+                        }
+                    }
+                }
+            },
+            "execution": {
+                "type": "evm_call",
+                "to": {"lit": "0x0000000000000000000000000000000000000001"},
+                "abi": {"type": "function", "name": "approve", "inputs": [], "outputs": []},
+                "method": "approve",
+                "args": {
+                    "allowance": {"ref": "query.allowance-token.allowance_atomic"}
+                }
+            },
+            "writes": [{"path": "nodes.swap-query-bindings-1.outputs", "mode": "set"}]
+        })],
+        extensions: Map::new(),
+    };
+    let mut state = EngineRunnerState {
+        runtime: json!({
+            "nodes": {
+                "q_allowance": {
+                    "outputs": {
+                        "allowance_atomic": "12345"
+                    }
+                }
+            }
+        }),
+        ..EngineRunnerState::default()
+    };
+    let captured = Rc::new(RefCell::new(None::<Value>));
+
+    let mut router = RouterExecutor::new();
+    router.register(
+        "evm",
+        "eip155:1",
+        Box::new(CaptureNodeExecutor {
+            last_node: captured.clone(),
+        }),
+    );
+
+    let result = run_plan_once(
+        "run-materialize-required-query-bindings",
+        &plan,
+        &mut state,
+        &router,
+        &DefaultSolver,
+        &[],
+        &EngineRunnerOptions::default(),
+    );
+
+    assert_eq!(result.status, EngineRunStatus::Completed);
+    let node = captured
+        .borrow()
+        .clone()
+        .expect("executor should receive node");
+    assert_eq!(
+        node.pointer("/execution/args/allowance"),
+        Some(&Value::String("12345".to_string()))
     );
 }
 
@@ -1613,6 +2102,69 @@ fn assert_true_records_assert_check_on_node_ready() {
             .and_then(Value::as_bool),
         Some(true)
     );
+}
+
+#[test]
+fn assert_uses_node_scoped_params_and_calculated_roots() {
+    let plan = PlanDocument {
+        schema: "ais-plan/0.0.3".to_string(),
+        meta: Some(json!({"name": "assert-node-derived-bindings"})),
+        nodes: vec![json!({
+            "id": "assert-node-derived-1",
+            "kind": "execution",
+            "chain": "eip155:1",
+            "bindings": {
+                "params": {
+                    "amount": {"ref": "inputs.amount"}
+                }
+            },
+            "calculated_overrides": {
+                "amount_atomic": {
+                    "expr": {"ref": "params.amount"}
+                }
+            },
+            "execution": {
+                "type": "evm_read",
+                "to": {"lit": "0x0000000000000000000000000000000000000001"},
+                "abi": {"type": "function", "name": "balanceOf", "inputs": [], "outputs": []},
+                "method": "balanceOf",
+                "args": {}
+            },
+            "assert": {"cel": "params.amount == '42' && calculated.amount_atomic == '42'"},
+            "writes": [{"path":"nodes.assert-node-derived-1.outputs","mode":"set"}]
+        })],
+        extensions: Map::new(),
+    };
+    let mut state = EngineRunnerState {
+        runtime: json!({
+            "inputs": {
+                "amount": "42"
+            }
+        }),
+        ..EngineRunnerState::default()
+    };
+    let mut router = RouterExecutor::new();
+    let calls = Rc::new(RefCell::new(0usize));
+    router.register(
+        "evm",
+        "eip155:1",
+        Box::new(CountingExecutor {
+            calls: calls.clone(),
+        }),
+    );
+
+    let result = run_plan_once(
+        "run-assert-node-derived-bindings",
+        &plan,
+        &mut state,
+        &router,
+        &DefaultSolver,
+        &[],
+        &EngineRunnerOptions::default(),
+    );
+
+    assert_eq!(result.status, EngineRunStatus::Completed);
+    assert_eq!(*calls.borrow(), 1);
 }
 
 #[test]
@@ -1848,6 +2400,132 @@ fn condition_true_executes_node() {
 }
 
 #[test]
+fn condition_uses_shared_policy_query_and_calculated_roots() {
+    let plan = PlanDocument {
+        schema: "ais-plan/0.0.3".to_string(),
+        meta: Some(json!({"name": "condition-shared-bindings"})),
+        nodes: vec![json!({
+            "id": "cond-shared-1",
+            "kind": "execution",
+            "chain": "eip155:1",
+            "condition": {"cel":"policy.required_fields[0] == 'spender' && query.quote.amount_out == '123' && calculated.amount_atomic == '1000000'"},
+            "extensions": {
+                "policy": {
+                    "required_fields": ["spender"]
+                }
+            },
+            "execution": {
+                "type": "evm_read",
+                "to": {"lit": "0x0000000000000000000000000000000000000001"},
+                "abi": {"type": "function", "name": "balanceOf", "inputs": [], "outputs": []},
+                "method": "balanceOf",
+                "args": {}
+            },
+            "writes": [{"path":"nodes.cond-shared-1.outputs","mode":"set"}]
+        })],
+        extensions: Map::new(),
+    };
+    let mut state = EngineRunnerState {
+        runtime: json!({
+            "query": {
+                "quote": {
+                    "amount_out": "123"
+                }
+            },
+            "calculated": {
+                "amount_atomic": "1000000"
+            }
+        }),
+        ..EngineRunnerState::default()
+    };
+    let mut router = RouterExecutor::new();
+    let calls = Rc::new(RefCell::new(0usize));
+    router.register(
+        "evm",
+        "eip155:1",
+        Box::new(CountingExecutor {
+            calls: calls.clone(),
+        }),
+    );
+
+    let result = run_plan_once(
+        "run-condition-shared-bindings",
+        &plan,
+        &mut state,
+        &router,
+        &DefaultSolver,
+        &[],
+        &EngineRunnerOptions::default(),
+    );
+
+    assert_eq!(result.status, EngineRunStatus::Completed);
+    assert_eq!(*calls.borrow(), 1);
+}
+
+#[test]
+fn condition_uses_node_scoped_params_and_calculated_roots() {
+    let plan = PlanDocument {
+        schema: "ais-plan/0.0.3".to_string(),
+        meta: Some(json!({"name": "condition-node-derived-bindings"})),
+        nodes: vec![json!({
+            "id": "cond-node-derived-1",
+            "kind": "execution",
+            "chain": "eip155:1",
+            "bindings": {
+                "params": {
+                    "amount": {"ref": "inputs.amount"}
+                }
+            },
+            "calculated_overrides": {
+                "amount_atomic": {
+                    "expr": {"ref": "params.amount"}
+                }
+            },
+            "condition": {"cel":"params.amount == '42' && calculated.amount_atomic == '42'"},
+            "execution": {
+                "type": "evm_read",
+                "to": {"lit": "0x0000000000000000000000000000000000000001"},
+                "abi": {"type": "function", "name": "balanceOf", "inputs": [], "outputs": []},
+                "method": "balanceOf",
+                "args": {}
+            },
+            "writes": [{"path":"nodes.cond-node-derived-1.outputs","mode":"set"}]
+        })],
+        extensions: Map::new(),
+    };
+    let mut state = EngineRunnerState {
+        runtime: json!({
+            "inputs": {
+                "amount": "42"
+            }
+        }),
+        ..EngineRunnerState::default()
+    };
+    let mut router = RouterExecutor::new();
+    let calls = Rc::new(RefCell::new(0usize));
+    router.register(
+        "evm",
+        "eip155:1",
+        Box::new(CountingExecutor {
+            calls: calls.clone(),
+        }),
+    );
+
+    let result = run_plan_once(
+        "run-condition-node-derived-bindings",
+        &plan,
+        &mut state,
+        &router,
+        &DefaultSolver,
+        &[],
+        &EngineRunnerOptions::default(),
+    );
+
+    assert_eq!(result.status, EngineRunStatus::Completed);
+    assert_eq!(*calls.borrow(), 1);
+}
+
+#[test]
 fn invalid_condition_pauses_with_error_event() {
     let plan = condition_plan(json!({"cel": "size("}));
     let mut state = EngineRunnerState::default();
@@ -1918,6 +2596,69 @@ fn until_false_without_retry_pauses() {
         record.event.event_type == crate::events::EngineEventType::Error
             && record.event.data.get("reason") == Some(&json!("until_failed"))
     }));
+}
+
+#[test]
+fn until_uses_node_scoped_params_and_calculated_roots() {
+    let plan = PlanDocument {
+        schema: "ais-plan/0.0.3".to_string(),
+        meta: Some(json!({"name": "until-node-derived-bindings"})),
+        nodes: vec![json!({
+            "id": "until-node-derived-1",
+            "kind": "execution",
+            "chain": "eip155:1",
+            "bindings": {
+                "params": {
+                    "amount": {"ref": "inputs.amount"}
+                }
+            },
+            "calculated_overrides": {
+                "amount_atomic": {
+                    "expr": {"ref": "params.amount"}
+                }
+            },
+            "execution": {
+                "type": "evm_read",
+                "to": {"lit": "0x0000000000000000000000000000000000000001"},
+                "abi": {"type": "function", "name": "balanceOf", "inputs": [], "outputs": []},
+                "method": "balanceOf",
+                "args": {}
+            },
+            "until": {"cel": "params.amount == '42' && calculated.amount_atomic == '42'"},
+            "writes": [{"path":"nodes.until-node-derived-1.outputs","mode":"set"}]
+        })],
+        extensions: Map::new(),
+    };
+    let mut state = EngineRunnerState {
+        runtime: json!({
+            "inputs": {
+                "amount": "42"
+            }
+        }),
+        ..EngineRunnerState::default()
+    };
+    let mut router = RouterExecutor::new();
+    let calls = Rc::new(RefCell::new(0usize));
+    router.register(
+        "evm",
+        "eip155:1",
+        Box::new(CountingExecutor {
+            calls: calls.clone(),
+        }),
+    );
+
+    let result = run_plan_once(
+        "run-until-node-derived-bindings",
+        &plan,
+        &mut state,
+        &router,
+        &DefaultSolver,
+        &[],
+        &EngineRunnerOptions::default(),
+    );
+
+    assert_eq!(result.status, EngineRunStatus::Completed);
+    assert_eq!(*calls.borrow(), 1);
 }
 
 #[test]

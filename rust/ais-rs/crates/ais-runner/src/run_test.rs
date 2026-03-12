@@ -12,7 +12,10 @@ use ais_engine::{
     save_checkpoint_to_path, CheckpointEngineState, CheckpointSideEffectRecord, EngineCommandType,
     EngineEvent, EngineEventRecord, EngineEventType, EngineRunnerOptions, EngineRunnerState,
 };
-use ais_sdk::PlanDocument;
+use ais_sdk::{
+    parse_document_with_options, validate_document_semantics, DocumentFormat, ParseDocumentOptions,
+    PlanDocument,
+};
 use serde_json::{json, Value};
 use std::fs;
 use std::io::Cursor;
@@ -591,6 +594,568 @@ chains:
     assert_eq!(
         parsed.pointer("/outputs/human").and_then(Value::as_str),
         Some("1.5")
+    );
+}
+
+#[test]
+fn repo_examples_now_parse_and_validate_for_raw_ingestion() {
+    let aave = read_example_fixture("aave-v3.ais.yaml");
+    let aave_document = parse_document_with_options(
+        aave.as_str(),
+        ParseDocumentOptions {
+            format: DocumentFormat::Auto,
+            validate_schema: true,
+        },
+    )
+    .expect("raw aave example must now parse");
+    assert!(validate_document_semantics(&aave_document).is_empty());
+
+    let uniswap = read_example_fixture("uniswap-v3.ais.yaml");
+    let uniswap_document = parse_document_with_options(
+        uniswap.as_str(),
+        ParseDocumentOptions {
+            format: DocumentFormat::Auto,
+            validate_schema: true,
+        },
+    )
+    .expect("raw uniswap example must now parse");
+    assert!(validate_document_semantics(&uniswap_document).is_empty());
+
+    let safe_pack = read_example_fixture("safe-defi-pack.ais-pack.yaml");
+    let safe_pack_document = parse_document_with_options(
+        safe_pack.as_str(),
+        ParseDocumentOptions {
+            format: DocumentFormat::Auto,
+            validate_schema: true,
+        },
+    )
+    .expect("raw safe defi pack must now parse");
+    assert!(validate_document_semantics(&safe_pack_document).is_empty());
+
+    let erc20 = read_example_fixture("erc20.ais.yaml");
+    let erc20_document = parse_document_with_options(
+        erc20.as_str(),
+        ParseDocumentOptions {
+            format: DocumentFormat::Auto,
+            validate_schema: true,
+        },
+    )
+    .expect("raw erc20 example must now parse");
+    assert!(validate_document_semantics(&erc20_document).is_empty());
+
+    let spl_token = read_example_fixture("spl-token.ais.yaml");
+    let spl_token_document = parse_document_with_options(
+        spl_token.as_str(),
+        ParseDocumentOptions {
+            format: DocumentFormat::Auto,
+            validate_schema: true,
+        },
+    )
+    .expect("raw spl-token example must now parse");
+    assert!(validate_document_semantics(&spl_token_document).is_empty());
+}
+
+#[test]
+fn example_aave_supply_raw_dry_run_is_ready_with_deployment_contracts() {
+    let workspace_dir = temp_dir("example-aave-supply-raw");
+    write_temp_file_in(
+        workspace_dir.as_path(),
+        "aave-v3.ais.yaml",
+        read_example_fixture("aave-v3.ais.yaml").as_str(),
+    );
+    let workflow_path = write_temp_file_in(
+        workspace_dir.as_path(),
+        "workflow.yaml",
+        r#"
+schema: ais-flow/0.0.3
+meta:
+  name: aave-supply-raw
+  version: 0.0.1
+nodes:
+  - id: supply_raw
+    type: action_ref
+    protocol: aave-v3@0.0.2
+    action: supply-raw
+    chain: eip155:1
+    args:
+      token:
+        object:
+          address: { lit: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" }
+          decimals: { lit: 6 }
+          chain_id: { lit: "eip155:1" }
+      amount_atomic: { lit: "1000000" }
+      on_behalf_of: { lit: "0x1111111111111111111111111111111111111111" }
+"#,
+    );
+
+    let output = execute_run_workflow(&WorkflowCommand {
+        workflow: workflow_path,
+        workspace: Some(workspace_dir),
+        config: None,
+        runtime: None,
+        dry_run: true,
+        events_jsonl: None,
+        trace: None,
+        checkpoint: None,
+        outputs: None,
+        commands_stdin_jsonl: false,
+        verbose: false,
+        format: OutputFormat::Json,
+    })
+    .expect("aave raw workflow dry-run must succeed");
+
+    let parsed: Value = serde_json::from_str(output.as_str()).expect("json");
+    assert_eq!(
+        parsed.pointer("/plan/nodes/0/extensions/protocol/contracts/pool"),
+        Some(&json!("0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2"))
+    );
+    assert_eq!(
+        parsed.pointer("/dry_run/nodes/0/readiness/state"),
+        Some(&json!("ready"))
+    );
+}
+
+#[test]
+fn example_aave_withdraw_dry_run_resolves_calculated_fields() {
+    let workspace_dir = temp_dir("example-aave-withdraw");
+    write_temp_file_in(
+        workspace_dir.as_path(),
+        "aave-v3.ais.yaml",
+        read_example_fixture("aave-v3.ais.yaml").as_str(),
+    );
+    let workflow_path = write_temp_file_in(
+        workspace_dir.as_path(),
+        "workflow.yaml",
+        r#"
+schema: ais-flow/0.0.3
+meta:
+  name: aave-withdraw
+  version: 0.0.1
+nodes:
+  - id: withdraw
+    type: action_ref
+    protocol: aave-v3@0.0.2
+    action: withdraw
+    chain: eip155:1
+    args:
+      token:
+        object:
+          address: { lit: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" }
+          decimals: { lit: 6 }
+          chain_id: { lit: "eip155:1" }
+      amount: { lit: "1.5" }
+      recipient: { lit: "0x1111111111111111111111111111111111111111" }
+"#,
+    );
+
+    let output = execute_run_workflow(&WorkflowCommand {
+        workflow: workflow_path,
+        workspace: Some(workspace_dir),
+        config: None,
+        runtime: None,
+        dry_run: true,
+        events_jsonl: None,
+        trace: None,
+        checkpoint: None,
+        outputs: None,
+        commands_stdin_jsonl: false,
+        verbose: false,
+        format: OutputFormat::Json,
+    })
+    .expect("aave withdraw workflow dry-run must succeed");
+
+    let parsed: Value = serde_json::from_str(output.as_str()).expect("json");
+    assert_eq!(
+        parsed.pointer("/dry_run/nodes/0/readiness/state"),
+        Some(&json!("ready"))
+    );
+    assert_eq!(
+        parsed.pointer("/dry_run/nodes/0/readiness/missing_refs"),
+        Some(&json!([]))
+    );
+}
+
+#[test]
+fn example_aave_supply_dry_run_lowers_composite_execution() {
+    let workspace_dir = temp_dir("example-aave-supply");
+    write_temp_file_in(
+        workspace_dir.as_path(),
+        "aave-v3.ais.yaml",
+        read_example_fixture("aave-v3.ais.yaml").as_str(),
+    );
+    let workflow_path = write_temp_file_in(
+        workspace_dir.as_path(),
+        "workflow.yaml",
+        r#"
+schema: ais-flow/0.0.3
+meta:
+  name: aave-supply
+  version: 0.0.1
+nodes:
+  - id: supply
+    type: action_ref
+    protocol: aave-v3@0.0.2
+    action: supply
+    chain: eip155:1
+    args:
+      token:
+        object:
+          address: { lit: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" }
+          decimals: { lit: 6 }
+          chain_id: { lit: "eip155:1" }
+      amount: { lit: "1.5" }
+      on_behalf_of: { lit: "0x1111111111111111111111111111111111111111" }
+"#,
+    );
+
+    let output = execute_run_workflow(&WorkflowCommand {
+        workflow: workflow_path,
+        workspace: Some(workspace_dir),
+        config: None,
+        runtime: None,
+        dry_run: true,
+        events_jsonl: None,
+        trace: None,
+        checkpoint: None,
+        outputs: None,
+        commands_stdin_jsonl: false,
+        verbose: false,
+        format: OutputFormat::Json,
+    })
+    .expect("aave supply workflow dry-run must succeed");
+
+    let parsed: Value = serde_json::from_str(output.as_str()).expect("json");
+    assert_eq!(
+        parsed.pointer("/plan/nodes/0/id"),
+        Some(&json!("supply__approve_if_needed"))
+    );
+    assert_eq!(parsed.pointer("/plan/nodes/1/id"), Some(&json!("supply")));
+    assert_eq!(
+        parsed.pointer("/plan/nodes/0/execution/type"),
+        Some(&json!("evm_call"))
+    );
+    assert_eq!(
+        parsed.pointer("/plan/nodes/1/execution/type"),
+        Some(&json!("evm_call"))
+    );
+    assert_eq!(
+        parsed.pointer("/plan/nodes/0/extensions/composite/step_id"),
+        Some(&json!("approve_if_needed"))
+    );
+    assert_eq!(
+        parsed.pointer("/plan/nodes/1/extensions/composite/step_id"),
+        Some(&json!("supply"))
+    );
+    assert_eq!(
+        parsed.pointer("/plan/nodes/1/deps/0"),
+        Some(&json!("supply__approve_if_needed"))
+    );
+    assert_eq!(
+        parsed.pointer("/plan/nodes/0/calculated_overrides/amount_atomic/expr/cel"),
+        Some(&json!("to_atomic(params.amount, params.token)"))
+    );
+    assert_eq!(
+        parsed.pointer("/plan/nodes/0/calculated_overrides/recipient/expr/cel"),
+        Some(&json!(
+            "params.on_behalf_of != null ? params.on_behalf_of : ctx.wallet_address"
+        ))
+    );
+    assert_eq!(
+        parsed.pointer("/dry_run/nodes/0/readiness/state"),
+        Some(&json!("blocked"))
+    );
+    let missing_refs = parsed
+        .pointer("/dry_run/nodes/0/readiness/missing_refs")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !missing_refs
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|path| path == "calculated.amount_atomic" || path == "calculated.recipient"),
+        "calculated bindings should resolve before prerequisite query blocks execution: {missing_refs:?}"
+    );
+}
+
+#[test]
+fn example_safe_defi_pack_registry_source_loads_snapshot_protocol_copy() {
+    let workspace_dir = temp_dir("example-safe-pack-registry");
+    write_temp_file_in(
+        workspace_dir.as_path(),
+        "safe-defi-pack.ais-pack.yaml",
+        safe_defi_pack_registry_only_fixture().as_str(),
+    );
+    let workflow_path = write_temp_file_in(
+        workspace_dir.as_path(),
+        "workflow.yaml",
+        r#"
+schema: ais-flow/0.0.3
+meta:
+  name: swap
+  version: 0.0.1
+requires_pack:
+  name: safe-defi-pack
+  version: 0.0.2
+nodes:
+  - id: swap
+    type: action_ref
+    protocol: uniswap-v3@0.0.2
+    action: swap-exact-in
+    chain: eip155:8453
+"#,
+    );
+    write_temp_file_in(
+        workspace_dir.as_path(),
+        ".ais/registry/protocols/uniswap-v3/0.0.2.yaml",
+        r#"
+schema: ais/0.0.2
+meta:
+  protocol: uniswap-v3
+  version: 0.0.2
+deployments:
+  - chain: eip155:8453
+    contracts: {}
+actions:
+  swap-exact-in:
+    description: swap exact in
+    risk_level: 3
+    params: []
+    execution:
+      "eip155:*":
+        type: evm_call
+        to: { lit: "0x0000000000000000000000000000000000000001" }
+        abi: { type: function, name: swap, inputs: [], outputs: [] }
+        args: {}
+queries: {}
+"#,
+    );
+
+    let output = execute_run_workflow(&WorkflowCommand {
+        workflow: workflow_path,
+        workspace: Some(workspace_dir),
+        config: None,
+        runtime: None,
+        dry_run: true,
+        events_jsonl: None,
+        trace: None,
+        checkpoint: None,
+        outputs: None,
+        commands_stdin_jsonl: false,
+        verbose: false,
+        format: OutputFormat::Json,
+    })
+    .expect("registry-backed include must load snapshot protocol");
+
+    let parsed: Value = serde_json::from_str(output.as_str()).expect("json");
+    assert_eq!(parsed.pointer("/documents/protocols"), Some(&json!(1)));
+    assert_eq!(
+        parsed.pointer("/plan/nodes/0/execution/type"),
+        Some(&json!("evm_call"))
+    );
+}
+
+#[test]
+fn example_safe_defi_raw_example_dry_run_lowers_pack_constrained_executor_nodes() {
+    let workspace_dir = temp_dir("example-safe-defi-swap");
+    write_temp_file_in(
+        workspace_dir.as_path(),
+        "safe-defi-pack.ais-pack.yaml",
+        read_example_fixture("safe-defi-pack.ais-pack.yaml").as_str(),
+    );
+    write_temp_file_in(
+        workspace_dir.as_path(),
+        ".ais/registry/protocols/uniswap-v3/0.0.2.yaml",
+        read_example_fixture("uniswap-v3.ais.yaml").as_str(),
+    );
+    let workflow_path = write_temp_file_in(
+        workspace_dir.as_path(),
+        "workflow.yaml",
+        r#"
+schema: ais-flow/0.0.3
+meta:
+  name: safe-defi-uniswap
+  version: 0.0.1
+requires_pack:
+  name: safe-defi-pack
+  version: 0.0.2
+nodes:
+  - id: quote
+    type: query_ref
+    protocol: uniswap-v3@0.0.2
+    query: quote-exact-in-single
+    chain: eip155:8453
+    args:
+      token_in:
+        object:
+          address: { lit: "0x4200000000000000000000000000000000000006" }
+          decimals: { lit: 18 }
+          chain_id: { lit: "eip155:8453" }
+      token_out:
+        object:
+          address: { lit: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" }
+          decimals: { lit: 6 }
+          chain_id: { lit: "eip155:8453" }
+      amount_in: { lit: "1.0" }
+      fee: { lit: 500 }
+  - id: allowance
+    type: query_ref
+    protocol: uniswap-v3@0.0.2
+    query: allowance-token-in
+    chain: eip155:8453
+    args:
+      token_in:
+        object:
+          address: { lit: "0x4200000000000000000000000000000000000006" }
+          decimals: { lit: 18 }
+          chain_id: { lit: "eip155:8453" }
+  - id: swap
+    type: action_ref
+    protocol: uniswap-v3@0.0.2
+    action: swap-exact-in
+    chain: eip155:8453
+    deps: ["quote", "allowance"]
+    args:
+      token_in:
+        object:
+          address: { lit: "0x4200000000000000000000000000000000000006" }
+          decimals: { lit: 18 }
+          chain_id: { lit: "eip155:8453" }
+      token_out:
+        object:
+          address: { lit: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" }
+          decimals: { lit: 6 }
+          chain_id: { lit: "eip155:8453" }
+      amount_in: { lit: "1.0" }
+      slippage_bps: { lit: 20 }
+      fee: { lit: 500 }
+      recipient: { lit: "0x1111111111111111111111111111111111111111" }
+"#,
+    );
+    let runtime_path = write_temp_file_in(
+        workspace_dir.as_path(),
+        "runtime.local.yaml",
+        r#"
+ctx:
+  wallet_address: "0x1111111111111111111111111111111111111111"
+  now: 1700000000
+query:
+  quote-exact-in-single:
+    amount_out_atomic: "3500000000"
+  allowance-token-in:
+    allowance_atomic: "2000000000000000000"
+nodes:
+  quote:
+    outputs:
+      amount_out_atomic: "3500000000"
+  allowance:
+    outputs:
+      allowance_atomic: "2000000000000000000"
+"#,
+    );
+
+    let output = execute_run_workflow(&WorkflowCommand {
+        workflow: workflow_path,
+        workspace: Some(workspace_dir),
+        config: None,
+        runtime: Some(runtime_path),
+        dry_run: true,
+        events_jsonl: None,
+        trace: None,
+        checkpoint: None,
+        outputs: None,
+        commands_stdin_jsonl: false,
+        verbose: false,
+        format: OutputFormat::Json,
+    })
+    .expect("safe defi raw example workflow dry-run must succeed");
+
+    let parsed: Value = serde_json::from_str(output.as_str()).expect("json");
+    assert_eq!(parsed.pointer("/documents/protocols"), Some(&json!(1)));
+    assert_eq!(parsed.pointer("/documents/packs"), Some(&json!(1)));
+
+    let plan_nodes = parsed
+        .pointer("/plan/nodes")
+        .and_then(Value::as_array)
+        .expect("plan nodes");
+    let swap_index = plan_nodes
+        .iter()
+        .position(|node| node.get("id").and_then(Value::as_str) == Some("swap"))
+        .expect("swap node index");
+    let swap_node = plan_nodes
+        .iter()
+        .find(|node| node.get("id").and_then(Value::as_str) == Some("swap"))
+        .cloned()
+        .expect("lowered swap node");
+    assert_eq!(
+        swap_node.pointer("/execution/type"),
+        Some(&json!("evm_call"))
+    );
+    assert_eq!(
+        swap_node.pointer("/extensions/pack/ref"),
+        Some(&json!("safe-defi-pack@0.0.2"))
+    );
+    assert_eq!(
+        swap_node.pointer("/extensions/pack/matched_action_rule_ids/0"),
+        Some(&json!("action_rule_0"))
+    );
+    assert_eq!(
+        swap_node.pointer("/extensions/protocol/contracts/router"),
+        Some(&json!("0x2626664c2603336E57B271c5C0b26F421741e481"))
+    );
+    assert_eq!(
+        swap_node
+            .pointer("/extensions/policy/effective_constraints")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(3)
+    );
+    assert_eq!(
+        swap_node.pointer("/extensions/operation/query_bindings/quote-exact-in-single/node_id"),
+        Some(&json!("quote"))
+    );
+    assert_eq!(
+        swap_node.pointer("/extensions/operation/query_bindings/allowance-token-in/node_id"),
+        Some(&json!("allowance"))
+    );
+    assert_eq!(
+        swap_node.pointer("/calculated_overrides/fee_tier/expr/cel"),
+        Some(&json!("params.fee != null ? params.fee : 500"))
+    );
+    assert_eq!(
+        swap_node.pointer("/calculated_overrides/min_out_atomic/expr/cel"),
+        Some(&json!(
+            "mul_div(query[\"quote-exact-in-single\"].amount_out_atomic, (10000 - params.slippage_bps), 10000)"
+        ))
+    );
+
+    let dry_run_nodes = parsed
+        .pointer("/dry_run/nodes")
+        .and_then(Value::as_array)
+        .expect("dry run nodes");
+    let approval_readiness = dry_run_nodes
+        .get(swap_index.saturating_sub(1))
+        .cloned()
+        .expect("approval dry-run node");
+    let swap_readiness = dry_run_nodes
+        .get(swap_index)
+        .cloned()
+        .expect("swap dry-run node");
+    assert_eq!(
+        approval_readiness.pointer("/readiness/state"),
+        Some(&json!("skipped"))
+    );
+    assert_eq!(
+        approval_readiness.pointer("/readiness/missing_refs"),
+        Some(&json!([]))
+    );
+    assert_eq!(
+        swap_readiness.pointer("/readiness/state"),
+        Some(&json!("ready"))
+    );
+    assert_eq!(
+        swap_readiness.pointer("/readiness/missing_refs"),
+        Some(&json!([]))
     );
 }
 
@@ -1888,8 +2453,36 @@ fn temp_dir(prefix: &str) -> PathBuf {
 
 fn write_temp_file_in(dir: &std::path::Path, name: &str, content: &str) -> PathBuf {
     let path = dir.join(name);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("must create temp parent");
+    }
     fs::write(&path, content).expect("must write file");
     path
+}
+
+fn example_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../examples")
+}
+
+fn read_example_fixture(name: &str) -> String {
+    fs::read_to_string(example_root().join(name)).expect("must read example fixture")
+}
+
+fn safe_defi_pack_registry_only_fixture() -> String {
+    r#"
+schema: ais-pack/0.0.2
+name: safe-defi-pack
+version: 0.0.2
+meta:
+  name: safe-defi-pack
+  version: 0.0.2
+includes:
+  - protocol: uniswap-v3
+    version: 0.0.2
+    source: registry
+    chain_scope: ["eip155:8453"]
+"#
+    .to_string()
 }
 
 fn assert_timestamp_is_wall_clock_rfc3339(ts: &str) {

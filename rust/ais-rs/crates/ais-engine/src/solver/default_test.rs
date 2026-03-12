@@ -2,7 +2,6 @@ use super::{build_solver_event, DefaultSolver, Solver, SolverContext, SolverDeci
 use crate::events::EngineEventType;
 use ais_sdk::{NodeReadinessResult, NodeRunState};
 use serde_json::{json, Map};
-use std::collections::BTreeMap;
 
 fn blocked_readiness(missing_refs: Vec<&str>) -> NodeReadinessResult {
     NodeReadinessResult {
@@ -14,27 +13,25 @@ fn blocked_readiness(missing_refs: Vec<&str>) -> NodeReadinessResult {
 }
 
 #[test]
-fn blocked_contract_ref_with_single_candidate_returns_solver_applied() {
+fn blocked_contract_ref_returns_need_user_confirm_instead_of_patch_autofill() {
     let solver = DefaultSolver;
     let readiness = blocked_readiness(vec!["contracts.router"]);
-    let context = SolverContext {
-        contract_candidates: BTreeMap::from([(
-            "contracts.router".to_string(),
-            vec![json!("0x0000000000000000000000000000000000000001")],
-        )]),
-    };
+    let context = SolverContext::default();
 
     let decision = solver.solve(&json!({"id": "n1"}), &readiness, &context);
     match &decision {
-        SolverDecision::ApplyPatches { patches, .. } => {
-            assert_eq!(patches.len(), 1);
-            assert_eq!(patches[0].path, "contracts.router");
+        SolverDecision::NeedUserConfirm { reason, details } => {
+            assert_eq!(reason, "unresolved_system_refs");
+            assert_eq!(
+                details.get("system_missing_refs"),
+                Some(&json!(["contracts.router"]))
+            );
         }
-        _ => panic!("expected apply_patches"),
+        _ => panic!("expected need_user_confirm"),
     }
 
     let event = build_solver_event(Some("n1"), &decision).expect("event expected");
-    assert_eq!(event.event_type, EngineEventType::SolverApplied);
+    assert_eq!(event.event_type, EngineEventType::NeedUserConfirm);
 }
 
 #[test]

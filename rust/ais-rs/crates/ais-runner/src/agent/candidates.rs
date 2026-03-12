@@ -2,8 +2,9 @@ use crate::cli::AgentCommand;
 use crate::error::RunnerError;
 use crate::io::load_workspace_documents;
 use ais_sdk::{
-    build_catalog, build_catalog_index, get_executable_candidates, CatalogBuildInput,
-    CatalogBuildOptions, CatalogCardLevel, ExecutableCandidates, PackDocument, ProtocolDocument,
+    build_catalog, build_catalog_index, get_executable_candidates, resolve_operation_spec,
+    CatalogBuildInput, CatalogBuildOptions, CatalogCardLevel, ExecutableCandidates, PackDocument,
+    ProtocolDocument, ResolvedOperationKind, ResolverContext,
 };
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -29,6 +30,7 @@ pub struct CandidateContext {
     pub detail_by_ref: BTreeMap<String, Value>,
     pub executable_candidates: ExecutableCandidates,
     pub protocols: Vec<ProtocolDocument>,
+    pub pack: Option<PackDocument>,
 }
 
 impl Default for CandidateContext {
@@ -53,6 +55,7 @@ impl Default for CandidateContext {
                 execution_plugins: vec![],
             },
             protocols: vec![],
+            pack: None,
         }
     }
 }
@@ -744,8 +747,19 @@ pub fn build_candidate_context_for_agent(
         },
     )
     .map_err(RunnerError::from)?;
-    let mut detail_by_ref =
-        build_detail_lookup_from_catalog(detail_catalog.actions, detail_catalog.queries);
+    let mut detail_resolver = ResolverContext::new();
+    for protocol in &loaded.protocols {
+        detail_resolver.register_protocol(protocol.clone());
+    }
+    if let Some(pack) = pack {
+        detail_resolver.register_pack(pack.clone());
+    }
+    let mut detail_by_ref = build_detail_lookup_from_catalog(
+        detail_catalog.actions,
+        detail_catalog.queries,
+        &detail_resolver,
+        pack,
+    );
     detail_by_ref.retain(|reference, _| allowed_refs.contains(reference));
 
     Ok(Some(CandidateContext {
@@ -761,6 +775,7 @@ pub fn build_candidate_context_for_agent(
         }),
         executable_candidates,
         protocols: loaded.protocols,
+        pack: pack.cloned(),
         detail_by_ref,
     }))
 }
@@ -794,23 +809,41 @@ fn truncate_candidates(candidates: &mut ExecutableCandidates, max_index_candidat
 fn build_detail_lookup_from_catalog(
     actions: Vec<Value>,
     queries: Vec<Value>,
+    context: &ResolverContext,
+    pack: Option<&PackDocument>,
 ) -> BTreeMap<String, Value> {
     let mut out = BTreeMap::<String, Value>::new();
     for action in actions {
-        if let Some(reference) = action.get("ref").and_then(Value::as_str) {
-            out.insert(reference.to_string(), normalize_action_detail(action));
+        let reference = action
+            .get("ref")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        if let Some(reference) = reference {
+            out.insert(
+                reference.clone(),
+                normalize_action_detail(action, reference.as_str(), context, pack),
+            );
         }
     }
     for query in queries {
-        if let Some(reference) = query.get("ref").and_then(Value::as_str) {
-            out.insert(reference.to_string(), normalize_query_detail(query));
+        let reference = query.get("ref").and_then(Value::as_str).map(str::to_string);
+        if let Some(reference) = reference {
+            out.insert(
+                reference.clone(),
+                normalize_query_detail(query, reference.as_str(), context, pack),
+            );
         }
     }
     out
 }
 
-fn normalize_action_detail(action: Value) -> Value {
-    json!({
+fn normalize_action_detail(
+    action: Value,
+    reference: &str,
+    context: &ResolverContext,
+    pack: Option<&PackDocument>,
+) -> Value {
+    let mut detail = json!({
         "kind": "action",
         "ref": action.get("ref").and_then(Value::as_str).unwrap_or_default(),
         "id": action.get("id").and_then(Value::as_str).unwrap_or_default(),
@@ -826,11 +859,24 @@ fn normalize_action_detail(action: Value) -> Value {
             .or_else(|| action.pointer("/extensions/write_gate").cloned()),
         "execution_types": action.get("execution_types").cloned().unwrap_or_else(|| Value::Array(vec![])),
         "execution_chains": action.get("execution_chains").cloned().unwrap_or_else(|| Value::Array(vec![])),
-    })
+    });
+    apply_resolved_operation_detail(
+        &mut detail,
+        reference,
+        ResolvedOperationKind::Action,
+        context,
+        pack,
+    );
+    detail
 }
 
-fn normalize_query_detail(query: Value) -> Value {
-    json!({
+fn normalize_query_detail(
+    query: Value,
+    reference: &str,
+    context: &ResolverContext,
+    pack: Option<&PackDocument>,
+) -> Value {
+    let mut detail = json!({
         "kind": "query",
         "ref": query.get("ref").and_then(Value::as_str).unwrap_or_default(),
         "id": query.get("id").and_then(Value::as_str).unwrap_or_default(),
@@ -839,7 +885,298 @@ fn normalize_query_detail(query: Value) -> Value {
         "returns": query.get("returns").cloned().unwrap_or_else(|| Value::Array(vec![])),
         "execution_types": query.get("execution_types").cloned().unwrap_or_else(|| Value::Array(vec![])),
         "execution_chains": query.get("execution_chains").cloned().unwrap_or_else(|| Value::Array(vec![])),
+    });
+    apply_resolved_operation_detail(
+        &mut detail,
+        reference,
+        ResolvedOperationKind::Query,
+        context,
+        pack,
+    );
+    detail
+}
+
+fn apply_resolved_operation_detail(
+    detail: &mut Value,
+    reference: &str,
+    kind: ResolvedOperationKind,
+    context: &ResolverContext,
+    pack: Option<&PackDocument>,
+) {
+    let Some((protocol_ref, operation_key)) = reference.split_once('/') else {
+        return;
+    };
+    let Some(protocol) = context.protocols.get(protocol_ref) else {
+        return;
+    };
+    let chain = detail_resolution_chain(detail, protocol_ref, pack).or_else(|| {
+        detail
+            .get("execution_chains")
+            .and_then(Value::as_array)
+            .and_then(|chains| {
+                if chains.len() == 1 {
+                    chains.first().and_then(Value::as_str).map(str::to_string)
+                } else {
+                    None
+                }
+            })
+    });
+    let Some(chain) = chain else {
+        return;
+    };
+    let Some(resolved) = resolve_operation_spec(
+        protocol_ref,
+        protocol,
+        operation_key,
+        kind,
+        chain.as_str(),
+        pack,
+    ) else {
+        return;
+    };
+    if let Some(description) = resolved
+        .merged_spec
+        .as_object()
+        .and_then(|spec| spec.get("description"))
+        .cloned()
+    {
+        detail["description"] = description;
+    }
+    if let Some(risk_level) = resolved
+        .merged_spec
+        .as_object()
+        .and_then(|spec| spec.get("risk_level"))
+        .cloned()
+    {
+        detail["risk_level"] = risk_level;
+    }
+    if let Some(risk_tags) = resolved
+        .merged_spec
+        .as_object()
+        .and_then(|spec| spec.get("risk_tags"))
+        .cloned()
+    {
+        detail["risk_tags"] = risk_tags;
+    }
+    if let Some(requires_queries) = resolved
+        .merged_spec
+        .as_object()
+        .and_then(|spec| spec.get("requires_queries"))
+        .cloned()
+    {
+        detail["requires_queries"] = requires_queries;
+    }
+    detail["semantic_hints"] = build_resolved_semantic_hints(&resolved, chain.as_str());
+    if let Some(pack) = resolved.pack {
+        detail["pack_constraints"] = json!({
+            "global": pack.global_constraints,
+            "action_rules": pack.action_rule_constraints,
+            "action": pack.action_constraints,
+            "effective": pack.effective_constraints,
+            "matched_action_rule_ids": pack.matched_action_rule_ids,
+        });
+    }
+}
+
+fn detail_resolution_chain(
+    detail: &Value,
+    protocol_ref: &str,
+    pack: Option<&PackDocument>,
+) -> Option<String> {
+    let execution_chains = detail
+        .get("execution_chains")
+        .and_then(Value::as_array)
+        .map(|chains| {
+            chains
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if let Some(chain) =
+        detail_resolution_chain_from_pack_scope(protocol_ref, pack, execution_chains.as_slice())
+    {
+        return Some(chain);
+    }
+
+    let concrete_execution_chains = execution_chains
+        .into_iter()
+        .filter(|chain| !is_wildcard_chain(chain))
+        .collect::<Vec<_>>();
+    if concrete_execution_chains.len() == 1 {
+        return concrete_execution_chains.into_iter().next();
+    }
+
+    None
+}
+
+fn detail_resolution_chain_from_pack_scope(
+    protocol_ref: &str,
+    pack: Option<&PackDocument>,
+    execution_chains: &[String],
+) -> Option<String> {
+    let (protocol_id, version) = protocol_ref.split_once('@')?;
+    let include = pack.and_then(|pack| {
+        pack.includes.iter().find(|include| {
+            include
+                .get("protocol")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value == protocol_id)
+                && include
+                    .get("version")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| value == version)
+        })
+    })?;
+    let concrete_scope = include
+        .get("chain_scope")
+        .and_then(Value::as_array)
+        .map(|chains| {
+            chains
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|chain| !is_wildcard_chain(chain))
+                .filter(|chain| {
+                    execution_chains.is_empty()
+                        || execution_chains
+                            .iter()
+                            .any(|pattern| detail_chain_matches(pattern.as_str(), chain))
+                })
+                .map(str::to_string)
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if concrete_scope.len() == 1 {
+        return concrete_scope.into_iter().next();
+    }
+    None
+}
+
+fn detail_chain_matches(pattern: &str, chain: &str) -> bool {
+    if pattern == chain || pattern == "*" {
+        return true;
+    }
+    if let Some((pattern_ns, pattern_ref)) = pattern.split_once(':') {
+        if let Some((chain_ns, chain_ref)) = chain.split_once(':') {
+            return pattern_ns == chain_ns && (pattern_ref == "*" || chain_ref == "*");
+        }
+    }
+    false
+}
+
+fn build_resolved_semantic_hints(resolved: &ais_sdk::ResolvedOperationSpec, chain: &str) -> Value {
+    let mut semantic_hints = Map::<String, Value>::new();
+    semantic_hints.insert(
+        "resolution_chain".to_string(),
+        Value::String(chain.to_string()),
+    );
+    semantic_hints.insert(
+        "deployment".to_string(),
+        json!({
+            "selected_chain": resolved.deployment.chain,
+            "contract_keys": sorted_contract_keys(&resolved.deployment.contracts),
+            "contracts": resolved.deployment.contracts,
+        }),
+    );
+
+    let requires_queries = resolved
+        .merged_spec
+        .as_object()
+        .and_then(|spec| spec.get("requires_queries"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    semantic_hints.insert(
+        "prerequisites".to_string(),
+        json!({
+            "requires_queries": requires_queries,
+            "requires_query_count": requires_queries.len(),
+        }),
+    );
+
+    let execution = selected_execution_for_chain(&resolved.merged_spec, chain);
+    semantic_hints.insert(
+        "execution".to_string(),
+        build_execution_semantic_hint(execution.as_ref()),
+    );
+
+    if let Some(pack) = &resolved.pack {
+        semantic_hints.insert(
+            "pack".to_string(),
+            json!({
+                "pack_ref": pack.pack_key,
+                "matched_action_rule_ids": pack.matched_action_rule_ids,
+                "has_action_override": pack.action_override.is_some(),
+                "constraint_counts": {
+                    "global": pack.global_constraints.len(),
+                    "action_rules": pack.action_rule_constraints.len(),
+                    "action": pack.action_constraints.len(),
+                    "effective": pack.effective_constraints.len(),
+                }
+            }),
+        );
+    }
+
+    Value::Object(semantic_hints)
+}
+
+fn build_execution_semantic_hint(execution: Option<&Value>) -> Value {
+    let execution_type = execution
+        .and_then(Value::as_object)
+        .and_then(|execution| execution.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let composite_steps = execution
+        .and_then(Value::as_object)
+        .and_then(|execution| execution.get("steps"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let composite_step_ids = composite_steps
+        .iter()
+        .filter_map(Value::as_object)
+        .filter_map(|step| step.get("id"))
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    json!({
+        "selected_type": execution_type,
+        "requires_lowering": execution_type == "composite",
+        "composite_step_ids": composite_step_ids,
+        "composite_step_count": composite_steps.len(),
     })
+}
+
+fn selected_execution_for_chain(operation_spec: &Value, chain: &str) -> Option<Value> {
+    let execution = operation_spec
+        .as_object()
+        .and_then(|spec| spec.get("execution"))
+        .and_then(Value::as_object)?;
+    if let Some(selected) = execution.get(chain) {
+        return Some(selected.clone());
+    }
+    if let Some((namespace, _)) = chain.split_once(':') {
+        let wildcard = format!("{namespace}:*");
+        if let Some(selected) = execution.get(wildcard.as_str()) {
+            return Some(selected.clone());
+        }
+    }
+    execution.get("*").cloned()
+}
+
+fn sorted_contract_keys(contracts: &Map<String, Value>) -> Vec<String> {
+    let mut keys = contracts.keys().cloned().collect::<Vec<_>>();
+    keys.sort();
+    keys
+}
+
+fn is_wildcard_chain(chain: &str) -> bool {
+    let trimmed = chain.trim();
+    trimmed == "*" || trimmed.ends_with(":*")
 }
 
 fn to_discovery_card(card: &Value, kind: &str) -> Value {

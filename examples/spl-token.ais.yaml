@@ -9,11 +9,6 @@ meta:
   tags: ["token", "transfer", "solana"]
   maintainer: "solana.labs"
 
-capabilities_required:
-  - "cel_v1"
-  - "solana_instruction"
-  - "cel_builtin:derive_ata"
-
 deployments:
   - chain: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp" # Mainnet
     contracts:
@@ -24,24 +19,19 @@ deployments:
 supported_assets:
   - symbol: "SOL"
     name: "Wrapped SOL"
-    decimals:
-      solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp: 9
-    addresses:
-      solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp: "So11111111111111111111111111111111111111112"
+    deployments:
+      - chain: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
+        address: "So11111111111111111111111111111111111111112"
+        decimals: 9
     tags: ["native", "wrapped"]
 
   - symbol: "USDC"
     name: "USD Coin"
-    decimals:
-      solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp: 6
-    addresses:
-      solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+    deployments:
+      - chain: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
+        address: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+        decimals: 6
     tags: ["stable"]
-
-risks:
-  - level: "info"
-    text: "Transfers require the destination to have an ATA. This spec uses create_idempotent to ensure it exists."
-    applies_to: ["transfer"]
 
 actions:
   transfer:
@@ -136,4 +126,3 @@ actions:
                 object:
                   amount: { ref: "calculated.amount_atomic" }
               compute_units: { lit: "10000" }
-

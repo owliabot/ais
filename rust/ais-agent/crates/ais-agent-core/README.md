@@ -1,0 +1,130 @@
+# ais-agent-core
+
+Purpose:
+- define the greenfield `ais-agent` core domain and runtime boundaries
+- own runtime domain objects such as mission, evidence, action graph, effect contract, checkpoint, and runtime lifecycle
+
+Public API entry points:
+- current public modules:
+  - `mission`
+  - `evidence`
+  - `action`
+  - `effect`
+  - `actuation`
+  - `checkpoint`
+  - `driver`
+  - `governor`
+  - `patch`
+  - `recovery`
+  - `runtime`
+
+Dependencies on workspace crates:
+- `ais-agent-control`
+- `ais-agent-expr`
+
+Current implementation status:
+- initial core domain object skeletons implemented
+- evidence graph and usage-tracing skeleton implemented
+- action graph and typed node payload skeleton implemented
+- driver fragment live-binding hints now exist as a fragment-level contract:
+  - `DriverNodeLiveBindingHint`
+  - `DriverEvmObserveHint`
+  - `DriverEvmSimulateHint`
+  - `DriverEvmActuateHint`
+  - `DriverEvmVerifyHint`
+- `ActionGraphFragment` now carries `live_binding_hints`
+- `DriverBuildOutput::apply_live_binding_hints()` now provides the single normalization path from driver fragment metadata into typed node payloads
+- typed EVM live-binding contract implemented for:
+  - `ObserveAction`
+  - `SimulateAction`
+  - `ActuateAction`
+  - `VerifyAction`
+- typed Solana minimal live-binding contract implemented for:
+  - `ObserveAction`
+  - `SimulateAction`
+  - `ActuateAction`
+  - `VerifyAction`
+- action payloads now use chain-scoped live wrappers instead of flat per-chain fields:
+  - `ObserveLiveBinding`
+  - `SimulateLiveBinding`
+  - `ActuateLiveBinding`
+  - `VerifyLiveBinding`
+- typed EVM connection/request contract now also exists for live execution:
+  - `EvmConnectionSpec`
+  - `EvmObserveRequest`
+  - `EvmCallRequest`
+- typed Solana connection/request contract now also exists for minimal live execution:
+  - `SolanaConnectionSpec`
+  - `SolanaObserveRequest`
+  - `SolanaTransactionRequest`
+- `SolanaTransactionRequest` now has explicit modes:
+  - `Legacy`
+  - `V0 { address_lookup_tables }`
+- LUT-bearing typed requests keep `solana_sdk::message::AddressLookupTableAccount` as the in-memory type
+- typed live write/read connection and request state now live inside the chain-scoped wrappers, not as flat action fields
+- runtime lifecycle and stable boundary skeleton implemented
+- runtime lifecycle failure truth is now typed against the frozen control-plane recovery contract:
+  - `RunFailureContext`
+  - `RunFailureCode`
+  - `RunFailureStage`
+  - `StableBoundaryKind`
+- runtime lifecycle now also carries durable interruption truth through:
+  - `InterruptionState`
+  - interruption class / stage / side-effect phase / summary
+- lifecycle now has explicit helpers for recovery-aware stable boundaries:
+  - `pause_with_failure(...)`
+  - `await_evidence_with_failure(...)`
+- runtime lifecycle now includes explicit chain-confirmation waiting:
+  - `AwaitingConfirmation`
+  - `BoundaryKind::Confirmation`
+- pure bounded-patch legality helpers now exist for:
+  - `validate_plan_patch_submission(...)`
+  - `validate_submit_plan_patch_command(...)`
+  - `PatchLegalityError`
+- checkpoint-level recovery classification is now shared in core for both runtime and host projection:
+  - `RecoveryProjection`
+  - `classify_recovery_view(...)`
+  - `classify_recovery_disposition(...)`
+  - `classify_allowed_recovery_actions(...)`
+  - `classify_recovery_suggestions(...)`
+  - classifier now prefers explicit durable interruption truth when present
+- shared control classification now also owns first-pass cancel legality through:
+  - `CancelRequestResolution`
+  - `classify_cancel_request(...)`
+  - explicit durable `cancel_state` preference over inferred cancel status
+  - budget-exhaustion interruption can now project as `continue_wait` without requiring a failure state
+- checkpoint snapshots now also persist runtime-owned effect contracts:
+  - `CheckpointSnapshot.effect_contracts`
+- checkpoint pending-request truth now also persists:
+  - `pending_envelope_refs`
+- checkpoint ownership and storage skeleton implemented
+- restart/resume regressions now cover:
+  - awaiting evidence checkpoints
+  - awaiting signer checkpoints
+  - restart after tx submission but before final verification
+- governor decision engine skeleton implemented
+- effect verifier now supports reduced-scope `EffectContract + pre/post/receipt/expected` verification via `ais-agent-expr`
+- effect verification regressions now cover:
+  - satisfied / violated / unknown-missing-observation outcomes
+  - driver-backed effect contracts
+  - raw-envelope effect contracts
+- EVM live verify contract now also carries:
+  - `VerifyAction.pre_observation_ref`
+  - `VerifyAction.post_observation_ref`
+  - `VerifyAction.post_evm_request`
+- signer boundary state model implemented in runtime
+- runtime envelope model and raw-envelope gating helpers implemented
+- inspect types still live in `ais-agent-host`
+- no stepping logic yet
+
+Known gaps:
+- no conversions from command DTOs into core domain objects yet
+- no runtime evidence ingestion or eviction behavior yet
+- no graph execution or scheduling logic yet
+- bounded patch legality is frozen and now consumed by runtime patch application, but slice-specific patch semantics are still incomplete
+- no durable store implementation beyond an in-memory skeleton
+- governor decisions are currently pure domain logic and not yet wired into a runtime stepper
+- effect verification remains pure core logic, but runtime now feeds it real EVM `pre / receipt / post` observations on the main write path
+- signer boundary state is defined, but not yet durably archived for restart/recovery
+- raw-envelope binding exists, but not yet wired into a stepper or broadcaster
+- Solana live ports still need to consume the new `Legacy / V0 + LUT` request contract in real read/simulate/broadcast code

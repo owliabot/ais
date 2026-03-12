@@ -146,7 +146,7 @@
             "need_user_confirm"
           ]
         },
-        "expr": {
+        "assert": {
           "type": "string",
           "minLength": 1
         },
@@ -160,7 +160,7 @@
       "required": [
         "id",
         "effect",
-        "expr"
+        "assert"
       ],
       "additionalProperties": false
     },
@@ -170,6 +170,9 @@
         "approvals": {
           "$ref": "#/$defs/approvals_21"
         },
+        "execution": {
+          "$ref": "#/$defs/execution_22"
+        },
         "protocol_install": {
           "$ref": "#/$defs/protocol_install_23"
         },
@@ -177,7 +180,33 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/policy_constraint_25"
-          }
+          },
+          "minItems": 1
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "additionalProperties": false
+    },
+    "volatile_facts_22": {
+      "type": "object",
+      "properties": {
+        "max_age_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "additionalProperties": false
+    },
+    "execution_22": {
+      "type": "object",
+      "properties": {
+        "volatile_facts": {
+          "$ref": "#/$defs/volatile_facts_22"
         },
         "extensions": {
           "$ref": "#/$defs/extensions_10"
@@ -377,10 +406,46 @@
             "type": "string"
           }
         },
+        "constraints": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/policy_constraint_25"
+          },
+          "minItems": 1
+        },
         "extensions": {
           "$ref": "#/$defs/extensions_10"
         }
       },
+      "additionalProperties": false
+    },
+    "Def_80": {
+      "type": "object",
+      "properties": {
+        "actions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "constraints": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/policy_constraint_25"
+          },
+          "minItems": 1
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions_10"
+        }
+      },
+      "required": [
+        "actions",
+        "constraints"
+      ],
       "additionalProperties": false
     },
     "actions_77": {
@@ -394,6 +459,12 @@
       "properties": {
         "actions": {
           "$ref": "#/$defs/actions_77"
+        },
+        "action_rules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Def_80"
+          }
         },
         "extensions": {
           "$ref": "#/$defs/extensions_10"

@@ -11,13 +11,7 @@ pub struct ProtocolDocument {
     #[serde(default)]
     pub queries: Map<String, Value>,
     #[serde(default)]
-    pub risks: Vec<Value>,
-    #[serde(default)]
     pub supported_assets: Vec<Value>,
-    #[serde(default)]
-    pub capabilities_required: Vec<String>,
-    #[serde(default)]
-    pub tests: Vec<Value>,
     #[serde(default)]
     pub extensions: Map<String, Value>,
 }

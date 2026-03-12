@@ -24,6 +24,290 @@ fn truncate_candidates_limits_total_index_cards() {
 }
 
 #[test]
+fn build_detail_lookup_applies_pack_merged_requires_queries_and_constraints() {
+    let mut resolver = ResolverContext::new();
+    resolver.register_protocol(serde_json::from_value(json!({
+        "schema":"ais/0.0.2",
+        "meta":{"protocol":"demo","version":"0.0.2"},
+        "deployments":[{"chain":"eip155:*","contracts":{"router":"0x1"}}],
+        "actions":{
+            "swap":{
+                "description":"base",
+                "risk_level":3,
+                "params":[],
+                "requires_queries":["quote"],
+                "execution":{"eip155:*":{"type":"evm_call","to":{"lit":"0x1"},"abi":{"type":"function","name":"swap","inputs":[],"outputs":[]},"args":{}}}
+            }
+        },
+        "queries":{}
+    }))
+    .expect("protocol"));
+    let pack: PackDocument = serde_json::from_value(json!({
+        "schema":"ais-pack/0.0.2",
+        "name":"safe-defi",
+        "version":"0.0.2",
+        "includes":[{"protocol":"demo","version":"0.0.2","source":"registry"}],
+        "policy":{"constraints":[{"id":"global","effect":"hard_block","assert":"inputs.x"}]},
+        "overrides":{
+            "action_rules":[{"id":"swap-rule","actions":["demo.swap"],"constraints":[{"id":"rule","effect":"hard_block","assert":"params.y"}]}],
+            "actions":{
+                "demo.swap":{
+                    "requires_queries":["quote","allowance"],
+                    "constraints":[{"id":"action","effect":"hard_block","assert":"params.z"}]
+                }
+            }
+        }
+    }))
+    .expect("pack");
+    resolver.register_pack(pack.clone());
+
+    let details = build_detail_lookup_from_catalog(
+        vec![json!({
+            "ref":"demo@0.0.2/swap",
+            "id":"swap",
+            "description":"base",
+            "risk_level":3,
+            "risk_tags":[],
+            "params":[],
+            "returns":[],
+            "requires_queries":["quote"],
+            "execution_types":["evm_call"],
+            "execution_chains":["eip155:*"]
+        })],
+        vec![],
+        &resolver,
+        Some(&pack),
+    );
+
+    let detail = details.get("demo@0.0.2/swap").expect("detail");
+    assert_eq!(
+        detail
+            .get("requires_queries")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(2)
+    );
+    assert_eq!(
+        detail
+            .pointer("/pack_constraints/matched_action_rule_ids/0")
+            .and_then(Value::as_str),
+        Some("swap-rule")
+    );
+    assert_eq!(
+        detail
+            .pointer("/semantic_hints/deployment/selected_chain")
+            .and_then(Value::as_str),
+        Some("eip155:*")
+    );
+    assert_eq!(
+        detail
+            .pointer("/semantic_hints/deployment/contract_keys/0")
+            .and_then(Value::as_str),
+        Some("router")
+    );
+    assert_eq!(
+        detail
+            .pointer("/semantic_hints/prerequisites/requires_query_count")
+            .and_then(Value::as_u64),
+        Some(2)
+    );
+    assert_eq!(
+        detail
+            .pointer("/semantic_hints/pack/has_action_override")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    assert!(detail.get("providers").is_none());
+}
+
+#[test]
+fn build_detail_lookup_exposes_composite_lowering_hints() {
+    let mut resolver = ResolverContext::new();
+    resolver.register_protocol(serde_json::from_value(json!({
+        "schema":"ais/0.0.2",
+        "meta":{"protocol":"demo","version":"0.0.2"},
+        "deployments":[{"chain":"eip155:1","contracts":{"router":"0x1"}}],
+        "actions":{
+            "supply":{
+                "description":"composite supply",
+                "params":[],
+                "execution":{
+                    "eip155:*":{
+                        "type":"composite",
+                        "steps":[
+                            {"id":"approve","execution":{"type":"evm_call","to":{"lit":"0x1"},"abi":{"type":"function","name":"approve","inputs":[],"outputs":[]},"args":{}}},
+                            {"id":"supply","execution":{"type":"evm_call","to":{"lit":"0x1"},"abi":{"type":"function","name":"supply","inputs":[],"outputs":[]},"args":{}}}
+                        ]
+                    }
+                }
+            }
+        },
+        "queries":{}
+    }))
+    .expect("protocol"));
+
+    let details = build_detail_lookup_from_catalog(
+        vec![json!({
+            "ref":"demo@0.0.2/supply",
+            "id":"supply",
+            "description":"composite supply",
+            "risk_tags":[],
+            "params":[],
+            "returns":[],
+            "execution_types":["composite"],
+            "execution_chains":["eip155:1"]
+        })],
+        vec![],
+        &resolver,
+        None,
+    );
+
+    let detail = details.get("demo@0.0.2/supply").expect("detail");
+    assert_eq!(
+        detail
+            .pointer("/semantic_hints/execution/selected_type")
+            .and_then(Value::as_str),
+        Some("composite")
+    );
+    assert_eq!(
+        detail
+            .pointer("/semantic_hints/execution/requires_lowering")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        detail
+            .pointer("/semantic_hints/execution/composite_step_ids/0")
+            .and_then(Value::as_str),
+        Some("approve")
+    );
+    assert_eq!(
+        detail
+            .pointer("/semantic_hints/execution/composite_step_count")
+            .and_then(Value::as_u64),
+        Some(2)
+    );
+}
+
+#[test]
+fn build_detail_lookup_prefers_pack_chain_scope_for_wildcard_execution_resolution() {
+    let mut resolver = ResolverContext::new();
+    resolver.register_protocol(
+        serde_json::from_value(json!({
+            "schema":"ais/0.0.2",
+            "meta":{"protocol":"aave-demo","version":"0.0.2"},
+            "deployments":[
+                {"chain":"eip155:1","contracts":{"pool":"0x1"}},
+                {"chain":"eip155:8453","contracts":{"pool":"0x8453"}}
+            ],
+            "actions":{
+                "supply":{
+                    "description":"supply",
+                    "params":[],
+                    "execution":{
+                        "eip155:*":{
+                            "type":"evm_call",
+                            "to":{"ref":"contracts.pool"},
+                            "abi":{"type":"function","name":"supply","inputs":[],"outputs":[]},
+                            "args":{}
+                        }
+                    }
+                }
+            },
+            "queries":{}
+        }))
+        .expect("protocol"),
+    );
+    let pack: PackDocument = serde_json::from_value(json!({
+        "schema":"ais-pack/0.0.2",
+        "name":"safe-defi",
+        "version":"0.0.2",
+        "includes":[{"protocol":"aave-demo","version":"0.0.2","source":"registry","chain_scope":["eip155:8453"]}]
+    }))
+    .expect("pack");
+
+    let details = build_detail_lookup_from_catalog(
+        vec![json!({
+            "ref":"aave-demo@0.0.2/supply",
+            "id":"supply",
+            "description":"supply",
+            "risk_tags":[],
+            "params":[],
+            "returns":[],
+            "execution_types":["evm_call"],
+            "execution_chains":["eip155:*"]
+        })],
+        vec![],
+        &resolver,
+        Some(&pack),
+    );
+
+    let detail = details.get("aave-demo@0.0.2/supply").expect("detail");
+    assert_eq!(
+        detail
+            .pointer("/semantic_hints/resolution_chain")
+            .and_then(Value::as_str),
+        Some("eip155:8453")
+    );
+    assert_eq!(
+        detail
+            .pointer("/semantic_hints/deployment/contracts/pool")
+            .and_then(Value::as_str),
+        Some("0x8453")
+    );
+}
+
+#[test]
+fn build_detail_lookup_omits_semantic_hints_without_deterministic_concrete_chain() {
+    let mut resolver = ResolverContext::new();
+    resolver.register_protocol(
+        serde_json::from_value(json!({
+            "schema":"ais/0.0.2",
+            "meta":{"protocol":"aave-demo","version":"0.0.2"},
+            "deployments":[
+                {"chain":"eip155:1","contracts":{"pool":"0x1"}},
+                {"chain":"eip155:8453","contracts":{"pool":"0x8453"}}
+            ],
+            "actions":{
+                "supply":{
+                    "description":"supply",
+                    "params":[],
+                    "execution":{
+                        "eip155:*":{
+                            "type":"evm_call",
+                            "to":{"ref":"contracts.pool"},
+                            "abi":{"type":"function","name":"supply","inputs":[],"outputs":[]},
+                            "args":{}
+                        }
+                    }
+                }
+            },
+            "queries":{}
+        }))
+        .expect("protocol"),
+    );
+
+    let details = build_detail_lookup_from_catalog(
+        vec![json!({
+            "ref":"aave-demo@0.0.2/supply",
+            "id":"supply",
+            "description":"supply",
+            "risk_tags":[],
+            "params":[],
+            "returns":[],
+            "execution_types":["evm_call"],
+            "execution_chains":["eip155:*"]
+        })],
+        vec![],
+        &resolver,
+        None,
+    );
+
+    let detail = details.get("aave-demo@0.0.2/supply").expect("detail");
+    assert!(detail.get("semantic_hints").is_none());
+}
+
+#[test]
 fn get_details_for_refs_returns_only_known_refs() {
     let mut context = CandidateContext::default();
     context

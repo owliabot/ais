@@ -272,10 +272,7 @@ fn demo_protocol() -> ProtocolDocument {
         })],
         actions,
         queries,
-        risks: Vec::new(),
         supported_assets: Vec::new(),
-        capabilities_required: Vec::new(),
-        tests: Vec::new(),
         extensions: Map::new(),
     }
 }

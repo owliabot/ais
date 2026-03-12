@@ -1,6 +1,14 @@
 use crate::catalog::ExecutableCandidates;
 use crate::documents::{PlanDocument, PlanSketchDocument};
-use crate::resolver::{resolve_action_ref, resolve_query_ref, ResolverContext};
+use crate::planner::lower_composite::lower_composite_node;
+use crate::protocol::{
+    annotate_composite_step_protocol_bindings, build_operation_extension, build_pack_extension,
+    build_policy_extension, build_protocol_extension, pack_document_hash, resolve_operation_spec,
+    ResolvedOperationKind,
+};
+use crate::resolver::{
+    calculated_override_order_from_map, resolve_action_ref, resolve_query_ref, ResolverContext,
+};
 use crate::ValueRef;
 use ais_core::{FieldPath, FieldPathSegment, IssueSeverity, StructuredIssue};
 use ais_schema::versions::SCHEMA_PLAN_0_0_3;
@@ -29,21 +37,22 @@ pub fn compile_plan_sketch(
     let mut issues = Vec::<StructuredIssue>::new();
     let known_input_refs = build_known_input_ref_set(options);
 
-    let chain = if let Some(default_chain) = options.default_chain.as_deref() {
-        default_chain.to_string()
-    } else if sketch.chain_scope.len() == 1 {
-        sketch.chain_scope[0].clone()
-    } else {
-        issues.push(issue(
-            "compile_error",
-            vec![FieldPathSegment::Key("chain_scope".to_string())],
-            "missing deterministic chain: set compile default_chain or a single sketch.chain_scope item",
-            "missing_required_input",
-        ));
-        String::new()
-    };
+    let default_chain = options
+        .default_chain
+        .as_deref()
+        .map(str::to_string)
+        .or_else(|| (sketch.chain_scope.len() == 1).then(|| sketch.chain_scope[0].clone()));
 
     let candidate_index = build_candidate_index(candidates);
+    let resolved_pack = match validate_and_resolve_sketch_pack(sketch, context) {
+        Ok(pack) => pack,
+        Err(mut pack_issues) => {
+            StructuredIssue::sort_stable(&mut pack_issues);
+            return CompilePlanSketchResult::Err {
+                issues: pack_issues,
+            };
+        }
+    };
 
     let mut seen_node_ids = HashSet::<String>::new();
     for segment in &sketch.segments {
@@ -66,6 +75,7 @@ pub fn compile_plan_sketch(
     }
 
     let mut nodes = Vec::<Value>::new();
+    let mut emitted_node_ids = HashSet::<String>::new();
     for (segment_index, segment) in sketch.segments.iter().enumerate() {
         let mut segment_step_to_node_id = HashMap::<String, String>::new();
         let mut segment_steps_by_id = HashMap::<String, crate::documents::PlanSketchStep>::new();
@@ -125,7 +135,8 @@ pub fn compile_plan_sketch(
                     .filter(|value| !value.is_empty()),
                 &effective_step,
                 step_path.as_slice(),
-                chain.as_str(),
+                default_chain.as_deref(),
+                resolved_pack,
                 &known_input_refs,
                 context,
                 &candidate_index,
@@ -134,7 +145,24 @@ pub fn compile_plan_sketch(
                 &segment_step_ids,
                 &segment_node_ids,
             ) {
-                Ok(node) => nodes.push(node),
+                Ok(mut lowered_nodes) => {
+                    let duplicate_issues = validate_emitted_node_ids(
+                        lowered_nodes.as_slice(),
+                        &mut emitted_node_ids,
+                        &[
+                            FieldPathSegment::Key("segments".to_string()),
+                            FieldPathSegment::Index(segment_index),
+                            FieldPathSegment::Key("steps".to_string()),
+                            FieldPathSegment::Index(step_index),
+                            FieldPathSegment::Key("id".to_string()),
+                        ],
+                    );
+                    if duplicate_issues.is_empty() {
+                        nodes.append(&mut lowered_nodes);
+                    } else {
+                        issues.extend(duplicate_issues);
+                    }
+                }
                 Err(mut step_issues) => issues.append(&mut step_issues),
             }
         }
@@ -222,15 +250,16 @@ fn compile_step(
     segment_todo_id: Option<&str>,
     step: &crate::documents::PlanSketchStep,
     step_path: &[FieldPathSegment],
-    chain: &str,
+    default_chain: Option<&str>,
+    pack: Option<&crate::documents::PackDocument>,
     known_input_refs: &HashSet<String>,
     context: &ResolverContext,
     candidate_index: &HashMap<String, CandidateMeta>,
     segment_step_to_node_id: &HashMap<String, String>,
-    _segment_steps_by_id: &HashMap<String, crate::documents::PlanSketchStep>,
+    segment_steps_by_id: &HashMap<String, crate::documents::PlanSketchStep>,
     segment_step_ids: &HashSet<String>,
     segment_node_ids: &HashSet<String>,
-) -> Result<Value, Vec<StructuredIssue>> {
+) -> Result<Vec<Value>, Vec<StructuredIssue>> {
     let mut issues = Vec::<StructuredIssue>::new();
     let node_id = segment_step_to_node_id
         .get(step.id.as_str())
@@ -259,6 +288,30 @@ fn compile_step(
         ));
         return Err(issues);
     };
+    let Some(chain) = step
+        .chain
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or(default_chain)
+    else {
+        issues.push(issue(
+            "compile_error",
+            path_with_key(step_path, "chain"),
+            "missing deterministic chain: set step.chain, compile default_chain, or a single sketch.chain_scope item",
+            "missing_required_input",
+        ));
+        return Err(issues);
+    };
+    if !sketch.chain_scope.is_empty() && !sketch.chain_scope.iter().any(|allowed| allowed == chain)
+    {
+        issues.push(issue(
+            "compile_error",
+            path_with_key(step_path, "chain"),
+            &format!("step chain `{chain}` is outside sketch.chain_scope"),
+            "candidate_chain_not_allowed",
+        ));
+    }
     let effective_inputs = step.inputs.clone();
 
     if let Some(meta) = candidate_index.get(candidate_ref.as_str()) {
@@ -300,41 +353,86 @@ fn compile_step(
         ));
     }
 
-    let (operation_spec, source_key, source_leaf) = match resolved_kind {
-        CandidateKind::Action => match resolve_action_ref(context, candidate_ref.as_str()) {
-            Ok(resolved) => (resolved.action_spec, "action", resolved.reference.action),
-            Err(error) => {
-                issues.push(issue(
-                    "compile_error",
-                    path_with_key(step_path, "candidate_ref"),
-                    &format!("unable to resolve action candidate: {error}"),
-                    "candidate_not_found",
-                ));
-                return Err(issues);
-            }
-        },
-        CandidateKind::Query => match resolve_query_ref(context, candidate_ref.as_str()) {
-            Ok(resolved) => (resolved.query_spec, "query", resolved.reference.query),
-            Err(error) => {
-                issues.push(issue(
-                    "compile_error",
-                    path_with_key(step_path, "candidate_ref"),
-                    &format!("unable to resolve query candidate: {error}"),
-                    "candidate_not_found",
-                ));
-                return Err(issues);
-            }
-        },
+    let (protocol_ref, protocol, operation_key, _operation_spec, source_key, source_leaf) =
+        match resolved_kind {
+            CandidateKind::Action => match resolve_action_ref(context, candidate_ref.as_str()) {
+                Ok(resolved) => (
+                    format!(
+                        "{}@{}",
+                        resolved.reference.protocol, resolved.reference.version
+                    ),
+                    resolved.protocol,
+                    resolved.reference.action.clone(),
+                    resolved.action_spec,
+                    "action",
+                    resolved.reference.action,
+                ),
+                Err(error) => {
+                    issues.push(issue(
+                        "compile_error",
+                        path_with_key(step_path, "candidate_ref"),
+                        &format!("unable to resolve action candidate: {error}"),
+                        "candidate_not_found",
+                    ));
+                    return Err(issues);
+                }
+            },
+            CandidateKind::Query => match resolve_query_ref(context, candidate_ref.as_str()) {
+                Ok(resolved) => (
+                    format!(
+                        "{}@{}",
+                        resolved.reference.protocol, resolved.reference.version
+                    ),
+                    resolved.protocol,
+                    resolved.reference.query.clone(),
+                    resolved.query_spec,
+                    "query",
+                    resolved.reference.query,
+                ),
+                Err(error) => {
+                    issues.push(issue(
+                        "compile_error",
+                        path_with_key(step_path, "candidate_ref"),
+                        &format!("unable to resolve query candidate: {error}"),
+                        "candidate_not_found",
+                    ));
+                    return Err(issues);
+                }
+            },
+        };
+
+    let operation_kind = match resolved_kind {
+        CandidateKind::Action => ResolvedOperationKind::Action,
+        CandidateKind::Query => ResolvedOperationKind::Query,
+    };
+    let Some(resolved_spec) = resolve_operation_spec(
+        protocol_ref.as_str(),
+        protocol,
+        operation_key.as_str(),
+        operation_kind,
+        chain,
+        pack,
+    ) else {
+        issues.push(issue(
+            "compile_error",
+            path_with_key(step_path, "candidate_ref"),
+            &format!(
+                "no deployment mapping for chain `{chain}` in `{}`",
+                protocol_ref
+            ),
+            "candidate_deployment_missing_for_chain",
+        ));
+        return Err(issues);
     };
 
     validate_required_params(
-        operation_spec,
+        &resolved_spec.merged_spec,
         &effective_inputs,
         candidate_ref.as_str(),
         &mut issues,
     );
     let mut normalized_inputs = normalize_step_inputs(
-        operation_spec,
+        &resolved_spec.merged_spec,
         &effective_inputs,
         chain,
         candidate_ref.as_str(),
@@ -355,7 +453,7 @@ fn compile_step(
     lint_unknown_input_refs(&normalized_inputs, known_input_refs, step_path, &mut issues);
     validate_step_runtime_controls(step, step_path, &mut issues);
 
-    let execution = match select_execution_for_chain(operation_spec, chain) {
+    let execution = match select_execution_for_chain(&resolved_spec.merged_spec, chain) {
         Some(execution) => execution,
         None => {
             issues.push(issue(
@@ -397,6 +495,24 @@ fn compile_step(
         return Err(issues);
     }
 
+    let execution = match annotate_composite_step_protocol_bindings(
+        &execution,
+        protocol_ref.as_str(),
+        protocol,
+        chain,
+    ) {
+        Ok(execution) => execution,
+        Err(error) => {
+            issues.push(issue(
+                "compile_error",
+                path_with_key(step_path, "candidate_ref"),
+                &error,
+                "candidate_invalid_composite_chain",
+            ));
+            return Err(issues);
+        }
+    };
+
     let mut node = Map::<String, Value>::new();
     node.insert("id".to_string(), Value::String(node_id.clone()));
     node.insert(
@@ -414,6 +530,34 @@ fn compile_step(
             "params": to_bindings_params(&normalized_inputs)
         }),
     );
+    if let Some(calculated_overrides) = merged_calculated_overrides(&resolved_spec.merged_spec) {
+        let order = match calculated_override_order_from_map(&calculated_overrides) {
+            Ok(order) => order,
+            Err(_) => {
+                issues.push(issue(
+                    "compile_error",
+                    path_with_key(step_path, "candidate_ref"),
+                    &format!(
+                        "candidate `{}` has invalid calculated_fields metadata",
+                        candidate_ref
+                    ),
+                    "candidate_invalid_calculated_fields",
+                ));
+                return Err(issues);
+            }
+        };
+        let mut ordered = Map::<String, Value>::new();
+        for key in &order {
+            if let Some(value) = calculated_overrides.get(key.as_str()) {
+                ordered.insert(key.clone(), value.clone());
+            }
+        }
+        node.insert("calculated_overrides".to_string(), Value::Object(ordered));
+        node.insert(
+            "calculated_override_order".to_string(),
+            Value::Array(order.into_iter().map(Value::String).collect()),
+        );
+    }
     node.insert(
         "writes".to_string(),
         Value::Array(vec![json!({
@@ -424,7 +568,7 @@ fn compile_step(
     node.insert(
         "source".to_string(),
         json!({
-            "protocol": candidate_ref.split('/').next().unwrap_or_default(),
+            "protocol": protocol_ref.clone(),
             source_key: source_leaf
         }),
     );
@@ -440,6 +584,9 @@ fn compile_step(
     if !step.stores.is_empty() {
         plan_sketch_extension["stores"] = json!(step.stores);
     }
+    if let Some(token_resolution) = step.extensions.get("token_resolution") {
+        plan_sketch_extension["token_resolution"] = token_resolution.clone();
+    }
     if matches!(step.kind.as_str(), "assert" | "branch") {
         plan_sketch_extension["step_kind"] = Value::String(step.kind.clone());
     }
@@ -452,6 +599,21 @@ fn compile_step(
     if let Some(meta) = candidate_index.get(candidate_ref.as_str()) {
         copy_risk_metadata_from_candidate(meta, &mut extensions);
     }
+    extensions["operation"] = build_operation_extension(&resolved_spec);
+    insert_required_query_metadata(
+        &mut extensions,
+        required_query_names(&resolved_spec),
+        step_query_bindings(
+            step,
+            segment_steps_by_id,
+            segment_step_to_node_id,
+            protocol_ref.as_str(),
+        ),
+    );
+    merge_policy_extension(&mut extensions, build_policy_extension(&resolved_spec));
+    extensions["protocol"] =
+        build_protocol_extension(protocol_ref.as_str(), &resolved_spec.deployment);
+    insert_sketch_pack_extension(&mut extensions, sketch, resolved_spec.pack.as_ref());
     node.insert("extensions".to_string(), extensions);
     if let Some(when) = &step.when {
         let cel = when.cel.as_str();
@@ -490,7 +652,212 @@ fn compile_step(
         );
     }
 
-    Ok(Value::Object(node))
+    let node = Value::Object(node);
+    match lower_composite_node(&node) {
+        Ok(Some(lowered)) => Ok(lowered),
+        Ok(None) => Ok(vec![node]),
+        Err(error) => Err(vec![issue(
+            "compile_error",
+            path_with_key(step_path, "candidate_ref"),
+            &error,
+            "candidate_invalid_composite_execution",
+        )]),
+    }
+}
+
+fn validate_and_resolve_sketch_pack<'a>(
+    sketch: &PlanSketchDocument,
+    context: &'a ResolverContext,
+) -> Result<Option<&'a crate::documents::PackDocument>, Vec<StructuredIssue>> {
+    let name = sketch.pack_snapshot.name.as_deref();
+    let version = sketch.pack_snapshot.version.as_deref();
+    match (name, version) {
+        (None, None) => Ok(None),
+        (Some(_), None) | (None, Some(_)) => Err(vec![issue(
+            "compile_error",
+            vec![FieldPathSegment::Key("pack_snapshot".to_string())],
+            "pack_snapshot must include both name and version when binding a pack",
+            "pack_snapshot_incomplete",
+        )]),
+        (Some(name), Some(version)) => {
+            let pack_key = format!("{name}@{version}");
+            let Some(pack) = context.packs.get(pack_key.as_str()) else {
+                return Err(vec![issue(
+                    "compile_error",
+                    vec![
+                        FieldPathSegment::Key("pack_snapshot".to_string()),
+                        FieldPathSegment::Key("name".to_string()),
+                    ],
+                    &format!("pack snapshot could not be resolved: {pack_key}"),
+                    "pack_snapshot_missing",
+                )]);
+            };
+            let actual_hash = pack_document_hash(pack).unwrap_or_default();
+            if !sketch.pack_snapshot.hash.trim().is_empty()
+                && sketch.pack_snapshot.hash != actual_hash
+            {
+                return Err(vec![issue(
+                    "compile_error",
+                    vec![
+                        FieldPathSegment::Key("pack_snapshot".to_string()),
+                        FieldPathSegment::Key("hash".to_string()),
+                    ],
+                    &format!(
+                        "pack snapshot hash mismatch for `{pack_key}`: expected `{}`, got `{}`",
+                        actual_hash, sketch.pack_snapshot.hash
+                    ),
+                    "pack_snapshot_hash_mismatch",
+                )]);
+            }
+            Ok(Some(pack))
+        }
+    }
+}
+
+fn insert_sketch_pack_extension(
+    extensions: &mut Value,
+    sketch: &PlanSketchDocument,
+    pack: Option<&crate::protocol::ResolvedPackOperation>,
+) {
+    let Some(pack) = pack else {
+        return;
+    };
+    let Some(extensions_obj) = extensions.as_object_mut() else {
+        return;
+    };
+    let mut pack_extension = build_pack_extension(pack);
+    let Some(pack_extension_obj) = pack_extension.as_object_mut() else {
+        return;
+    };
+    if let Some(name) = sketch.pack_snapshot.name.clone() {
+        pack_extension_obj.insert("name".to_string(), Value::String(name));
+    }
+    if let Some(version) = sketch.pack_snapshot.version.clone() {
+        pack_extension_obj.insert("version".to_string(), Value::String(version));
+    }
+    if !sketch.pack_snapshot.hash.trim().is_empty() {
+        pack_extension_obj.insert(
+            "hash".to_string(),
+            Value::String(sketch.pack_snapshot.hash.clone()),
+        );
+    }
+    extensions_obj.insert("pack".to_string(), pack_extension);
+}
+
+fn merged_calculated_overrides(operation_spec: &Value) -> Option<Map<String, Value>> {
+    let overrides = operation_spec
+        .as_object()
+        .and_then(|spec| spec.get("calculated_fields"))
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    if overrides.is_empty() {
+        None
+    } else {
+        Some(overrides)
+    }
+}
+
+fn insert_required_query_metadata(
+    extensions: &mut Value,
+    required_queries: Vec<String>,
+    query_bindings: Map<String, Value>,
+) {
+    if required_queries.is_empty() && query_bindings.is_empty() {
+        return;
+    }
+    let Some(operation) = extensions
+        .as_object_mut()
+        .and_then(|extensions| extensions.get_mut("operation"))
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    if !required_queries.is_empty() {
+        operation.insert(
+            "requires_queries".to_string(),
+            Value::Array(required_queries.into_iter().map(Value::String).collect()),
+        );
+    }
+    if !query_bindings.is_empty() {
+        operation.insert("query_bindings".to_string(), Value::Object(query_bindings));
+    }
+}
+
+fn merge_policy_extension(extensions: &mut Value, policy_extension: Value) {
+    let Some(policy_extension_obj) = policy_extension.as_object() else {
+        return;
+    };
+    if policy_extension_obj.is_empty() {
+        return;
+    }
+    let Some(extensions_obj) = extensions.as_object_mut() else {
+        return;
+    };
+    let policy = extensions_obj
+        .entry("policy".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    let Some(policy_obj) = policy.as_object_mut() else {
+        return;
+    };
+    for (key, value) in policy_extension_obj {
+        policy_obj.insert(key.clone(), value.clone());
+    }
+}
+
+fn required_query_names(resolved_spec: &crate::protocol::ResolvedOperationSpec) -> Vec<String> {
+    resolved_spec
+        .merged_spec
+        .as_object()
+        .and_then(|spec| spec.get("requires_queries"))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn step_query_bindings(
+    step: &crate::documents::PlanSketchStep,
+    segment_steps_by_id: &HashMap<String, crate::documents::PlanSketchStep>,
+    segment_step_to_node_id: &HashMap<String, String>,
+    protocol_ref: &str,
+) -> Map<String, Value> {
+    let mut bindings = Map::<String, Value>::new();
+    for dep in &step.depends_on {
+        let Some(dep_step) = segment_steps_by_id.get(dep) else {
+            continue;
+        };
+        if dep_step.kind != "query" {
+            continue;
+        }
+        let Some(candidate_ref) = normalized_candidate_ref(dep_step.candidate_ref.as_deref())
+        else {
+            continue;
+        };
+        let Some((dep_protocol_ref, query_name)) = candidate_ref.split_once('/') else {
+            continue;
+        };
+        if dep_protocol_ref != protocol_ref {
+            continue;
+        }
+        let Some(node_id) = segment_step_to_node_id.get(dep) else {
+            continue;
+        };
+        bindings.entry(query_name.to_string()).or_insert_with(|| {
+            json!({
+                "node_id": node_id,
+                "query_ref": candidate_ref
+            })
+        });
+    }
+    bindings
 }
 
 fn normalized_candidate_ref(value: Option<&str>) -> Option<String> {
@@ -975,6 +1342,40 @@ fn copy_risk_metadata_from_candidate(meta: &CandidateMeta, extensions: &mut Valu
                 .collect::<Vec<_>>(),
         );
     }
+}
+
+fn validate_emitted_node_ids(
+    emitted_nodes: &[Value],
+    seen_node_ids: &mut HashSet<String>,
+    path: &[FieldPathSegment],
+) -> Vec<StructuredIssue> {
+    let mut issues = Vec::<StructuredIssue>::new();
+    for node in emitted_nodes {
+        let Some(node_id) = node
+            .as_object()
+            .and_then(|object| object.get("id"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            issues.push(issue(
+                "compile_error",
+                path.to_vec(),
+                "lowered node is missing `id`",
+                "candidate_invalid_lowered_missing_id",
+            ));
+            continue;
+        };
+        if !seen_node_ids.insert(node_id.to_string()) {
+            issues.push(issue(
+                "compile_error",
+                path.to_vec(),
+                &format!("duplicate emitted node id after lowering: {node_id}"),
+                "candidate_invalid_lowered_duplicate_id",
+            ));
+        }
+    }
+    issues
 }
 
 fn issue(

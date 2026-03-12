@@ -112,11 +112,18 @@ pub fn execute_run_workflow(command: &WorkflowCommand) -> Result<String, RunnerE
             .to_path_buf(),
     };
 
-    let mut loaded = load_workspace_documents_excluding(
-        workspace_root.as_path(),
-        std::slice::from_ref(&command.workflow),
-    )
-    .map_err(|issues| RunnerError::WorkspaceLoad(format!("{issues:?}")))?;
+    let mut excluded = vec![command.workflow.clone()];
+    if let Some(runtime) = &command.runtime {
+        excluded.push(runtime.clone());
+    }
+    if let Some(config) = &command.config {
+        excluded.push(config.clone());
+    }
+    if let Some(outputs) = &command.outputs {
+        excluded.push(outputs.clone());
+    }
+    let mut loaded = load_workspace_documents_excluding(workspace_root.as_path(), &excluded)
+        .map_err(|issues| RunnerError::WorkspaceLoad(format!("{issues:?}")))?;
     loaded.workflows.push(workflow.clone());
 
     let mut issues = validate_workspace_references(WorkspaceDocuments {
@@ -148,6 +155,9 @@ pub fn execute_run_workflow(command: &WorkflowCommand) -> Result<String, RunnerE
     let mut compile_context = ResolverContext::new();
     for protocol in loaded.protocols.iter().cloned() {
         compile_context.register_protocol(protocol);
+    }
+    for pack in loaded.packs.iter().cloned() {
+        compile_context.register_pack(pack);
     }
 
     let plan = match compile_workflow(

@@ -17,6 +17,21 @@ CLI wrapper for AIS SDK/engine workflows.
 
 ## Recent changes
 
+- `POST-018 legacy example cleanup beyond Aave`: `examples/erc20.ais.yaml` and `examples/spl-token.ais.yaml` now follow the same slimmed protocol boundary as the newer examples. Legacy `capabilities_required` and top-level `risks` were removed, and `spl-token` asset metadata now uses the preferred `supported_assets[].deployments[]` shape. Runner raw-ingest regression coverage was expanded so these examples are validated alongside Aave/Uniswap/safe-defi.
+- `POST-016 raw Aave execute parity`: runner's three main Aave dry-run regressions now compile and dry-run directly from raw `examples/aave-v3.ais.yaml`. Deployment-backed `contracts.pool`, protocol `calculated_fields`, and composite lowering for `supply` are therefore all locked against the raw example document instead of a reduced helper fixture.
+- `POST-008 pack snapshot invariant`: segmented compile no longer trusts caller-supplied pack snapshot hashes blindly. When `CandidateContext` carries a pack, runner now verifies the incoming `pack_snapshot_hash` against the active pack document before building a `PlanSketchDocument`, and downstream SDK compile also rejects missing/mismatched `pack_snapshot.{name,version,hash}`. This keeps `extensions.pack.hash` audit metadata aligned with the pack semantics that actually produced the node.
+- `POST-006 dropped pack.providers residue`: runner no longer exposes `pack.providers` through resolved candidate detail or compiled pack metadata. `get_candidate_detail` now surfaces only active pack semantics (`constraints`, `matched_action_rule_ids`, action override presence) instead of carrying a dropped provider-routing field.
+- `POST-004 workspace sidecar exclusion`: workspace loading now ignores non-AIS YAML/JSON sidecars such as runtime payloads and `ais-runner` configs, and `run workflow` explicitly excludes `--workflow` / `--runtime` / `--config` / `--outputs` side files from workspace discovery. This closes the false-positive parse path where a colocated `runtime.yaml` or `runner.local.yaml` could break workspace loading.
+- `POST-003 example-backed proof scoping`: runner docs/tests now distinguish raw example parity from reduced-semantic fixture coverage. The safe-defi/Uniswap fixture is documented as a reduced semantic snapshot rather than an otherwise-equivalent raw example, because it removes or simplifies unsupported detect/slippage/constraint surfaces before proving the remaining compile/readiness/engine path.
+- `POST-015 raw safe-defi execute parity`: runner's pack-constrained Uniswap dry-run regression no longer goes through a reduced semantic Uniswap/safe-defi fixture. The main safe-defi regression now compiles and dry-runs directly from raw `examples/uniswap-v3.ais.yaml` plus raw `examples/safe-defi-pack.ais-pack.yaml`, so pack merge, prerequisite query bindings, slippage-derived `min_out_atomic`, and composite lowering are proven against the raw example semantics that remain after recent protocol slimming.
+- `CPS-603 prompt/tool contract alignment`: segmented planner prompts now document the host-owned semantic surfaces that already exist instead of asking the model to infer them. System prompt contracts now call out `get_candidate_detail.semantic_hints` as source-of-truth metadata when runner has resolved a deterministic concrete chain, describe the expanded CEL/runtime roots (`query`, `calculated`, `policy`, `contracts`, `ctx`), and tell grounding/revise flows to treat `token_policy_signal` as a host-enforced pack token-policy diagnostic rather than something to bypass with guessed symbols or addresses.
+- `CPS-602 resolved-semantics write-gates`: write-gate validation now reads prerequisite query requirements from resolved semantic hints rather than relying only on flattened catalog fields. Compile-phase error state payloads also surface token-policy diagnostics (`token_policy_signal`) when pack token resolution rejects a symbol, so planner grounding/pause repair sees the concrete chain/symbol/policy reason instead of a generic compile error.
+- `CPS-601 resolved semantic hints in candidate detail`: agent-facing candidate detail now exposes a compact `semantic_hints` block derived from the same resolved operation semantics used by compile/runtime when runner can bind the candidate to a deterministic concrete chain. Detail responses can then tell the planner which deployment/contract map was selected, which prerequisite queries are required, whether the operation still needs composite lowering, and what pack merge state (`matched_action_rule_ids`, action override presence, constraint counts) is active.
+- `CPS-501 token-policy-aware segmented compile`: agent segmented compile now resolves asset symbol inputs through pack `token_policy` + protocol `supported_assets` before lowering a segment into `PlanSketchDocument`. Allowlisted symbols are normalized into structured asset objects, denied/unallowlisted symbols fail at compile time with structured `token_symbol_*` issues, and direct address inputs now surface `extensions.plan_sketch.token_resolution.*` metadata so host/UI can require explicit asset-address confirmation when pack policy asks for it.
+- `CPS-202 pack-aware compile/candidate merge`: `run workflow` now registers loaded packs into `ais-sdk::ResolverContext`, and segmented agent compile now preserves pack snapshot `name/version/hash` when lowering a segment into `PlanSketchDocument`. Candidate detail cards are also resolved through the same pack+protocol semantic merge used by the compilers, so pack-overridden `description`, `risk`, `requires_queries`, constraints, and provider hints are visible to agent discovery/write-gate decisions from one source of truth.
+- `CPS-201 include-source resolution`: workspace loading now treats `.ais/registry` as a registry snapshot store instead of normal workspace protocol inventory. Pack includes with `source: registry` resolve protocol snapshots from `.ais/registry/protocols/<protocol>/<version>.{json,yaml,yml}` or `.ais/registry/protocols/<protocol>/<version>/protocol.{json,yaml,yml}`, dedupe by `protocol@version`, and prefer already-loaded workspace protocols when present. `run workflow` and agent candidate loading therefore no longer fail solely because the protocol is absent from the workspace root, as long as a matching registry snapshot exists.
+- `CPS-302 calculated-field regression lock`: example-backed dry-run coverage now asserts that `aave-v3.withdraw` resolves protocol `calculated_fields` end-to-end, and that `aave-v3.supply` compiles those bindings into node `calculated_overrides` without surfacing `calculated.*` as user-missing input even though `composite` / `requires_queries` are still pending.
+- `CPS-401 composite-lowering regression lock`: example-backed dry-run coverage now asserts that `aave-v3.supply` no longer emits a top-level `execution.type = composite`. The compiled plan lowers into ordered base nodes (`supply__approve_if_needed` -> `supply`) with `extensions.composite` trace metadata, so runner dry-run surfaces executor-ready `evm_call` steps instead of raw protocol DSL.
 - `G-001 / G-002 fixture regression and auditability lock-in`: `segmented_flow` now includes native+ERC20 fixture-grade scripted regressions for three previously reviewed chains: checkpoint-restored `inputs.token.decimals` satisfying write-gates and CEL at execution time, `missing_action_gate_dep` revise-success recovery, and `stale_volatile_fact` repair by adding a fresh same-segment balance query. The same suite now also asserts audit artifacts directly: `events-jsonl` keeps the paused primary issue visible, checkpoint persists the semantic truth the host actually used (`resume_core.input_store.entries.token.decimals.value` remains numeric), and `llm-transcript` carries the repair hints that match the host acceptance contract.
 - `F-002 operator/audit issue taxonomy alignment`: operator-facing docs now spell out the stable issue taxonomy for write-gate, stale volatile facts, and canonical decimals/asset semantics. The documented contract is now: actionable top-level `reason_code`, optional `family_reason_code` for grouping, `stale_volatile_fact` carrying timestamp/age/threshold evidence, and `missing_token_decimals` always meaning the canonical numeric asset leaf/object contract is not yet satisfied. README/audit docs now also tell operators which artifact to inspect for each class of failure: compile/check payloads in `events-jsonl`, host decision context in `agent-trace-jsonl`, and semantic truth in `checkpoint`.
 - `F-001 planner write-gate/freshness prompt alignment`: the segmented planner prompt now states the current host contract explicitly instead of leaving write-gate repair to inference. Base rules, phase-specific propose/revise guidance, and contracts summary now all say that `depends_on` is only for same-segment scheduling/gate reachability, historical `nodes.<step>.outputs.*` refs do not require invented same-segment query deps, `balance`/`allowance` are volatile query facts that need a fresh same-segment query before writes when no historical node-output backing exists, and successful writes invalidate prior volatile observations for follow-up writes. The prompt also tightens the canonical `decimals` contract to `inputs.<asset>.decimals` leaves / resolved asset objects and keeps `*.decimals` refs out of token/address slots.
@@ -179,6 +194,33 @@ CLI wrapper for AIS SDK/engine workflows.
   - `ais-runner plan diff --before <plan> --after <plan> [--format text|json]`
   - `ais-runner replay [--trace-jsonl <file>] [--checkpoint <file> --plan <plan> --config <runner-config>] [--until-node <id>] [--format text|json]`
 - `ais-runner agent (--plan <file> | --intent <text> | --intent-file <file>) --config <runner-config> [--workspace <dir>] [--pack <pack-file>] [--runtime <file>] [--events-jsonl <path|->] [--trace <path>] [--agent-trace-jsonl <path>] [--checkpoint <path>] [--profile standard|demo-scripted] [--llm-script-jsonl <file>] [--verbose] [--verbose-llm] [--approvals-mode safe|assist|yolo] [--max-iterations <n>] [--max-planner-rounds <n>] [--max-tool-rounds <n>] [--max-index-candidates <n>] [--planner-context-token-budget <n>] [--llm-transcript-path <file>] [--llm-transcript-append] [--format text|json]`
+
+Agent-facing integration notes:
+- candidate discovery/detail is pack-aware when `--pack` is provided and the pack resolves against the workspace/registry snapshot
+- candidate detail includes `semantic_hints` only when runner can resolve the candidate against a deterministic concrete chain; when present, those hints expose deployment bindings, prerequisite queries, composite-lowering need, and pack merge state without reverse-inferring them from raw catalog cards
+- segmented compile persists the selected pack snapshot into `plan_sketch.pack_snapshot` so downstream sketch compilation can reapply the same merged semantics deterministically
+- segmented compile now also applies pack token resolution policy before sketch compile, and surfaces per-param token resolution metadata at `node.extensions.plan_sketch.token_resolution`
+- segmented planner prompts/fixtures now explicitly treat `semantic_hints` and `token_policy_signal` as host-owned contracts, and the prompt-level CEL/runtime-root guidance matches the shared binding roots already exposed by compile/readiness/engine (`inputs`, `params`, `nodes`, `query`, `calculated`, `policy`, `ctx`, `contracts`)
+
+## Complex Protocol Support Boundaries
+
+- Example-backed dry-run coverage now closes the main target family:
+  - raw `aave-v3.supply-raw` proves deployment-backed `contracts.pool`
+  - raw `aave-v3.withdraw` proves protocol `calculated_fields`
+  - raw `aave-v3.supply` proves composite lowering and prerequisite query lowering
+  - raw `safe-defi-pack` constrained Base `uniswap-v3.swap-exact-in` proves pack merge, raw slippage-derived `min_out_atomic`, prerequisite query binding, and executor-facing composite lowering
+- Runner closeout guarantee still is not byte-for-byte raw for every example family:
+  - raw `aave-v3` / `uniswap-v3` / `safe-defi-pack` examples now parse, schema-validate, and ingest directly without a pre-normalization pass
+  - the main Aave and safe-defi/Uniswap dry-run coverage now uses raw examples rather than reduced semantic snapshots
+  - remaining non-raw evidence is limited to targeted schema/edge-case fixtures, not the primary example-backed runner regressions
+- What is now host-owned in runner main flow:
+  - pack include loading from workspace/registry snapshot
+  - deployment selection and `contracts.*` projection
+  - pack constraint / override merge
+  - protocol `calculated_fields`
+  - prerequisite `requires_queries` / `query_bindings`
+  - composite lowering to executor-facing base nodes
+  - agent-side token-policy-aware asset normalization and diagnostics
 
 ### Artifact contracts
 
@@ -398,6 +440,7 @@ Intent mode requires `--workspace` candidates and uses the vNext segmented loop:
   - `plan.propose_segment` / `plan.revise_segment` with `status=proposed` MUST include a `segment`
   - with `status=invalid|unavailable` MUST include an `error.reason_code`
 - segmented step kinds support `query|action|assert|branch`
+- segmented executable steps now support optional `step.chain`; when `chain_scope` spans multiple chains, query/action steps must set `chain` explicitly and runner compile no longer falls back to `chain_scope.first()`
 - `plan.begin.cursor` accepts string/number and is normalized to string for session state (`"0"` style cursor is valid)
 - `plan.begin` prompt payload now includes host-derived `snapshot_hash`; planner must echo this exact hash to avoid begin-session drift
 - planner tool-call decoding accepts `segment` as object or JSON-stringified object text; non-object/invalid JSON still yields deterministic repair reason codes
@@ -473,6 +516,7 @@ Intent mode requires `--workspace` candidates and uses the vNext segmented loop:
   - `AGT-LI-015` unknown-input auto-repair suggestions are now staged and deterministic: candidate ranking prioritizes exact canonical alias matches first, then grounding-aware deterministic alias candidates (including `intent_slots.intent_facts` hints such as `fact:token` -> canonical token refs), and only then bounded semantic fallback; compile-autofill emits trace event `unknown_input_ref_repair_suggested` with top candidates.
   - `AGT-LI-019` prompt semantic guard for unknown-input repair: token/address params prefer address-like refs (for example `*.address`), and `*.decimals` refs are explicitly disallowed as substitutes for token/address slots.
 - segmented draft step contract is conditional: each `segment.steps[]` must include `id/kind/inputs`; `candidate_ref` is required for `query|action` and optional for built-in `assert|branch`
+  - `segment.steps[].chain` is optional for single-chain segments, but required on `query|action` when the available `chain_scope` is multi-chain
   - when planner omits `candidate_ref` on executable steps (`query|action`), runner emits targeted diagnostics with missing step ids/kinds and classifies retry reason as `missing_candidate_ref` for deterministic repair prompts
   - planner-output repair payload now includes `previous_error.last_failed_finalize` (failed finalize tool call args + assistant snippet, compacted), so revise rounds can patch the previous draft instead of regenerating from scratch
 - `segment.steps[].depends_on` may only reference step ids in the same segment (cross-segment ids like `seg_1/...` are invalid)
@@ -507,6 +551,13 @@ Intent mode requires `--workspace` candidates and uses the vNext segmented loop:
 
 Use fixture `rust/ais-rs/fixtures/runner-local/intent-native-erc20-transfer`:
 commands below assume working directory `/home/xcshuan/work/owlia/ais`.
+
+Export fixture secrets via env placeholders first:
+
+```bash
+export OPENROUTER_API_KEY=dummy-local-script-key
+export AIS_RUNNER_LOCAL_EVM_PRIVATE_KEY=0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d
+```
 
 ```bash
 cargo run --manifest-path rust/ais-rs/Cargo.toml -p ais-runner -- agent \
@@ -546,6 +597,8 @@ cargo run --manifest-path rust/ais-rs/Cargo.toml -p ais-runner -- agent \
 - `planner_context_token_budget`: optional `state_summary` token budget override for segmented planner context projection (default `6000`, CLI `--planner-context-token-budget` has higher priority)
 - `max_tool_rounds`: optional max LLM tool rounds per segmented planner phase call (`ground_intent` / `propose_todos` / `propose_segment` / `revise_segment`), default `24`, CLI `--max-tool-rounds` has higher priority
 - `context_limit_tokens`: optional LLM context limit for usage tracking (supports integer or human-readable string like `262k` / `1M` / `262,144`); runner computes remaining headroom against a 90% soft limit.
+- runner config scalar strings support `${ENV_VAR}` placeholders before decode; this is the preferred way to provide secrets like `llm.api_key` and signer `private_key`
+- missing env placeholders fail with structured runner-config issues instead of silently decoding as empty strings
 - planner context projection now uses adaptive budgeting: when `runtime.agent.llm_usage.context_remaining_tokens` ratio is high, `state_summary` budget is relaxed (less aggressive trimming); when low, it tightens automatically.
 - `state_summary` projection is emitted directly from context-budget + pressure strategy output (no extra post-pass compact layer), so high-value registry/context fields remain visible when budget allows.
   - `context_remaining_tokens` now means per-call context-window headroom (soft limit - current request input tokens).

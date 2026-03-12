@@ -1,0 +1,423 @@
+# ais-agent-runtime
+
+Purpose:
+- host the real runtime execution controller for `ais-agent`
+- keep stepper, runtime service, persistence orchestration, and event emission out of `ais-agent-core`
+
+Public API entry points:
+- current public modules:
+  - `concurrency`
+  - `service`
+  - `runtime`
+  - `stepper`
+  - `persistence`
+  - `events`
+
+Dependencies on workspace crates:
+- `ais-agent-control`
+- `ais-agent-core`
+- `ais-agent-evm`
+- `ais-agent-host`
+- `ais-agent-solana`
+
+Current implementation status:
+- crate skeleton created
+- module layout frozen for:
+  - runtime service
+  - runtime state
+  - stepper
+  - persistence
+  - events
+- `ActiveRun` implemented
+- `RuntimeDriverBinder` implemented for attaching driver-produced fragments into hot runtime state
+- `RuntimeDriverBinder` now also attaches:
+  - API-native direct-envelope outputs
+  - raw-envelope guarded execution nodes
+- `RunRepository` contract implemented
+- in-memory run repository implemented
+- durable repository contracts now frozen for:
+  - `MissionRepository`
+  - `RunCatalogRepository`
+  - `CheckpointArchive`
+  - `EventArchive`
+  - `SignerStateArchive`
+  - `RuntimeAuditArchive`
+- grouped durable write-set contracts now frozen for:
+  - `DurableMutationUnit`
+  - `DurableMutationKind`
+  - mission/checkpoint/event/catalog/signer/audit write members
+  - fail-closed `validate_durable_mutation_unit(...)`
+- runtime-owned executor seam now exists for those grouped units:
+  - `DurableMutationExecutor`
+  - `DurableCommitReceipt`
+  - `DurableCommitError`
+  - `LinearDurableMutationExecutor` as the current reference implementation
+- in-memory repository shells implemented for:
+  - mission archive
+  - run catalog
+  - checkpoint archive
+  - event archive
+  - signer-state archive
+  - runtime audit archive
+- checkpoint archive now uses `append/latest` archive semantics instead of overwrite-style save/load
+- checkpoint `latest(...)` semantics are now monotonic:
+  - latest resolves by highest durable checkpoint truth (`checkpoint_seq`, then `plan_epoch`)
+  - later append order does not override a newer checkpoint with an older one
+- checkpoint archive entry kinds now distinguish:
+  - `boundary`
+  - `progress`
+  - `side_effect`
+- concrete SQLite backend now exists in:
+  - `ais-agent-store-sqlite`
+  covering:
+    - mission archive
+    - run catalog
+    - checkpoint archive
+    - event archive
+    - signer-state archive
+    - runtime audit archive
+    - transaction-backed `DurableMutationExecutor`
+- runtime host service now also owns a durable audit archive dependency and commits grouped durable truth through the executor seam for:
+  - `begin_run`
+  - `step_run`
+  - `submit_evidence`
+  - `submit_envelope`
+  - `submit_signer_decision`
+  - `submit_plan_patch`
+  - `cancel_run`
+- durable restore path now reconstructs `ActiveRun` from:
+  - `MissionRepository`
+  - latest `CheckpointArchive` entry
+  - durable `SignerStateArchive`
+  instead of relying on a retained hot runtime copy
+  and now rejects malformed confirmation-resume checkpoints that are missing:
+    - `pending_confirmation_id`
+    - effect contracts required by pending verify nodes
+- optimistic concurrency helpers implemented for mutable commands:
+  - current version snapshot
+  - stale checkpoint sequence guard
+  - stale plan epoch guard
+  - machine-readable stale-command conflict reason
+  - host-side durable mutations now advance checkpoint sequence so repeated stale submissions are rejected against the latest persisted version
+- `step_once(...)` implemented as a one-local-transition state machine
+- `step_until_boundary(...)` implemented with:
+  - budget-aware scheduler loop
+  - stop reasons
+  - durable interruption truth for scheduler budget exhaustion
+  - checkpoint persistence before returning control
+  - explicit side-effect durability cuts when execution enters confirmation wait with a persisted broadcast tx id
+  - runtime event emission per local transition
+  - hot runtime event log retention for later polling
+  - sequenced `RunEventEnvelope` output carrying:
+    - `run_id`
+    - `event_seq`
+    - `checkpoint_seq`
+    - `plan_epoch`
+  - runtime-backed host service implemented for:
+  - `begin_run`
+  - `inspect_run`
+  - `step_run`
+  - `submit_evidence`
+  - `submit_envelope`
+  - `submit_signer_decision`
+  - `submit_plan_patch`
+  - `cancel_run`
+  - all host-service entry points now execute through an async `HostCommandService` surface
+  - hot-cache miss handling now restores from durable mission + checkpoint archives before serving inspect/mutation requests
+  - `inspect_run` now uses archive-backed projection on hot-cache miss instead of rebuilding and recaching an `ActiveRun`
+  - `inspect_run` is now also the deterministic session-relink seam after restart:
+    - if a durable run exists but the in-memory session link was lost, inspect re-attaches the run to the requesting `HostSessionId`
+    - mutation commands fail closed as `session_relink_required` until that relink happens
+    - existing live links owned by a different session still fail as `session_run_mismatch`
+  - host-service truth loading now also treats a newer durable checkpoint as authoritative over stale hot cache:
+    - `inspect_run` projects from durable mission + checkpoint when durable checkpoint seq is ahead of the cached hot runtime
+    - mutation paths restore from durable truth before trusting hot state
+    - if the newer durable checkpoint cannot be safely reconstructed, mutation paths fail closed with `restore_error` instead of continuing from stale hot memory
+  - `begin_run` now skips run ids already occupied in hot cache or durable mission archive, so restart against an existing store no longer reissues `run-1` / `mission-1`
+- durable-first host writes now update:
+  - checkpoint archive
+  - event archive
+  - run catalog
+  before hot runtime cache save / success return
+  - those success-path writes now flow through executor-built `DurableMutationUnit`s instead of repo-by-repo host choreography
+  - `step_run` now records scheduler checkpoint appends into an in-memory recorder first so the final checkpoint write can be grouped with events/catalog/signer/audit truth
+- runtime-backed event query service implemented:
+  - `HostRunEventService`
+  - cursor-style event batch reads over durable `EventArchive`
+  - unlimited and huge-limit archive reads now avoid overflow instead of probing with `u64::MAX + 1`
+  - empty event archives project to empty batches when the run itself exists
+  - restored hot runtimes realign `event_seq` from the latest archived event before emitting new ones
+  - event payloads now also cover:
+    - recovery audit views
+    - governor decision audit records
+    - plan patch submitted / applied / rejected
+- durable run-catalog tracking implemented through `RunCatalogRepository` for:
+  - latest checkpoint seq
+  - latest event seq
+  - lifecycle status / phase
+  - active boundary kind
+  - latest revision
+- SQLite-backed restart/regression coverage now proves:
+  - inspect after restart from durable mission + checkpoint archives
+  - inspect-driven session relink restores post-restart host operability before mutation
+  - patch-required recovery can restart from durable truth and still complete through `submit_plan_patch -> step`
+  - event polling after restart from durable event archive
+  - awaiting-evidence resume through real `RuntimeHostService`
+  - awaiting-signer resume from durable signer-state archive
+  - signer denial / signer submission survive restart through real `RuntimeHostService`
+- typed EVM live-binding resolution helpers implemented for:
+  - observe
+  - simulate
+  - actuate
+  - verify
+- runtime now resolves chain-scoped action `live` wrappers instead of flat per-chain payload fields
+- runtime stepper is now async so live chain I/O can happen inside:
+  - observe transitions
+  - simulate transitions
+- EVM live observe/simulate bindings now execute through real `alloy` ports for:
+  - block-number observe
+  - native-balance observe
+  - storage-slot observe
+  - ERC20 `balanceOf`
+  - ERC20 `allowance`
+  - stateless `eth_call` observe
+  - stateless `eth_call` simulate
+- Solana live observe/simulate bindings now execute through real RPC-backed ports for:
+  - slot observe
+  - lamports observe
+  - SPL token-account balance observe
+  - account-data observe
+  - signature-status observe
+  - legacy transaction simulate
+  - v0 transaction simulate with lookup-table accounts
+- Solana live write-path transitions now execute through real RPC-backed ports for:
+  - signed transaction broadcast
+  - signature-status receipt polling
+  - confirmation-depth aware receipt projection
+  - explicit `awaiting_confirmation` stable boundary
+- EVM live write-path transitions now execute through real `alloy` ports for:
+  - raw signed-transaction broadcast -> live `tx_hash`
+  - receipt polling -> observed/missing receipt view
+  - confirmation-depth aware receipt projection
+  - explicit `awaiting_confirmation` stable boundary
+  - effect verification from real:
+    - pre-state evidence
+    - receipt observation
+    - post-state read
+- transition modules implemented for:
+  - ingest
+  - observe
+  - derive
+  - simulate
+  - govern
+  - signer
+  - broadcast
+  - verify
+  - recover
+  - complete
+- runtime repository regressions cover:
+  - mission/checkpoint/signer hot state
+  - revision-guarded save
+  - duplicate insert and delete semantics
+- checkpoint repository regressions cover:
+  - append-only history
+  - latest checkpoint lookup
+  - structured not-found
+- durable repository contract regressions now also cover:
+  - mission insert/load
+  - run catalog upsert/load
+  - event archive cursor reads
+  - checkpoint archive entry-kind history
+  - mission/checkpoint mismatch rejection on restore
+  - pending signer request mismatch rejection on restore
+- runtime-owned recovery classification helpers now derive:
+  - `RecoveryDisposition`
+  - `allowed_recovery_actions`
+  - `RecoverySuggestion[]`
+  - `InterruptionClass`
+  - `CancelState`
+  - `SideEffectPhase`
+  directly from stable-boundary checkpoint truth
+- runtime lifecycle now persists explicit `InterruptionState` so host-visible interruption truth survives restart instead of living only in transient step results
+- pre-side-effect live observe provider failures now pause as retryable interruption instead of terminally failing closed
+- runtime interruption mapping now distinguishes:
+  - step budget vs wall-clock budget
+  - provider timeout vs provider unavailable
+  - confirmation wait timeout vs verify wait timeout
+  - retryable broadcast provider interruption vs broadcast outcome uncertainty
+- retry-oriented recovery suggestions now also carry explicit `RetryIntent`
+- runtime recovery wrappers now delegate to a shared core checkpoint-recovery classifier, so direct host projector usage and runtime-backed inspect cannot silently diverge on recovery semantics
+- `RuntimeHostService` now feeds those runtime-owned recovery views into host inspect/pause projection instead of relying on host-layer inference
+- runtime now validates recovery contracts at real boundaries:
+  - checkpoint persistence rejects malformed recovery truth before archive append
+  - host inspect/pause projection rejects malformed recovery truth with structured `recovery_contract_invalid`
+- runtime observability now includes `tracing` events for:
+  - scheduler start / transition / stop
+  - side-effect durability cut success / failure
+  - hot-vs-durable restore decisions
+  - archive-backed inspect source decisions
+  - durable commit stage failures
+  - hot cache invalidation after durable advancement
+- scheduler regressions now explicitly cover:
+  - transition-count budget exhaustion
+  - wall-clock budget exhaustion before any state advance
+  - stall detection fail-closed semantics
+- runtime event emission now also archives recovery/audit truth for:
+  - govern decisions
+  - recovery classification / suggestion emission
+  - plan patch success / rejection
+  - fail-closed termination with typed failure context
+- first executable recovery slices now exist for:
+  - `missing_evidence`
+  - `stale_evidence`
+  - `simulation_rejected`
+  - `governor_denied`
+  - `signer_denied`
+  - `signer_expired`
+  - `envelope_invalid`
+  including:
+    - `await_evidence`
+    - `await_patch`
+    - `await_envelope`
+- checkpoint truth now persists `pending_envelope_refs` so envelope-replacement waits survive durable projection and restart
+- `submit_plan_patch` command wiring now exists end-to-end through control/runtime routing:
+  - contract validation is enforced up front
+  - runtime patch application now executes against hot `ActiveRun`
+  - mission constraint changes are durably persisted through mission-archive upsert
+  - checkpoint / run-catalog writes happen before hot cache save
+- `submit_envelope(...)` now participates in recovery instead of acting like a blind blob insert:
+  - malformed expected-effect contracts are rejected at the host boundary
+  - unexpected replacement envelope refs are rejected with machine-readable `envelope_invalid`
+  - matching replacement envelopes clear `await_envelope` boundaries back into `running/recovering`
+- restore/apply helpers implemented for:
+  - reconstructing `ActiveRun` from mission + latest checkpoint + durable signer state
+  - persisting stable-boundary checkpoints
+  - persisting in-progress checkpoints with wait-state normalization
+  - persisting side-effect checkpoints with preserved pending wait state
+  - preserving verify-resume truth inside side-effect checkpoints:
+    - confirmation id
+    - effect contract linkage
+    - pre/post observation refs
+    - attached pre-state evidence
+  - crash/restart completion from durable side-effect cuts for:
+    - EVM broadcast -> receipt/effect verify
+    - Solana broadcast -> signature-status/effect verify
+- stepper regressions cover:
+  - single-transition semantics
+  - mocked-provider live EVM observe transition
+  - mocked-provider live EVM simulate transition
+  - fake-client live Solana observe transition
+  - fake-client live Solana simulate transition
+  - fake-client live Solana broadcast transition
+  - fake-client live Solana verify transition
+  - v0 + LUT Solana broadcast/verify
+  - evidence ingestion and resume
+  - signer boundary entry/resolution
+  - terminal completion
+  - standard-like driver fragment binding into the same live runtime path
+  - EVM reflection fragment binding into the same live runtime path
+  - API-native direct-envelope binding into the same guarded live runtime path
+  - raw-envelope binding into the same guarded live runtime path while still requiring an effect contract
+  - mixed-path matrix proof that:
+    - standard
+    - reflection
+    - API-native direct-envelope
+    - raw-envelope
+    converge into the same guarded runtime write signature
+  - stable-boundary stop
+  - budget exhaustion stop
+  - stall-to-failure stop
+  - persisted checkpoint on return
+- host-service regressions cover:
+  - begin / inspect / cancel
+  - evidence ingest + step
+  - signer decision + step
+  - plan-patch success / stale rejection / illegal rejection
+  - replacement envelope recovery and wrong-envelope rejection
+  - repeated stale host-side mutation rejection after checkpoint advancement
+  - signer submission entering chain confirmation wait instead of synthetic completion
+  - alloy-backed live EVM observation flowing into evidence ingest + governor + completion
+  - host collaboration loop over:
+    - `inspect_run`
+    - event polling
+    - `submit_evidence`
+    - `step_run`
+  - recovery mutation loops over:
+    - `inspect_run -> submit_plan_patch -> step_run`
+    - `inspect_run -> submit_envelope -> step_run`
+  - Solana guarded collaboration loop over:
+    - `inspect_run`
+    - event polling
+    - `submit_signer_decision`
+    - `step_run`
+    - `NeedConfirmation` pause
+  - stale mutable command rejection through real `RuntimeHostService`
+  - runtime-owned recovery projection for:
+    - awaiting evidence
+    - paused governor failure
+    - broadcast uncertainty
+    - retry-ready confirmation/provider failures
+    - paused verify mismatch with effect / confirmation refs
+  - fail-closed malformed-recovery rejection for:
+    - invalid checkpoint persistence
+    - archive-backed inspect of malformed recovery truth
+  - tracing smoke coverage for:
+    - scheduler transition + stop
+    - host restore + durable commit path
+  - run-catalog pointer consistency against durable checkpoint/event archives
+  - injected durable write failure returning error before hot cache save
+  - injected grouped durable write-member failure over:
+    - mission write on `begin_run`
+    - checkpoint write on mutation
+    - signer archive write
+    - event archive write
+    - run catalog write
+    - runtime audit write on `submit_plan_patch`
+  - host-session-scoped replay for:
+    - `begin_run`
+    - `step_run`
+    - `submit_evidence`
+    - `submit_envelope`
+    - `submit_plan_patch`
+    - `submit_signer_decision`
+    - `cancel_run`
+- restart / resume through real runtime service for:
+  - grouped `begin_run` truth after restart via archive-backed inspect + durable started-event polling
+  - awaiting evidence
+  - awaiting signer
+  - confirmation-path `cancel_pending`
+  - retry-ready confirmation timeout truth
+  - verifying after broadcast before final completion
+  - live EVM broadcast -> persisted confirmation wait -> restored receipt verification
+  - live EVM effect verification with persisted effect-contract inventory
+  - full guarded EVM execution through:
+    - `observe`
+    - `simulate`
+    - signer wait
+    - live broadcast
+    - live receipt
+    - post-state verify
+    - completion
+
+Known gaps:
+- only SQLite currently provides a backend-native grouped transaction unit; the reference in-memory executor remains a linear fail-closed seam for tests and non-SQLite wiring
+- no push-based event streaming transport yet
+- effect contracts are still only persisted in checkpoint snapshots; there is no separate durable effect archive yet
+- interruption/cancel runtime semantics now implement:
+  - durable `cancel_state`
+  - `request_cancel_run`
+  - pre-side-effect terminal cancel
+  - confirmation-path `cancel_pending`
+  - machine-readable `cancel_rejected`
+- transport and restart proof now cover:
+  - archive-backed restart preservation for `cancel_pending`
+  - archive-backed restart preservation for retry-ready confirmation timeout truth
+  - JSONL/HTTP confirmation-wait cancel e2e
+  - retry-ready inspect and await-user-input pause wire round-trips
+- remaining gap on this axis is automatic terminal resolution for `cancel_pending` and broader command-surface refinement, not basic legality/runtime behavior
+- runtime driver binding currently proves:
+  - standard-like fragments
+  - EVM reflection fragments
+  - API-native direct-envelope fragments
+  - raw-envelope guarded binding
+- provider-specific API-native clients are still not implemented; current coverage is around normalized direct-envelope outputs

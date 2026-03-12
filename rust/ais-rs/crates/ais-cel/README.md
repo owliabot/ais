@@ -47,6 +47,7 @@ CEL lexer/parser/numeric/evaluator for AIS expression evaluation.
   - Integer model migrated from `i128` to `num_bigint::BigInt`; decimal core migrated to `bigdecimal`.
   - `to_atomic`/`to_human` are unified on `Decimal` (`bigdecimal`-backed) conversion with exact atomic scaling checks.
   - Evaluator now coerces numeric strings into numeric values for compare/arithmetic paths, including very large integer strings (BigInt path) to avoid decimal-overflow failures in on-chain balance assertions.
+  - `mul_div` now accepts integer-like numeric strings from runtime/query roots while still rejecting decimal strings, which keeps raw on-chain quote/slippage formulas executable without loosening integer-only semantics.
   - `to_human` now supports very large integers with exact decimal scaling and no panic on large values.
 - Planned next:
   - integrate into `ais-sdk` `ValueRef::Cel` evaluation path

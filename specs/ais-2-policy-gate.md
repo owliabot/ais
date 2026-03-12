@@ -63,7 +63,7 @@ All outputs carry:
 - `hit_reasons[]`: list of normalized rule hits (stable ids recommended)
 - `thresholds`: relevant policy thresholds (summarized)
 - `violations[]`: structured violations (optional)
-- `matched_constraints[]`: matched CEL constraint ids (when CEL constraints are enabled)
+- `failed_constraints[]`: failed pack constraint ids (when pack constraints are enabled)
 
 ### 2.3 `ConfirmationSummary` and `confirmation_hash`
 
@@ -169,31 +169,54 @@ This repository defines authority JSON Schemas for:
 
 ---
 
-## 7. CEL constraints execution model (normative)
+## 7. Pack constraints execution model (normative)
 
 For vNext, policy gate SHOULD use constraint templates as canonical input.
 Template contract and CEL scope are defined in `specs/ais-2-constraint-templates.md`.
 
-When pack policy defines raw `policy.constraints[]`, policy gate MUST evaluate each CEL expression against `input` (the normalized `PolicyGateInput` object).
+When pack policy defines raw pack constraints, policy gate MUST collect the effective constraint set from:
+
+- `policy.constraints[]`
+- matched `overrides.action_rules[].constraints[]`
+- `overrides.actions.<actionKey>.constraints[]`
+
+When pack policy defines global constraints, hosts/runners SHOULD evaluate them against `inputs` (the normalized `PolicyGateInput` object).
+
+When pack policy defines action-scoped override constraints, hosts/runners SHOULD evaluate them against `params` and MAY also expose `inputs` and `policy`.
 
 When template references are present on planning steps, host/compiler MUST resolve templates into effective constraints before gate evaluation.
 
 Required behavior:
 
-- evaluation order is list order from pack.
-- each match contributes one `matched_constraints[]` entry using constraint `id`.
+- evaluation order is:
+  1) `policy.constraints[]` in list order
+  2) matched `overrides.action_rules[].constraints[]` in declaration order
+  3) matched `overrides.actions.<actionKey>.constraints[]` in list order
+- each failed assertion contributes one `failed_constraints[]` entry using constraint `id`.
 - decision merge:
-  - any matched `hard_block` constraint => output `hard_block`
-  - else if any matched `need_user_confirm` constraint => output `need_user_confirm`
+  - any failed `hard_block` constraint => output `hard_block`
+  - else if any failed `need_user_confirm` constraint => output `need_user_confirm`
   - else continue with remaining checks.
+
+Constraint semantics:
+
+- each constraint predicate field is named `assert`
+- `assert` MUST evaluate to a boolean
+- `assert == true` means the constraint passes
+- `assert == false` means the constraint fails and `effect` determines the outcome
+- migration note:
+  - old trigger-style mental model: expression truth implied a violation hit
+  - current assert-style mental model: assertion truth implies the action is allowed by that constraint
+  - migration from trigger-style expressions therefore requires predicate inversion
 
 Error handling:
 
-- invalid CEL expression SHOULD produce `hard_block` with stable reason code (recommended: `policy_constraint_eval_error`) unless host explicitly opts into permissive mode.
+- invalid `assert` expression SHOULD produce `hard_block` with stable reason code (recommended: `policy_constraint_eval_error`) unless host explicitly opts into permissive mode
+- non-boolean `assert` results SHOULD be treated the same way as evaluation errors
 
 CEL scope constraints (normative):
 
-- allowed roots: `input`, `params`, `policy`
+- allowed roots: `inputs`, `params`, `policy`
 - forbidden roots: `nodes`, `runtime`, `env`, or any IO/network handle
 - CEL evaluation MUST be deterministic and side-effect-free.
 

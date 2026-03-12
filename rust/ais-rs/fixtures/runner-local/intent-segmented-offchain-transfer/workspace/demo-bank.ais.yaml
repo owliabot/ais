@@ -7,9 +7,6 @@ meta:
   description: "Local offchain balance/transfer protocol for segmented intent tests."
   tags: ["offchain", "fixture", "segmented"]
 
-capabilities_required:
-  - "offchain_apy_query"
-
 deployments:
   - chain: "eip155:31338"
     contracts: {}

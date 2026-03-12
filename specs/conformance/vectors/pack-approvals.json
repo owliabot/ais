@@ -60,7 +60,7 @@
       "expect": { "valid": false }
     },
     {
-      "id": "pack-policy-cel-constraints-valid",
+      "id": "pack-policy-constraints-assert-valid",
       "kind": "json_schema_validate",
       "input": {
         "schema_id": "ais-pack/0.0.2",
@@ -73,7 +73,7 @@
               {
                 "id": "limit-slippage",
                 "effect": "hard_block",
-                "expr": "input.slippage_bps <= 50",
+                "assert": "inputs.slippage_bps <= 50",
                 "message": "slippage too high"
               }
             ]
@@ -83,7 +83,7 @@
       "expect": { "valid": true }
     },
     {
-      "id": "pack-policy-cel-constraints-missing-effect-invalid",
+      "id": "pack-policy-constraints-missing-effect-invalid",
       "kind": "json_schema_validate",
       "input": {
         "schema_id": "ais-pack/0.0.2",
@@ -95,9 +95,158 @@
             "constraints": [
               {
                 "id": "bad-constraint",
-                "expr": "true"
+                "assert": "true"
               }
             ]
+          }
+        }
+      },
+      "expect": { "valid": false }
+    },
+    {
+      "id": "pack-policy-constraints-legacy-expr-invalid",
+      "kind": "json_schema_validate",
+      "input": {
+        "schema_id": "ais-pack/0.0.2",
+        "value": {
+          "schema": "ais-pack/0.0.2",
+          "meta": { "name": "p", "version": "0.0.2" },
+          "includes": [],
+          "policy": {
+            "constraints": [
+              {
+                "id": "legacy-expr",
+                "effect": "hard_block",
+                "expr": "inputs.slippage_bps <= 50"
+              }
+            ]
+          }
+        }
+      },
+      "expect": { "valid": false }
+    },
+    {
+      "id": "pack-overrides-actions-constraints-valid",
+      "kind": "json_schema_validate",
+      "input": {
+        "schema_id": "ais-pack/0.0.2",
+        "value": {
+          "schema": "ais-pack/0.0.2",
+          "meta": { "name": "p", "version": "0.0.2" },
+          "includes": [],
+          "overrides": {
+            "actions": {
+              "uniswap-v3.swap-exact-in": {
+                "risk_tags": ["dex", "swap"],
+                "constraints": [
+                  {
+                    "id": "tight-slippage",
+                    "effect": "hard_block",
+                    "assert": "params.slippage_bps <= 30"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "expect": { "valid": true }
+    },
+    {
+      "id": "pack-overrides-action-rules-valid",
+      "kind": "json_schema_validate",
+      "input": {
+        "schema_id": "ais-pack/0.0.2",
+        "value": {
+          "schema": "ais-pack/0.0.2",
+          "meta": { "name": "p", "version": "0.0.2" },
+          "includes": [],
+          "overrides": {
+            "action_rules": [
+              {
+                "actions": [
+                  "uniswap-v3.swap-exact-in",
+                  "uniswap-v3.swap-exact-out"
+                ],
+                "constraints": [
+                  {
+                    "id": "shared-slippage",
+                    "effect": "hard_block",
+                    "assert": "params.slippage_bps <= 30"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "expect": { "valid": true }
+    },
+    {
+      "id": "pack-overrides-action-rules-empty-actions-invalid",
+      "kind": "json_schema_validate",
+      "input": {
+        "schema_id": "ais-pack/0.0.2",
+        "value": {
+          "schema": "ais-pack/0.0.2",
+          "meta": { "name": "p", "version": "0.0.2" },
+          "includes": [],
+          "overrides": {
+            "action_rules": [
+              {
+                "actions": [],
+                "constraints": [
+                  {
+                    "id": "shared-slippage",
+                    "effect": "hard_block",
+                    "assert": "params.slippage_bps <= 30"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "expect": { "valid": false }
+    },
+    {
+      "id": "pack-overrides-action-rules-empty-constraints-invalid",
+      "kind": "json_schema_validate",
+      "input": {
+        "schema_id": "ais-pack/0.0.2",
+        "value": {
+          "schema": "ais-pack/0.0.2",
+          "meta": { "name": "p", "version": "0.0.2" },
+          "includes": [],
+          "overrides": {
+            "action_rules": [
+              {
+                "actions": ["uniswap-v3.swap-exact-in"],
+                "constraints": []
+              }
+            ]
+          }
+        }
+      },
+      "expect": { "valid": false }
+    },
+    {
+      "id": "pack-overrides-actions-legacy-hard-constraints-invalid",
+      "kind": "json_schema_validate",
+      "input": {
+        "schema_id": "ais-pack/0.0.2",
+        "value": {
+          "schema": "ais-pack/0.0.2",
+          "meta": { "name": "p", "version": "0.0.2" },
+          "includes": [],
+          "overrides": {
+            "actions": {
+              "uniswap-v3.swap-exact-in": {
+                "hard_constraints": {
+                  "max_slippage_bps": 30
+                }
+              }
+            }
           }
         }
       },

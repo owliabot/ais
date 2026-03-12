@@ -181,6 +181,9 @@ fn parse_key_value(line: &str) -> Option<(String, Option<&str>)> {
             '\'' if !in_double => in_single = !in_single,
             '"' if !in_single => in_double = !in_double,
             ':' if !in_single && !in_double => {
+                if !is_key_value_delimiter(line, index) {
+                    continue;
+                }
                 let key = normalize_key(line[..index].trim());
                 if key.is_empty() {
                     return None;
@@ -192,6 +195,17 @@ fn parse_key_value(line: &str) -> Option<(String, Option<&str>)> {
         }
     }
     None
+}
+
+fn is_key_value_delimiter(line: &str, index: usize) -> bool {
+    let Some(rest) = line.get(index + 1..) else {
+        return true;
+    };
+    rest.is_empty()
+        || rest
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_whitespace())
 }
 
 fn normalize_key(raw: &str) -> String {

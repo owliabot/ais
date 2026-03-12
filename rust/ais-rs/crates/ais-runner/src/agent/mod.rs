@@ -73,8 +73,11 @@ use ais_sdk::documents::{
     PlanSketchSession,
 };
 use ais_sdk::{
-    compile_plan_sketch, parse_document_with_options, AisDocument, CompilePlanSketchOptions,
-    CompilePlanSketchResult, DocumentFormat, ParseDocumentOptions, PlanDocument, ResolverContext,
+    compile_plan_sketch, parse_document_with_options, resolve_token_candidate_for_address,
+    resolve_token_candidate_for_symbol, token_resolution_policy, AisDocument,
+    CompilePlanSketchOptions, CompilePlanSketchResult, DocumentFormat, PackDocument,
+    ParseDocumentOptions, PlanDocument, ProtocolDocument, ResolverContext,
+    TokenResolutionErrorCode,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -759,12 +762,37 @@ fn compile_segment_plan_with_snapshot_hash_and_inputs(
             }]
         }));
     }
-    let normalized_segment = normalize_segment_asset_inputs_for_compile(
+    if let Some(pack) = candidate_context.pack.as_ref() {
+        let expected_pack_snapshot_hash =
+            derive_pack_snapshot_hash(Some(pack)).map_err(|error| {
+                serde_json::json!({
+                    "reason_code": "snapshot_hash_error",
+                    "message": error.to_string(),
+                })
+            })?;
+        if expected_pack_snapshot_hash != pack_snapshot_hash {
+            return Err(serde_json::json!({
+                "reason_code": "compile_error",
+                "message": "segment compile pack snapshot hash mismatch",
+                "issues": [{
+                    "kind": "compile_error",
+                    "reason_code": "pack_snapshot_hash_mismatch",
+                    "message": format!(
+                        "segment compile expected pack snapshot hash `{}` but received `{}`",
+                        expected_pack_snapshot_hash,
+                        pack_snapshot_hash
+                    )
+                }]
+            }));
+        }
+    }
+    let compile_default_chain = deterministic_default_chain(chain_scope);
+    let normalized_segment = normalize_segment_asset_inputs_for_compile_checked(
         segment,
         candidate_context,
-        chain_scope.first().map(String::as_str),
+        compile_default_chain,
         known_input_refs,
-    );
+    )?;
     validate_segment_write_gates_with_policy(
         &normalized_segment,
         candidate_context,
@@ -777,13 +805,16 @@ fn compile_segment_plan_with_snapshot_hash_and_inputs(
     for protocol in &candidate_context.protocols {
         resolver.register_protocol(protocol.clone());
     }
+    if let Some(pack) = candidate_context.pack.as_ref() {
+        resolver.register_pack(pack.clone());
+    }
 
     let sketch = PlanSketchDocument {
         schema: "ais-plan-sketch/0.1.0".to_string(),
         intent: intent.to_string(),
         pack_snapshot: PlanSketchPackSnapshot {
-            name: None,
-            version: None,
+            name: pack_identity_field(candidate_context.pack.as_ref(), "name"),
+            version: pack_identity_field(candidate_context.pack.as_ref(), "version"),
             hash: pack_snapshot_hash.to_string(),
         },
         catalog_snapshot: PlanSketchCatalogSnapshot {
@@ -808,7 +839,7 @@ fn compile_segment_plan_with_snapshot_hash_and_inputs(
         &resolver,
         Some(&candidate_context.executable_candidates),
         &CompilePlanSketchOptions {
-            default_chain: chain_scope.first().cloned(),
+            default_chain: compile_default_chain.map(str::to_string),
             known_input_refs: build_known_input_refs(known_input_refs),
         },
     ) {
@@ -821,16 +852,76 @@ fn compile_segment_plan_with_snapshot_hash_and_inputs(
     }
 }
 
+fn pack_identity_field(pack: Option<&ais_sdk::PackDocument>, field: &str) -> Option<String> {
+    let pack = pack?;
+    match field {
+        "name" => pack.name.clone().or_else(|| {
+            pack.meta
+                .as_ref()
+                .and_then(serde_json::Value::as_object)
+                .and_then(|meta| meta.get("name"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        }),
+        "version" => pack.version.clone().or_else(|| {
+            pack.meta
+                .as_ref()
+                .and_then(serde_json::Value::as_object)
+                .and_then(|meta| meta.get("version"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        }),
+        _ => None,
+    }
+}
+
+fn deterministic_default_chain(chain_scope: &[String]) -> Option<&str> {
+    (chain_scope.len() == 1).then(|| chain_scope[0].as_str())
+}
+
 fn segment_requires_runtime_validation_state(segment: &PlanSketchSegment) -> bool {
     segment.steps.iter().any(|step| step.kind == "action")
 }
 
+#[cfg(test)]
 fn normalize_segment_asset_inputs_for_compile(
     segment: &PlanSketchSegment,
     candidate_context: &CandidateContext,
     default_chain: Option<&str>,
     known_input_refs: &[String],
 ) -> PlanSketchSegment {
+    normalize_segment_asset_inputs_for_compile_internal(
+        segment,
+        candidate_context,
+        default_chain,
+        known_input_refs,
+        false,
+    )
+    .unwrap_or_else(|_| segment.clone())
+}
+
+fn normalize_segment_asset_inputs_for_compile_checked(
+    segment: &PlanSketchSegment,
+    candidate_context: &CandidateContext,
+    default_chain: Option<&str>,
+    known_input_refs: &[String],
+) -> Result<PlanSketchSegment, Value> {
+    normalize_segment_asset_inputs_for_compile_internal(
+        segment,
+        candidate_context,
+        default_chain,
+        known_input_refs,
+        true,
+    )
+}
+
+fn normalize_segment_asset_inputs_for_compile_internal(
+    segment: &PlanSketchSegment,
+    candidate_context: &CandidateContext,
+    default_chain: Option<&str>,
+    known_input_refs: &[String],
+    enforce_token_policy: bool,
+) -> Result<PlanSketchSegment, Value> {
     let mut out = segment.clone();
     let query_step_ids = out
         .steps
@@ -845,22 +936,51 @@ fn normalize_segment_asset_inputs_for_compile(
         .find(|slot| {
             slot == "inputs.chain" || slot == "inputs.chain_id" || slot == "inputs.chain_ref"
         });
-    let chain_binding = if let Some(chain_ref) = known_chain_ref {
-        serde_json::json!({"ref": chain_ref})
-    } else {
-        serde_json::json!({"lit": default_chain.unwrap_or("eip155:1")})
-    };
-
     for step in &mut out.steps {
         if step.kind != "query" && step.kind != "action" {
             continue;
         }
-        let Some(candidate_ref) = step.candidate_ref.as_deref() else {
+        let Some(candidate_ref) = step.candidate_ref.clone() else {
             continue;
         };
-        let Some(detail) = candidate_context.detail_by_ref.get(candidate_ref) else {
+        let Some(detail) = candidate_context.detail_by_ref.get(candidate_ref.as_str()) else {
             continue;
         };
+        let explicit_step_chain = step
+            .chain
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let explicit_step_chain = explicit_step_chain.map(str::to_string);
+        let Some(step_chain) = explicit_step_chain
+            .as_deref()
+            .or(default_chain)
+            .map(str::to_string)
+        else {
+            if enforce_token_policy {
+                return Err(serde_json::json!({
+                    "reason_code": "compile_error",
+                    "message": "segment compile failed during token resolution",
+                    "issues": [{
+                        "kind": "compile_error",
+                        "reason_code": "missing_required_input",
+                        "message": "step chain is required for asset normalization when segment chain_scope is not deterministic",
+                        "step_id": step.id,
+                        "field": "chain"
+                    }]
+                }));
+            }
+            continue;
+        };
+        let chain_binding = if let Some(chain) = explicit_step_chain.as_deref() {
+            serde_json::json!({"lit": chain})
+        } else if let Some(chain_ref) = known_chain_ref.clone() {
+            serde_json::json!({"ref": chain_ref})
+        } else {
+            serde_json::json!({"lit": step_chain})
+        };
+        let candidate_protocol =
+            protocol_for_candidate_ref(candidate_context, candidate_ref.as_str());
         let Some(params) = detail.get("params").and_then(Value::as_array) else {
             continue;
         };
@@ -878,7 +998,28 @@ fn normalize_segment_asset_inputs_for_compile(
             let Some(existing) = step.inputs.get(param_name).cloned() else {
                 continue;
             };
+            if let Some(metadata) = build_inline_asset_confirmation_metadata(
+                &existing,
+                candidate_context.pack.as_ref(),
+                candidate_protocol,
+                step_chain.as_str(),
+            ) {
+                insert_step_token_resolution_metadata(step, param_name, metadata);
+            }
             if asset_input_already_structured(&existing, param_name, known_input_refs) {
+                continue;
+            }
+            if let Some(normalized_asset) = normalize_symbol_asset_input_for_compile(
+                &existing,
+                candidate_context.pack.as_ref(),
+                candidate_protocol,
+                step_chain.as_str(),
+                chain_binding.clone(),
+                enforce_token_policy,
+            )? {
+                insert_step_token_resolution_metadata(step, param_name, normalized_asset.metadata);
+                step.inputs
+                    .insert(param_name.to_string(), normalized_asset.input);
                 continue;
             }
             step.inputs.insert(
@@ -918,7 +1059,7 @@ fn normalize_segment_asset_inputs_for_compile(
         }
     }
 
-    out
+    Ok(out)
 }
 
 fn extract_query_step_ids_from_when_cel<'a>(
@@ -1067,6 +1208,285 @@ fn asset_ref_resolves_to_full_input_slot(
     known_input_refs
         .iter()
         .any(|known| known.trim() == canonical_ref.as_str())
+}
+
+#[derive(Debug, Clone)]
+struct NormalizedAssetInput {
+    input: Value,
+    metadata: Value,
+}
+
+fn normalize_symbol_asset_input_for_compile(
+    value: &Value,
+    pack: Option<&PackDocument>,
+    protocol: Option<&ProtocolDocument>,
+    chain: &str,
+    chain_binding: Value,
+    enforce_token_policy: bool,
+) -> Result<Option<NormalizedAssetInput>, Value> {
+    let Some(raw_symbol) = asset_symbol_input(value) else {
+        return Ok(None);
+    };
+    match resolve_token_candidate_for_symbol(pack, protocol, chain, raw_symbol.as_str()) {
+        Ok(candidate) => Ok(Some(NormalizedAssetInput {
+            input: serde_json::json!({
+                "object": {
+                    "address": { "lit": candidate.address.clone() },
+                    "chain_ref": chain_binding,
+                    "symbol": { "lit": candidate.symbol.clone() },
+                    "source": { "lit": candidate.source.clone() },
+                    "allowlisted": { "lit": candidate.allowlisted },
+                    "confirmation_required": { "lit": candidate.require_user_confirm_asset_address },
+                    "tags": { "lit": candidate.tags.clone() },
+                    "name": { "lit": candidate.name.clone() },
+                    "decimals": { "lit": candidate.decimals }
+                }
+            }),
+            metadata: token_resolution_metadata(
+                "symbol",
+                raw_symbol.as_str(),
+                &candidate.chain,
+                Some(&candidate.symbol),
+                Some(&candidate.address),
+                candidate.decimals,
+                candidate.name.as_deref(),
+                candidate.tags.as_slice(),
+                candidate.source.as_str(),
+                Some(candidate.allowlisted),
+                true,
+                candidate.require_user_confirm_asset_address,
+            ),
+        })),
+        Err(error) if enforce_token_policy => Err(token_resolution_compile_error(error)),
+        Err(_) => Ok(None),
+    }
+}
+
+fn build_inline_asset_confirmation_metadata(
+    value: &Value,
+    pack: Option<&PackDocument>,
+    protocol: Option<&ProtocolDocument>,
+    chain: &str,
+) -> Option<Value> {
+    let policy = token_resolution_policy(pack);
+    let address = asset_inline_address(value)?;
+    let resolved = resolve_token_candidate_for_address(pack, protocol, chain, address.as_str());
+    let confirmation_required = policy.require_user_confirm_asset_address;
+    match resolved {
+        Some(candidate) => Some(token_resolution_metadata(
+            "address",
+            address.as_str(),
+            &candidate.chain,
+            Some(&candidate.symbol),
+            Some(&candidate.address),
+            candidate.decimals,
+            candidate.name.as_deref(),
+            candidate.tags.as_slice(),
+            candidate.source.as_str(),
+            Some(candidate.allowlisted),
+            true,
+            candidate.require_user_confirm_asset_address,
+        )),
+        None if confirmation_required => Some(token_resolution_metadata(
+            "address",
+            address.as_str(),
+            chain,
+            None,
+            Some(address.as_str()),
+            None,
+            None,
+            &[],
+            "user_input",
+            None,
+            false,
+            true,
+        )),
+        None => None,
+    }
+}
+
+fn token_resolution_metadata(
+    input_kind: &str,
+    input_value: &str,
+    chain: &str,
+    symbol: Option<&str>,
+    address: Option<&str>,
+    decimals: Option<u64>,
+    name: Option<&str>,
+    tags: &[String],
+    source: &str,
+    allowlisted: Option<bool>,
+    resolved: bool,
+    confirmation_required: bool,
+) -> Value {
+    let mut metadata = Map::<String, Value>::new();
+    metadata.insert(
+        "input_kind".to_string(),
+        Value::String(input_kind.to_string()),
+    );
+    metadata.insert(
+        "input_value".to_string(),
+        Value::String(input_value.to_string()),
+    );
+    metadata.insert("chain".to_string(), Value::String(chain.to_string()));
+    metadata.insert("resolved".to_string(), Value::Bool(resolved));
+    metadata.insert(
+        "confirmation_required".to_string(),
+        Value::Bool(confirmation_required),
+    );
+    metadata.insert("source".to_string(), Value::String(source.to_string()));
+    if let Some(symbol) = symbol {
+        metadata.insert("symbol".to_string(), Value::String(symbol.to_string()));
+    }
+    if let Some(address) = address {
+        metadata.insert("address".to_string(), Value::String(address.to_string()));
+    }
+    if let Some(decimals) = decimals {
+        metadata.insert("decimals".to_string(), Value::Number(decimals.into()));
+    }
+    if let Some(name) = name {
+        metadata.insert("name".to_string(), Value::String(name.to_string()));
+    }
+    if !tags.is_empty() {
+        metadata.insert(
+            "tags".to_string(),
+            Value::Array(tags.iter().cloned().map(Value::String).collect()),
+        );
+    }
+    if let Some(allowlisted) = allowlisted {
+        metadata.insert("allowlisted".to_string(), Value::Bool(allowlisted));
+    }
+    Value::Object(metadata)
+}
+
+fn asset_symbol_input(value: &Value) -> Option<String> {
+    let candidate = match value {
+        Value::String(text) => Some(text.trim().to_string()),
+        Value::Object(object) => object
+            .get("lit")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .map(str::to_string),
+        _ => None,
+    }?;
+    if candidate.is_empty() || looks_like_address_literal(candidate.as_str()) {
+        return None;
+    }
+    Some(candidate)
+}
+
+fn asset_inline_address(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) if looks_like_address_literal(text.trim()) => {
+            Some(text.trim().to_string())
+        }
+        Value::Object(object) => {
+            if let Some(address) = object.get("lit").and_then(Value::as_str) {
+                return looks_like_address_literal(address.trim())
+                    .then(|| address.trim().to_string());
+            }
+            if let Some(address) = object.get("address").and_then(Value::as_str) {
+                return looks_like_address_literal(address.trim())
+                    .then(|| address.trim().to_string());
+            }
+            if let Some(address) = object
+                .get("address")
+                .and_then(Value::as_object)
+                .and_then(|address| address.get("lit"))
+                .and_then(Value::as_str)
+            {
+                return looks_like_address_literal(address.trim())
+                    .then(|| address.trim().to_string());
+            }
+            if let Some(lit_object) = object.get("lit").and_then(Value::as_object) {
+                if let Some(address) = lit_object.get("address").and_then(Value::as_str) {
+                    return looks_like_address_literal(address.trim())
+                        .then(|| address.trim().to_string());
+                }
+            }
+            if let Some(inner_object) = object.get("object").and_then(Value::as_object) {
+                if let Some(address) = inner_object.get("address").and_then(Value::as_str) {
+                    return looks_like_address_literal(address.trim())
+                        .then(|| address.trim().to_string());
+                }
+                if let Some(address) = inner_object
+                    .get("address")
+                    .and_then(Value::as_object)
+                    .and_then(|address| address.get("lit"))
+                    .and_then(Value::as_str)
+                {
+                    return looks_like_address_literal(address.trim())
+                        .then(|| address.trim().to_string());
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn looks_like_address_literal(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.len() == 42
+        && trimmed.starts_with("0x")
+        && trimmed.chars().skip(2).all(|ch| ch.is_ascii_hexdigit())
+}
+
+fn insert_step_token_resolution_metadata(
+    step: &mut ais_sdk::documents::PlanSketchStep,
+    param_name: &str,
+    metadata: Value,
+) {
+    let entry = step
+        .extensions
+        .entry("token_resolution".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    let Some(entry_obj) = entry.as_object_mut() else {
+        *entry = Value::Object(Map::new());
+        let Some(entry_obj) = entry.as_object_mut() else {
+            return;
+        };
+        entry_obj.insert(param_name.to_string(), metadata);
+        return;
+    };
+    entry_obj.insert(param_name.to_string(), metadata);
+}
+
+fn token_resolution_compile_error(error: ais_sdk::TokenResolutionError) -> Value {
+    let reason_code = match error.code {
+        TokenResolutionErrorCode::SymbolInputNotAllowed => "token_symbol_input_not_allowed",
+        TokenResolutionErrorCode::SymbolNotAllowlisted => "token_symbol_not_allowlisted",
+        TokenResolutionErrorCode::SymbolUnknownForChain => "token_symbol_unresolved",
+    };
+    serde_json::json!({
+        "reason_code": "compile_error",
+        "message": "segment compile failed during token resolution",
+        "issues": [{
+            "kind": "compile_error",
+            "reason_code": reason_code,
+            "message": error.message,
+            "chain": error.chain,
+            "symbol": error.symbol
+        }]
+    })
+}
+
+fn protocol_for_candidate_ref<'a>(
+    candidate_context: &'a CandidateContext,
+    candidate_ref: &str,
+) -> Option<&'a ProtocolDocument> {
+    let (protocol_ref, _) = candidate_ref.split_once('/')?;
+    candidate_context
+        .protocols
+        .iter()
+        .find(|protocol| protocol_document_ref(protocol).as_deref() == Some(protocol_ref))
+}
+
+fn protocol_document_ref(protocol: &ProtocolDocument) -> Option<String> {
+    let meta = protocol.meta.as_object()?;
+    let protocol_id = meta.get("protocol").and_then(Value::as_str)?;
+    let version = meta.get("version").and_then(Value::as_str)?;
+    Some(format!("{protocol_id}@{version}"))
 }
 
 fn auto_inject_query_stores(step: &mut ais_sdk::documents::PlanSketchStep, detail: &Value) {

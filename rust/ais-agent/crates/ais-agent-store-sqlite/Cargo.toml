@@ -1,0 +1,17 @@
+[package]
+name = "ais-agent-store-sqlite"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ais-agent-control = { path = "../ais-agent-control" }
+ais-agent-core = { path = "../ais-agent-core" }
+ais-agent-runtime = { path = "../ais-agent-runtime" }
+rusqlite.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+ais-agent-host = { path = "../ais-agent-host" }
+tokio = { version = "1", features = ["rt", "macros"] }

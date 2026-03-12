@@ -1,7 +1,7 @@
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
-use crate::documents::ProtocolDocument;
+use crate::documents::{PackDocument, ProtocolDocument};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ResolverError {
@@ -17,6 +17,7 @@ pub enum ResolverError {
 pub struct ResolverContext {
     pub runtime: Value,
     pub protocols: BTreeMap<String, ProtocolDocument>,
+    pub packs: BTreeMap<String, PackDocument>,
 }
 
 impl ResolverContext {
@@ -24,6 +25,7 @@ impl ResolverContext {
         Self {
             runtime: Value::Object(Map::new()),
             protocols: BTreeMap::new(),
+            packs: BTreeMap::new(),
         }
     }
 
@@ -36,12 +38,18 @@ impl ResolverContext {
         Self {
             runtime,
             protocols: BTreeMap::new(),
+            packs: BTreeMap::new(),
         }
     }
 
     pub fn register_protocol(&mut self, protocol: ProtocolDocument) -> Option<ProtocolDocument> {
         let key = protocol_key(&protocol);
         self.protocols.insert(key, protocol)
+    }
+
+    pub fn register_pack(&mut self, pack: PackDocument) -> Option<PackDocument> {
+        let key = pack_key(&pack);
+        self.packs.insert(key, pack)
     }
 
     pub fn get_ref(&self, path: &str) -> Result<Value, ResolverError> {
@@ -219,6 +227,32 @@ fn protocol_key(protocol: &ProtocolDocument) -> String {
         .and_then(Value::as_str)
         .unwrap_or("0.0.0");
     format!("{protocol_id}@{version}")
+}
+
+fn pack_key(pack: &PackDocument) -> String {
+    let pack_name = pack
+        .name
+        .as_deref()
+        .or_else(|| {
+            pack.meta
+                .as_ref()
+                .and_then(Value::as_object)
+                .and_then(|meta| meta.get("name"))
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("unknown-pack");
+    let version = pack
+        .version
+        .as_deref()
+        .or_else(|| {
+            pack.meta
+                .as_ref()
+                .and_then(Value::as_object)
+                .and_then(|meta| meta.get("version"))
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("0.0.0");
+    format!("{pack_name}@{version}")
 }
 
 #[cfg(test)]

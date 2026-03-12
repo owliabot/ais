@@ -7,11 +7,6 @@ meta:
   description: "Helpers for reading/sending EVM native currency (ETH) via core execution types."
   tags: ["evm", "native", "runner"]
 
-capabilities_required:
-  - "cel_v1"
-  - "evm_read"
-  - "evm_call"
-
 deployments:
   - chain: "eip155:31338"
     contracts: {}
@@ -51,5 +46,3 @@ actions:
           outputs: []
         args: {}
         value: { cel: "to_atomic(params.amount, 18)" }
-
-extensions: {}

@@ -9,7 +9,8 @@ Pure AIS SDK logic: document parsing, typed models, resolver context, and value-
   - Duplicate keys are scoped per mapping object (including array item mappings), so repeated keys across different list items are allowed.
 - Typed top-level document structs for protocol/pack/workflow/plan/catalog/plan-skeleton
   - plus segmented intent planning IR: `plan-sketch`
-- Resolver context (`runtime` + protocol registry)
+- Resolver context (`runtime` + protocol/pack registry)
+- Protocol deployment resolution by chain, with selected deployment metadata/`contracts` projection for compiled plan nodes
 - ValueRef sync/async evaluation (`lit/ref/cel/object/array`) with root overrides
 - Resolver path bridge for asset compatibility: `.address` reads are accepted when the source slot already holds a raw address string (for example `params.token = "0x..."` still satisfies `params.token.address`)
 - Protocol/action/query reference parsing and resolution (`protocol@version/action|query`)
@@ -28,16 +29,39 @@ Pure AIS SDK logic: document parsing, typed models, resolver context, and value-
   - `PlanDocument`, `CatalogDocument`, `PlanSkeletonDocument`, `PlanSketchDocument`
 - Resolver:
   - `ResolverContext`
+  - `ResolvedNodeBindings`
+  - `ResolvedQueryBindings`
+  - `CalculatedBindingsResult`
   - `ValueRef`
   - `evaluate_value_ref`
   - `evaluate_value_ref_with_options`
   - `evaluate_value_ref_async`
+  - `resolve_calculated_bindings`
+  - `resolve_calculated_bindings_async`
+  - `resolve_node_bindings`
+  - `resolve_query_bindings`
   - `parse_action_ref` / `parse_query_ref`
   - `resolve_action_ref` / `resolve_query_ref`
   - `ActionRef` / `QueryRef`
   - `calculated_override_order`
   - `calculated_override_order_from_map`
   - `CalculatedOverrideError`
+- Protocol:
+  - `resolve_deployment_for_chain`
+  - `resolve_operation_spec`
+  - `token_resolution_policy`
+  - `resolve_token_candidate_for_symbol`
+  - `resolve_token_candidate_for_address`
+  - `build_protocol_extension`
+  - `build_pack_extension`
+  - `ResolvedDeployment`
+  - `ResolvedOperationKind`
+  - `ResolvedOperationSpec`
+  - `ResolvedPackOperation`
+  - `ResolvedTokenCandidate`
+  - `TokenResolutionPolicy`
+  - `TokenResolutionError`
+  - `TokenResolutionErrorCode`
 - Validate:
   - `validate_document_semantics`
   - `validate_workspace_references`
@@ -81,10 +105,26 @@ Pure AIS SDK logic: document parsing, typed models, resolver context, and value-
   - `DryRunJsonReport`
   - `NodeRunState`
   - `NodeReadinessResult`
+  - `value_ref_eval_options_for_node`
 
 ## Recent changes
 
+- `CPS-501 token resolution contract`: `protocol.rs` now exposes pack-aware token resolution helpers for segmented planner/agent callers. `token_resolution_policy(...)`, `resolve_token_candidate_for_symbol(...)`, and `resolve_token_candidate_for_address(...)` merge pack `token_policy`, pack allowlist entries, protocol `supported_assets`, and chain context into deterministic `ResolvedTokenCandidate` / `TokenResolutionError` results before plan compilation.
 - `F-PROJ-01`: `context::get_ref` now unwraps `_value` sentinel keys when resolution yields an object containing a `_value` field, supporting the InputStore leaf/subtree collision preservation pattern. Address bridge compatibility extended to handle `_value` sentinel in intermediate objects.
+- `F-PROJ-02`: `compile_workflow` and `compile_plan_sketch` now resolve the selected protocol deployment for the target chain and persist `extensions.protocol.{ref,deployment_chain,deployment,contracts}` on each compiled node. Readiness/eval helpers now project `contracts.*` from node extensions into ValueRef root overrides so `to: { ref: "contracts.pool" }` can resolve without ad hoc runtime injection.
+- `POST-005 deployment contracts validation`: protocol documents and workspace loading now reject non-object `deployments[].contracts` with structured issues instead of silently degrading to an empty contract map. `resolve_deployment_for_chain(...)` also skips malformed deployment entries rather than materializing invalid `contracts.*` bindings.
+- `POST-006 dropped providers residue removal`: resolved pack semantics no longer carry `providers` through `ResolvedPackOperation` or compiled `extensions.pack`. `pack.providers` remains a document field only, but it is no longer part of the active compile/runtime semantic surface.
+- `POST-007 node-scoped runtime controls`: `get_node_readiness` now pre-resolves node `bindings.params` plus `calculated_overrides` before evaluating `condition`, so readiness gating sees the same node-scoped `params.*` / `calculated.*` roots as downstream execution materialization instead of relying on global runtime pre-seeding.
+- `POST-008 pack snapshot invariant`: workflow compile now fails closed when `requires_pack` cannot be resolved from `ResolverContext`, and plan-sketch compile now verifies `pack_snapshot.{name,version,hash}` against the actually loaded pack document before lowering any node. Nodes therefore cannot claim `extensions.pack.hash` for semantics compiled from a different pack snapshot.
+- `CPS-202 pack merge`: `resolve_operation_spec(...)` now resolves protocol action/query semantics through deployment + optional pack merge before execution selection. `compile_workflow` and `compile_plan_sketch` both compile against the merged spec, persist `extensions.pack` audit metadata, and surface pack-selected description / risk / `requires_queries` / constraint provenance from a single resolution path.
+- `CPS-203 resolved metadata snapshot`: compiled workflow/sketch nodes now also persist `extensions.operation` as the stable merged operation identity (`protocol_ref`, `kind`, `key`, `selector`, `target_chain`) and enrich `extensions.pack` with snapshot identity fields (`name`, `version`, `hash`) when available, so audit/debug can trace exactly which resolved protocol/pack snapshot produced a node.
+- `CPS-301 resolved node bindings`: shared root materialization now lives in `ResolvedNodeBindings` / `resolve_node_bindings(...)`. `get_node_readiness` and engine-side execution/condition/assert materialization consume the same binding builder for `params`, deployment-backed `contracts`, node `policy`, and runtime `query` / `calculated` roots.
+- `CPS-302 calculated-field lowering`: protocol action/query `calculated_fields` now lower into compiled node `calculated_overrides`, and `resolve_calculated_bindings(...)` evaluates them in dependency order against the shared binding roots. Readiness and engine materialization therefore resolve `calculated.*` from protocol semantics directly instead of relying on host-side precomputation.
+- `CPS-303 query binding contract`: protocol/pack `requires_queries` now lower into `extensions.operation.requires_queries`, and compilers persist dependency-backed `extensions.operation.query_bindings` when an action step depends on an explicit query producer. `resolve_query_bindings(...)` merges those prerequisite node outputs with any existing runtime `query` root, so readiness/engine can satisfy `query.<name>.*` and CEL `query["name"]` reads from one normalized source.
+- `CPS-304 policy metadata lowering`: `build_policy_extension(...)` now lowers pack-derived constraint arrays into `extensions.policy`. Compiled nodes carry ordered `global_constraints` / `action_rule_constraints` / `action_constraints` / `effective_constraints`, while preserving `param_roles` / `required_fields` metadata for downstream policy-gate extraction. Legacy protocol-level `hard_constraints` are no longer part of the active protocol surface.
+- `CPS-401 composite lowering`: planner compile now rewrites protocol `execution.type = composite` into ordered base plan nodes before executor handoff. `lower_composite_node(...)` converts `steps[]` into deterministic node ids, preserves dependency order, annotates each lowered node with `extensions.composite.{parent_node_id,step_id,step_index,step_count}`, and ensures example-backed green paths no longer emit raw `composite` execution to runtime.
+- `CPS-402 composite metadata preservation`: composite lowering now also rewrites local step output refs (for example `nodes.approve.outputs.*`) into lowered node ids, adds `source.composite_step_id`, enriches `extensions.composite` with output/local-step mapping metadata, and preserves segmented planner provenance via `extensions.plan_sketch.composite_step_id` while keeping step-level `stores` attached only to the final lowered node.
+- `CPS-403 composite policy overlay`: lowered composite steps now keep parent action risk/policy metadata by default, but approval-like sub-steps (`approve`) receive a step-local overlay. That overlay appends `approval` to `extensions.risk_tags`, preserves the original risk level, annotates `extensions.composite.semantic_kind`, and maps policy-gate roles `spender_address -> spender` / `approval_amount -> amount` so engine policy checks can reason about the actual approval call without losing pack/protocol constraints on the downstream action step.
 
 ## Dependencies
 
@@ -100,6 +140,26 @@ Pure AIS SDK logic: document parsing, typed models, resolver context, and value-
 - Workflow imports validation includes fixture-backed tests from `rust/ais-rs/fixtures/workflow-0.0.3/imports`.
 - Workflow assert compile/validation checks include fixture-backed tests from `rust/ais-rs/fixtures/workflow-0.0.3/assert`.
 - Workflow calculated_overrides checks include fixture-backed tests from `rust/ais-rs/fixtures/workflow-0.0.3/calculated_overrides`.
+
+## Complex Protocol Support Boundaries
+
+- Example-backed green paths now cover:
+  - `aave-v3.supply-raw`: deployment-selected `contracts.*`
+  - `aave-v3.withdraw`: protocol `calculated_fields`
+  - `aave-v3.supply`: `requires_queries` + composite lowering into base nodes
+  - `safe-defi-pack` constrained `uniswap-v3.swap-exact-in`: pack merge, constraint lowering, token policy contract, and prerequisite query bindings
+- Compiler/runtime boundary is now explicit:
+  - protocol `deployments`, pack overrides/constraints, protocol `calculated_fields`, and `execution.type = composite` are lowered before executor handoff
+  - executor-facing plans should only see base execution nodes plus resolved metadata under `extensions.*`
+- Raw example ingestion now works for the main target files:
+  - YAML duplicate-key safety no longer misclassifies namespaced chain-map keys such as `eip155:1:` inside protocol examples
+  - pack schema now ingests `policy.execution.volatile_facts.max_age_ms` from raw pack examples
+  - workspace/runner can therefore parse, schema-validate, and ingest raw `examples/aave-v3.ais.yaml`, `examples/uniswap-v3.ais.yaml`, and `examples/safe-defi-pack.ais-pack.yaml` without a pre-normalization pass
+- Protocol asset registry shape now supports both:
+  - legacy chain-map form: `addresses.{chain}` + `decimals.{chain}`
+  - preferred slim form: `supported_assets[].deployments[] = { chain, address, decimals }`
+  `resolve_token_candidate_for_symbol/address(...)` reads both, so examples can migrate without breaking existing workspace content.
+- Reduced-semantic fixtures still remain in runner coverage where downstream execute proof intentionally simplifies raw detect/slippage surfaces; raw ingestion parity is broader than raw execution parity
 
 ## Current status
 
@@ -161,6 +221,28 @@ Pure AIS SDK logic: document parsing, typed models, resolver context, and value-
   - `compile_workflow` now copies action `risk_level`/`risk_tags` into plan node `extensions` for policy gate + confirmation UX, and emits `extensions.policy.{param_roles,required_fields}` derived from action schemas with canonical role names only (`spend_amount`, `slippage_bps`, `spender_address`, `approval_amount`), without alias inference.
   - `AISRS-SDK-052` (node readiness: missing refs / condition skipped)
   - `AISRS-SDK-053` (dry-run text/json with per-node report, issues, stable hashes)
+  - deployment-aware plan compilation/runtime binding:
+    - `compile_workflow` and `compile_plan_sketch` now require a matching protocol deployment for the selected chain
+    - compiled nodes carry selected deployment metadata under `extensions.protocol`
+    - `get_node_readiness` and shared node eval helpers inject `contracts.*` from `extensions.protocol.contracts`
+  - pack-aware operation resolution:
+    - `ResolverContext` now indexes packs by `name@version`
+    - `resolve_operation_spec` merges `policy.constraints[]`, matching `overrides.action_rules[]`, and `overrides.actions.<selector>`
+    - workflow/sketch compilers select execution and copy metadata from the merged operation spec instead of the raw protocol spec
+    - compiled nodes persist `extensions.operation` and `extensions.pack` with merged identity/constraint provenance for downstream audit/debug
+  - shared node binding contract:
+    - `resolve_node_bindings` produces the common runtime-visible roots consumed by readiness and engine execution
+    - current shared roots are `params`, `contracts`, `policy`, plus runtime-projected `query` / `calculated` when present
+  - multi-chain plan-sketch compile contract:
+    - `PlanSketchStep` may now carry explicit `chain`
+    - `compile_plan_sketch` no longer requires one implicit segment-wide default chain when every executable step supplies its own chain
+    - multi-chain `chain_scope` now fails with structured diagnostics when a query/action step omits `chain` or names a chain outside the declared scope
+  - composite execution lowering:
+    - `compile_workflow` and `compile_plan_sketch` lower protocol `execution.type = composite` into base nodes before plan emission
+    - intermediate lowered steps inherit node metadata, honor step-local `steps[].chain` overrides, and rebind deployment-backed `contracts.*` / `extensions.operation.target_chain` against each lowered step's effective chain
+    - lowered nodes persist step-local ids/deps under `extensions.composite`
+    - compiler paths now re-run node-id uniqueness validation after lowering, so emitted ids such as `<base>__approve` cannot silently collide with pre-existing workflow/sketch node ids
+    - executor-facing plans therefore only contain base execution kinds such as `evm_call`
   - Minor cleanup: simplified optional/object handling and chain-scope filtering code paths (`?`/`contains`) for clearer semantics.
 - Planned next:
   - `AISRS-ENG-001+` engine events/loop integration

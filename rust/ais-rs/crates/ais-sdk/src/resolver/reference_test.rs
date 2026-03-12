@@ -18,10 +18,7 @@ fn protocol_document() -> ProtocolDocument {
         deployments: vec![],
         actions,
         queries,
-        risks: vec![],
         supported_assets: vec![],
-        capabilities_required: vec![],
-        tests: vec![],
         extensions: Map::<String, Value>::new(),
     }
 }

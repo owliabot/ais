@@ -58,12 +58,7 @@ fn validate_protocol(protocol: &ProtocolDocument, issues: &mut Vec<StructuredIss
             "protocol.deployments.non_empty",
         ));
     }
-
-    validate_capabilities_list(
-        &protocol.capabilities_required,
-        vec![FieldPathSegment::Key("capabilities_required".to_string())],
-        issues,
-    );
+    validate_protocol_deployments(protocol, issues);
 
     for (action_id, action_spec) in &protocol.actions {
         let path = vec![
@@ -79,6 +74,39 @@ fn validate_protocol(protocol: &ProtocolDocument, issues: &mut Vec<StructuredIss
             FieldPathSegment::Key(query_id.clone()),
         ];
         validate_operation_spec(query_spec, path, issues);
+    }
+}
+
+pub(crate) fn validate_protocol_deployments(
+    protocol: &ProtocolDocument,
+    issues: &mut Vec<StructuredIssue>,
+) {
+    for (index, deployment) in protocol.deployments.iter().enumerate() {
+        let base_path = vec![
+            FieldPathSegment::Key("deployments".to_string()),
+            FieldPathSegment::Index(index),
+        ];
+        let Some(deployment_object) = deployment.as_object() else {
+            issues.push(issue(
+                "semantic_error",
+                base_path,
+                "protocol deployment must be an object",
+                "protocol.deployments.object",
+            ));
+            continue;
+        };
+
+        if deployment_object
+            .get("contracts")
+            .is_some_and(|value| !value.is_object())
+        {
+            issues.push(issue(
+                "semantic_error",
+                path_with_key(&base_path, "contracts"),
+                "protocol deployment contracts must be an object",
+                "protocol.deployments.contracts_object",
+            ));
+        }
     }
 }
 
@@ -340,34 +368,6 @@ fn validate_operation_spec(
         return;
     };
 
-    if let Some(capabilities) = object.get("capabilities_required") {
-        match capabilities.as_array() {
-            Some(items) => {
-                for (index, item) in items.iter().enumerate() {
-                    if item
-                        .as_str()
-                        .map(str::trim)
-                        .filter(|it| !it.is_empty())
-                        .is_none()
-                    {
-                        issues.push(issue(
-                            "semantic_error",
-                            path_with_key_index(&base_path, "capabilities_required", index),
-                            "capability must be a non-empty string",
-                            "protocol.capabilities.non_empty",
-                        ));
-                    }
-                }
-            }
-            None => issues.push(issue(
-                "semantic_error",
-                path_with_key(&base_path, "capabilities_required"),
-                "capabilities_required must be an array",
-                "protocol.capabilities.array",
-            )),
-        }
-    }
-
     if let Some(execution) = object.get("execution") {
         let Some(execution_map) = execution.as_object() else {
             issues.push(issue(
@@ -413,23 +413,6 @@ fn validate_operation_spec(
     }
 }
 
-fn validate_capabilities_list(
-    capabilities: &[String],
-    base_path: Vec<FieldPathSegment>,
-    issues: &mut Vec<StructuredIssue>,
-) {
-    for (index, capability) in capabilities.iter().enumerate() {
-        if capability.trim().is_empty() {
-            issues.push(issue(
-                "semantic_error",
-                path_with_index(&base_path, index),
-                "capability must be a non-empty string",
-                "capabilities.non_empty",
-            ));
-        }
-    }
-}
-
 fn validate_schema_field(
     actual: &str,
     expected: &str,
@@ -471,12 +454,6 @@ fn issue(
 fn path_with_key(path: &[FieldPathSegment], key: &str) -> Vec<FieldPathSegment> {
     let mut out = path.to_vec();
     out.push(FieldPathSegment::Key(key.to_string()));
-    out
-}
-
-fn path_with_index(path: &[FieldPathSegment], index: usize) -> Vec<FieldPathSegment> {
-    let mut out = path.to_vec();
-    out.push(FieldPathSegment::Index(index));
     out
 }
 

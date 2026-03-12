@@ -18,7 +18,8 @@ use crate::policy::{
 };
 use crate::solver::{build_solver_event, Solver, SolverDecision};
 use ais_sdk::{
-    evaluate_value_ref_with_options, get_node_readiness, PlanDocument, ResolverContext, ValueRef,
+    evaluate_value_ref_with_options, get_node_readiness, resolve_calculated_bindings,
+    resolve_node_bindings, resolve_query_bindings, PlanDocument, ResolverContext, ValueRef,
     ValueRefEvalOptions,
 };
 use serde::{Deserialize, Serialize};
@@ -380,6 +381,7 @@ pub fn run_plan_once(
                     let risk_tags = extract_risk_tags_from_node(node_obj);
                     let gate_input = extract_policy_gate_input(
                         node,
+                        Some(&state.runtime),
                         readiness.resolved_params.as_ref(),
                         action_ref.clone(),
                         risk_observation.risk_level,
@@ -463,6 +465,99 @@ pub fn run_plan_once(
 
         let simulate_mode = should_simulate_node(plan, node_obj, &node_id);
         if simulate_mode {
+            let query = resolve_query_bindings(node, Some(&state.runtime));
+            if !query.missing_refs.is_empty() {
+                let mut details = Map::new();
+                details.insert(
+                    "reason".to_string(),
+                    Value::String(format!(
+                        "simulate prerequisite queries failed: {}",
+                        query.missing_refs.join(", ")
+                    )),
+                );
+                events.push(
+                    stream.next_record(
+                        wall_clock_timestamp_rfc3339(),
+                        executor_error_event(
+                            &node_id,
+                            &RouterExecuteError::ExecutorFailed {
+                                executor: "engine:materialize".to_string(),
+                                node_id: node_id.clone(),
+                                reason: details
+                                    .get("reason")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_string(),
+                            },
+                        ),
+                    ),
+                );
+                state.paused_reason = Some(format!("executor_error:{node_id}"));
+                events.push(stream.next_record(
+                    wall_clock_timestamp_rfc3339(),
+                    paused_event("executor_error"),
+                ));
+                persist_state_from_runtime(state, &mut deduper, &stream);
+                return EngineRunResult {
+                    status: EngineRunStatus::Paused,
+                    events,
+                };
+            }
+            let calculated = resolve_calculated_bindings(
+                node,
+                &ResolverContext::with_runtime(state.runtime.clone()),
+                &ValueRefEvalOptions::default(),
+                readiness.resolved_params.as_ref(),
+            );
+            if !calculated.missing_refs.is_empty() || !calculated.errors.is_empty() {
+                let mut details = Map::new();
+                details.insert(
+                    "reason".to_string(),
+                    Value::String(format!(
+                        "simulate calculated bindings failed: {}",
+                        calculated
+                            .missing_refs
+                            .into_iter()
+                            .chain(calculated.errors.into_iter())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )),
+                );
+                events.push(
+                    stream.next_record(
+                        wall_clock_timestamp_rfc3339(),
+                        executor_error_event(
+                            &node_id,
+                            &RouterExecuteError::ExecutorFailed {
+                                executor: "engine:materialize".to_string(),
+                                node_id: node_id.clone(),
+                                reason: details
+                                    .get("reason")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_string(),
+                            },
+                        ),
+                    ),
+                );
+                state.paused_reason = Some(format!("executor_error:{node_id}"));
+                events.push(stream.next_record(
+                    wall_clock_timestamp_rfc3339(),
+                    paused_event("executor_error"),
+                ));
+                persist_state_from_runtime(state, &mut deduper, &stream);
+                return EngineRunResult {
+                    status: EngineRunStatus::Paused,
+                    events,
+                };
+            }
+            if !calculated.calculated.is_empty() {
+                set_runtime_path(
+                    &mut state.runtime,
+                    &format!("nodes.{node_id}.calculated"),
+                    Value::Object(calculated.calculated),
+                );
+            }
             let simulated_result = json!({
                 "simulated": true,
                 "node_id": node_id,
@@ -568,6 +663,7 @@ pub fn run_plan_once(
         let risk_tags = extract_risk_tags_from_node(node_obj);
         let gate_input = extract_policy_gate_input(
             node,
+            Some(&state.runtime),
             readiness.resolved_params.as_ref(),
             action_ref.clone(),
             risk_observation.risk_level,
@@ -681,12 +777,12 @@ pub fn run_plan_once(
             set_latest_node_ready_gate_result(&mut events, &node_id, control_kind);
         }
 
-        let executable_node = match materialize_node_execution(
+        let (executable_node, resolved_calculated) = match materialize_node_execution(
             node,
             &state.runtime,
             readiness.resolved_params.as_ref(),
         ) {
-            Ok(node) => node,
+            Ok(payload) => payload,
             Err(reason) => {
                 let error = RouterExecuteError::ExecutorFailed {
                     executor: "engine:materialize".to_string(),
@@ -733,7 +829,13 @@ pub fn run_plan_once(
                 events,
             };
         }
-
+        if !resolved_calculated.is_empty() {
+            set_runtime_path(
+                &mut state.runtime,
+                &format!("nodes.{node_id}.calculated"),
+                Value::Object(resolved_calculated.clone()),
+            );
+        }
         match router.execute(&executable_node, &mut state.runtime) {
             Ok(mut result) => {
                 if options.safety.sanitize_executor_output {
@@ -936,26 +1038,118 @@ fn materialize_node_execution(
     node: &Value,
     runtime: &Value,
     resolved_params: Option<&Map<String, Value>>,
-) -> Result<Value, String> {
+) -> Result<(Value, Map<String, Value>), String> {
     let mut node_obj = node
         .as_object()
         .cloned()
         .ok_or_else(|| "node must be object".to_string())?;
     let Some(execution) = node_obj.get("execution") else {
-        return Ok(Value::Object(node_obj));
+        return Ok((Value::Object(node_obj), Map::new()));
     };
 
     let context = ResolverContext::with_runtime(runtime.clone());
-    let mut options = ValueRefEvalOptions::default();
-    if let Some(params) = resolved_params {
-        options
-            .root_overrides
-            .insert("params".to_string(), Value::Object(params.clone()));
+    let query = resolve_query_bindings(node, Some(runtime));
+    if !query.missing_refs.is_empty() {
+        return Err(format!(
+            "materialize prerequisite queries failed: {}",
+            query.missing_refs.join(", ")
+        ));
     }
+    let calculated = resolve_calculated_bindings(
+        node,
+        &context,
+        &ValueRefEvalOptions::default(),
+        resolved_params,
+    );
+    if !calculated.missing_refs.is_empty() || !calculated.errors.is_empty() {
+        let mut issues = calculated.missing_refs;
+        issues.extend(calculated.errors);
+        return Err(format!(
+            "materialize calculated bindings failed: {}",
+            issues.join(", ")
+        ));
+    }
+    let calculated_root = node
+        .get("calculated_overrides")
+        .and_then(Value::as_object)
+        .map(|_| &calculated.calculated);
+    let options = resolve_node_bindings(node, Some(runtime), resolved_params, calculated_root)
+        .to_eval_options(&ValueRefEvalOptions::default());
 
     let resolved_execution = materialize_value_refs(execution, &context, &options)?;
     node_obj.insert("execution".to_string(), resolved_execution);
-    Ok(Value::Object(node_obj))
+    Ok((Value::Object(node_obj), calculated.calculated))
+}
+
+fn prepare_node_expression_eval_options(
+    node_obj: &Map<String, Value>,
+    runtime: &Value,
+) -> Result<ValueRefEvalOptions, String> {
+    let node_value = Value::Object(node_obj.clone());
+    let context = ResolverContext::with_runtime(runtime.clone());
+    let base_options = resolve_node_bindings(&node_value, Some(runtime), None, None)
+        .to_eval_options(&ValueRefEvalOptions::default());
+    let resolved_params = resolve_node_params(&node_value, &context, &base_options)?;
+    let resolved_params = has_param_bindings(&node_value).then_some(resolved_params);
+    let query = resolve_query_bindings(&node_value, Some(runtime));
+    if !query.missing_refs.is_empty() {
+        return Err(format!(
+            "prerequisite query bindings failed: {}",
+            query.missing_refs.join(", ")
+        ));
+    }
+    let calculated = resolve_calculated_bindings(
+        &node_value,
+        &context,
+        &ValueRefEvalOptions::default(),
+        resolved_params.as_ref(),
+    );
+    if !calculated.missing_refs.is_empty() || !calculated.errors.is_empty() {
+        let mut issues = calculated.missing_refs;
+        issues.extend(calculated.errors);
+        return Err(format!(
+            "node derived bindings failed: {}",
+            issues.join(", ")
+        ));
+    }
+    let calculated_root = node_value
+        .get("calculated_overrides")
+        .and_then(Value::as_object)
+        .map(|_| &calculated.calculated);
+    Ok(resolve_node_bindings(
+        &node_value,
+        Some(runtime),
+        resolved_params.as_ref(),
+        calculated_root,
+    )
+    .to_eval_options(&ValueRefEvalOptions::default()))
+}
+
+fn resolve_node_params(
+    node: &Value,
+    context: &ResolverContext,
+    options: &ValueRefEvalOptions,
+) -> Result<Map<String, Value>, String> {
+    let mut resolved_params = Map::new();
+    let Some(params) = node.pointer("/bindings/params").and_then(Value::as_object) else {
+        return Ok(resolved_params);
+    };
+
+    for (key, value) in params {
+        let value_ref = serde_json::from_value::<ValueRef>(value.clone())
+            .map_err(|error| format!("invalid ValueRef at `bindings.params.{key}`: {error}"))?;
+        let resolved = evaluate_value_ref_with_options(&value_ref, context, options)
+            .map_err(|error| format!("bindings.params.{key} evaluation failed: {error}"))?;
+        resolved_params.insert(key.clone(), resolved);
+    }
+
+    Ok(resolved_params)
+}
+
+fn has_param_bindings(node: &Value) -> bool {
+    node.pointer("/bindings/params")
+        .and_then(Value::as_object)
+        .is_some()
 }
 
 fn materialize_value_refs(
@@ -1101,11 +1295,16 @@ fn evaluate_node_condition(node_obj: &Map<String, Value>, runtime: &Value) -> No
         }
     };
     let context = ResolverContext::with_runtime(runtime.clone());
-    let evaluated = match evaluate_value_ref_with_options(
-        &condition_value_ref,
-        &context,
-        &ValueRefEvalOptions::default(),
-    ) {
+    let options = match prepare_node_expression_eval_options(node_obj, runtime) {
+        Ok(options) => options,
+        Err(error) => {
+            return NodeConditionOutcome::Fail {
+                message: format!("condition evaluation failed: {error}"),
+            };
+        }
+    };
+    let evaluated = match evaluate_value_ref_with_options(&condition_value_ref, &context, &options)
+    {
         Ok(value) => value,
         Err(error) => {
             return NodeConditionOutcome::Fail {
@@ -1138,11 +1337,15 @@ fn evaluate_node_until(node_obj: &Map<String, Value>, runtime: &Value) -> NodeUn
         }
     };
     let context = ResolverContext::with_runtime(runtime.clone());
-    let evaluated = match evaluate_value_ref_with_options(
-        &until_value_ref,
-        &context,
-        &ValueRefEvalOptions::default(),
-    ) {
+    let options = match prepare_node_expression_eval_options(node_obj, runtime) {
+        Ok(options) => options,
+        Err(error) => {
+            return NodeUntilOutcome::Fail {
+                message: format!("until evaluation failed: {error}"),
+            };
+        }
+    };
+    let evaluated = match evaluate_value_ref_with_options(&until_value_ref, &context, &options) {
         Ok(value) => value,
         Err(error) => {
             return NodeUntilOutcome::Fail {
@@ -1392,11 +1595,16 @@ fn evaluate_node_assert(
         }
     };
     let context = ResolverContext::with_runtime(runtime.clone());
-    let evaluated = match evaluate_value_ref_with_options(
-        &assert_value_ref,
-        &context,
-        &ValueRefEvalOptions::default(),
-    ) {
+    let options = match prepare_node_expression_eval_options(node_obj, runtime) {
+        Ok(options) => options,
+        Err(error) => {
+            return NodeAssertOutcome::Fail {
+                message: format!("assert evaluation failed: {error}"),
+                strategy,
+            };
+        }
+    };
+    let evaluated = match evaluate_value_ref_with_options(&assert_value_ref, &context, &options) {
         Ok(value) => value,
         Err(error) => {
             return NodeAssertOutcome::Fail {

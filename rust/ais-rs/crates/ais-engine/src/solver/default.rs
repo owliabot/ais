@@ -1,9 +1,9 @@
 use crate::events::{EngineEvent, EngineEventType};
-use ais_core::{RuntimePatch, RuntimePatchOp};
+use ais_core::RuntimePatch;
 use ais_sdk::{NodeReadinessResult, NodeRunState};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 pub trait Solver {
     fn solve(
@@ -46,58 +46,46 @@ impl Solver for DefaultSolver {
         &self,
         _node: &Value,
         readiness: &NodeReadinessResult,
-        context: &SolverContext,
+        _context: &SolverContext,
     ) -> SolverDecision {
         if readiness.state != NodeRunState::Blocked {
             return SolverDecision::Noop;
         }
 
-        let mut proposed_patches = Vec::<RuntimePatch>::new();
-        let mut resolved_contract_paths = BTreeSet::<String>::new();
-        for missing_ref in &readiness.missing_refs {
-            if let Some(contract_path) = normalize_contract_path(missing_ref) {
-                if resolved_contract_paths.contains(&contract_path) {
-                    continue;
-                }
-                let Some(candidates) = context.contract_candidates.get(&contract_path) else {
-                    continue;
-                };
-                if candidates.len() == 1 {
-                    proposed_patches.push(RuntimePatch {
-                        op: RuntimePatchOp::Set,
-                        path: contract_path.clone(),
-                        value: candidates[0].clone(),
-                        extensions: None,
-                    });
-                    resolved_contract_paths.insert(contract_path);
-                }
-            }
-        }
-
-        let remaining_missing = readiness
+        let recoverable_missing = readiness
             .missing_refs
             .iter()
-            .filter(|path| {
-                normalize_contract_path(path)
-                    .map(|contract_path| !resolved_contract_paths.contains(&contract_path))
-                    .unwrap_or(true)
-            })
+            .filter(|path| normalize_contract_path(path).is_none())
             .cloned()
             .collect::<Vec<_>>();
+        let unresolved_system_refs = readiness
+            .missing_refs
+            .iter()
+            .filter_map(|path| normalize_contract_path(path.as_str()))
+            .collect::<Vec<_>>();
 
-        if !remaining_missing.is_empty() {
+        if !recoverable_missing.is_empty() {
             return SolverDecision::NeedUserInput {
                 reason: "missing_inputs_or_runtime_refs".to_string(),
-                details: map_from_entries(vec![
-                    (
-                        "missing_refs",
-                        Value::Array(remaining_missing.into_iter().map(Value::String).collect()),
+                details: map_from_entries(vec![(
+                    "missing_refs",
+                    Value::Array(recoverable_missing.into_iter().map(Value::String).collect()),
+                )]),
+            };
+        }
+
+        if !unresolved_system_refs.is_empty() {
+            return SolverDecision::NeedUserConfirm {
+                reason: "unresolved_system_refs".to_string(),
+                details: map_from_entries(vec![(
+                    "system_missing_refs",
+                    Value::Array(
+                        unresolved_system_refs
+                            .into_iter()
+                            .map(Value::String)
+                            .collect(),
                     ),
-                    (
-                        "proposed_patch_count",
-                        Value::Number((proposed_patches.len() as u64).into()),
-                    ),
-                ]),
+                )]),
             };
         }
 
@@ -115,13 +103,6 @@ impl Solver for DefaultSolver {
                             .collect(),
                     ),
                 )]),
-            };
-        }
-
-        if !proposed_patches.is_empty() {
-            return SolverDecision::ApplyPatches {
-                patches: proposed_patches,
-                summary: "contracts auto-filled by default solver".to_string(),
             };
         }
 

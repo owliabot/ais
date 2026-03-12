@@ -266,6 +266,37 @@ fn fixture_workspace_invalid_chain_scope_reports_issue() {
     ));
 }
 
+#[test]
+fn workspace_reports_invalid_protocol_deployment_contracts_shape() {
+    let protocol = ProtocolDocument {
+        schema: "ais/0.0.2".to_string(),
+        meta: json!({
+            "protocol": "demo",
+            "version": "0.0.2"
+        }),
+        deployments: vec![json!({
+            "chain": "eip155:1",
+            "contracts": "0xrouter"
+        })],
+        actions: Map::new(),
+        queries: Map::new(),
+        supported_assets: Vec::new(),
+        extensions: Map::new(),
+    };
+
+    let issues = validate_workspace_references(WorkspaceDocuments {
+        protocols: &[protocol],
+        packs: &[],
+        workflows: &[],
+    });
+
+    assert!(has_issue(
+        &issues,
+        "protocol.deployments.contracts_object",
+        "$.deployments[0].contracts"
+    ));
+}
+
 fn protocol_doc(
     protocol: &str,
     version: &str,
@@ -293,10 +324,7 @@ fn protocol_doc(
         })],
         actions: action_map,
         queries: query_map,
-        risks: Vec::new(),
         supported_assets: Vec::new(),
-        capabilities_required: Vec::new(),
-        tests: Vec::new(),
         extensions: Map::new(),
     }
 }

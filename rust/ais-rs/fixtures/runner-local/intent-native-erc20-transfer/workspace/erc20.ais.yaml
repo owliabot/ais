@@ -7,11 +7,6 @@ meta:
   description: "Minimal ERC-20 primitives used by workflows (approve/transfer/transferFrom/balance/allowance/name/symbol/decimals/totalSupply)."
   tags: ["evm", "token", "erc20"]
 
-capabilities_required:
-  - "cel_v1"
-  - "evm_read"
-  - "evm_call"
-
 deployments:
   - chain: "eip155:1"
     contracts: {}
