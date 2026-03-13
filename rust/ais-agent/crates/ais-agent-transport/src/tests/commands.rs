@@ -4,13 +4,14 @@ use serde_json::json;
 
 use ais_agent_control::{
     commands::{
-        BeginRunCommand, CancelRunCommand, EnvelopeKind, EnvelopeSubmission,
-        ExpectedRuntimeVersion, InspectRunCommand, MissionSubmission, RequestCancelRunCommand,
-        RunCommand, SignerDecisionKind, SignerDecisionSubmission, StepBudget, StepRunCommand,
-        StepUntil, SubmitEnvelopeCommand, SubmitEvidenceCommand, SubmitPlanPatchCommand,
-        SubmitSignerDecisionCommand,
+        BeginRunCommand, CancelRunCommand, ClaimRunCommand, EnvelopeKind, EnvelopeSubmission,
+        ExpectedRuntimeVersion, InspectRunCommand, MissionSubmission, ReleaseRunClaimCommand,
+        RenewRunClaimCommand, RequestCancelRunCommand, RunCommand, SignerDecisionKind,
+        SignerDecisionSubmission, StepBudget, StepRunCommand, StepUntil, SubmitEnvelopeCommand,
+        SubmitEvidenceCommand, SubmitPlanPatchCommand, SubmitSignerDecisionCommand,
     },
-    ids::{CommandId, IdempotencyKey, RunId, SignerRequestId},
+    ids::{ClaimId, CommandId, IdempotencyKey, RunId, SignerRequestId},
+    ownership::{RunClaimMode, RunClaimOwnerKind},
     patch::{PlanPatchOperation, PlanPatchSubmission, PlanPatchTarget},
     recovery::RunFailureCode,
 };
@@ -35,8 +36,16 @@ pub fn sample_begin_command() -> HostedRunCommand {
 }
 
 pub fn inspect_command(run_id: &RunId, request_id: &str) -> HostedRunCommand {
+    inspect_command_for_session(run_id, request_id, "session-1")
+}
+
+pub fn inspect_command_for_session(
+    run_id: &RunId,
+    request_id: &str,
+    host_session_id: &str,
+) -> HostedRunCommand {
     HostedRunCommand {
-        host_session_id: HostSessionId("session-1".to_owned()),
+        host_session_id: HostSessionId(host_session_id.to_owned()),
         host_request_id: Some(request_id.into()),
         command: RunCommand::InspectRun(InspectRunCommand {
             command_id: CommandId(format!("cmd-{request_id}")),
@@ -45,12 +54,105 @@ pub fn inspect_command(run_id: &RunId, request_id: &str) -> HostedRunCommand {
     }
 }
 
-pub fn evidence_command(run_id: &RunId) -> HostedRunCommand {
+pub fn claim_command(run_id: &RunId, request_id: &str) -> HostedRunCommand {
+    claim_command_for_session(run_id, request_id, "session-1", Some(30_000))
+}
+
+pub fn claim_command_for_session(
+    run_id: &RunId,
+    request_id: &str,
+    host_session_id: &str,
+    requested_lease_ms: Option<u64>,
+) -> HostedRunCommand {
     HostedRunCommand {
-        host_session_id: HostSessionId("session-1".to_owned()),
-        host_request_id: Some("request-evidence".into()),
+        host_session_id: HostSessionId(host_session_id.to_owned()),
+        host_request_id: Some(request_id.into()),
+        command: RunCommand::ClaimRun(ClaimRunCommand {
+            command_id: CommandId(format!("cmd-{request_id}")),
+            run_id: run_id.clone(),
+            owner_kind: RunClaimOwnerKind::InteractiveHost,
+            owner_instance_id: host_session_id.to_owned(),
+            mode: RunClaimMode::ExclusiveMutation,
+            requested_lease_ms,
+            allow_supersede: false,
+            expected_current_claim_id: None,
+            expected_current_claim_epoch: None,
+        }),
+    }
+}
+
+pub fn renew_claim_command(
+    run_id: &RunId,
+    claim_id: &str,
+    claim_epoch: u64,
+    request_id: &str,
+) -> HostedRunCommand {
+    renew_claim_command_for_session(run_id, claim_id, claim_epoch, request_id, "session-1")
+}
+
+pub fn renew_claim_command_for_session(
+    run_id: &RunId,
+    claim_id: &str,
+    claim_epoch: u64,
+    request_id: &str,
+    host_session_id: &str,
+) -> HostedRunCommand {
+    HostedRunCommand {
+        host_session_id: HostSessionId(host_session_id.to_owned()),
+        host_request_id: Some(request_id.into()),
+        command: RunCommand::RenewRunClaim(RenewRunClaimCommand {
+            command_id: CommandId(format!("cmd-{request_id}")),
+            run_id: run_id.clone(),
+            claim_id: ClaimId(claim_id.to_owned()),
+            claim_epoch,
+            requested_lease_ms: Some(30_000),
+        }),
+    }
+}
+
+pub fn release_claim_command(
+    run_id: &RunId,
+    claim_id: &str,
+    claim_epoch: u64,
+    request_id: &str,
+) -> HostedRunCommand {
+    release_claim_command_for_session(run_id, claim_id, claim_epoch, request_id, "session-1")
+}
+
+pub fn release_claim_command_for_session(
+    run_id: &RunId,
+    claim_id: &str,
+    claim_epoch: u64,
+    request_id: &str,
+    host_session_id: &str,
+) -> HostedRunCommand {
+    HostedRunCommand {
+        host_session_id: HostSessionId(host_session_id.to_owned()),
+        host_request_id: Some(request_id.into()),
+        command: RunCommand::ReleaseRunClaim(ReleaseRunClaimCommand {
+            command_id: CommandId(format!("cmd-{request_id}")),
+            run_id: run_id.clone(),
+            claim_id: ClaimId(claim_id.to_owned()),
+            claim_epoch,
+            reason: Some("transport passthrough".to_owned()),
+        }),
+    }
+}
+
+pub fn evidence_command(run_id: &RunId) -> HostedRunCommand {
+    evidence_command_for_session(run_id, "session-1", "request-evidence")
+}
+
+pub fn evidence_command_for_session(
+    run_id: &RunId,
+    host_session_id: &str,
+    request_id: &str,
+) -> HostedRunCommand {
+    HostedRunCommand {
+        host_session_id: HostSessionId(host_session_id.to_owned()),
+        host_request_id: Some(request_id.into()),
         command: RunCommand::SubmitEvidence(SubmitEvidenceCommand {
-            command_id: CommandId("cmd-evidence".to_owned()),
+            command_id: CommandId(format!("cmd-{request_id}")),
             run_id: run_id.clone(),
             evidence: ais_agent_control::commands::EvidenceSubmission {
                 evidence_id: "quote".to_owned(),
@@ -67,8 +169,16 @@ pub fn evidence_command(run_id: &RunId) -> HostedRunCommand {
 }
 
 pub fn step_command(run_id: &RunId, request_id: &str) -> HostedRunCommand {
+    step_command_for_session(run_id, request_id, "session-1")
+}
+
+pub fn step_command_for_session(
+    run_id: &RunId,
+    request_id: &str,
+    host_session_id: &str,
+) -> HostedRunCommand {
     HostedRunCommand {
-        host_session_id: HostSessionId("session-1".to_owned()),
+        host_session_id: HostSessionId(host_session_id.to_owned()),
         host_request_id: Some(request_id.into()),
         command: RunCommand::StepRun(StepRunCommand {
             command_id: CommandId(format!("cmd-{request_id}")),

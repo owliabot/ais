@@ -20,6 +20,7 @@ Current implementation status:
   - `RunCatalogRepository`
   - `CheckpointArchive`
   - `EventArchive`
+  - `RunClaimRepository`
   - `SignerStateArchive`
   - `RuntimeAuditArchive`
 - SQLite now also implements backend-native grouped durable commits through:
@@ -33,6 +34,7 @@ Current implementation status:
   - `run_catalog`
   - `checkpoint_archive`
   - `event_archive`
+  - `run_claims`
   - `runtime_audit_archive`
   - `signer_state_archive`
 - repository tests currently prove:
@@ -44,12 +46,20 @@ Current implementation status:
   - event archive unlimited and huge-limit reads stay overflow-safe and untruncated
   - pending signer state round-trips through SQLite
   - signer state upsert and clear semantics behave like the in-memory archive
+  - run claim acquire / load_active / load_claim round-trip through SQLite
+  - active-claim conflict and epoch-mismatch checks are enforced in the SQLite adapter
+  - claim expiry and supersede semantics survive durable storage
+  - file-backed reopen preserves active claim truth
   - runtime audit archive cursor reads round-trip through SQLite
   - grouped durable commits persist all members on success
   - grouped durable commits roll back earlier writes when a later member fails
 - checkpoint archive storage now enforces:
   - unique `(run_id, checkpoint_seq, plan_epoch)` identity
   - indexed latest-checkpoint lookup by checkpoint truth
+- run claim storage now enforces:
+  - `claim_id` primary-key identity
+  - one active claim per run through a partial unique index
+  - indexed `(run_id, claim_epoch DESC)` lookup for active/history scans
 - SQLite connection defaults now explicitly configure:
   - `foreign_keys = ON`
   - `synchronous = NORMAL`
@@ -71,3 +81,6 @@ Current implementation status:
 
 Known gaps:
 - no path/file configuration surface beyond direct `SqliteStore` construction
+- claim audit does not introduce a second archive here:
+  - this crate keeps ownership audit on the existing `runtime_audit_archive` seam
+  - claim-specific audit payloads are not yet available from `ais-agent-control`, so this backend stores durable claim truth now and is ready to persist claim audit records through the existing audit table once runtime starts emitting them

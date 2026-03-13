@@ -207,7 +207,27 @@ This means:
   - stop reason / stable-boundary exit
   - side-effect durability cut decisions
   - restore-source decisions
-  - durable write failures
+- durable write failures
+
+## Service Configuration Boundary
+
+Service/deployment configuration is a runtime wiring seam, not the product truth for one run.
+
+That means:
+- storage / transport / provider / observability / timeout defaults belong in service config
+- recipient / amount / slippage / LP parameters belong in mission submission and evidence
+
+Current implementation note:
+- the current service config still carries per-family feature toggles such as transfer enablement
+- treat those toggles as bounded rollout guards, not as the long-term capability model
+
+Forward-looking constraint:
+- do not keep expanding `ais-agent` by adding one hard-coded feature flag or action-family-specific branch per new capability
+- new execution slices should prefer:
+  - shared action-family seeding seams
+  - shared capability registration / discovery
+  - generic runtime wiring over feature-specific special cases
+- after the current bounded rollout phase, the feature-toggle seam should be refactored toward a capability/registry-driven model instead of a growing per-feature boolean table
 
 ## Host Collaboration Contract
 
@@ -483,9 +503,25 @@ These are the most important remaining architectural gaps:
      - the in-memory/reference executor remains linear and fail-closed for tests and non-SQLite wiring
 
 2. cross-process durable host-session ownership
-   - single-process restart operability is now covered by deterministic `inspect_run` relink
-   - the remaining gap is broader ownership across processes or horizontally scaled service instances
-   - no shared durable session store or lease/claim protocol exists yet
+   - durable `RunClaimRepository` truth and SQLite-backed claim storage now exist
+   - host-service mutating commands now enforce active-claim legality and `begin_run` seeds an initial exclusive claim
+   - `inspect_run` still stays a soft relink, while legacy pre-claim durable runs can bootstrap a bounded claim on first legal mutation
+   - runtime now also handles:
+     - explicit `claim_run`
+     - `renew_run_claim`
+     - `release_run_claim`
+     - compare-and-supersede on paused pre-side-effect runs
+     - explicit reacquire after durable lease expiry
+   - restart/transport proof now also exists for:
+     - active claim surviving restart
+     - released claim remaining inspect-readable but mutation-closed after restart
+     - expired claim requiring explicit reacquire after restart
+     - JSONL release-style handoff across separate service instances sharing SQLite durable claim truth
+     - HTTP expiry-style takeover across separate service instances sharing SQLite durable claim truth
+     - stale old-owner mutation rejection after takeover
+   - the remaining gap is broader ownership across processes or horizontally scaled service instances:
+     - claim transition audit payload emission
+     - shared lease ownership beyond a single service instance
 
 3. long-running step cancellation/interruption
    - interruption DTOs and runtime classification are now implemented

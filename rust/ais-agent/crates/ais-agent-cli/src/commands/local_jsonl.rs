@@ -3,16 +3,16 @@ use std::io::{self, BufRead, BufReader, Write};
 use ais_agent_host::{control::HostCommandService, events::HostRunEventService};
 use ais_agent_transport::jsonl::JsonlServer;
 
-use crate::service::UnavailableHostService;
-
-pub async fn local_jsonl() -> io::Result<()> {
+pub async fn local_jsonl<S>(service: &mut S) -> io::Result<()>
+where
+    S: HostCommandService + HostRunEventService,
+{
     let stdin = io::stdin();
     let stdout = io::stdout();
     let reader = BufReader::new(stdin.lock());
     let writer = stdout.lock();
-    let mut service = UnavailableHostService::default();
 
-    serve_jsonl_with_service(reader, writer, &mut service).await
+    serve_jsonl_with_service(reader, writer, service).await
 }
 
 pub async fn serve_jsonl_with_service<R, W, S>(
@@ -36,6 +36,7 @@ mod tests {
         commands::{BeginRunCommand, MissionSubmission, RunCommand},
         events::{RunEvent, RunEventEnvelope, RunStarted},
         ids::{CommandId, EventId, IdempotencyKey, RunId},
+        ownership::{OwnershipVisibility, RunOwnershipSnapshot},
         recovery::{
             RecoveryActionKind, RecoveryDisposition, RecoveryPriority, RecoverySuggestion,
             RunFailureCode, RunFailureContext, RunFailureStage, StableBoundaryKind,
@@ -242,11 +243,20 @@ mod tests {
                         side_effect_phase: None,
                         recovery_disposition: RecoveryDisposition::AwaitPatch,
                         summary: "governor requested patch".to_owned(),
+                        ownership: RunOwnershipSnapshot {
+                            run_id: RunId("run-1".to_owned()),
+                            current_claim: None,
+                            last_terminal_claim_id: None,
+                            last_claim_transition: None,
+                            claim_required_for_mutation: true,
+                            owner_visibility: OwnershipVisibility::ObserverReadAllowed,
+                        },
                         blocking_refs: vec!["govern.swap".to_owned()],
                         required_actions: vec![PauseActionView {
                             action_kind: RecoveryActionKind::SubmitPlanPatch,
                             action: "submit_plan_patch".to_owned(),
                             description: "submit a bounded plan patch".to_owned(),
+                            requires_mutation_claim: true,
                             retry_intent: None,
                         }],
                         failure_context: Some(failure),

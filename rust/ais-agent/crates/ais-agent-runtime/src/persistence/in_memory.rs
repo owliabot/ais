@@ -2,17 +2,23 @@
 
 use std::collections::BTreeMap;
 
-use ais_agent_control::{audit::RuntimeAuditRecord, events::RunEventEnvelope, ids::RunId};
+use ais_agent_control::{
+    audit::RuntimeAuditRecord,
+    events::RunEventEnvelope,
+    ids::{ClaimId, RunId},
+    ownership::{RunClaim, RunClaimStatus},
+};
 use ais_agent_core::checkpoint::CheckpointSnapshot;
 use ais_agent_core::mission::Mission;
 use ais_agent_core::runtime::SignerRequestState;
 
 use crate::persistence::{
-    CheckpointArchive, CheckpointArchiveEntry, CheckpointArchiveError, EventArchive,
-    EventArchiveError, EventArchiveQuery, EventArchiveSlice, MissionRepository,
+    CheckpointArchive, CheckpointArchiveEntry, CheckpointArchiveError, ClaimExpireRequest,
+    ClaimReleaseRequest, ClaimRenewRequest, ClaimSupersedeRequest, ClaimSupersedeResult,
+    EventArchive, EventArchiveError, EventArchiveQuery, EventArchiveSlice, MissionRepository,
     MissionRepositoryError, RunCatalogEntry, RunCatalogRepository, RunCatalogRepositoryError,
-    RuntimeAuditArchive, RuntimeAuditArchiveError, RuntimeAuditQuery, RuntimeAuditSlice,
-    SignerStateArchive, SignerStateArchiveError,
+    RunClaimRepository, RunClaimRepositoryError, RuntimeAuditArchive, RuntimeAuditArchiveError,
+    RuntimeAuditQuery, RuntimeAuditSlice, SignerStateArchive, SignerStateArchiveError,
 };
 
 #[derive(Debug, Default)]
@@ -101,6 +107,251 @@ impl MissionRepository for InMemoryMissionRepository {
 #[derive(Debug, Default)]
 pub struct InMemoryRunCatalogRepository {
     entries: BTreeMap<String, RunCatalogEntry>,
+}
+
+#[derive(Debug, Default)]
+pub struct InMemoryRunClaimRepository {
+    claims_by_id: BTreeMap<String, RunClaim>,
+    active_claim_by_run: BTreeMap<String, String>,
+}
+
+impl InMemoryRunClaimRepository {
+    fn validate_active_claim(claim: &RunClaim) -> Result<(), RunClaimRepositoryError> {
+        claim
+            .validate()
+            .map_err(|message| RunClaimRepositoryError::InvalidClaim { message })?;
+        if claim.status != RunClaimStatus::Active {
+            return Err(RunClaimRepositoryError::InvalidStatus {
+                claim_id: claim.claim_id.0.clone(),
+                status: claim.status.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    fn load_existing_claim(&self, claim_id: &ClaimId) -> Result<RunClaim, RunClaimRepositoryError> {
+        self.claims_by_id.get(&claim_id.0).cloned().ok_or_else(|| {
+            RunClaimRepositoryError::ClaimNotFound {
+                claim_id: claim_id.0.clone(),
+            }
+        })
+    }
+}
+
+impl RunClaimRepository for InMemoryRunClaimRepository {
+    fn acquire(&mut self, claim: RunClaim) -> Result<RunClaim, RunClaimRepositoryError> {
+        Self::validate_active_claim(&claim)?;
+        if let Some(active_claim_id) = self.active_claim_by_run.get(&claim.run_id.0) {
+            return Err(RunClaimRepositoryError::ActiveClaimConflict {
+                run_id: claim.run_id.0.clone(),
+                claim_id: active_claim_id.clone(),
+            });
+        }
+
+        self.active_claim_by_run
+            .insert(claim.run_id.0.clone(), claim.claim_id.0.clone());
+        self.claims_by_id
+            .insert(claim.claim_id.0.clone(), claim.clone());
+        Ok(claim)
+    }
+
+    fn renew(&mut self, request: ClaimRenewRequest) -> Result<RunClaim, RunClaimRepositoryError> {
+        let mut current = self.load_existing_claim(&request.claim_id)?;
+        if current.run_id != request.run_id {
+            return Err(RunClaimRepositoryError::InvalidClaim {
+                message: "claim renew run_id does not match existing claim".to_owned(),
+            });
+        }
+        if current.status != RunClaimStatus::Active {
+            return Err(RunClaimRepositoryError::InvalidStatus {
+                claim_id: current.claim_id.0.clone(),
+                status: current.status,
+            });
+        }
+        if current.claim_epoch != request.claim_epoch {
+            return Err(RunClaimRepositoryError::ClaimEpochConflict {
+                claim_id: current.claim_id.0.clone(),
+                expected_claim_epoch: request.claim_epoch,
+                actual_claim_epoch: current.claim_epoch,
+            });
+        }
+
+        current.last_renewed_at_ms = Some(request.renewed_at_ms);
+        current.lease_expires_at_ms = request.lease_expires_at_ms;
+        current.claim_epoch += 1;
+        current
+            .validate()
+            .map_err(|message| RunClaimRepositoryError::InvalidClaim { message })?;
+        self.claims_by_id
+            .insert(current.claim_id.0.clone(), current.clone());
+        Ok(current)
+    }
+
+    fn release(
+        &mut self,
+        request: ClaimReleaseRequest,
+    ) -> Result<RunClaim, RunClaimRepositoryError> {
+        let mut current = self.load_existing_claim(&request.claim_id)?;
+        if current.run_id != request.run_id {
+            return Err(RunClaimRepositoryError::InvalidClaim {
+                message: "claim release run_id does not match existing claim".to_owned(),
+            });
+        }
+        if current.status != RunClaimStatus::Active {
+            return Err(RunClaimRepositoryError::InvalidStatus {
+                claim_id: current.claim_id.0.clone(),
+                status: current.status,
+            });
+        }
+        if current.claim_epoch != request.claim_epoch {
+            return Err(RunClaimRepositoryError::ClaimEpochConflict {
+                claim_id: current.claim_id.0.clone(),
+                expected_claim_epoch: request.claim_epoch,
+                actual_claim_epoch: current.claim_epoch,
+            });
+        }
+
+        current.status = RunClaimStatus::Released;
+        current.claim_epoch += 1;
+        current
+            .validate()
+            .map_err(|message| RunClaimRepositoryError::InvalidClaim { message })?;
+        self.claims_by_id
+            .insert(current.claim_id.0.clone(), current.clone());
+        self.active_claim_by_run.remove(&current.run_id.0);
+        Ok(current)
+    }
+
+    fn load_active(&self, run_id: &RunId) -> Result<Option<RunClaim>, RunClaimRepositoryError> {
+        Ok(self
+            .active_claim_by_run
+            .get(&run_id.0)
+            .and_then(|claim_id| self.claims_by_id.get(claim_id))
+            .cloned())
+    }
+
+    fn load_latest_for_run(
+        &self,
+        run_id: &RunId,
+    ) -> Result<Option<RunClaim>, RunClaimRepositoryError> {
+        Ok(self
+            .claims_by_id
+            .values()
+            .filter(|claim| claim.run_id == *run_id)
+            .cloned()
+            .max_by(|left, right| {
+                (
+                    left.lease_started_at_ms,
+                    left.last_renewed_at_ms.unwrap_or(left.lease_started_at_ms),
+                    left.claim_epoch,
+                    &left.claim_id.0,
+                )
+                    .cmp(&(
+                        right.lease_started_at_ms,
+                        right
+                            .last_renewed_at_ms
+                            .unwrap_or(right.lease_started_at_ms),
+                        right.claim_epoch,
+                        &right.claim_id.0,
+                    ))
+            }))
+    }
+
+    fn load_claim(&self, claim_id: &ClaimId) -> Result<RunClaim, RunClaimRepositoryError> {
+        self.load_existing_claim(claim_id)
+    }
+
+    fn expire_stale(
+        &mut self,
+        request: ClaimExpireRequest,
+    ) -> Result<Option<RunClaim>, RunClaimRepositoryError> {
+        let Some(claim_id) = self.active_claim_by_run.get(&request.run_id.0).cloned() else {
+            return Ok(None);
+        };
+        let mut current = self.load_existing_claim(&ClaimId(claim_id))?;
+        let Some(lease_expires_at_ms) = current.lease_expires_at_ms else {
+            return Ok(None);
+        };
+        if lease_expires_at_ms > request.now_ms {
+            return Ok(None);
+        }
+        if current.status != RunClaimStatus::Active {
+            return Ok(None);
+        }
+
+        current.status = RunClaimStatus::Expired;
+        current.claim_epoch += 1;
+        current
+            .validate()
+            .map_err(|message| RunClaimRepositoryError::InvalidClaim { message })?;
+        self.claims_by_id
+            .insert(current.claim_id.0.clone(), current.clone());
+        self.active_claim_by_run.remove(&current.run_id.0);
+        Ok(Some(current))
+    }
+
+    fn supersede(
+        &mut self,
+        request: ClaimSupersedeRequest,
+    ) -> Result<ClaimSupersedeResult, RunClaimRepositoryError> {
+        Self::validate_active_claim(&request.successor_claim)?;
+        if request.successor_claim.run_id != request.run_id {
+            return Err(RunClaimRepositoryError::InvalidClaim {
+                message: "successor claim run_id does not match supersede request".to_owned(),
+            });
+        }
+
+        let active_claim_id = self
+            .active_claim_by_run
+            .get(&request.run_id.0)
+            .cloned()
+            .ok_or_else(|| RunClaimRepositoryError::ClaimNotFound {
+                claim_id: request.predecessor_claim_id.0.clone(),
+            })?;
+        if active_claim_id != request.predecessor_claim_id.0 {
+            return Err(RunClaimRepositoryError::ActiveClaimConflict {
+                run_id: request.run_id.0.clone(),
+                claim_id: active_claim_id,
+            });
+        }
+
+        let mut predecessor = self.load_existing_claim(&request.predecessor_claim_id)?;
+        if predecessor.claim_epoch != request.predecessor_claim_epoch {
+            return Err(RunClaimRepositoryError::ClaimEpochConflict {
+                claim_id: predecessor.claim_id.0.clone(),
+                expected_claim_epoch: request.predecessor_claim_epoch,
+                actual_claim_epoch: predecessor.claim_epoch,
+            });
+        }
+        if predecessor.status != RunClaimStatus::Active {
+            return Err(RunClaimRepositoryError::InvalidStatus {
+                claim_id: predecessor.claim_id.0.clone(),
+                status: predecessor.status,
+            });
+        }
+
+        predecessor.status = RunClaimStatus::Superseded;
+        predecessor.claim_epoch += 1;
+        predecessor
+            .validate()
+            .map_err(|message| RunClaimRepositoryError::InvalidClaim { message })?;
+
+        self.claims_by_id
+            .insert(predecessor.claim_id.0.clone(), predecessor.clone());
+        self.claims_by_id.insert(
+            request.successor_claim.claim_id.0.clone(),
+            request.successor_claim.clone(),
+        );
+        self.active_claim_by_run.insert(
+            request.run_id.0.clone(),
+            request.successor_claim.claim_id.0.clone(),
+        );
+
+        Ok(ClaimSupersedeResult {
+            predecessor,
+            successor: request.successor_claim,
+        })
+    }
 }
 
 impl RunCatalogRepository for InMemoryRunCatalogRepository {

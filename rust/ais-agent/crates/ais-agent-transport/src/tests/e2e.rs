@@ -24,14 +24,17 @@ use crate::{
     jsonl::{JsonlInboundFrame, JsonlOutboundFrame, JsonlServer},
     tests::{
         commands::{
-            cancel_command, envelope_command, evidence_command, illegal_patch_command,
-            inspect_command, patch_command, request_cancel_command, sample_begin_command,
-            signer_approved_command, signer_command, stale_patch_command, step_command,
+            cancel_command, claim_command_for_session, envelope_command, evidence_command,
+            evidence_command_for_session, illegal_patch_command, inspect_command,
+            inspect_command_for_session, patch_command, release_claim_command_for_session,
+            request_cancel_command, sample_begin_command, signer_approved_command, signer_command,
+            stale_patch_command, step_command, step_command_for_session,
         },
         runtime_host::{
             build_preloaded_envelope_wait_service, build_preloaded_evidence_wait_service,
             build_preloaded_patch_wait_service, build_preloaded_signer_wait_service,
             build_preloaded_solana_signer_wait_service, build_runtime_host_service,
+            build_sqlite_preloaded_evidence_wait_service,
         },
     },
 };
@@ -337,7 +340,9 @@ async fn jsonl_runtime_e2e_can_poll_event_batches_after_sqlite_backed_restart() 
         _event_archive,
         session_store,
         _signer_state_archive,
-    ) = service.into_parts();
+        _audit_archive,
+        _claim_repo,
+    ) = service.into_parts_with_claim_repo();
     let mut restarted = sqlite_runtime_host_service(
         &sqlite_path,
         InMemoryRunRepository::default(),
@@ -369,6 +374,171 @@ async fn jsonl_runtime_e2e_can_poll_event_batches_after_sqlite_backed_restart() 
             assert!(matches!(batch.events[0].event, RunEvent::Started(_)));
         }
         other => panic!("unexpected frame: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn jsonl_runtime_e2e_supports_cross_process_claim_handoff_after_release() {
+    let sqlite_path = sqlite_test_path("jsonl-claim-handoff");
+    let run_id = RunId("run-1".to_owned());
+    let mut owner_a = build_sqlite_preloaded_evidence_wait_service(
+        &sqlite_path,
+        InMemoryHostSessionStore::default(),
+    );
+
+    let inspect_a = send_jsonl_command(
+        &mut owner_a,
+        inspect_command_for_session(&run_id, "jsonl-owner-a-inspect-1", "session-a"),
+    )
+    .await;
+    match inspect_a.response {
+        HostCommandResponse::Inspect(snapshot) => {
+            assert_eq!(
+                snapshot.status,
+                ais_agent_host::inspect::RunStatus::AwaitingEvidence
+            );
+            assert!(snapshot.ownership.current_claim.is_none());
+            assert!(snapshot.ownership.claim_required_for_mutation);
+        }
+        other => panic!("unexpected owner-a inspect response: {other:?}"),
+    }
+
+    let claimed_a = send_jsonl_command(
+        &mut owner_a,
+        claim_command_for_session(&run_id, "jsonl-owner-a-claim", "session-a", Some(30_000)),
+    )
+    .await;
+    let (claim_id, claim_epoch) = match claimed_a.response {
+        HostCommandResponse::Inspect(snapshot) => {
+            let claim = snapshot
+                .ownership
+                .current_claim
+                .expect("owner-a claim should be present");
+            assert_eq!(claim.host_session_id, "session-a");
+            (claim.claim_id.0, claim.claim_epoch)
+        }
+        other => panic!("unexpected owner-a claim response: {other:?}"),
+    };
+
+    let released_a = send_jsonl_command(
+        &mut owner_a,
+        release_claim_command_for_session(
+            &run_id,
+            &claim_id,
+            claim_epoch,
+            "jsonl-owner-a-release",
+            "session-a",
+        ),
+    )
+    .await;
+    match released_a.response {
+        HostCommandResponse::Inspect(snapshot) => {
+            assert!(snapshot.ownership.current_claim.is_none());
+            assert_eq!(
+                snapshot.ownership.last_claim_transition,
+                Some(ais_agent_control::ownership::ClaimTransitionKind::ClaimReleased)
+            );
+        }
+        other => panic!("unexpected owner-a release response: {other:?}"),
+    }
+
+    let mut owner_b = sqlite_runtime_host_service(
+        &sqlite_path,
+        InMemoryRunRepository::default(),
+        Default::default(),
+    );
+    let inspect_b = send_jsonl_command(
+        &mut owner_b,
+        inspect_command_for_session(&run_id, "jsonl-owner-b-inspect-1", "session-b"),
+    )
+    .await;
+    match inspect_b.response {
+        HostCommandResponse::Inspect(snapshot) => {
+            assert_eq!(
+                snapshot.status,
+                ais_agent_host::inspect::RunStatus::AwaitingEvidence
+            );
+            assert!(snapshot.ownership.current_claim.is_none());
+            assert_eq!(
+                snapshot.ownership.last_claim_transition,
+                Some(ais_agent_control::ownership::ClaimTransitionKind::ClaimReleased)
+            );
+        }
+        other => panic!("unexpected owner-b inspect response: {other:?}"),
+    }
+
+    let claimed_b = send_jsonl_command(
+        &mut owner_b,
+        claim_command_for_session(&run_id, "jsonl-owner-b-claim", "session-b", Some(30_000)),
+    )
+    .await;
+    match claimed_b.response {
+        HostCommandResponse::Inspect(snapshot) => {
+            let claim = snapshot
+                .ownership
+                .current_claim
+                .expect("owner-b claim should be present");
+            assert_eq!(claim.host_session_id, "session-b");
+        }
+        other => panic!("unexpected owner-b claim response: {other:?}"),
+    }
+
+    let mut stale_owner = sqlite_runtime_host_service(
+        &sqlite_path,
+        InMemoryRunRepository::default(),
+        Default::default(),
+    );
+    let _ = send_jsonl_command(
+        &mut stale_owner,
+        inspect_command_for_session(&run_id, "jsonl-stale-owner-inspect", "session-a"),
+    )
+    .await;
+    let stale_mutation = send_jsonl_command(
+        &mut stale_owner,
+        evidence_command_for_session(&run_id, "session-a", "jsonl-stale-owner-evidence"),
+    )
+    .await;
+    match stale_mutation.response {
+        HostCommandResponse::Error(error) => {
+            assert_eq!(error.code, "claim_conflict");
+        }
+        other => panic!("unexpected stale owner response: {other:?}"),
+    }
+
+    let submitted = send_jsonl_command(
+        &mut owner_b,
+        evidence_command_for_session(&run_id, "session-b", "jsonl-owner-b-evidence"),
+    )
+    .await;
+    match submitted.response {
+        HostCommandResponse::Inspect(snapshot) => {
+            assert!(matches!(
+                snapshot.status,
+                ais_agent_host::inspect::RunStatus::AwaitingEvidence
+                    | ais_agent_host::inspect::RunStatus::Running
+            ));
+            let claim = snapshot
+                .ownership
+                .current_claim
+                .expect("owner-b claim should remain active");
+            assert_eq!(claim.host_session_id, "session-b");
+        }
+        other => panic!("unexpected owner-b evidence response: {other:?}"),
+    }
+
+    let completed = send_jsonl_command(
+        &mut owner_b,
+        step_command_for_session(&run_id, "jsonl-owner-b-step", "session-b"),
+    )
+    .await;
+    match completed.response {
+        HostCommandResponse::Inspect(snapshot) => {
+            assert_eq!(
+                snapshot.status,
+                ais_agent_host::inspect::RunStatus::Completed
+            );
+        }
+        other => panic!("unexpected owner-b completion response: {other:?}"),
     }
 }
 
@@ -974,6 +1144,119 @@ async fn http_runtime_e2e_supports_minimal_solana_guarded_execution_to_confirmat
 }
 
 #[tokio::test]
+async fn http_runtime_e2e_supports_cross_process_takeover_after_claim_expiry() {
+    let sqlite_path = sqlite_test_path("http-claim-expiry");
+    let app_a = build_http_router(build_sqlite_preloaded_evidence_wait_service(
+        &sqlite_path,
+        InMemoryHostSessionStore::default(),
+    ));
+    let run_id = RunId("run-1".to_owned());
+
+    let inspect_a = send_http_command(
+        &app_a,
+        inspect_command_for_session(&run_id, "http-owner-a-inspect-1", "session-a"),
+    )
+    .await;
+    match inspect_a.response {
+        HostCommandResponse::Inspect(snapshot) => {
+            assert_eq!(
+                snapshot.status,
+                ais_agent_host::inspect::RunStatus::AwaitingEvidence
+            );
+            assert!(snapshot.ownership.current_claim.is_none());
+        }
+        other => panic!("unexpected owner-a inspect response: {other:?}"),
+    }
+
+    let claimed_a = send_http_command(
+        &app_a,
+        claim_command_for_session(&run_id, "http-owner-a-claim", "session-a", Some(25)),
+    )
+    .await;
+    match claimed_a.response {
+        HostCommandResponse::Inspect(snapshot) => {
+            let claim = snapshot
+                .ownership
+                .current_claim
+                .expect("owner-a claim should be present");
+            assert_eq!(claim.host_session_id, "session-a");
+        }
+        other => panic!("unexpected owner-a claim response: {other:?}"),
+    }
+
+    let submitted_a = send_http_command(
+        &app_a,
+        evidence_command_for_session(&run_id, "session-a", "http-owner-a-evidence"),
+    )
+    .await;
+    match submitted_a.response {
+        HostCommandResponse::Inspect(snapshot) => {
+            assert!(matches!(
+                snapshot.status,
+                ais_agent_host::inspect::RunStatus::AwaitingEvidence
+                    | ais_agent_host::inspect::RunStatus::Running
+            ));
+            let claim = snapshot
+                .ownership
+                .current_claim
+                .expect("owner-a claim should remain active");
+            assert_eq!(claim.host_session_id, "session-a");
+        }
+        other => panic!("unexpected owner-a evidence response: {other:?}"),
+    }
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let app_b = build_http_router(sqlite_runtime_host_service(
+        &sqlite_path,
+        InMemoryRunRepository::default(),
+        InMemoryHostSessionStore::default(),
+    ));
+    let claimed_b = send_http_command(
+        &app_b,
+        claim_command_for_session(&run_id, "http-owner-b-claim", "session-b", Some(30_000)),
+    )
+    .await;
+    match claimed_b.response {
+        HostCommandResponse::Inspect(snapshot) => {
+            let claim = snapshot
+                .ownership
+                .current_claim
+                .expect("owner-b claim should be present");
+            assert_eq!(claim.host_session_id, "session-b");
+        }
+        other => panic!("unexpected owner-b claim response: {other:?}"),
+    }
+
+    let stale_step = send_http_command(
+        &app_a,
+        step_command_for_session(&run_id, "http-owner-a-stale-step", "session-a"),
+    )
+    .await;
+    match stale_step.response {
+        HostCommandResponse::Error(error) => {
+            assert_eq!(error.code, "claim_conflict");
+        }
+        other => panic!("unexpected stale owner step response: {other:?}"),
+    }
+
+    let completed_b = send_http_command(
+        &app_b,
+        step_command_for_session(&run_id, "http-owner-b-step", "session-b"),
+    )
+    .await;
+    match completed_b.response {
+        HostCommandResponse::Inspect(snapshot) => {
+            assert_eq!(
+                snapshot.status,
+                ais_agent_host::inspect::RunStatus::Completed
+            );
+        }
+        other => panic!("unexpected owner-b completion response: {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn http_runtime_e2e_can_replace_envelope_after_recovery_pause_and_continue() {
     let app = build_http_router(build_preloaded_envelope_wait_service());
     let run_id = RunId("run-1".to_owned());
@@ -1121,6 +1404,38 @@ async fn send_http_event_poll(
     serde_json::from_slice(&bytes).expect("decode event batch")
 }
 
+async fn send_jsonl_command<S>(
+    service: &mut S,
+    command: ais_agent_host::session::HostedRunCommand,
+) -> HostCommandOutcome
+where
+    S: HostCommandService + ais_agent_host::events::HostRunEventService + Send,
+{
+    let input =
+        serde_json::to_string(&JsonlInboundFrame::Command { command }).expect("encode") + "\n";
+    let mut output = Vec::new();
+
+    JsonlServer
+        .serve(Cursor::new(input), &mut output, service)
+        .await
+        .expect("serve");
+
+    let mut response = None;
+    let mut events = Vec::new();
+    for frame in parse_jsonl_frames(&output) {
+        match frame {
+            JsonlOutboundFrame::Response(frame) => response = Some(frame.response),
+            JsonlOutboundFrame::Event { event } => events.push(event),
+            JsonlOutboundFrame::EventBatch { .. } | JsonlOutboundFrame::ServerError(_) => {}
+        }
+    }
+
+    HostCommandOutcome {
+        response: response.expect("command response"),
+        events,
+    }
+}
+
 fn sqlite_runtime_host_service(
     sqlite_path: &Path,
     run_repo: InMemoryRunRepository,
@@ -1132,14 +1447,20 @@ fn sqlite_runtime_host_service(
     SqliteStore,
     SqliteStore,
     InMemoryHostSessionStore,
+    SqliteStore,
+    SqliteStore,
+    SqliteStore,
 > {
-    RuntimeHostService::new(
+    RuntimeHostService::new_with_archives_and_claim_repo(
         run_repo,
         SqliteStore::open_path(sqlite_path).expect("checkpoint store"),
         SqliteStore::open_path(sqlite_path).expect("mission store"),
         SqliteStore::open_path(sqlite_path).expect("catalog store"),
         SqliteStore::open_path(sqlite_path).expect("event store"),
         session_store,
+        SqliteStore::open_path(sqlite_path).expect("signer store"),
+        SqliteStore::open_path(sqlite_path).expect("audit store"),
+        SqliteStore::open_path(sqlite_path).expect("claim store"),
     )
 }
 

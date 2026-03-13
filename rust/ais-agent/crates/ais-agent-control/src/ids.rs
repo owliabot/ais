@@ -20,6 +20,7 @@ macro_rules! string_id {
 }
 
 string_id!(RunId);
+string_id!(ClaimId);
 string_id!(CommandId);
 string_id!(EventId);
 string_id!(AuditId);

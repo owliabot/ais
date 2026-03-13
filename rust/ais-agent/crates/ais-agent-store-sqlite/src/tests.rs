@@ -9,13 +9,14 @@ use ais_agent_control::{
         GovernorDecisionAuditKind, GovernorDecisionAuditRecord, RuntimeAudit, RuntimeAuditRecord,
     },
     commands::{
-        BeginRunCommand, EvidenceKind, EvidenceSubmission, InspectRunCommand,
+        BeginRunCommand, ClaimRunCommand, EvidenceKind, EvidenceSubmission, InspectRunCommand,
         MissionBudgetSubmission, MissionSubmission, RequestCancelRunCommand, RunCommand,
         SignerDecisionKind, SignerDecisionSubmission, StepBudget, StepRunCommand, StepUntil,
         SubmitEvidenceCommand, SubmitSignerDecisionCommand,
     },
     events::{RunEvent, RunEventEnvelope, RunProgress},
-    ids::{AuditId, CommandId, EventId, RunId, SignerRequestId},
+    ids::{AuditId, ClaimId, CommandId, EventId, RunId, SignerRequestId},
+    ownership::{ClaimTransitionKind, RunClaim, RunClaimMode, RunClaimOwnerKind, RunClaimStatus},
     recovery::{CancelState, InterruptionClass},
 };
 use ais_agent_core::{
@@ -48,10 +49,11 @@ use ais_agent_host::{
 };
 use ais_agent_runtime::persistence::{
     restore_active_run, CheckpointArchive, CheckpointArchiveEntry, CheckpointArchiveKind,
-    DurableCommitError, DurableMutationExecutor, DurableMutationKind, DurableMutationUnit,
-    EventArchive, EventArchiveQuery, MissionRepository, MissionWrite, MissionWriteMode,
-    RunCatalogEntry, RunCatalogRepository, RuntimeAuditArchive, RuntimeAuditQuery,
-    SignerStateArchive, SignerStateArchiveError, SignerStateWrite,
+    ClaimExpireRequest, ClaimRenewRequest, ClaimSupersedeRequest, DurableCommitError,
+    DurableMutationExecutor, DurableMutationKind, DurableMutationUnit, EventArchive,
+    EventArchiveQuery, MissionRepository, MissionWrite, MissionWriteMode, RunCatalogEntry,
+    RunCatalogRepository, RunClaimRepository, RunClaimRepositoryError, RuntimeAuditArchive,
+    RuntimeAuditQuery, SignerStateArchive, SignerStateArchiveError, SignerStateWrite,
 };
 use ais_agent_runtime::{
     runtime::{InMemoryRunRepository, RunRepository},
@@ -68,6 +70,7 @@ type SqliteHostService = RuntimeHostService<
     SqliteStore,
     SqliteStore,
     InMemoryHostSessionStore,
+    SqliteStore,
     SqliteStore,
     SqliteStore,
 >;
@@ -171,6 +174,131 @@ fn sqlite_store_round_trips_pending_signer_state() {
         )
         .expect("load signer request id");
     assert_eq!(stored_request_id, loaded.request_id.0);
+}
+
+#[test]
+fn sqlite_run_claim_repository_round_trips_active_claim_and_history() {
+    let mut store = SqliteStore::open_in_memory().expect("open sqlite store");
+    let run_id = RunId("run-claim-1".to_owned());
+    let claim = sample_claim("claim-1", run_id.clone(), 1, Some(20));
+
+    let acquired = RunClaimRepository::acquire(&mut store, claim.clone()).expect("acquire claim");
+    assert_eq!(acquired, claim);
+    assert_eq!(
+        RunClaimRepository::load_active(&store, &run_id).expect("load active"),
+        Some(claim.clone())
+    );
+    assert_eq!(
+        RunClaimRepository::load_claim(&store, &ClaimId("claim-1".to_owned())).expect("load claim"),
+        claim
+    );
+}
+
+#[test]
+fn sqlite_run_claim_repository_reports_conflict_and_epoch_mismatch() {
+    let mut store = SqliteStore::open_in_memory().expect("open sqlite store");
+    let run_id = RunId("run-claim-2".to_owned());
+    RunClaimRepository::acquire(
+        &mut store,
+        sample_claim("claim-1", run_id.clone(), 1, Some(20)),
+    )
+    .expect("acquire claim");
+
+    let conflict = RunClaimRepository::acquire(
+        &mut store,
+        sample_claim("claim-2", run_id.clone(), 1, Some(30)),
+    )
+    .expect_err("active conflict");
+    assert_eq!(
+        conflict,
+        RunClaimRepositoryError::ActiveClaimConflict {
+            run_id: "run-claim-2".to_owned(),
+            claim_id: "claim-1".to_owned(),
+        }
+    );
+
+    let stale = RunClaimRepository::renew(
+        &mut store,
+        ClaimRenewRequest {
+            run_id: run_id.clone(),
+            claim_id: ClaimId("claim-1".to_owned()),
+            claim_epoch: 9,
+            renewed_at_ms: 15,
+            lease_expires_at_ms: Some(25),
+        },
+    )
+    .expect_err("stale epoch");
+    assert_eq!(
+        stale,
+        RunClaimRepositoryError::ClaimEpochConflict {
+            claim_id: "claim-1".to_owned(),
+            expected_claim_epoch: 9,
+            actual_claim_epoch: 1,
+        }
+    );
+}
+
+#[test]
+fn sqlite_run_claim_repository_expires_and_supersedes_claims() {
+    let mut store = SqliteStore::open_in_memory().expect("open sqlite store");
+    let run_id = RunId("run-claim-3".to_owned());
+    RunClaimRepository::acquire(
+        &mut store,
+        sample_claim("claim-1", run_id.clone(), 1, Some(20)),
+    )
+    .expect("acquire claim");
+
+    let expired = RunClaimRepository::expire_stale(
+        &mut store,
+        ClaimExpireRequest {
+            run_id: run_id.clone(),
+            now_ms: 21,
+        },
+    )
+    .expect("expire stale")
+    .expect("expired claim");
+    assert_eq!(expired.status, RunClaimStatus::Expired);
+    assert!(RunClaimRepository::load_active(&store, &run_id)
+        .expect("load active")
+        .is_none());
+
+    RunClaimRepository::acquire(
+        &mut store,
+        sample_claim("claim-2", run_id.clone(), 1, Some(40)),
+    )
+    .expect("re-acquire claim");
+    let superseded = RunClaimRepository::supersede(
+        &mut store,
+        ClaimSupersedeRequest {
+            run_id: run_id.clone(),
+            predecessor_claim_id: ClaimId("claim-2".to_owned()),
+            predecessor_claim_epoch: 1,
+            successor_claim: sample_claim("claim-3", run_id.clone(), 1, Some(60)),
+        },
+    )
+    .expect("supersede claim");
+    assert_eq!(superseded.predecessor.status, RunClaimStatus::Superseded);
+    assert_eq!(superseded.successor.claim_id.0, "claim-3");
+}
+
+#[test]
+fn sqlite_run_claim_repository_active_claim_survives_restart() {
+    let sqlite_path = sqlite_test_path("claims-restart");
+    {
+        let mut store = SqliteStore::open_path(&sqlite_path).expect("open sqlite store");
+        RunClaimRepository::acquire(
+            &mut store,
+            sample_claim("claim-1", RunId("run-claim-4".to_owned()), 1, Some(20)),
+        )
+        .expect("acquire claim");
+    }
+
+    let store = SqliteStore::open_path(&sqlite_path).expect("reopen sqlite store");
+    let active = RunClaimRepository::load_active(&store, &RunId("run-claim-4".to_owned()))
+        .expect("load active after restart")
+        .expect("active claim");
+    assert_eq!(active.claim_id.0, "claim-1");
+    assert_eq!(active.status, RunClaimStatus::Active);
 }
 
 #[test]
@@ -967,6 +1095,184 @@ async fn sqlite_host_service_preserves_cancel_pending_after_restart() {
 }
 
 #[tokio::test]
+async fn sqlite_host_service_requires_reacquire_after_expired_claim_restart() {
+    let sqlite_path = sqlite_test_path("claim-expired-restart");
+    let host_session_id: HostSessionId = "session-sqlite-claim-expired".into();
+    let run_id = RunId("run-1".to_owned());
+    let mission = sample_mission();
+    let checkpoint = evidence_wait_checkpoint();
+
+    seed_sqlite_mission_checkpoint(&sqlite_path, run_id.clone(), mission.clone(), checkpoint);
+    let mut claim_store = SqliteStore::open_path(&sqlite_path).expect("claim store");
+    RunClaimRepository::acquire(
+        &mut claim_store,
+        sample_claim("claim-expired-1", run_id.clone(), 1, Some(10)),
+    )
+    .expect("acquire expired claim");
+
+    let mut service = sqlite_host_service(
+        &sqlite_path,
+        InMemoryRunRepository::default(),
+        InMemoryHostSessionStore::default(),
+    );
+
+    let inspect = service
+        .handle(HostCommandEnvelope {
+            host_session_id: host_session_id.clone(),
+            host_request_id: Some("request-sqlite-claim-expired-inspect".into()),
+            command: RunCommand::InspectRun(InspectRunCommand {
+                command_id: CommandId("cmd-sqlite-claim-expired-inspect".to_owned()),
+                run_id: run_id.clone(),
+            }),
+        })
+        .await;
+    match inspect.response {
+        HostCommandResponse::Inspect(snapshot) => {
+            let current_claim = snapshot
+                .ownership
+                .current_claim
+                .expect("expired claim in inspect");
+            assert_eq!(current_claim.claim_id.0, "claim-expired-1");
+            assert_eq!(current_claim.status, RunClaimStatus::Expired);
+        }
+        other => panic!("unexpected inspect response: {other:?}"),
+    }
+
+    let submit = service
+        .handle(HostCommandEnvelope {
+            host_session_id: host_session_id.clone(),
+            host_request_id: Some("request-sqlite-claim-expired-evidence".into()),
+            command: RunCommand::SubmitEvidence(SubmitEvidenceCommand {
+                command_id: CommandId("cmd-sqlite-claim-expired-evidence".to_owned()),
+                run_id: run_id.clone(),
+                evidence: EvidenceSubmission {
+                    evidence_id: "quote".to_owned(),
+                    kind: EvidenceKind::RouteOrQuote,
+                    source: "quote-api".to_owned(),
+                    observed_at_ms: Some(42),
+                    chain_scope: Some("eip155:1".to_owned()),
+                    payload: json!({"amount_out":"1000"}),
+                    confidence: Some(0.95),
+                },
+                expected_version: None,
+            }),
+        })
+        .await;
+    match submit.response {
+        HostCommandResponse::Error(error) => assert_eq!(error.code, "claim_expired"),
+        other => panic!("unexpected expired mutation response: {other:?}"),
+    }
+
+    let claim = service
+        .handle(HostCommandEnvelope {
+            host_session_id,
+            host_request_id: Some("request-sqlite-claim-expired-reacquire".into()),
+            command: RunCommand::ClaimRun(ClaimRunCommand {
+                command_id: CommandId("cmd-sqlite-claim-expired-reacquire".to_owned()),
+                run_id: run_id.clone(),
+                owner_kind: RunClaimOwnerKind::InteractiveHost,
+                owner_instance_id: "session-sqlite-claim-expired".to_owned(),
+                mode: RunClaimMode::ExclusiveMutation,
+                requested_lease_ms: None,
+                allow_supersede: false,
+                expected_current_claim_id: None,
+                expected_current_claim_epoch: None,
+            }),
+        })
+        .await;
+    match claim.response {
+        HostCommandResponse::Inspect(snapshot) => {
+            let current_claim = snapshot.ownership.current_claim.expect("reacquired claim");
+            assert_ne!(current_claim.claim_id.0, "claim-expired-1");
+            assert_eq!(current_claim.status, RunClaimStatus::Active);
+        }
+        other => panic!("unexpected reacquire response: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn sqlite_host_service_keeps_released_claim_readable_but_not_mutable_after_restart() {
+    let sqlite_path = sqlite_test_path("claim-released-restart");
+    let host_session_id: HostSessionId = "session-sqlite-claim-released".into();
+    let run_id = RunId("run-1".to_owned());
+    let mission = sample_mission();
+    let checkpoint = evidence_wait_checkpoint();
+
+    seed_sqlite_mission_checkpoint(&sqlite_path, run_id.clone(), mission.clone(), checkpoint);
+    let mut claim_store = SqliteStore::open_path(&sqlite_path).expect("claim store");
+    RunClaimRepository::acquire(
+        &mut claim_store,
+        sample_claim("claim-released-1", run_id.clone(), 1, Some(u64::MAX / 2)),
+    )
+    .expect("acquire claim");
+    RunClaimRepository::release(
+        &mut claim_store,
+        ais_agent_runtime::persistence::ClaimReleaseRequest {
+            run_id: run_id.clone(),
+            claim_id: ClaimId("claim-released-1".to_owned()),
+            claim_epoch: 1,
+        },
+    )
+    .expect("release claim");
+
+    let mut service = sqlite_host_service(
+        &sqlite_path,
+        InMemoryRunRepository::default(),
+        InMemoryHostSessionStore::default(),
+    );
+
+    let inspect = service
+        .handle(HostCommandEnvelope {
+            host_session_id: host_session_id.clone(),
+            host_request_id: Some("request-sqlite-claim-released-inspect".into()),
+            command: RunCommand::InspectRun(InspectRunCommand {
+                command_id: CommandId("cmd-sqlite-claim-released-inspect".to_owned()),
+                run_id: run_id.clone(),
+            }),
+        })
+        .await;
+    match inspect.response {
+        HostCommandResponse::Inspect(snapshot) => {
+            assert!(snapshot.ownership.current_claim.is_none());
+            assert_eq!(
+                snapshot.ownership.last_terminal_claim_id,
+                Some(ClaimId("claim-released-1".to_owned()))
+            );
+            assert_eq!(
+                snapshot.ownership.last_claim_transition,
+                Some(ClaimTransitionKind::ClaimReleased)
+            );
+        }
+        other => panic!("unexpected inspect response: {other:?}"),
+    }
+
+    let submit = service
+        .handle(HostCommandEnvelope {
+            host_session_id,
+            host_request_id: Some("request-sqlite-claim-released-evidence".into()),
+            command: RunCommand::SubmitEvidence(SubmitEvidenceCommand {
+                command_id: CommandId("cmd-sqlite-claim-released-evidence".to_owned()),
+                run_id,
+                evidence: EvidenceSubmission {
+                    evidence_id: "quote".to_owned(),
+                    kind: EvidenceKind::RouteOrQuote,
+                    source: "quote-api".to_owned(),
+                    observed_at_ms: Some(42),
+                    chain_scope: Some("eip155:1".to_owned()),
+                    payload: json!({"amount_out":"1000"}),
+                    confidence: Some(0.95),
+                },
+                expected_version: None,
+            }),
+        })
+        .await;
+    match submit.response {
+        HostCommandResponse::Error(error) => assert_eq!(error.code, "claim_required"),
+        other => panic!("unexpected released mutation response: {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn sqlite_host_service_keeps_catalog_pointers_consistent_with_archives_after_mutations() {
     let sqlite_path = sqlite_test_path("catalog-consistency");
     let host_session_id: HostSessionId = "session-sqlite-catalog".into();
@@ -1120,7 +1426,17 @@ fn sqlite_host_service(
     run_repo: InMemoryRunRepository,
     session_store: InMemoryHostSessionStore,
 ) -> SqliteHostService {
-    RuntimeHostService::new_with_archives(
+    RuntimeHostService::<
+        InMemoryRunRepository,
+        SqliteStore,
+        SqliteStore,
+        SqliteStore,
+        SqliteStore,
+        InMemoryHostSessionStore,
+        SqliteStore,
+        SqliteStore,
+        SqliteStore,
+    >::new_with_archives_and_claim_repo(
         run_repo,
         SqliteStore::open_path(sqlite_path).expect("checkpoint store"),
         SqliteStore::open_path(sqlite_path).expect("mission store"),
@@ -1129,6 +1445,7 @@ fn sqlite_host_service(
         session_store,
         SqliteStore::open_path(sqlite_path).expect("signer state store"),
         SqliteStore::open_path(sqlite_path).expect("audit archive store"),
+        SqliteStore::open_path(sqlite_path).expect("claim store"),
     )
 }
 
@@ -1548,5 +1865,26 @@ fn sample_event(run_id: RunId, event_seq: u64) -> RunEventEnvelope {
             phase: "planning".to_owned(),
             summary: "waiting for quote".to_owned(),
         }),
+    }
+}
+
+fn sample_claim(
+    claim_id: &str,
+    run_id: RunId,
+    claim_epoch: u64,
+    lease_expires_at_ms: Option<u64>,
+) -> RunClaim {
+    RunClaim {
+        claim_id: ClaimId(claim_id.to_owned()),
+        run_id,
+        host_session_id: "session-1".to_owned(),
+        owner_kind: RunClaimOwnerKind::InteractiveHost,
+        owner_instance_id: "host-a".to_owned(),
+        lease_started_at_ms: 10,
+        lease_expires_at_ms,
+        last_renewed_at_ms: Some(10),
+        claim_epoch,
+        mode: RunClaimMode::ExclusiveMutation,
+        status: RunClaimStatus::Active,
     }
 }

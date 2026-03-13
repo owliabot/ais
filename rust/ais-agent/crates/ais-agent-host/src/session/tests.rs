@@ -1,4 +1,7 @@
-use ais_agent_control::ids::{CommandId, IdempotencyKey, RunId};
+use ais_agent_control::{
+    ids::{ClaimId, CommandId, IdempotencyKey, RunId},
+    ownership::{OwnershipVisibility, RunOwnershipSnapshot},
+};
 
 use crate::{
     control::{HostCommandOutcome, HostCommandResponse},
@@ -42,6 +45,7 @@ fn idempotency_is_scoped_to_host_session() {
         IdempotencyKey("key-1".to_owned()),
         CommandId("cmd-1".to_owned()),
         Some(RunId("run-1".to_owned())),
+        None,
     );
     assert!(matches!(first, IdempotencyResolution::Accepted));
 
@@ -50,6 +54,7 @@ fn idempotency_is_scoped_to_host_session() {
         IdempotencyKey("key-1".to_owned()),
         CommandId("cmd-1".to_owned()),
         Some(RunId("run-1".to_owned())),
+        None,
     );
     match replay {
         IdempotencyResolution::Replay {
@@ -69,6 +74,7 @@ fn idempotency_is_scoped_to_host_session() {
         IdempotencyKey("key-1".to_owned()),
         CommandId("cmd-9".to_owned()),
         Some(RunId("run-9".to_owned())),
+        None,
     );
     assert!(matches!(different_session, IdempotencyResolution::Accepted));
 }
@@ -85,6 +91,7 @@ fn completed_idempotency_replays_cached_outcome() {
         key.clone(),
         CommandId("cmd-1".to_owned()),
         Some(run_id.clone()),
+        None,
     );
     assert!(matches!(accepted, IdempotencyResolution::Accepted));
 
@@ -96,13 +103,20 @@ fn completed_idempotency_replays_cached_outcome() {
         }),
         events: Vec::new(),
     };
-    store.complete_idempotency(&session_id, &key, outcome.clone(), Some(run_id.clone()));
+    store.complete_idempotency(
+        &session_id,
+        &key,
+        outcome.clone(),
+        Some(run_id.clone()),
+        None,
+    );
 
     let replay = store.register_idempotency(
         session_id,
         key,
         CommandId("cmd-1".to_owned()),
         Some(run_id.clone()),
+        None,
     );
     match replay {
         IdempotencyResolution::Replay {
@@ -122,6 +136,73 @@ fn completed_idempotency_replays_cached_outcome() {
         }
         other => panic!("unexpected resolution: {other:?}"),
     }
+}
+
+#[test]
+fn idempotency_conflicts_when_claim_lineage_changes() {
+    let mut store = InMemoryHostSessionStore::default();
+    let session_id: HostSessionId = "session-a".into();
+    let key = IdempotencyKey("key-claim".to_owned());
+    let run_id = RunId("run-1".to_owned());
+
+    let accepted = store.register_idempotency(
+        session_id.clone(),
+        key.clone(),
+        CommandId("cmd-step".to_owned()),
+        Some(run_id.clone()),
+        Some(ClaimId("claim-1".to_owned())),
+    );
+    assert!(matches!(accepted, IdempotencyResolution::Accepted));
+
+    let conflict = store.register_idempotency(
+        session_id,
+        key,
+        CommandId("cmd-step".to_owned()),
+        Some(run_id),
+        Some(ClaimId("claim-2".to_owned())),
+    );
+    assert!(matches!(conflict, IdempotencyResolution::Conflict { .. }));
+}
+
+#[test]
+fn completed_idempotency_can_update_claim_lineage_for_replay() {
+    let mut store = InMemoryHostSessionStore::default();
+    let session_id: HostSessionId = "session-a".into();
+    let key = IdempotencyKey("key-claim".to_owned());
+    let run_id = RunId("run-1".to_owned());
+
+    let accepted = store.register_idempotency(
+        session_id.clone(),
+        key.clone(),
+        CommandId("cmd-step".to_owned()),
+        Some(run_id.clone()),
+        None,
+    );
+    assert!(matches!(accepted, IdempotencyResolution::Accepted));
+
+    store.complete_idempotency(
+        &session_id,
+        &key,
+        HostCommandOutcome {
+            response: HostCommandResponse::Session(HostSessionSnapshot {
+                host_session_id: session_id.clone(),
+                active_run_id: Some(run_id.clone()),
+                linked_runs: Vec::new(),
+            }),
+            events: Vec::new(),
+        },
+        Some(run_id.clone()),
+        Some(ClaimId("claim-1".to_owned())),
+    );
+
+    let replay = store.register_idempotency(
+        session_id,
+        key,
+        CommandId("cmd-step".to_owned()),
+        Some(run_id),
+        Some(ClaimId("claim-1".to_owned())),
+    );
+    assert!(matches!(replay, IdempotencyResolution::Replay { .. }));
 }
 
 #[test]
@@ -162,6 +243,14 @@ fn inspect_projection_updates_run_link_cursor() {
         pending_signer_requests: Vec::new(),
         recent_side_effects: Vec::new(),
         effect_status: None,
+        ownership: RunOwnershipSnapshot {
+            run_id: run_id.clone(),
+            current_claim: None,
+            last_terminal_claim_id: None,
+            last_claim_transition: None,
+            claim_required_for_mutation: true,
+            owner_visibility: OwnershipVisibility::ObserverReadAllowed,
+        },
         run_result: None,
         progress: ProgressView {
             graph_id: None,

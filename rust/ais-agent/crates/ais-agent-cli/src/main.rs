@@ -1,5 +1,7 @@
+mod bootstrap;
 mod cli;
 mod commands;
+mod config;
 mod service;
 
 #[tokio::main]

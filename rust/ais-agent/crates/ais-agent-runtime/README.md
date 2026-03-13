@@ -42,6 +42,7 @@ Current implementation status:
   - `EventArchive`
   - `SignerStateArchive`
   - `RuntimeAuditArchive`
+  - `RunClaimRepository`
 - grouped durable write-set contracts now frozen for:
   - `DurableMutationUnit`
   - `DurableMutationKind`
@@ -59,6 +60,7 @@ Current implementation status:
   - event archive
   - signer-state archive
   - runtime audit archive
+  - run-claim archive/repository semantics
 - checkpoint archive now uses `append/latest` archive semantics instead of overwrite-style save/load
 - checkpoint `latest(...)` semantics are now monotonic:
   - latest resolves by highest durable checkpoint truth (`checkpoint_seq`, then `plan_epoch`)
@@ -174,6 +176,66 @@ Current implementation status:
 - runtime stepper is now async so live chain I/O can happen inside:
   - observe transitions
   - simulate transitions
+- first Owliabot transfer action-family seeding now exists for:
+  - `native_transfer`
+  - `erc20_transfer`
+  - `begin_run` can seed real action graphs from `owliabot_action_family=*`
+  - seeded checkpoints now carry:
+    - transfer-specific observe / simulate / actuate / verify nodes
+    - transfer evidence records / requirements
+    - `effect.native_transfer` / `effect.erc20_transfer`
+  - runtime proof now exists for:
+    - signer-submitted native-transfer completion via live verify
+    - signer-submitted ERC20-transfer completion via live verify
+    - restart from signer-submitted confirmation cut for both transfer families
+    - wrong-token-class ERC20 observe failures now surface as structured recovery:
+      - undecodable `balanceOf` payloads map to `stale_evidence`
+      - failed observe checkpoints carry `evidence.transfer.token`
+      - recovery stops at `await_evidence` instead of generic provider pause
+  - current transfer effect assertion strength is still:
+    - receipt success
+    - recipient balance change
+    - exact-amount delta arithmetic remains deferred until effect-verifier big-integer expressions are strengthened
+- first bounded Uniswap V3 swap action-family seeding now also exists for:
+  - `uniswap_v3_swap`
+  - `begin_run` can now seed a real action graph for the current bounded swap slice:
+    - exact-in
+    - single-hop
+    - pre-approved router path
+    - explicit `approval_required=true` approve-then-swap path
+  - seeded checkpoints now carry:
+    - swap-specific observe / simulate / actuate / verify nodes
+    - quote/router/deadline/token evidence records with freshness metadata
+    - `effect.uniswap_v3_swap`
+    - `effect.uniswap_v3_swap.approval`
+  - runtime proof now exists for:
+    - signer-submitted swap completion via live verify
+    - approval-then-swap completion through two signer boundaries
+    - stale quote recovery stopping at `await_evidence`
+    - durable host-service seeding of the swap action family
+  - current swap effect assertion strength is still:
+    - receipt success
+    - recipient output-token balance change
+    - approval verification currently checks allowance change, not exact allowance target
+  - auto allowance-policy selection and richer slippage-bound verification remain deferred within later Uniswap milestones
+- first bounded Uniswap V3 LP action-family seeding now also exists for:
+  - `uniswap_v3_lp`
+  - `begin_run` can now seed a real action graph for the current bounded LP slice:
+    - `mint`
+    - pre-approved position-manager path
+    - owner-bound mint using `sender_address_hint` as the bounded recipient/owner truth
+  - seeded checkpoints now carry:
+    - LP-specific observe / simulate / actuate / verify nodes
+    - token/pool/deadline evidence records
+    - `effect.uniswap_v3_lp`
+  - runtime proof now exists for:
+    - signer-submitted LP mint completion via live verify
+    - restart from signer-submitted side-effect cut
+    - durable host-service seeding of the LP action family
+  - current LP effect assertion strength is still bounded to:
+    - receipt success
+    - position-manager `balanceOf(owner)` change
+  - richer `positions(tokenId)` decoding, approval-required LP paths, and broader LP lifecycle operations remain deferred within later Uniswap milestones
 - EVM live observe/simulate bindings now execute through real `alloy` ports for:
   - block-number observe
   - native-balance observe
@@ -400,6 +462,27 @@ Current implementation status:
     - completion
 
 Known gaps:
+- durable claim storage and runtime claim enforcement are now implemented for host-service mutation paths:
+  - `begin_run` seeds an initial exclusive mutation claim for the creating session
+  - runtime-backed inspect/pause projection hydrates durable `current_claim` truth
+  - mutating commands enforce active-claim legality through `RunClaimRepository`
+  - legacy pre-claim durable runs use a narrow first-mutation bootstrap path so restart/recovery does not become inoperable before explicit handoff commands land
+- runtime ownership commands now also exist for:
+  - `claim_run`
+  - `renew_run_claim`
+  - `release_run_claim`
+  - compare-and-supersede on paused pre-side-effect runs
+  - explicit reacquire after durable lease expiry
+  - claim-aware idempotent replay across release/reacquire and legacy bootstrap paths
+- restart/transport proof on the ownership seam now also covers:
+  - released-claim restart truth remaining inspect-readable but mutation-closed
+  - expired-claim restart truth requiring explicit reacquire
+  - JSONL release-style handoff across separate service instances sharing SQLite durable claim truth
+  - HTTP expiry-style takeover across separate service instances sharing SQLite durable claim truth
+  - stale old-owner mutation rejection after takeover
+- the remaining ownership gap is now narrower:
+  - claim transitions are not yet emitted as first-class runtime audit payloads
+  - cross-process takeover still depends on per-process host-session storage plus durable claim truth; there is no shared host-session backend yet
 - only SQLite currently provides a backend-native grouped transaction unit; the reference in-memory executor remains a linear fail-closed seam for tests and non-SQLite wiring
 - no push-based event streaming transport yet
 - effect contracts are still only persisted in checkpoint snapshots; there is no separate durable effect archive yet

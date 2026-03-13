@@ -1,3 +1,4 @@
+use ais_agent_control::ownership::OwnershipErrorCode;
 use ais_agent_host::control::{HostCommandError, HostCommandOutcome, HostCommandResponse};
 use thiserror::Error;
 
@@ -45,10 +46,20 @@ pub enum RuntimeHostServiceError {
     SignerDecisionMismatch,
     #[error("envelope submission rejected: {0}")]
     EnvelopeRejected(String),
+    #[error("invalid command: {0}")]
+    InvalidCommand(String),
     #[error("plan patch rejected: {0}")]
     PlanPatchLegality(String),
     #[error("cancel request rejected: {0}")]
     CancelRejected(String),
+    #[error("ownership violation `{code:?}` for run `{run_id}`: {message}")]
+    OwnershipViolation {
+        code: OwnershipErrorCode,
+        run_id: String,
+        message: String,
+    },
+    #[error("ownership command `{command}` is not implemented yet")]
+    OwnershipCommandNotImplemented { command: &'static str },
     #[error("invalid recovery contract: {0}")]
     InvalidRecoveryContract(String),
     #[error("{0:?}")]
@@ -56,6 +67,10 @@ pub enum RuntimeHostServiceError {
 }
 
 impl RuntimeHostServiceError {
+    pub fn invalid_command(message: impl Into<String>) -> Self {
+        Self::InvalidCommand(message.into())
+    }
+
     pub fn into_outcome(self) -> HostCommandOutcome {
         let code = error_code(&self);
         HostCommandOutcome {
@@ -116,8 +131,21 @@ fn error_code(error: &RuntimeHostServiceError) -> String {
         RuntimeHostServiceError::Stepper(_) => "stepper_error".to_owned(),
         RuntimeHostServiceError::SignerDecisionMismatch => "signer_decision_mismatch".to_owned(),
         RuntimeHostServiceError::EnvelopeRejected(_) => "envelope_invalid".to_owned(),
+        RuntimeHostServiceError::InvalidCommand(_) => "invalid_command".to_owned(),
         RuntimeHostServiceError::PlanPatchLegality(_) => "plan_patch_illegal".to_owned(),
         RuntimeHostServiceError::CancelRejected(_) => "cancel_rejected".to_owned(),
+        RuntimeHostServiceError::OwnershipViolation { code, .. } => match code {
+            OwnershipErrorCode::ClaimRequired => "claim_required".to_owned(),
+            OwnershipErrorCode::ClaimConflict => "claim_conflict".to_owned(),
+            OwnershipErrorCode::ClaimExpired => "claim_expired".to_owned(),
+            OwnershipErrorCode::ClaimNotOwner => "claim_not_owner".to_owned(),
+            OwnershipErrorCode::ClaimEpochStale => "claim_epoch_stale".to_owned(),
+            OwnershipErrorCode::ClaimTransferRequired => "claim_transfer_required".to_owned(),
+            OwnershipErrorCode::ObserverOnly => "observer_only".to_owned(),
+        },
+        RuntimeHostServiceError::OwnershipCommandNotImplemented { .. } => {
+            "ownership_command_not_implemented".to_owned()
+        }
         RuntimeHostServiceError::InvalidRecoveryContract(_) => {
             "recovery_contract_invalid".to_owned()
         }

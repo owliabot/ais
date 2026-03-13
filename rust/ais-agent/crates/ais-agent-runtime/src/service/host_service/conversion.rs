@@ -7,7 +7,7 @@ use ais_agent_control::{
     },
     commands::{MissionBudgetSubmission, MissionSubmission, RunCommand, StepUntil},
     events::RunEvent,
-    ids::{AuditId, IdempotencyKey, RunId},
+    ids::{AuditId, ClaimId, IdempotencyKey, RunId},
     patch::{PatchOutcome, PlanPatchOperation, PlanPatchSubmission},
 };
 use ais_agent_core::{
@@ -48,7 +48,10 @@ pub(super) fn replay_key(command: &HostedRunCommand) -> Option<IdempotencyKey> {
     match &command.command {
         RunCommand::BeginRun(begin) => Some(begin.idempotency_key.clone()),
         RunCommand::InspectRun(_) => None,
-        RunCommand::StepRun(_)
+        RunCommand::ClaimRun(_)
+        | RunCommand::RenewRunClaim(_)
+        | RunCommand::ReleaseRunClaim(_)
+        | RunCommand::StepRun(_)
         | RunCommand::SubmitEvidence(_)
         | RunCommand::SubmitEnvelope(_)
         | RunCommand::SubmitSignerDecision(_)
@@ -65,6 +68,9 @@ pub(super) fn command_id(command: &RunCommand) -> &ais_agent_control::ids::Comma
     match command {
         RunCommand::BeginRun(command) => &command.command_id,
         RunCommand::InspectRun(command) => &command.command_id,
+        RunCommand::ClaimRun(command) => &command.command_id,
+        RunCommand::RenewRunClaim(command) => &command.command_id,
+        RunCommand::ReleaseRunClaim(command) => &command.command_id,
         RunCommand::StepRun(command) => &command.command_id,
         RunCommand::SubmitEvidence(command) => &command.command_id,
         RunCommand::SubmitEnvelope(command) => &command.command_id,
@@ -79,6 +85,9 @@ pub(super) fn command_run_id(command: &RunCommand) -> Option<RunId> {
     match command {
         RunCommand::BeginRun(_) => None,
         RunCommand::InspectRun(command) => Some(command.run_id.clone()),
+        RunCommand::ClaimRun(command) => Some(command.run_id.clone()),
+        RunCommand::RenewRunClaim(command) => Some(command.run_id.clone()),
+        RunCommand::ReleaseRunClaim(command) => Some(command.run_id.clone()),
         RunCommand::StepRun(command) => Some(command.run_id.clone()),
         RunCommand::SubmitEvidence(command) => Some(command.run_id.clone()),
         RunCommand::SubmitEnvelope(command) => Some(command.run_id.clone()),
@@ -96,6 +105,31 @@ pub(super) fn outcome_run_id(outcome: &HostCommandOutcome) -> Option<RunId> {
         HostCommandResponse::Pause(bundle) => Some(bundle.run_id.clone()),
         HostCommandResponse::Session(snapshot) => snapshot.active_run_id.clone(),
         HostCommandResponse::Error(_) => None,
+    }
+}
+
+pub(super) fn completed_replay_claim_id(
+    outcome: &HostCommandOutcome,
+    registered_claim_id: Option<ClaimId>,
+) -> Option<ClaimId> {
+    outcome_claim_id(outcome).or(registered_claim_id)
+}
+
+pub(super) fn outcome_claim_id(outcome: &HostCommandOutcome) -> Option<ClaimId> {
+    match &outcome.response {
+        HostCommandResponse::Inspect(snapshot) => snapshot
+            .ownership
+            .current_claim
+            .as_ref()
+            .map(|claim| claim.claim_id.clone()),
+        HostCommandResponse::Pause(bundle) => bundle
+            .ownership
+            .current_claim
+            .as_ref()
+            .map(|claim| claim.claim_id.clone()),
+        HostCommandResponse::Accepted(_)
+        | HostCommandResponse::Session(_)
+        | HostCommandResponse::Error(_) => None,
     }
 }
 

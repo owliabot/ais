@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use ais_agent_control::{
     ids::RunId,
+    ownership::RunOwnershipSnapshot,
     recovery::{
         CancelState, InterruptionClass, RecoveryActionKind, RecoveryDisposition,
         RecoverySuggestion, RunFailureContext, SideEffectPhase,
@@ -106,6 +107,7 @@ pub struct RunResultView {
     pub final_recovery_disposition: Option<RecoveryDisposition>,
     #[serde(default)]
     pub final_recovery_suggestions: Vec<RecoverySuggestion>,
+    pub ownership: RunOwnershipSnapshot,
     pub interruption_class: Option<InterruptionClass>,
     pub cancel_state: Option<CancelState>,
     pub side_effect_phase: Option<SideEffectPhase>,
@@ -139,6 +141,7 @@ pub struct InspectSnapshot {
     #[serde(default)]
     pub recent_side_effects: Vec<SideEffectView>,
     pub effect_status: Option<EffectStatusView>,
+    pub ownership: RunOwnershipSnapshot,
     pub run_result: Option<RunResultView>,
     pub progress: ProgressView,
 }

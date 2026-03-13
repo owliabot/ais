@@ -1,5 +1,6 @@
 //! Runtime-backed host service.
 
+mod action_family;
 mod commands;
 mod conversion;
 mod error;
@@ -17,12 +18,15 @@ use ais_agent_host::{
 use crate::{
     persistence::{
         CheckpointRepository, EventArchive, MissionRepository, RunCatalogRepository,
-        RuntimeAuditArchive, SignerStateArchive,
+        RunClaimRepository, RuntimeAuditArchive, SignerStateArchive,
     },
     runtime::RunRepository,
     service::RuntimeCommandRouter,
 };
 
+#[cfg(test)]
+pub(crate) use action_family::seed_action_family_checkpoint;
+pub use action_family::RuntimeExecutionWiring;
 pub use error::RuntimeHostServiceError;
 
 pub type RuntimeHostServiceResult = Result<HostCommandOutcome, RuntimeHostServiceError>;
@@ -43,6 +47,7 @@ pub struct RuntimeHostService<
     S,
     G = crate::persistence::InMemorySignerStateArchive,
     A = crate::persistence::InMemoryRuntimeAuditArchive,
+    Q = crate::persistence::InMemoryRunClaimRepository,
 > {
     run_repo: R,
     checkpoint_repo: C,
@@ -52,6 +57,8 @@ pub struct RuntimeHostService<
     session_store: S,
     signer_state_archive: G,
     audit_archive: A,
+    claim_repo: Q,
+    execution_wiring: RuntimeExecutionWiring,
     next_run_seq: u64,
 }
 
@@ -65,6 +72,7 @@ impl<R, C, M, K, E, S>
         S,
         crate::persistence::InMemorySignerStateArchive,
         crate::persistence::InMemoryRuntimeAuditArchive,
+        crate::persistence::InMemoryRunClaimRepository,
     >
 where
     R: RunRepository + Send,
@@ -117,7 +125,17 @@ where
 }
 
 impl<R, C, M, K, E, S, G>
-    RuntimeHostService<R, C, M, K, E, S, G, crate::persistence::InMemoryRuntimeAuditArchive>
+    RuntimeHostService<
+        R,
+        C,
+        M,
+        K,
+        E,
+        S,
+        G,
+        crate::persistence::InMemoryRuntimeAuditArchive,
+        crate::persistence::InMemoryRunClaimRepository,
+    >
 where
     R: RunRepository + Send,
     C: CheckpointRepository + Send,
@@ -136,7 +154,7 @@ where
         session_store: S,
         signer_state_archive: G,
     ) -> Self {
-        Self::new_with_archives(
+        Self::new_with_archives_and_claim_repo(
             run_repo,
             checkpoint_repo,
             mission_repo,
@@ -145,11 +163,13 @@ where
             session_store,
             signer_state_archive,
             crate::persistence::InMemoryRuntimeAuditArchive::default(),
+            crate::persistence::InMemoryRunClaimRepository::default(),
         )
     }
 }
 
-impl<R, C, M, K, E, S, G, A> RuntimeHostService<R, C, M, K, E, S, G, A>
+impl<R, C, M, K, E, S, G, A>
+    RuntimeHostService<R, C, M, K, E, S, G, A, crate::persistence::InMemoryRunClaimRepository>
 where
     R: RunRepository + Send,
     C: CheckpointRepository + Send,
@@ -170,6 +190,43 @@ where
         signer_state_archive: G,
         audit_archive: A,
     ) -> Self {
+        Self::new_with_archives_and_claim_repo(
+            run_repo,
+            checkpoint_repo,
+            mission_repo,
+            run_catalog_repo,
+            event_archive,
+            session_store,
+            signer_state_archive,
+            audit_archive,
+            crate::persistence::InMemoryRunClaimRepository::default(),
+        )
+    }
+}
+
+impl<R, C, M, K, E, S, G, A, Q> RuntimeHostService<R, C, M, K, E, S, G, A, Q>
+where
+    R: RunRepository + Send,
+    C: CheckpointRepository + Send,
+    M: MissionRepository + Send,
+    K: RunCatalogRepository + Send,
+    E: EventArchive + Send,
+    S: HostSessionStore + Send,
+    G: SignerStateArchive + Send,
+    A: RuntimeAuditArchive + Send,
+    Q: RunClaimRepository + Send,
+{
+    pub fn new_with_archives_and_claim_repo(
+        run_repo: R,
+        checkpoint_repo: C,
+        mission_repo: M,
+        run_catalog_repo: K,
+        event_archive: E,
+        session_store: S,
+        signer_state_archive: G,
+        audit_archive: A,
+        claim_repo: Q,
+    ) -> Self {
         Self {
             run_repo,
             checkpoint_repo,
@@ -179,8 +236,15 @@ where
             session_store,
             signer_state_archive,
             audit_archive,
+            claim_repo,
+            execution_wiring: RuntimeExecutionWiring::default(),
             next_run_seq: 1,
         }
+    }
+
+    pub fn with_execution_wiring(mut self, execution_wiring: RuntimeExecutionWiring) -> Self {
+        self.execution_wiring = execution_wiring;
+        self
     }
 
     pub fn into_parts_with_signer_archive(self) -> (R, C, M, K, E, S, G) {
@@ -194,9 +258,23 @@ where
             self.signer_state_archive,
         )
     }
+
+    pub fn into_parts_with_claim_repo(self) -> (R, C, M, K, E, S, G, A, Q) {
+        (
+            self.run_repo,
+            self.checkpoint_repo,
+            self.mission_repo,
+            self.run_catalog_repo,
+            self.event_archive,
+            self.session_store,
+            self.signer_state_archive,
+            self.audit_archive,
+            self.claim_repo,
+        )
+    }
 }
 
-impl<R, C, M, K, E, S, G, A> HostCommandService for RuntimeHostService<R, C, M, K, E, S, G, A>
+impl<R, C, M, K, E, S, G, A, Q> HostCommandService for RuntimeHostService<R, C, M, K, E, S, G, A, Q>
 where
     R: RunRepository + Send,
     C: CheckpointRepository + Send,
@@ -206,6 +284,7 @@ where
     S: HostSessionStore + Send,
     G: SignerStateArchive + Send,
     A: RuntimeAuditArchive + Send,
+    Q: RunClaimRepository + Send,
 {
     fn handle(
         &mut self,
@@ -215,6 +294,16 @@ where
             let replay_key = conversion::replay_key(&command);
             let command_id = conversion::command_id(&command.command).clone();
             let run_id = conversion::command_run_id(&command.command);
+            let replay_claim_id = match replay_key.as_ref() {
+                Some(_) => Some(self.idempotency_claim_id_for_command(&command.command)),
+                None => None,
+            };
+
+            let replay_claim_id = match replay_claim_id {
+                Some(Ok(claim_id)) => Some(claim_id),
+                Some(Err(error)) => return error.into_outcome(),
+                None => None,
+            };
 
             if let Some(key) = replay_key.as_ref() {
                 match self.session_store.register_idempotency(
@@ -222,6 +311,7 @@ where
                     key.clone(),
                     command_id.clone(),
                     run_id.clone(),
+                    replay_claim_id.clone().flatten(),
                 ) {
                     ais_agent_host::session::IdempotencyResolution::Accepted => {}
                     ais_agent_host::session::IdempotencyResolution::Replay { outcome, .. } => {
@@ -250,11 +340,16 @@ where
                     }
                     _ => {
                         let resolved_run_id = conversion::outcome_run_id(&result).or(run_id);
+                        let resolved_replay_claim_id = conversion::completed_replay_claim_id(
+                            &result,
+                            replay_claim_id.flatten(),
+                        );
                         self.session_store.complete_idempotency(
                             &host_session_id,
                             &key,
                             result.clone(),
                             resolved_run_id,
+                            resolved_replay_claim_id,
                         );
                     }
                 }
@@ -265,7 +360,8 @@ where
     }
 }
 
-impl<R, C, M, K, E, S, G, A> HostRunEventService for RuntimeHostService<R, C, M, K, E, S, G, A>
+impl<R, C, M, K, E, S, G, A, Q> HostRunEventService
+    for RuntimeHostService<R, C, M, K, E, S, G, A, Q>
 where
     R: RunRepository + Send,
     C: CheckpointRepository + Send,
@@ -275,6 +371,7 @@ where
     S: HostSessionStore + Send,
     G: SignerStateArchive + Send,
     A: RuntimeAuditArchive + Send,
+    Q: RunClaimRepository + Send,
 {
     fn list_events(
         &self,

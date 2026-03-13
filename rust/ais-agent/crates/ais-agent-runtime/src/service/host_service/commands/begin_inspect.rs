@@ -4,17 +4,17 @@ use ais_agent_control::{
 };
 use ais_agent_host::{
     control::{HostAcceptedResponse, HostCommandOutcome, HostCommandResponse},
-    inspect::project_inspect_snapshot_with_recovery,
     session::{HostRunLink, HostSessionId},
 };
 
 use crate::runtime::{classify_validated_recovery_view, ActiveRun};
 
 use super::super::{
-    conversion, RuntimeHostService, RuntimeHostServiceError, RuntimeHostServiceResult,
+    action_family, conversion, RuntimeHostService, RuntimeHostServiceError,
+    RuntimeHostServiceResult,
 };
 
-impl<R, C, M, K, E, S, G, A> RuntimeHostService<R, C, M, K, E, S, G, A>
+impl<R, C, M, K, E, S, G, A, Q> RuntimeHostService<R, C, M, K, E, S, G, A, Q>
 where
     R: crate::runtime::RunRepository + Send,
     C: crate::persistence::CheckpointRepository + Send,
@@ -24,6 +24,7 @@ where
     S: ais_agent_host::session::HostSessionStore + Send,
     G: crate::persistence::SignerStateArchive + Send,
     A: crate::persistence::RuntimeAuditArchive + Send,
+    Q: crate::persistence::RunClaimRepository + Send,
 {
     pub async fn begin_run(
         &mut self,
@@ -33,13 +34,20 @@ where
         let run_seq = self.allocate_next_run_seq()?;
         let mission = conversion::normalize_mission(command.mission, run_seq);
         let run_id = RunId(format!("run-{run_seq}"));
-        let checkpoint = conversion::initial_checkpoint(run_id.clone(), &mission);
+        let mut checkpoint = conversion::initial_checkpoint(run_id.clone(), &mission);
+        action_family::seed_action_family_checkpoint(
+            &mission,
+            &mut checkpoint,
+            &self.execution_wiring,
+        )
+        .map_err(RuntimeHostServiceError::invalid_command)?;
         let mut runtime = ActiveRun::new(mission.clone(), checkpoint.clone());
         runtime.record_command(command.command_id, None);
 
         let events =
             crate::events::RuntimeEventEmitter::emit_started(&mut runtime, "mission_accepted");
         self.persist_new_run(&run_id, &mission, &checkpoint, &runtime, &events)?;
+        self.seed_initial_claim(&host_session_id, &run_id)?;
         self.session_store.link_run(HostRunLink::new(
             host_session_id.clone(),
             run_id.clone(),
@@ -65,12 +73,13 @@ where
     ) -> RuntimeHostServiceResult {
         let (mission, checkpoint) = self.load_inspect_projection_input(&command.run_id)?;
         self.establish_inspect_session_link(&host_session_id, &command.run_id, &mission)?;
-        let inspect = project_inspect_snapshot_with_recovery(
+        let mut inspect = ais_agent_host::inspect::project_inspect_snapshot_with_recovery(
             &mission,
             &checkpoint,
             classify_validated_recovery_view(&checkpoint)
                 .map_err(RuntimeHostServiceError::InvalidRecoveryContract)?,
         );
+        self.hydrate_inspect_ownership(&mut inspect)?;
         let _ = self.session_store.apply_inspect(&host_session_id, &inspect);
         Ok(HostCommandOutcome {
             response: HostCommandResponse::Inspect(inspect),

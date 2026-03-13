@@ -2,14 +2,15 @@ use std::collections::BTreeMap;
 
 use ais_agent_control::{
     commands::{
-        BeginRunCommand, CancelRunCommand, EnvelopeKind, EnvelopeSubmission, EvidenceKind,
-        EvidenceSubmission, ExpectedRuntimeVersion, MissionBudgetSubmission, MissionSubmission,
-        RequestCancelRunCommand, RunCommand, SignerDecisionKind, SignerDecisionSubmission,
-        StepBudget, StepRunCommand, StepUntil, SubmitEnvelopeCommand, SubmitEvidenceCommand,
-        SubmitSignerDecisionCommand,
+        BeginRunCommand, CancelRunCommand, ClaimRunCommand, EnvelopeKind, EnvelopeSubmission,
+        EvidenceKind, EvidenceSubmission, ExpectedRuntimeVersion, MissionBudgetSubmission,
+        MissionSubmission, ReleaseRunClaimCommand, RenewRunClaimCommand, RequestCancelRunCommand,
+        RunCommand, SignerDecisionKind, SignerDecisionSubmission, StepBudget, StepRunCommand,
+        StepUntil, SubmitEnvelopeCommand, SubmitEvidenceCommand, SubmitSignerDecisionCommand,
     },
     events::RunEvent,
     ids::{CommandId, IdempotencyKey, RunId, SignerRequestId},
+    ownership::{RunClaimMode, RunClaimOwnerKind},
     recovery::{
         CancelState, InterruptionClass, RunFailureCode, RunFailureContext, RunFailureStage,
     },
@@ -38,19 +39,20 @@ use ais_agent_host::{
         HostCommandEnvelope, HostRunLink, HostSessionId, HostSessionStore, InMemoryHostSessionStore,
     },
 };
-use alloy::{providers::ProviderBuilder, transports::mock::Asserter};
+use alloy::{primitives::U256, providers::ProviderBuilder, transports::mock::Asserter};
 use serde_json::json;
 
 use crate::{
     persistence::{
         CheckpointArchiveEntry, CheckpointArchiveKind, CheckpointRepository, EventArchive,
         EventArchiveError, EventArchiveQuery, InMemoryCheckpointRepository, InMemoryEventArchive,
-        InMemoryMissionRepository, InMemoryRunCatalogRepository, InMemorySignerStateArchive,
-        MissionRepository, MissionRepositoryError, RunCatalogEntry, RunCatalogRepository,
-        RunCatalogRepositoryError, SignerStateArchive, SignerStateArchiveError,
+        InMemoryMissionRepository, InMemoryRunCatalogRepository, InMemoryRunClaimRepository,
+        InMemorySignerStateArchive, MissionRepository, MissionRepositoryError, RunCatalogEntry,
+        RunCatalogRepository, RunCatalogRepositoryError, RunClaimRepository, SignerStateArchive,
+        SignerStateArchiveError,
     },
     runtime::{ActiveRun, InMemoryRunRepository, RunRepository},
-    service::RuntimeHostService,
+    service::{RuntimeExecutionWiring, RuntimeHostService},
     tests::tracing_capture::capture_tracing_output,
 };
 
@@ -135,6 +137,582 @@ async fn runtime_host_service_handles_begin_inspect_and_cancel() {
         }
         other => panic!("unexpected response: {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn runtime_host_service_begin_run_seeds_native_transfer_action_family_checkpoint() {
+    let host_session_id: HostSessionId = "session-native-transfer-begin".into();
+    let mut service = RuntimeHostService::new(
+        InMemoryRunRepository::default(),
+        InMemoryCheckpointRepository::default(),
+        InMemoryMissionRepository::default(),
+        InMemoryRunCatalogRepository::default(),
+        InMemoryEventArchive::default(),
+        InMemoryHostSessionStore::default(),
+    )
+    .with_execution_wiring(RuntimeExecutionWiring {
+        evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
+        solana_rpc_url: None,
+        native_transfer_enabled: true,
+        erc20_transfer_enabled: false,
+        uniswap_v3_swap_enabled: false,
+        uniswap_v3_lp_enabled: false,
+    });
+
+    let begin = service
+        .handle(HostCommandEnvelope {
+            host_session_id,
+            host_request_id: Some("request-native-transfer-begin".into()),
+            command: RunCommand::BeginRun(BeginRunCommand {
+                command_id: CommandId("cmd-native-transfer-begin".to_owned()),
+                idempotency_key: IdempotencyKey("idem-native-transfer-begin".to_owned()),
+                mission: MissionSubmission {
+                    goal: "owliabot:native_transfer".to_owned(),
+                    allowed_chains: vec!["eip155:11155111".to_owned()],
+                    constraints: BTreeMap::from([
+                        (
+                            "owliabot_action_family".to_owned(),
+                            json!("native_transfer"),
+                        ),
+                        (
+                            "owliabot_submission".to_owned(),
+                            json!({
+                                "payload": {
+                                    "chain": "11155111",
+                                    "recipient": "0x1111111111111111111111111111111111111111",
+                                    "requested_amount": "0.00000000000000003",
+                                    "asset_symbol": "ETH",
+                                    "sender_address_hint": "0x2222222222222222222222222222222222222222"
+                                },
+                                "evidence": {
+                                    "recipient": {
+                                        "user_input": "0x1111111111111111111111111111111111111111",
+                                        "normalized_address": "0x1111111111111111111111111111111111111111",
+                                        "source": "wallet_transfer",
+                                        "user_confirmed": true
+                                    },
+                                    "amount": {
+                                        "user_input": "0.00000000000000003",
+                                        "normalized_amount": "0.00000000000000003",
+                                        "atomic_amount": "30",
+                                        "decimals": 18,
+                                        "source": "wallet_transfer",
+                                        "user_confirmed": true
+                                    }
+                                }
+                            }),
+                        ),
+                    ]),
+                    budget: Some(MissionBudgetSubmission {
+                        max_steps: Some(8),
+                        max_signer_requests: Some(1),
+                        max_wall_clock_ms: Some(30_000),
+                    }),
+                    metadata: BTreeMap::new(),
+                },
+            }),
+        })
+        .await;
+
+    let run_id = match begin.response {
+        HostCommandResponse::Accepted(response) => response.run_id.expect("run id"),
+        other => panic!("unexpected response: {other:?}"),
+    };
+
+    let (
+        run_repo,
+        checkpoint_repo,
+        _mission_repo,
+        _run_catalog_repo,
+        _event_archive,
+        _session_store,
+        _signer_state_archive,
+    ) = service.into_parts();
+    let runtime = run_repo.load(&run_id).expect("runtime");
+    assert!(runtime
+        .checkpoint
+        .action_graph
+        .nodes
+        .contains_key("observe.native_transfer.recipient_balance"));
+    assert!(runtime
+        .checkpoint
+        .action_graph
+        .nodes
+        .contains_key("verify.native_transfer.effect"));
+    assert!(runtime
+        .checkpoint
+        .effect_contracts
+        .contains_key("effect.native_transfer"));
+    assert!(runtime
+        .checkpoint
+        .evidence_graph
+        .records
+        .contains_key("evidence.transfer.amount"));
+
+    match &runtime
+        .checkpoint
+        .action_graph
+        .nodes
+        .get("simulate.native_transfer.call")
+        .expect("simulate node")
+        .payload
+    {
+        ActionPayload::Simulate(action) => {
+            let live = action.live.as_ref().expect("live simulate binding");
+            let ais_agent_core::action::kinds::simulate::SimulateLiveBinding::Evm(live) = live
+            else {
+                panic!("expected evm simulate binding");
+            };
+            assert_eq!(live.request.value, Some(U256::from(30u64)));
+        }
+        other => panic!("unexpected simulate payload: {other:?}"),
+    }
+
+    let latest = checkpoint_repo
+        .latest(run_id.0.as_str())
+        .expect("latest checkpoint");
+    assert!(latest
+        .action_graph
+        .nodes
+        .contains_key("actuate.native_transfer.send"));
+}
+
+#[tokio::test]
+async fn runtime_host_service_begin_run_seeds_erc20_transfer_action_family_checkpoint() {
+    let host_session_id: HostSessionId = "session-erc20-transfer-begin".into();
+    let mut service = RuntimeHostService::new(
+        InMemoryRunRepository::default(),
+        InMemoryCheckpointRepository::default(),
+        InMemoryMissionRepository::default(),
+        InMemoryRunCatalogRepository::default(),
+        InMemoryEventArchive::default(),
+        InMemoryHostSessionStore::default(),
+    )
+    .with_execution_wiring(RuntimeExecutionWiring {
+        evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
+        solana_rpc_url: None,
+        native_transfer_enabled: false,
+        erc20_transfer_enabled: true,
+        uniswap_v3_swap_enabled: false,
+        uniswap_v3_lp_enabled: false,
+    });
+
+    let begin = service
+        .handle(HostCommandEnvelope {
+            host_session_id,
+            host_request_id: Some("request-erc20-transfer-begin".into()),
+            command: RunCommand::BeginRun(BeginRunCommand {
+                command_id: CommandId("cmd-erc20-transfer-begin".to_owned()),
+                idempotency_key: IdempotencyKey("idem-erc20-transfer-begin".to_owned()),
+                mission: MissionSubmission {
+                    goal: "owliabot:erc20_transfer".to_owned(),
+                    allowed_chains: vec!["eip155:11155111".to_owned()],
+                    constraints: BTreeMap::from([
+                        ("owliabot_action_family".to_owned(), json!("erc20_transfer")),
+                        (
+                            "owliabot_submission".to_owned(),
+                            json!({
+                                "payload": {
+                                    "chain": "11155111",
+                                    "token_address": "0x3333333333333333333333333333333333333333",
+                                    "token_symbol": "USDC",
+                                    "recipient": "0x1111111111111111111111111111111111111111",
+                                    "requested_amount": "10",
+                                    "sender_address_hint": "0x2222222222222222222222222222222222222222"
+                                },
+                                "evidence": {
+                                    "recipient": {
+                                        "user_input": "0x1111111111111111111111111111111111111111",
+                                        "normalized_address": "0x1111111111111111111111111111111111111111",
+                                        "source": "wallet_transfer",
+                                        "user_confirmed": true
+                                    },
+                                    "amount": {
+                                        "user_input": "10",
+                                        "normalized_amount": "10",
+                                        "atomic_amount": "10000000",
+                                        "decimals": 6,
+                                        "source": "wallet_transfer",
+                                        "user_confirmed": true
+                                    },
+                                    "token": {
+                                        "token_address": "0x3333333333333333333333333333333333333333",
+                                        "token_symbol": "USDC",
+                                        "decimals": 6,
+                                        "resolution_source": "token_registry",
+                                        "user_confirmed": true
+                                    }
+                                }
+                            }),
+                        ),
+                    ]),
+                    budget: Some(MissionBudgetSubmission {
+                        max_steps: Some(8),
+                        max_signer_requests: Some(1),
+                        max_wall_clock_ms: Some(30_000),
+                    }),
+                    metadata: BTreeMap::new(),
+                },
+            }),
+        })
+        .await;
+
+    let run_id = match begin.response {
+        HostCommandResponse::Accepted(response) => response.run_id.expect("run id"),
+        other => panic!("unexpected response: {other:?}"),
+    };
+
+    let (
+        run_repo,
+        checkpoint_repo,
+        _mission_repo,
+        _run_catalog_repo,
+        _event_archive,
+        _session_store,
+        _signer_state_archive,
+    ) = service.into_parts();
+    let runtime = run_repo.load(&run_id).expect("runtime");
+    assert!(runtime
+        .checkpoint
+        .action_graph
+        .nodes
+        .contains_key("observe.erc20_transfer.recipient_token_balance"));
+    assert!(runtime
+        .checkpoint
+        .action_graph
+        .nodes
+        .contains_key("verify.erc20_transfer.effect"));
+    assert!(runtime
+        .checkpoint
+        .effect_contracts
+        .contains_key("effect.erc20_transfer"));
+    assert!(runtime
+        .checkpoint
+        .evidence_graph
+        .records
+        .contains_key("evidence.transfer.token"));
+
+    match &runtime
+        .checkpoint
+        .action_graph
+        .nodes
+        .get("simulate.erc20_transfer.call")
+        .expect("simulate node")
+        .payload
+    {
+        ActionPayload::Simulate(action) => {
+            let live = action.live.as_ref().expect("live simulate binding");
+            let ais_agent_core::action::kinds::simulate::SimulateLiveBinding::Evm(live) = live
+            else {
+                panic!("expected evm simulate binding");
+            };
+            assert_eq!(
+                live.request.to,
+                alloy::primitives::address!("3333333333333333333333333333333333333333")
+            );
+            assert_eq!(live.request.data[0..4], [0xa9, 0x05, 0x9c, 0xbb]);
+        }
+        other => panic!("unexpected simulate payload: {other:?}"),
+    }
+
+    let latest = checkpoint_repo
+        .latest(run_id.0.as_str())
+        .expect("latest checkpoint");
+    assert!(latest
+        .action_graph
+        .nodes
+        .contains_key("actuate.erc20_transfer.send"));
+}
+
+#[tokio::test]
+async fn runtime_host_service_begin_run_seeds_uniswap_v3_swap_action_family_checkpoint() {
+    let host_session_id: HostSessionId = "session-uniswap-v3-swap-begin".into();
+    let mut service = RuntimeHostService::new(
+        InMemoryRunRepository::default(),
+        InMemoryCheckpointRepository::default(),
+        InMemoryMissionRepository::default(),
+        InMemoryRunCatalogRepository::default(),
+        InMemoryEventArchive::default(),
+        InMemoryHostSessionStore::default(),
+    )
+    .with_execution_wiring(RuntimeExecutionWiring {
+        evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
+        solana_rpc_url: None,
+        native_transfer_enabled: false,
+        erc20_transfer_enabled: false,
+        uniswap_v3_swap_enabled: true,
+        uniswap_v3_lp_enabled: false,
+    });
+
+    let begin = service
+        .handle(HostCommandEnvelope {
+            host_session_id,
+            host_request_id: Some("request-uniswap-v3-swap-begin".into()),
+            command: RunCommand::BeginRun(BeginRunCommand {
+                command_id: CommandId("cmd-uniswap-v3-swap-begin".to_owned()),
+                idempotency_key: IdempotencyKey("idem-uniswap-v3-swap-begin".to_owned()),
+                mission: MissionSubmission {
+                    goal: "owliabot:uniswap_v3_swap".to_owned(),
+                    allowed_chains: vec!["eip155:11155111".to_owned()],
+                    constraints: BTreeMap::from([
+                        ("owliabot_action_family".to_owned(), json!("uniswap_v3_swap")),
+                        (
+                            "owliabot_submission".to_owned(),
+                            json!({
+                                "payload": {
+                                    "chain": "11155111",
+                                    "token_in_address": "0x3333333333333333333333333333333333333333",
+                                    "token_in_symbol": "USDC",
+                                    "token_out_address": "0x4444444444444444444444444444444444444444",
+                                    "token_out_symbol": "WETH",
+                                    "fee_tier": 3000,
+                                    "requested_amount": "10",
+                                    "amount_mode": "exact_in",
+                                    "slippage_bps": 50,
+                                    "deadline_seconds": 4102444800u64,
+                                    "router_address": "0x5555555555555555555555555555555555555555",
+                                    "recipient_address": "0x1111111111111111111111111111111111111111",
+                                    "sender_address_hint": "0x2222222222222222222222222222222222222222",
+                                    "unwrap_native_out": false
+                                },
+                                "evidence": {
+                                    "token_in": {
+                                        "token_address": "0x3333333333333333333333333333333333333333",
+                                        "token_symbol": "USDC",
+                                        "decimals": 6,
+                                        "resolution_source": "token_registry",
+                                        "user_confirmed": true
+                                    },
+                                    "token_out": {
+                                        "token_address": "0x4444444444444444444444444444444444444444",
+                                        "token_symbol": "WETH",
+                                        "decimals": 18,
+                                        "resolution_source": "token_registry",
+                                        "user_confirmed": true
+                                    },
+                                    "quote": {
+                                        "source": "quoter",
+                                        "quoted_at_ms": 4102444800000u64,
+                                        "expires_at_ms": 4102444900000u64,
+                                        "route_summary": "USDC/WETH 0.3%",
+                                        "amount_in_atomic": "10000000",
+                                        "amount_out_atomic": "3000000000000000",
+                                        "min_amount_out_atomic": "2900000000000000",
+                                        "user_confirmed": true
+                                    },
+                                    "router": {
+                                        "router_address": "0x5555555555555555555555555555555555555555",
+                                        "approval_target_address": "0x5555555555555555555555555555555555555555",
+                                        "quoter_address": "0x6666666666666666666666666666666666666666",
+                                        "resolution_source": "sepolia_registry",
+                                        "user_confirmed": true
+                                    },
+                                    "deadline": {
+                                        "deadline_unix_seconds": 4102444800u64,
+                                        "source": "policy",
+                                        "user_confirmed": true
+                                    }
+                                }
+                            }),
+                        ),
+                    ]),
+                    budget: Some(MissionBudgetSubmission {
+                        max_steps: Some(8),
+                        max_signer_requests: Some(1),
+                        max_wall_clock_ms: Some(30_000),
+                    }),
+                    metadata: BTreeMap::new(),
+                },
+            }),
+        })
+        .await;
+
+    let run_id = match begin.response {
+        HostCommandResponse::Accepted(response) => response.run_id.expect("run id"),
+        other => panic!("unexpected response: {other:?}"),
+    };
+
+    let (
+        run_repo,
+        checkpoint_repo,
+        _mission_repo,
+        _run_catalog_repo,
+        _event_archive,
+        _session_store,
+        _signer_state_archive,
+    ) = service.into_parts();
+    let runtime = run_repo.load(&run_id).expect("runtime");
+    assert!(runtime
+        .checkpoint
+        .action_graph
+        .nodes
+        .contains_key("actuate.uniswap_v3_swap.send"));
+    assert!(runtime
+        .checkpoint
+        .effect_contracts
+        .contains_key("effect.uniswap_v3_swap"));
+    assert!(runtime
+        .checkpoint
+        .evidence_graph
+        .records
+        .contains_key("evidence.uniswap.swap.quote"));
+
+    let latest = checkpoint_repo
+        .latest(run_id.0.as_str())
+        .expect("latest checkpoint");
+
+    assert!(latest
+        .action_graph
+        .nodes
+        .contains_key("actuate.uniswap_v3_swap.send"));
+    assert!(latest
+        .effect_contracts
+        .contains_key("effect.uniswap_v3_swap"));
+    assert!(latest
+        .evidence_graph
+        .records
+        .contains_key("evidence.uniswap.swap.quote"));
+}
+
+#[tokio::test]
+async fn runtime_host_service_begin_run_seeds_uniswap_v3_lp_action_family_checkpoint() {
+    let host_session_id: HostSessionId = "session-uniswap-v3-lp-begin".into();
+    let mut service = RuntimeHostService::new(
+        InMemoryRunRepository::default(),
+        InMemoryCheckpointRepository::default(),
+        InMemoryMissionRepository::default(),
+        InMemoryRunCatalogRepository::default(),
+        InMemoryEventArchive::default(),
+        InMemoryHostSessionStore::default(),
+    )
+    .with_execution_wiring(RuntimeExecutionWiring {
+        evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
+        solana_rpc_url: None,
+        native_transfer_enabled: false,
+        erc20_transfer_enabled: false,
+        uniswap_v3_swap_enabled: false,
+        uniswap_v3_lp_enabled: true,
+    });
+
+    let begin = service
+        .handle(HostCommandEnvelope {
+            host_session_id,
+            host_request_id: Some("request-uniswap-v3-lp-begin".into()),
+            command: RunCommand::BeginRun(BeginRunCommand {
+                command_id: CommandId("cmd-uniswap-v3-lp-begin".to_owned()),
+                idempotency_key: IdempotencyKey("idem-uniswap-v3-lp-begin".to_owned()),
+                mission: MissionSubmission {
+                    goal: "owliabot:uniswap_v3_lp".to_owned(),
+                    allowed_chains: vec!["eip155:11155111".to_owned()],
+                    constraints: BTreeMap::from([
+                        ("owliabot_action_family".to_owned(), json!("uniswap_v3_lp")),
+                        (
+                            "owliabot_submission".to_owned(),
+                            json!({
+                                "payload": {
+                                    "chain": "11155111",
+                                    "operation": "mint",
+                                    "token0_address": "0x3333333333333333333333333333333333333333",
+                                    "token0_symbol": "USDC",
+                                    "token1_address": "0x4444444444444444444444444444444444444444",
+                                    "token1_symbol": "WETH",
+                                    "fee_tier": 3000,
+                                    "desired_amount0": "10",
+                                    "desired_amount1": "0.003",
+                                    "tick_lower": -600,
+                                    "tick_upper": 600,
+                                    "position_manager_address": "0x1238536071E1c677A632429e3655c799b22cDA52",
+                                    "deadline_seconds": 4102444800u64,
+                                    "sender_address_hint": "0x2222222222222222222222222222222222222222"
+                                },
+                                "evidence": {
+                                    "token0": {
+                                        "token_address": "0x3333333333333333333333333333333333333333",
+                                        "token_symbol": "USDC",
+                                        "decimals": 6,
+                                        "resolution_source": "token_registry",
+                                        "user_confirmed": true
+                                    },
+                                    "token1": {
+                                        "token_address": "0x4444444444444444444444444444444444444444",
+                                        "token_symbol": "WETH",
+                                        "decimals": 18,
+                                        "resolution_source": "token_registry",
+                                        "user_confirmed": true
+                                    },
+                                    "pool": {
+                                        "pool_address": "0x5555555555555555555555555555555555555555",
+                                        "token0_address": "0x3333333333333333333333333333333333333333",
+                                        "token1_address": "0x4444444444444444444444444444444444444444",
+                                        "fee_tier": 3000,
+                                        "tick_spacing": 60,
+                                        "slot0_tick": 0,
+                                        "observed_at_ms": 4102444800000u64,
+                                        "resolution_source": "sepolia_registry",
+                                        "user_confirmed": true
+                                    },
+                                    "deadline": {
+                                        "deadline_unix_seconds": 4102444800u64,
+                                        "source": "policy",
+                                        "user_confirmed": true
+                                    }
+                                }
+                            }),
+                        ),
+                    ]),
+                    budget: Some(MissionBudgetSubmission {
+                        max_steps: Some(8),
+                        max_signer_requests: Some(1),
+                        max_wall_clock_ms: Some(30_000),
+                    }),
+                    metadata: BTreeMap::new(),
+                },
+            }),
+        })
+        .await;
+
+    let run_id = match begin.response {
+        HostCommandResponse::Accepted(response) => response.run_id.expect("run id"),
+        other => panic!("unexpected response: {other:?}"),
+    };
+
+    let (
+        run_repo,
+        checkpoint_repo,
+        _mission_repo,
+        _run_catalog_repo,
+        _event_archive,
+        _session_store,
+        _signer_state_archive,
+    ) = service.into_parts();
+    let runtime = run_repo.load(&run_id).expect("runtime");
+    assert!(runtime
+        .checkpoint
+        .action_graph
+        .nodes
+        .contains_key("actuate.uniswap_v3_lp.mint"));
+    assert!(runtime
+        .checkpoint
+        .effect_contracts
+        .contains_key("effect.uniswap_v3_lp"));
+    assert!(runtime
+        .checkpoint
+        .evidence_graph
+        .records
+        .contains_key("evidence.uniswap.lp.pool"));
+
+    let latest = checkpoint_repo
+        .latest(run_id.0.as_str())
+        .expect("latest checkpoint");
+    assert!(latest
+        .action_graph
+        .nodes
+        .contains_key("actuate.uniswap_v3_lp.mint"));
+    assert!(latest.effect_contracts.contains_key("effect.uniswap_v3_lp"));
+    assert!(latest
+        .evidence_graph
+        .records
+        .contains_key("evidence.uniswap.lp.pool"));
 }
 
 #[tokio::test]
@@ -288,6 +866,338 @@ async fn runtime_host_service_rejects_cancel_request_for_terminal_run() {
 
     match rejected.response {
         HostCommandResponse::Error(error) => assert_eq!(error.code, "cancel_rejected"),
+        other => panic!("unexpected response: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn runtime_host_service_claim_run_acquires_unclaimed_preloaded_run() {
+    let (
+        run_repo,
+        checkpoint_repo,
+        mission_repo,
+        run_catalog_repo,
+        event_archive,
+        _session_store,
+        run_id,
+        _original_session_id,
+    ) = preloaded_evidence_wait_runtime();
+    let host_session_id: HostSessionId = "session-claim-acquire".into();
+    let mut service = RuntimeHostService::new(
+        run_repo,
+        checkpoint_repo,
+        mission_repo,
+        run_catalog_repo,
+        event_archive,
+        InMemoryHostSessionStore::default(),
+    );
+
+    let claimed = service
+        .handle(HostCommandEnvelope {
+            host_session_id: host_session_id.clone(),
+            host_request_id: Some("request-claim-acquire".into()),
+            command: RunCommand::ClaimRun(ClaimRunCommand {
+                command_id: CommandId("cmd-claim-acquire".to_owned()),
+                run_id: run_id.clone(),
+                owner_kind: RunClaimOwnerKind::InteractiveHost,
+                owner_instance_id: host_session_id.0.clone(),
+                mode: RunClaimMode::ExclusiveMutation,
+                requested_lease_ms: Some(30_000),
+                allow_supersede: false,
+                expected_current_claim_id: None,
+                expected_current_claim_epoch: None,
+            }),
+        })
+        .await;
+
+    let ownership = response_ownership(&claimed.response);
+    let claim = ownership
+        .current_claim
+        .as_ref()
+        .expect("claim should be present after acquire");
+    assert_eq!(claim.host_session_id, host_session_id.0);
+    assert_eq!(claim.mode, RunClaimMode::ExclusiveMutation);
+}
+
+#[tokio::test]
+async fn runtime_host_service_renews_and_releases_pre_side_effect_claim() {
+    let (
+        run_repo,
+        checkpoint_repo,
+        mission_repo,
+        run_catalog_repo,
+        event_archive,
+        _session_store,
+        run_id,
+        _original_session_id,
+    ) = preloaded_evidence_wait_runtime();
+    let host_session_id: HostSessionId = "session-claim-renew-release".into();
+    let mut service = RuntimeHostService::new(
+        run_repo,
+        checkpoint_repo,
+        mission_repo,
+        run_catalog_repo,
+        event_archive,
+        InMemoryHostSessionStore::default(),
+    );
+
+    let claimed = service
+        .handle(HostCommandEnvelope {
+            host_session_id: host_session_id.clone(),
+            host_request_id: Some("request-claim-seed".into()),
+            command: RunCommand::ClaimRun(ClaimRunCommand {
+                command_id: CommandId("cmd-claim-seed".to_owned()),
+                run_id: run_id.clone(),
+                owner_kind: RunClaimOwnerKind::InteractiveHost,
+                owner_instance_id: host_session_id.0.clone(),
+                mode: RunClaimMode::ExclusiveMutation,
+                requested_lease_ms: Some(30_000),
+                allow_supersede: false,
+                expected_current_claim_id: None,
+                expected_current_claim_epoch: None,
+            }),
+        })
+        .await;
+    let claimed_ownership = response_ownership(&claimed.response);
+    let claimed_claim = claimed_ownership
+        .current_claim
+        .as_ref()
+        .expect("claim should be present");
+    let claim_id = claimed_claim.claim_id.clone();
+    let claim_epoch = claimed_claim.claim_epoch;
+
+    let renewed = service
+        .handle(HostCommandEnvelope {
+            host_session_id: host_session_id.clone(),
+            host_request_id: Some("request-claim-renew".into()),
+            command: RunCommand::RenewRunClaim(RenewRunClaimCommand {
+                command_id: CommandId("cmd-claim-renew".to_owned()),
+                run_id: run_id.clone(),
+                claim_id: claim_id.clone(),
+                claim_epoch,
+                requested_lease_ms: Some(60_000),
+            }),
+        })
+        .await;
+    let renewed_ownership = response_ownership(&renewed.response);
+    let renewed_claim = renewed_ownership
+        .current_claim
+        .as_ref()
+        .expect("claim should remain present");
+    assert_eq!(renewed_claim.claim_id, claim_id);
+    assert!(renewed_claim.claim_epoch > claim_epoch);
+    let renewed_epoch = renewed_claim.claim_epoch;
+
+    let released = service
+        .handle(HostCommandEnvelope {
+            host_session_id: host_session_id.clone(),
+            host_request_id: Some("request-claim-release".into()),
+            command: RunCommand::ReleaseRunClaim(ReleaseRunClaimCommand {
+                command_id: CommandId("cmd-claim-release".to_owned()),
+                run_id,
+                claim_id,
+                claim_epoch: renewed_epoch,
+                reason: Some("handoff".to_owned()),
+            }),
+        })
+        .await;
+    assert!(response_ownership(&released.response)
+        .current_claim
+        .is_none());
+}
+
+#[tokio::test]
+async fn runtime_host_service_claim_run_can_reacquire_after_expiry() {
+    let (
+        run_repo,
+        checkpoint_repo,
+        mission_repo,
+        run_catalog_repo,
+        event_archive,
+        session_store,
+        run_id,
+        original_session_id,
+    ) = preloaded_evidence_wait_runtime();
+    let mut claim_repo = InMemoryRunClaimRepository::default();
+    claim_repo
+        .acquire(sample_runtime_claim(
+            &run_id,
+            &original_session_id,
+            "expired-claim",
+            1,
+            Some(1),
+        ))
+        .expect("seed expiring claim");
+    let new_session_id: HostSessionId = "session-claim-reacquire".into();
+    let mut service = RuntimeHostService::new_with_archives_and_claim_repo(
+        run_repo,
+        checkpoint_repo,
+        mission_repo,
+        run_catalog_repo,
+        event_archive,
+        session_store,
+        InMemorySignerStateArchive::default(),
+        crate::persistence::InMemoryRuntimeAuditArchive::default(),
+        claim_repo,
+    );
+
+    let claimed = service
+        .handle(HostCommandEnvelope {
+            host_session_id: new_session_id.clone(),
+            host_request_id: Some("request-claim-reacquire".into()),
+            command: RunCommand::ClaimRun(ClaimRunCommand {
+                command_id: CommandId("cmd-claim-reacquire".to_owned()),
+                run_id: run_id.clone(),
+                owner_kind: RunClaimOwnerKind::InteractiveHost,
+                owner_instance_id: new_session_id.0.clone(),
+                mode: RunClaimMode::ExclusiveMutation,
+                requested_lease_ms: Some(30_000),
+                allow_supersede: false,
+                expected_current_claim_id: None,
+                expected_current_claim_epoch: None,
+            }),
+        })
+        .await;
+
+    let claim = response_ownership(&claimed.response)
+        .current_claim
+        .as_ref()
+        .expect("claim should be present");
+    assert_eq!(claim.host_session_id, new_session_id.0);
+}
+
+#[tokio::test]
+async fn runtime_host_service_claim_run_allows_pre_side_effect_supersede_but_not_confirmation_takeover(
+) {
+    let (
+        run_repo,
+        checkpoint_repo,
+        mission_repo,
+        run_catalog_repo,
+        event_archive,
+        session_store,
+        run_id,
+        original_session_id,
+    ) = preloaded_evidence_wait_runtime();
+    let mut claim_repo = InMemoryRunClaimRepository::default();
+    let original_claim = claim_repo
+        .acquire(sample_runtime_claim(
+            &run_id,
+            &original_session_id,
+            "claim-pre-side-effect",
+            1,
+            Some(u64::MAX / 4),
+        ))
+        .expect("seed active claim");
+    let takeover_session: HostSessionId = "session-claim-takeover".into();
+    let mut service = RuntimeHostService::new_with_archives_and_claim_repo(
+        run_repo,
+        checkpoint_repo,
+        mission_repo,
+        run_catalog_repo,
+        event_archive,
+        session_store,
+        InMemorySignerStateArchive::default(),
+        crate::persistence::InMemoryRuntimeAuditArchive::default(),
+        claim_repo,
+    );
+
+    let superseded = service
+        .handle(HostCommandEnvelope {
+            host_session_id: takeover_session.clone(),
+            host_request_id: Some("request-claim-supersede".into()),
+            command: RunCommand::ClaimRun(ClaimRunCommand {
+                command_id: CommandId("cmd-claim-supersede".to_owned()),
+                run_id: run_id.clone(),
+                owner_kind: RunClaimOwnerKind::InteractiveHost,
+                owner_instance_id: takeover_session.0.clone(),
+                mode: RunClaimMode::ExclusiveMutation,
+                requested_lease_ms: Some(30_000),
+                allow_supersede: true,
+                expected_current_claim_id: Some(original_claim.claim_id.clone()),
+                expected_current_claim_epoch: Some(original_claim.claim_epoch),
+            }),
+        })
+        .await;
+    assert_eq!(
+        response_ownership(&superseded.response)
+            .current_claim
+            .as_ref()
+            .map(|claim| claim.host_session_id.as_str()),
+        Some(takeover_session.0.as_str())
+    );
+
+    let mut confirmation_claim_repo = InMemoryRunClaimRepository::default();
+    let confirmation_run_id = RunId("run-1".to_owned());
+    let confirmation_session_id: HostSessionId = "session-confirm-owner".into();
+    let confirmation_mission = sample_mission();
+    let confirmation_checkpoint = confirmation_wait_checkpoint();
+    let mut confirmation_run_repo = InMemoryRunRepository::default();
+    confirmation_run_repo
+        .insert(ActiveRun::new(
+            confirmation_mission.clone(),
+            confirmation_checkpoint.clone(),
+        ))
+        .expect("insert runtime");
+    let mut confirmation_checkpoint_repo = InMemoryCheckpointRepository::default();
+    confirmation_checkpoint_repo
+        .append(CheckpointArchiveEntry {
+            snapshot: confirmation_checkpoint,
+            kind: CheckpointArchiveKind::SideEffect,
+        })
+        .expect("append checkpoint");
+    let mut confirmation_session_store = InMemoryHostSessionStore::default();
+    confirmation_session_store.link_run(HostRunLink::new(
+        confirmation_session_id.clone(),
+        confirmation_run_id.clone(),
+        confirmation_mission.goal.clone(),
+        confirmation_mission.allowed_chains.clone(),
+    ));
+    let confirmation_mission_repo =
+        preloaded_mission_repo(confirmation_run_id.clone(), confirmation_mission);
+    let confirmation_claim = confirmation_claim_repo
+        .acquire(sample_runtime_claim(
+            &confirmation_run_id,
+            &confirmation_session_id,
+            "claim-confirmation",
+            1,
+            Some(u64::MAX / 4),
+        ))
+        .expect("seed confirmation claim");
+    let takeover_confirmation_session: HostSessionId = "session-confirm-takeover".into();
+    let mut confirmation_service = RuntimeHostService::new_with_archives_and_claim_repo(
+        confirmation_run_repo,
+        confirmation_checkpoint_repo,
+        confirmation_mission_repo,
+        InMemoryRunCatalogRepository::default(),
+        InMemoryEventArchive::default(),
+        confirmation_session_store,
+        InMemorySignerStateArchive::default(),
+        crate::persistence::InMemoryRuntimeAuditArchive::default(),
+        confirmation_claim_repo,
+    );
+
+    let rejected = confirmation_service
+        .handle(HostCommandEnvelope {
+            host_session_id: takeover_confirmation_session,
+            host_request_id: Some("request-claim-confirm-takeover".into()),
+            command: RunCommand::ClaimRun(ClaimRunCommand {
+                command_id: CommandId("cmd-claim-confirm-takeover".to_owned()),
+                run_id: confirmation_run_id,
+                owner_kind: RunClaimOwnerKind::InteractiveHost,
+                owner_instance_id: "session-confirm-takeover".to_owned(),
+                mode: RunClaimMode::ExclusiveMutation,
+                requested_lease_ms: Some(30_000),
+                allow_supersede: true,
+                expected_current_claim_id: Some(confirmation_claim.claim_id),
+                expected_current_claim_epoch: Some(confirmation_claim.claim_epoch),
+            }),
+        })
+        .await;
+    match rejected.response {
+        HostCommandResponse::Error(error) => {
+            assert_eq!(error.code, "claim_transfer_required");
+        }
         other => panic!("unexpected response: {other:?}"),
     }
 }
@@ -1198,6 +2108,97 @@ async fn runtime_host_service_replays_mutating_command_by_host_request_id() {
 }
 
 #[tokio::test]
+async fn runtime_host_service_does_not_replay_mutation_after_claim_handoff() {
+    let (
+        run_repo,
+        checkpoint_repo,
+        mission_repo,
+        run_catalog_repo,
+        event_archive,
+        session_store,
+        run_id,
+        host_session_id,
+    ) = preloaded_evidence_wait_runtime();
+    let mut service = RuntimeHostService::new(
+        run_repo,
+        checkpoint_repo,
+        mission_repo,
+        run_catalog_repo,
+        event_archive,
+        session_store,
+    );
+
+    let first_step_command = HostCommandEnvelope {
+        host_session_id: host_session_id.clone(),
+        host_request_id: Some("request-step-claim-scope".into()),
+        command: RunCommand::StepRun(StepRunCommand {
+            command_id: CommandId("cmd-step-claim-scope".to_owned()),
+            run_id: run_id.clone(),
+            until: StepUntil::BudgetExhausted,
+            budget: Some(StepBudget {
+                max_nodes: Some(0),
+                max_wall_clock_ms: Some(0),
+            }),
+            expected_version: None,
+        }),
+    };
+
+    let first = service.handle(first_step_command.clone()).await;
+    let first_claim = response_ownership(&first.response)
+        .current_claim
+        .clone()
+        .expect("bootstrapped claim");
+
+    let released = service
+        .handle(HostCommandEnvelope {
+            host_session_id: host_session_id.clone(),
+            host_request_id: Some("request-release-claim-scope".into()),
+            command: RunCommand::ReleaseRunClaim(ReleaseRunClaimCommand {
+                command_id: CommandId("cmd-release-claim-scope".to_owned()),
+                run_id: run_id.clone(),
+                claim_id: first_claim.claim_id.clone(),
+                claim_epoch: first_claim.claim_epoch,
+                reason: Some("handoff".to_owned()),
+            }),
+        })
+        .await;
+    assert!(response_ownership(&released.response)
+        .current_claim
+        .is_none());
+
+    let claimed = service
+        .handle(HostCommandEnvelope {
+            host_session_id: host_session_id.clone(),
+            host_request_id: Some("request-claim-claim-scope-2".into()),
+            command: RunCommand::ClaimRun(ClaimRunCommand {
+                command_id: CommandId("cmd-claim-claim-scope-2".to_owned()),
+                run_id: run_id.clone(),
+                owner_kind: RunClaimOwnerKind::InteractiveHost,
+                owner_instance_id: host_session_id.0.clone(),
+                mode: RunClaimMode::ExclusiveMutation,
+                requested_lease_ms: None,
+                allow_supersede: false,
+                expected_current_claim_id: None,
+                expected_current_claim_epoch: None,
+            }),
+        })
+        .await;
+    let reacquired_claim = response_ownership(&claimed.response)
+        .current_claim
+        .clone()
+        .expect("reacquired claim");
+    assert_ne!(reacquired_claim.claim_id, first_claim.claim_id);
+
+    let repeated = service.handle(first_step_command).await;
+    match repeated.response {
+        HostCommandResponse::Error(error) => {
+            assert_eq!(error.code, "idempotency_conflict");
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn runtime_host_service_lists_streamable_event_batches() {
     let mut service = RuntimeHostService::new(
         InMemoryRunRepository::default(),
@@ -1280,6 +2281,7 @@ async fn runtime_host_service_supports_host_collaboration_loop_for_evidence_wait
     match inspect_before.response {
         HostCommandResponse::Inspect(snapshot) => {
             assert_eq!(snapshot.status, RunStatus::AwaitingEvidence);
+            assert!(snapshot.ownership.current_claim.is_none());
         }
         other => panic!("unexpected inspect response: {other:?}"),
     }
@@ -1317,6 +2319,14 @@ async fn runtime_host_service_supports_host_collaboration_loop_for_evidence_wait
     match submit.response {
         HostCommandResponse::Inspect(snapshot) => {
             assert_eq!(snapshot.status, RunStatus::AwaitingEvidence);
+            assert_eq!(
+                snapshot
+                    .ownership
+                    .current_claim
+                    .as_ref()
+                    .map(|claim| claim.host_session_id.as_str()),
+                Some(host_session_id.0.as_str())
+            );
         }
         other => panic!("unexpected evidence response: {other:?}"),
     }
@@ -2561,6 +3571,38 @@ fn sample_envelope_submission(envelope_id: &str) -> EnvelopeSubmission {
     }
 }
 
+fn response_ownership(
+    response: &HostCommandResponse,
+) -> &ais_agent_control::ownership::RunOwnershipSnapshot {
+    match response {
+        HostCommandResponse::Inspect(snapshot) => &snapshot.ownership,
+        HostCommandResponse::Pause(bundle) => &bundle.ownership,
+        other => panic!("unexpected response shape: {other:?}"),
+    }
+}
+
+fn sample_runtime_claim(
+    run_id: &RunId,
+    host_session_id: &HostSessionId,
+    claim_id: &str,
+    claim_epoch: u64,
+    lease_expires_at_ms: Option<u64>,
+) -> ais_agent_control::ownership::RunClaim {
+    ais_agent_control::ownership::RunClaim {
+        claim_id: ais_agent_control::ids::ClaimId(claim_id.to_owned()),
+        run_id: run_id.clone(),
+        host_session_id: host_session_id.0.clone(),
+        owner_kind: RunClaimOwnerKind::InteractiveHost,
+        owner_instance_id: host_session_id.0.clone(),
+        lease_started_at_ms: 1,
+        lease_expires_at_ms,
+        last_renewed_at_ms: Some(1),
+        claim_epoch,
+        mode: RunClaimMode::ExclusiveMutation,
+        status: ais_agent_control::ownership::RunClaimStatus::Active,
+    }
+}
+
 fn sample_mission() -> Mission {
     Mission {
         mission_id: "mission-1".to_owned(),
@@ -2625,6 +3667,23 @@ fn checkpoint_with_nodes(nodes: Vec<ActionNode>, terminals: Vec<String>) -> Chec
         last_completed_node_id: None,
         actuation_records: Vec::new(),
     }
+}
+
+fn confirmation_wait_checkpoint() -> CheckpointSnapshot {
+    let mut checkpoint = checkpoint_with_nodes(
+        vec![
+            actuate_blocked_node("swap", vec![]),
+            verify_terminal_node("verify-swap", vec!["swap"]),
+        ],
+        vec!["verify-swap".to_owned()],
+    );
+    checkpoint
+        .lifecycle
+        .await_confirmation("waiting for receipt 0xabc");
+    checkpoint.lifecycle.phase = RunPhase::AwaitingHost;
+    checkpoint.pending_requests.pending_confirmation_id = Some("0xabc".to_owned());
+    checkpoint.last_completed_node_id = Some("swap".to_owned());
+    checkpoint
 }
 
 fn derive_terminal_node(node_id: &str) -> ActionNode {

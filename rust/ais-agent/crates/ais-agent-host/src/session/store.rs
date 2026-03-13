@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use ais_agent_control::ids::{CommandId, IdempotencyKey, RunId};
+use ais_agent_control::ids::{ClaimId, CommandId, IdempotencyKey, RunId};
 
 use crate::{
     control::HostCommandOutcome,
@@ -25,6 +25,7 @@ pub trait HostSessionStore {
         key: IdempotencyKey,
         command_id: CommandId,
         run_id: Option<RunId>,
+        replay_claim_id: Option<ClaimId>,
     ) -> IdempotencyResolution;
     fn complete_idempotency(
         &mut self,
@@ -32,6 +33,7 @@ pub trait HostSessionStore {
         key: &IdempotencyKey,
         outcome: HostCommandOutcome,
         run_id: Option<RunId>,
+        replay_claim_id: Option<ClaimId>,
     );
     fn clear_idempotency(&mut self, host_session_id: &HostSessionId, key: &IdempotencyKey);
 }
@@ -106,6 +108,7 @@ impl HostSessionStore for InMemoryHostSessionStore {
         key: IdempotencyKey,
         command_id: CommandId,
         run_id: Option<RunId>,
+        replay_claim_id: Option<ClaimId>,
     ) -> IdempotencyResolution {
         let composite_key = (host_session_id.0.clone(), key.0.clone());
 
@@ -118,6 +121,7 @@ impl HostSessionStore for InMemoryHostSessionStore {
                         key,
                         command_id,
                         run_id,
+                        replay_claim_id,
                         outcome: None,
                     },
                 );
@@ -125,6 +129,7 @@ impl HostSessionStore for InMemoryHostSessionStore {
             }
             Some(existing)
                 if existing.command_id == command_id
+                    && existing.replay_claim_id == replay_claim_id
                     && (existing.run_id == run_id || run_id.is_none()) =>
             {
                 IdempotencyResolution::Replay {
@@ -146,12 +151,14 @@ impl HostSessionStore for InMemoryHostSessionStore {
         key: &IdempotencyKey,
         outcome: HostCommandOutcome,
         run_id: Option<RunId>,
+        replay_claim_id: Option<ClaimId>,
     ) {
         if let Some(record) = self
             .idempotency
             .get_mut(&(host_session_id.0.clone(), key.0.clone()))
         {
             record.run_id = run_id;
+            record.replay_claim_id = replay_claim_id;
             record.outcome = Some(outcome);
         }
     }

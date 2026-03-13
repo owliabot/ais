@@ -9,8 +9,10 @@ Public API entry points:
 - `commands`
 - `events`
 - `ids`
+- `ownership`
 - `patch`
 - `recovery`
+- `transfer`
 
 Dependencies on workspace crates:
 - none
@@ -51,6 +53,34 @@ Current implementation status:
   - `SideEffectPhase`
   - `RequestCancelRunCommand`
   - `RetryIntent`
+- ownership DTOs are now frozen for the next host-collaboration phase:
+  - `RunClaim`
+  - `RunOwnershipSnapshot`
+  - `ClaimTransitionKind`
+  - `OwnershipErrorCode`
+  - `RunClaimOwnerKind`
+  - `RunClaimMode`
+  - `RunClaimStatus`
+- ownership command DTOs are now also frozen for explicit claim management:
+  - `ClaimRunCommand`
+  - `RenewRunClaimCommand`
+  - `ReleaseRunClaimCommand`
+  - `RunCommand::{ClaimRun, RenewRunClaim, ReleaseRunClaim}`
+- transfer action-family DTOs are now frozen for the first product slices:
+  - `NativeTransferRequest`
+  - `Erc20TransferRequest`
+  - `TransferEvidencePackage`
+  - `TransferVerificationContract`
+  - explicit recipient / amount / token-resolution evidence shapes
+- first Uniswap V3 contract DTOs are now also frozen for the next product slice:
+  - `UniswapV3SwapRequest`
+  - `UniswapV3LpRequest`
+  - `UniswapV3SwapEvidencePackage`
+  - `UniswapV3LpEvidencePackage`
+  - `UniswapV3SwapVerificationContract`
+  - `UniswapV3LpVerificationContract`
+  - quote / router / pool / deadline / position evidence shapes
+  - router evidence now also carries explicit `approval_required` truth for bounded approve-then-swap flows
 - interruption DTOs now distinguish:
   - `provider_timeout`
   - `provider_unavailable`
@@ -68,6 +98,16 @@ Current implementation status:
 Known gaps:
 - no command/result schema evolution policy yet
 - grouped durable commit execution now exists in runtime/store layers; this crate only freezes the command/audit DTO seam
+- ownership command DTOs are now implemented in runtime/store layers for acquire / renew / release / guarded supersede; remaining work on this seam is narrower:
+  - claim-specific runtime audit payload families are still not frozen here
 - interruption/cancellation legality plus transport/restart proof are now implemented; remaining future work on this seam is narrower:
   - any explicit retry-command split beyond `RetryIntent`
   - automatic terminal-resolution policy for post-side-effect cancel flows
+- transfer DTOs are frozen and now wired into runtime action-family execution for:
+  - native transfer
+  - ERC20 transfer
+  - exact-delta verifier strengthening still remains future work
+- Uniswap V3 DTOs are frozen and runtime execution is now partially in progress:
+  - bounded swap seeding and live verify proof now exist
+  - explicit `approval_required=true` approve-then-swap path is now supported
+  - LP lifecycle operations and richer swap verification still land in later milestones

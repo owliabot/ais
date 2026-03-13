@@ -233,14 +233,14 @@ impl EvmAlloyReadPort {
                     },
                 )
                 .await?;
-                Ok(Self::erc20_amount_payload(
+                Self::erc20_amount_payload(
                     &observation,
                     "balance_of",
                     json!({
                         "token": token,
                         "owner": owner,
                     }),
-                ))
+                )
             }
             EvmObserveRequest::Erc20Allowance {
                 token,
@@ -257,7 +257,7 @@ impl EvmAlloyReadPort {
                     },
                 )
                 .await?;
-                Ok(Self::erc20_amount_payload(
+                Self::erc20_amount_payload(
                     &observation,
                     "allowance",
                     json!({
@@ -265,7 +265,7 @@ impl EvmAlloyReadPort {
                         "owner": owner,
                         "spender": spender,
                     }),
-                ))
+                )
             }
             EvmObserveRequest::ContractStateRead { to, data } => {
                 let observation = Self::eth_call_with_provider(
@@ -303,15 +303,19 @@ impl EvmAlloyReadPort {
         json!({
             "address": observation.address,
             "balance": observation.balance.to_string(),
+            "decoded_u256": observation.balance.to_string(),
             "source_hint": observation.source_hint,
         })
     }
 
     pub fn call_observation_payload(observation: &EvmCallObservation) -> serde_json::Value {
+        let decoded_u256 = (observation.return_data.len() == 32)
+            .then(|| U256::from_be_slice(observation.return_data.as_ref()).to_string());
         json!({
             "to": observation.to,
             "data": observation.data,
             "return_data": observation.return_data,
+            "decoded_u256": decoded_u256,
             "source_hint": observation.source_hint,
         })
     }
@@ -336,15 +340,19 @@ impl EvmAlloyReadPort {
         observation: &EvmCallObservation,
         method: &'static str,
         target: serde_json::Value,
-    ) -> serde_json::Value {
-        let decoded = decode_u256_return(&observation.return_data).map(|value| value.to_string());
-        json!({
+    ) -> Result<serde_json::Value, EvmLiveReadError> {
+        let decoded = decode_u256_return(&observation.return_data).ok_or_else(|| {
+            EvmLiveReadError::Provider(format!(
+                "erc20 {method} returned undecodable uint256 payload"
+            ))
+        })?;
+        Ok(json!({
             "method": method,
             "target": target,
             "return_data": observation.return_data,
-            "decoded_u256": decoded,
+            "decoded_u256": decoded.to_string(),
             "source_hint": observation.source_hint,
-        })
+        }))
     }
 }
 
@@ -388,7 +396,7 @@ mod tests {
     };
 
     use super::EvmAlloyReadPort;
-    use ais_agent_core::binding::evm::EvmCallRequest;
+    use ais_agent_core::binding::evm::{EvmCallRequest, EvmObserveRequest};
 
     #[tokio::test]
     async fn alloy_live_read_port_reads_block_number_from_provider_stack() {
@@ -463,5 +471,27 @@ mod tests {
 
         assert_eq!(observation.return_data, return_data);
         assert_eq!(observation.source_hint, "alloy_provider:eth_call");
+    }
+
+    #[tokio::test]
+    async fn alloy_live_read_port_rejects_undecodable_erc20_balance_payload() {
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
+        asserter.push_success(&bytes!(""));
+
+        let error = EvmAlloyReadPort::observe_with_provider(
+            &provider,
+            &EvmObserveRequest::Erc20BalanceOf {
+                token: address!("1111111111111111111111111111111111111111"),
+                owner: address!("2222222222222222222222222222222222222222"),
+            },
+        )
+        .await
+        .expect_err("undecodable balanceOf payload must fail");
+
+        assert_eq!(
+            error.to_string(),
+            "alloy provider error: erc20 balance_of returned undecodable uint256 payload"
+        );
     }
 }

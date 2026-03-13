@@ -72,7 +72,7 @@ impl CheckpointRepository for PendingCheckpointRecorder {
     }
 }
 
-impl<R, C, M, K, E, S, G, A> RuntimeHostService<R, C, M, K, E, S, G, A>
+impl<R, C, M, K, E, S, G, A, Q> RuntimeHostService<R, C, M, K, E, S, G, A, Q>
 where
     R: crate::runtime::RunRepository + Send,
     C: crate::persistence::CheckpointRepository + Send,
@@ -82,6 +82,7 @@ where
     S: ais_agent_host::session::HostSessionStore + Send,
     G: crate::persistence::SignerStateArchive + Send,
     A: crate::persistence::RuntimeAuditArchive + Send,
+    Q: crate::persistence::RunClaimRepository + Send,
 {
     fn durable_executor(
         &mut self,

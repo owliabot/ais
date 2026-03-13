@@ -37,6 +37,8 @@ Current implementation status:
   - ERC20 `balanceOf`
   - ERC20 `allowance`
   - generic contract-state read payloads
+  - generic contract-state reads now also expose `decoded_u256` when the return payload is one 32-byte word
+  - undecodable ERC20 amount payloads now fail closed instead of surfacing null-decoded observations, so runtime recovery can classify wrong-token evidence explicitly
 - first real `alloy`-backed stateless simulate port implemented:
   - `simulate::live::EvmAlloySimulatePort`
   - `eth_call` simulation report

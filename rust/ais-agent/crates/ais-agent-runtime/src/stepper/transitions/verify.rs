@@ -1038,11 +1038,13 @@ where
     }
 
     let tx_hash = format!("{:#x}", receipt.tx_hash);
-    let receipt_payload = receipt.payload.clone();
+    let raw_receipt_payload = receipt.payload.clone();
     let success = receipt.success;
     let observed = receipt.observed;
 
     if is_effect_contract_binding(&binding) {
+        let receipt_payload =
+            normalized_receipt_payload(raw_receipt_payload.clone(), &tx_hash, success);
         let receipt_evidence_id = format!("receipt.{node_id}");
         insert_observation_record(
             runtime,
@@ -1128,7 +1130,7 @@ where
         verify,
         binding,
         tx_hash,
-        receipt_payload,
+        raw_receipt_payload,
         observed,
         success,
     )

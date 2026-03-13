@@ -207,27 +207,41 @@ fn fail_observe(
 ) -> Option<StepTransition> {
     let reason = reason.into();
     mark_node_status(runtime, node_id, ActionNodeStatus::Blocked);
-    runtime.checkpoint.lifecycle.pause_with_failure(
-        RunFailureStage::Observe,
-        RunFailureCode::ProviderUnavailable,
-        reason.as_str(),
-    );
-    if let Some(failure) = runtime.checkpoint.lifecycle.failure.as_mut() {
-        failure.node_refs.push(node_id.to_owned());
-        failure.provider_error = Some(ais_agent_control::recovery::ProviderFailureInfo {
-            provider: "live.read".to_owned(),
-            operation: "observe".to_owned(),
-            code: None,
-            message: reason.clone(),
-            retryable: true,
-        });
+    let evidence_refs = classify_observe_evidence_refs(runtime, node_id, reason.as_str());
+    if let Some(evidence_refs) = evidence_refs {
+        runtime.checkpoint.lifecycle.await_evidence_with_failure(
+            RunFailureStage::Observe,
+            RunFailureCode::StaleEvidence,
+            reason.as_str(),
+            evidence_refs.clone(),
+        );
+        if let Some(failure) = runtime.checkpoint.lifecycle.failure.as_mut() {
+            failure.node_refs.push(node_id.to_owned());
+            failure.evidence_refs = evidence_refs;
+        }
+    } else {
+        runtime.checkpoint.lifecycle.pause_with_failure(
+            RunFailureStage::Observe,
+            RunFailureCode::ProviderUnavailable,
+            reason.as_str(),
+        );
+        if let Some(failure) = runtime.checkpoint.lifecycle.failure.as_mut() {
+            failure.node_refs.push(node_id.to_owned());
+            failure.provider_error = Some(ais_agent_control::recovery::ProviderFailureInfo {
+                provider: "live.read".to_owned(),
+                operation: "observe".to_owned(),
+                code: None,
+                message: reason.clone(),
+                retryable: true,
+            });
+        }
+        runtime.checkpoint.lifecycle.record_interruption(
+            provider_interruption_class(&reason),
+            Some(RunFailureStage::Observe),
+            classify_side_effect_phase(&runtime.checkpoint),
+            reason.clone(),
+        );
     }
-    runtime.checkpoint.lifecycle.record_interruption(
-        provider_interruption_class(&reason),
-        Some(RunFailureStage::Observe),
-        classify_side_effect_phase(&runtime.checkpoint),
-        reason.clone(),
-    );
     runtime.touch_transition();
 
     Some(StepTransition {
@@ -235,6 +249,28 @@ fn fail_observe(
         node_id: Some(node_id.to_owned()),
         summary: format!("observe interrupted for node {node_id}: {reason}"),
     })
+}
+
+fn classify_observe_evidence_refs(
+    runtime: &ActiveRun,
+    node_id: &str,
+    reason: &str,
+) -> Option<Vec<String>> {
+    let reason = reason.to_ascii_lowercase();
+    if !reason.contains("undecodable uint256 payload") {
+        return None;
+    }
+
+    let node = runtime.checkpoint.action_graph.nodes.get(node_id)?;
+    let evidence_refs = node.evidence_refs.clone();
+    if evidence_refs.is_empty() {
+        return None;
+    }
+
+    evidence_refs
+        .iter()
+        .any(|reference| reference.contains("token"))
+        .then_some(evidence_refs)
 }
 
 fn current_time_ms() -> u64 {

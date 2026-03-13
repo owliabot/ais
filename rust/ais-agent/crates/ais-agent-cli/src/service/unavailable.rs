@@ -4,9 +4,33 @@ use ais_agent_host::{
     session::HostedRunCommand,
 };
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone)]
 pub struct UnavailableHostService {
-    _private: (),
+    code: String,
+    message: String,
+    event_message: String,
+}
+
+impl UnavailableHostService {
+    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        let code = code.into();
+        let message = message.into();
+        let event_message = message.clone();
+        Self {
+            code,
+            message,
+            event_message,
+        }
+    }
+}
+
+impl Default for UnavailableHostService {
+    fn default() -> Self {
+        Self::new(
+            "runtime_not_wired",
+            "ais-agent CLI transport shell is available, but no runtime service is wired yet",
+        )
+    }
 }
 
 impl HostCommandService for UnavailableHostService {
@@ -17,9 +41,8 @@ impl HostCommandService for UnavailableHostService {
         Box::pin(async move {
             HostCommandOutcome {
                 response: HostCommandResponse::Error(HostCommandError {
-                    code: "runtime_not_wired".to_owned(),
-                    message: "ais-agent CLI transport shell is available, but no runtime service is wired yet"
-                        .to_owned(),
+                    code: self.code.clone(),
+                    message: self.message.clone(),
                 }),
                 events: Vec::new(),
             }
@@ -40,9 +63,8 @@ impl HostRunEventService for UnavailableHostService {
     > {
         Box::pin(async move {
             Err(HostEventServiceError {
-                code: "runtime_not_wired".to_owned(),
-                message: "ais-agent CLI transport shell is available, but no runtime event service is wired yet"
-                    .to_owned(),
+                code: self.code.clone(),
+                message: self.event_message.clone(),
             })
         })
     }

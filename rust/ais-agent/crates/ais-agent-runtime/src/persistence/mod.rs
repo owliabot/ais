@@ -2,6 +2,7 @@
 
 mod audit_archive;
 mod checkpoint_repo;
+mod claim_repo;
 mod durable_executor;
 mod durable_mutation;
 mod event_archive;
@@ -19,6 +20,10 @@ pub use checkpoint_repo::{
     CheckpointArchive, CheckpointArchiveEntry, CheckpointArchiveError, CheckpointArchiveKind,
     CheckpointRepository, CheckpointRepositoryError,
 };
+pub use claim_repo::{
+    ClaimExpireRequest, ClaimReleaseRequest, ClaimRenewRequest, ClaimSupersedeRequest,
+    ClaimSupersedeResult, RunClaimRepository, RunClaimRepositoryError,
+};
 pub use durable_executor::{
     DurableCommitError, DurableCommitReceipt, DurableMutationExecutor, DurableMutationMember,
     LinearDurableMutationExecutor,
@@ -31,7 +36,8 @@ pub use durable_mutation::{
 pub use event_archive::{EventArchive, EventArchiveError, EventArchiveQuery, EventArchiveSlice};
 pub use in_memory::{
     InMemoryCheckpointRepository, InMemoryEventArchive, InMemoryMissionRepository,
-    InMemoryRunCatalogRepository, InMemoryRuntimeAuditArchive, InMemorySignerStateArchive,
+    InMemoryRunCatalogRepository, InMemoryRunClaimRepository, InMemoryRuntimeAuditArchive,
+    InMemorySignerStateArchive,
 };
 pub use mission_repo::{MissionRepository, MissionRepositoryError};
 pub use persist::{

@@ -21,7 +21,7 @@ use super::super::{
     RuntimeHostServiceError, RuntimeHostServiceResult,
 };
 
-impl<R, C, M, K, E, S, G, A> RuntimeHostService<R, C, M, K, E, S, G, A>
+impl<R, C, M, K, E, S, G, A, Q> RuntimeHostService<R, C, M, K, E, S, G, A, Q>
 where
     R: crate::runtime::RunRepository + Send,
     C: crate::persistence::CheckpointRepository + Send,
@@ -31,6 +31,7 @@ where
     S: ais_agent_host::session::HostSessionStore + Send,
     G: crate::persistence::SignerStateArchive + Send,
     A: crate::persistence::RuntimeAuditArchive + Send,
+    Q: crate::persistence::RunClaimRepository + Send,
 {
     pub async fn step_run(
         &mut self,
@@ -38,6 +39,7 @@ where
         command: StepRunCommand,
     ) -> RuntimeHostServiceResult {
         self.ensure_mutation_session_link(&host_session_id, &command.run_id)?;
+        let _claim = self.ensure_mutation_claim(&host_session_id, &command.run_id)?;
         let mut runtime = self.load_or_restore_active_run(&command.run_id)?;
         guard_run_command_version(
             &ais_agent_control::commands::RunCommand::StepRun(command.clone()),
@@ -113,6 +115,7 @@ where
         command: SubmitEvidenceCommand,
     ) -> RuntimeHostServiceResult {
         self.ensure_mutation_session_link(&host_session_id, &command.run_id)?;
+        let _claim = self.ensure_mutation_claim(&host_session_id, &command.run_id)?;
         let mut runtime = self.load_or_restore_active_run(&command.run_id)?;
         guard_run_command_version(
             &ais_agent_control::commands::RunCommand::SubmitEvidence(command.clone()),
@@ -157,6 +160,7 @@ where
         command: SubmitEnvelopeCommand,
     ) -> RuntimeHostServiceResult {
         self.ensure_mutation_session_link(&host_session_id, &command.run_id)?;
+        let _claim = self.ensure_mutation_claim(&host_session_id, &command.run_id)?;
         let mut runtime = self.load_or_restore_active_run(&command.run_id)?;
         guard_run_command_version(
             &ais_agent_control::commands::RunCommand::SubmitEnvelope(command.clone()),
@@ -225,6 +229,7 @@ where
         command: SubmitSignerDecisionCommand,
     ) -> RuntimeHostServiceResult {
         self.ensure_mutation_session_link(&host_session_id, &command.run_id)?;
+        let _claim = self.ensure_mutation_claim(&host_session_id, &command.run_id)?;
         let mut runtime = self.load_or_restore_active_run(&command.run_id)?;
         guard_run_command_version(
             &ais_agent_control::commands::RunCommand::SubmitSignerDecision(command.clone()),
@@ -271,6 +276,7 @@ where
         command: SubmitPlanPatchCommand,
     ) -> RuntimeHostServiceResult {
         self.ensure_mutation_session_link(&host_session_id, &command.run_id)?;
+        let _claim = self.ensure_mutation_claim(&host_session_id, &command.run_id)?;
         let mut runtime = self.load_or_restore_active_run(&command.run_id)?;
         let base_revision = runtime.revision;
         let base_checkpoint = runtime.checkpoint.clone();
@@ -367,6 +373,7 @@ where
         command: RequestCancelRunCommand,
     ) -> RuntimeHostServiceResult {
         self.ensure_mutation_session_link(&host_session_id, &command.run_id)?;
+        let _claim = self.ensure_mutation_claim(&host_session_id, &command.run_id)?;
         let mut runtime = self.load_or_restore_active_run(&command.run_id)?;
         guard_run_command_version(
             &ais_agent_control::commands::RunCommand::RequestCancelRun(command.clone()),

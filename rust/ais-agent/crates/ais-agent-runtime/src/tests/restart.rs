@@ -2,12 +2,14 @@ use std::collections::BTreeMap;
 
 use ais_agent_control::{
     commands::{
-        EvidenceKind, EvidenceSubmission, InspectRunCommand, RequestCancelRunCommand, RunCommand,
-        SignerDecisionKind, SignerDecisionSubmission, StepBudget, StepRunCommand, StepUntil,
-        SubmitEvidenceCommand, SubmitPlanPatchCommand, SubmitSignerDecisionCommand,
+        ClaimRunCommand, EvidenceKind, EvidenceSubmission, InspectRunCommand,
+        RequestCancelRunCommand, RunCommand, SignerDecisionKind, SignerDecisionSubmission,
+        StepBudget, StepRunCommand, StepUntil, SubmitEvidenceCommand, SubmitPlanPatchCommand,
+        SubmitSignerDecisionCommand,
     },
     events::{RunEvent, RunStarted},
-    ids::{CommandId, EventId, RunId, SignerRequestId},
+    ids::{ClaimId, CommandId, EventId, RunId, SignerRequestId},
+    ownership::{RunClaim, RunClaimMode, RunClaimOwnerKind, RunClaimStatus},
     patch::{PlanPatchOperation, PlanPatchSubmission, PlanPatchTarget},
     recovery::{CancelState, InterruptionClass, RecoveryDisposition, RunFailureCode},
 };
@@ -39,8 +41,9 @@ use crate::{
     persistence::{
         restore_active_run, CheckpointArchiveEntry, CheckpointArchiveKind, CheckpointRepository,
         EventArchive, InMemoryCheckpointRepository, InMemoryEventArchive,
-        InMemoryMissionRepository, InMemoryRunCatalogRepository, InMemorySignerStateArchive,
-        MissionRepository, SignerStateArchive,
+        InMemoryMissionRepository, InMemoryRunCatalogRepository, InMemoryRunClaimRepository,
+        InMemoryRuntimeAuditArchive, InMemorySignerStateArchive, MissionRepository,
+        RunClaimRepository, SignerStateArchive,
     },
     runtime::{ActiveRun, InMemoryRunRepository, RunRepository, RunRepositoryError},
     service::RuntimeHostService,
@@ -247,6 +250,295 @@ async fn restart_requires_inspect_relink_before_mutation_and_relinks_operability
             );
         }
         other => panic!("unexpected step response after relink: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn restart_preserves_active_claim_truth_and_allows_same_owner_mutation_after_inspect() {
+    let host_session_id: HostSessionId = "session-restart-claim-active".into();
+    let run_id = RunId("run-1".to_owned());
+    let mission = sample_mission();
+    let checkpoint = evidence_wait_checkpoint();
+
+    let mut checkpoint_repo = InMemoryCheckpointRepository::default();
+    checkpoint_repo
+        .append(CheckpointArchiveEntry {
+            snapshot: checkpoint,
+            kind: CheckpointArchiveKind::Boundary,
+        })
+        .expect("append checkpoint");
+    let mut mission_repo = InMemoryMissionRepository::default();
+    mission_repo
+        .insert(run_id.clone(), mission)
+        .expect("insert mission");
+    let mut claim_repo = InMemoryRunClaimRepository::default();
+    claim_repo
+        .acquire(sample_runtime_claim(
+            &run_id,
+            &host_session_id,
+            "claim-active-1",
+            RunClaimStatus::Active,
+            Some(u64::MAX / 2),
+            1,
+        ))
+        .expect("acquire claim");
+
+    let mut service = RuntimeHostService::new_with_archives_and_claim_repo(
+        InMemoryRunRepository::default(),
+        checkpoint_repo,
+        mission_repo,
+        InMemoryRunCatalogRepository::default(),
+        InMemoryEventArchive::default(),
+        InMemoryHostSessionStore::default(),
+        InMemorySignerStateArchive::default(),
+        InMemoryRuntimeAuditArchive::default(),
+        claim_repo,
+    );
+
+    let inspect = service
+        .handle(HostCommandEnvelope {
+            host_session_id: host_session_id.clone(),
+            host_request_id: Some("request-restart-claim-active-inspect".into()),
+            command: RunCommand::InspectRun(InspectRunCommand {
+                command_id: CommandId("cmd-restart-claim-active-inspect".to_owned()),
+                run_id: run_id.clone(),
+            }),
+        })
+        .await;
+    match inspect.response {
+        HostCommandResponse::Inspect(snapshot) => {
+            let current_claim = snapshot
+                .ownership
+                .current_claim
+                .expect("active claim in inspect");
+            assert_eq!(current_claim.claim_id.0, "claim-active-1");
+            assert_eq!(current_claim.status, RunClaimStatus::Active);
+        }
+        other => panic!("unexpected inspect response: {other:?}"),
+    }
+
+    let submit = service
+        .handle(HostCommandEnvelope {
+            host_session_id,
+            host_request_id: Some("request-restart-claim-active-evidence".into()),
+            command: RunCommand::SubmitEvidence(SubmitEvidenceCommand {
+                command_id: CommandId("cmd-restart-claim-active-evidence".to_owned()),
+                run_id,
+                evidence: EvidenceSubmission {
+                    evidence_id: "quote".to_owned(),
+                    kind: EvidenceKind::RouteOrQuote,
+                    source: "quote-api".to_owned(),
+                    observed_at_ms: Some(42),
+                    chain_scope: Some("eip155:1".to_owned()),
+                    payload: json!({"amount_out":"1000"}),
+                    confidence: Some(0.95),
+                },
+                expected_version: None,
+            }),
+        })
+        .await;
+    assert!(matches!(submit.response, HostCommandResponse::Inspect(_)));
+}
+
+#[tokio::test]
+async fn restart_requires_reacquire_for_expired_claim_and_blocks_released_claim_mutation() {
+    let host_session_id: HostSessionId = "session-restart-claim-history".into();
+    let run_id = RunId("run-1".to_owned());
+    let mission = sample_mission();
+    let checkpoint = evidence_wait_checkpoint();
+
+    let mut checkpoint_repo = InMemoryCheckpointRepository::default();
+    checkpoint_repo
+        .append(CheckpointArchiveEntry {
+            snapshot: checkpoint,
+            kind: CheckpointArchiveKind::Boundary,
+        })
+        .expect("append checkpoint");
+    let mut mission_repo = InMemoryMissionRepository::default();
+    mission_repo
+        .insert(run_id.clone(), mission)
+        .expect("insert mission");
+    let mut claim_repo = InMemoryRunClaimRepository::default();
+    claim_repo
+        .acquire(sample_runtime_claim(
+            &run_id,
+            &host_session_id,
+            "claim-history-1",
+            RunClaimStatus::Active,
+            Some(1),
+            1,
+        ))
+        .expect("acquire expiring claim");
+
+    let mut expired_service = RuntimeHostService::new_with_archives_and_claim_repo(
+        InMemoryRunRepository::default(),
+        checkpoint_repo,
+        mission_repo,
+        InMemoryRunCatalogRepository::default(),
+        InMemoryEventArchive::default(),
+        InMemoryHostSessionStore::default(),
+        InMemorySignerStateArchive::default(),
+        InMemoryRuntimeAuditArchive::default(),
+        claim_repo,
+    );
+
+    let inspect = expired_service
+        .handle(HostCommandEnvelope {
+            host_session_id: host_session_id.clone(),
+            host_request_id: Some("request-restart-claim-expired-inspect".into()),
+            command: RunCommand::InspectRun(InspectRunCommand {
+                command_id: CommandId("cmd-restart-claim-expired-inspect".to_owned()),
+                run_id: run_id.clone(),
+            }),
+        })
+        .await;
+    match inspect.response {
+        HostCommandResponse::Inspect(snapshot) => {
+            let current_claim = snapshot
+                .ownership
+                .current_claim
+                .expect("expired claim in inspect");
+            assert_eq!(current_claim.claim_id.0, "claim-history-1");
+            assert_eq!(current_claim.status, RunClaimStatus::Expired);
+            assert_eq!(
+                snapshot.ownership.last_terminal_claim_id,
+                Some(ClaimId("claim-history-1".to_owned()))
+            );
+        }
+        other => panic!("unexpected inspect response: {other:?}"),
+    }
+
+    let submit_expired = expired_service
+        .handle(HostCommandEnvelope {
+            host_session_id: host_session_id.clone(),
+            host_request_id: Some("request-restart-claim-expired-evidence".into()),
+            command: RunCommand::SubmitEvidence(SubmitEvidenceCommand {
+                command_id: CommandId("cmd-restart-claim-expired-evidence".to_owned()),
+                run_id: run_id.clone(),
+                evidence: EvidenceSubmission {
+                    evidence_id: "quote".to_owned(),
+                    kind: EvidenceKind::RouteOrQuote,
+                    source: "quote-api".to_owned(),
+                    observed_at_ms: Some(42),
+                    chain_scope: Some("eip155:1".to_owned()),
+                    payload: json!({"amount_out":"1000"}),
+                    confidence: Some(0.95),
+                },
+                expected_version: None,
+            }),
+        })
+        .await;
+    match submit_expired.response {
+        HostCommandResponse::Error(error) => assert_eq!(error.code, "claim_expired"),
+        other => panic!("unexpected expired-claim response: {other:?}"),
+    }
+
+    let reacquired = expired_service
+        .handle(HostCommandEnvelope {
+            host_session_id: host_session_id.clone(),
+            host_request_id: Some("request-restart-claim-expired-reacquire".into()),
+            command: RunCommand::ClaimRun(ClaimRunCommand {
+                command_id: CommandId("cmd-restart-claim-expired-reacquire".to_owned()),
+                run_id: run_id.clone(),
+                owner_kind: RunClaimOwnerKind::InteractiveHost,
+                owner_instance_id: host_session_id.0.clone(),
+                mode: RunClaimMode::ExclusiveMutation,
+                requested_lease_ms: None,
+                allow_supersede: false,
+                expected_current_claim_id: None,
+                expected_current_claim_epoch: None,
+            }),
+        })
+        .await;
+    match reacquired.response {
+        HostCommandResponse::Inspect(snapshot) => {
+            let current_claim = snapshot.ownership.current_claim.expect("reacquired claim");
+            assert_ne!(current_claim.claim_id.0, "claim-history-1");
+            assert_eq!(current_claim.status, RunClaimStatus::Active);
+        }
+        other => panic!("unexpected reacquire response: {other:?}"),
+    }
+
+    let (
+        _run_repo,
+        checkpoint_repo,
+        mission_repo,
+        _run_catalog_repo,
+        _event_archive,
+        _session_store,
+        signer_state_archive,
+        audit_archive,
+        mut claim_repo,
+    ) = expired_service.into_parts_with_claim_repo();
+    let current_claim = claim_repo
+        .load_active(&run_id)
+        .expect("active claim after reacquire")
+        .expect("some active claim");
+    claim_repo
+        .release(crate::persistence::ClaimReleaseRequest {
+            run_id: run_id.clone(),
+            claim_id: current_claim.claim_id.clone(),
+            claim_epoch: current_claim.claim_epoch,
+        })
+        .expect("release claim");
+
+    let mut released_service = RuntimeHostService::new_with_archives_and_claim_repo(
+        InMemoryRunRepository::default(),
+        checkpoint_repo,
+        mission_repo,
+        InMemoryRunCatalogRepository::default(),
+        InMemoryEventArchive::default(),
+        InMemoryHostSessionStore::default(),
+        signer_state_archive,
+        audit_archive,
+        claim_repo,
+    );
+
+    let inspect_released = released_service
+        .handle(HostCommandEnvelope {
+            host_session_id: host_session_id.clone(),
+            host_request_id: Some("request-restart-claim-released-inspect".into()),
+            command: RunCommand::InspectRun(InspectRunCommand {
+                command_id: CommandId("cmd-restart-claim-released-inspect".to_owned()),
+                run_id: run_id.clone(),
+            }),
+        })
+        .await;
+    match inspect_released.response {
+        HostCommandResponse::Inspect(snapshot) => {
+            assert!(snapshot.ownership.current_claim.is_none());
+            assert_eq!(
+                snapshot.ownership.last_claim_transition,
+                Some(ais_agent_control::ownership::ClaimTransitionKind::ClaimReleased)
+            );
+            assert!(snapshot.ownership.last_terminal_claim_id.is_some());
+        }
+        other => panic!("unexpected released inspect response: {other:?}"),
+    }
+
+    let submit_released = released_service
+        .handle(HostCommandEnvelope {
+            host_session_id,
+            host_request_id: Some("request-restart-claim-released-evidence".into()),
+            command: RunCommand::SubmitEvidence(SubmitEvidenceCommand {
+                command_id: CommandId("cmd-restart-claim-released-evidence".to_owned()),
+                run_id,
+                evidence: EvidenceSubmission {
+                    evidence_id: "quote".to_owned(),
+                    kind: EvidenceKind::RouteOrQuote,
+                    source: "quote-api".to_owned(),
+                    observed_at_ms: Some(42),
+                    chain_scope: Some("eip155:1".to_owned()),
+                    payload: json!({"amount_out":"1000"}),
+                    confidence: Some(0.95),
+                },
+                expected_version: None,
+            }),
+        })
+        .await;
+    match submit_released.response {
+        HostCommandResponse::Error(error) => assert_eq!(error.code, "claim_required"),
+        other => panic!("unexpected released-claim response: {other:?}"),
     }
 }
 
@@ -1498,5 +1790,28 @@ fn restart_patch_submission() -> PlanPatchSubmission {
             preserved_effect_refs: Vec::new(),
         }],
         expected_outcome: None,
+    }
+}
+
+fn sample_runtime_claim(
+    run_id: &RunId,
+    host_session_id: &HostSessionId,
+    claim_id: &str,
+    status: RunClaimStatus,
+    lease_expires_at_ms: Option<u64>,
+    claim_epoch: u64,
+) -> RunClaim {
+    RunClaim {
+        claim_id: ClaimId(claim_id.to_owned()),
+        run_id: run_id.clone(),
+        host_session_id: host_session_id.0.clone(),
+        owner_kind: RunClaimOwnerKind::InteractiveHost,
+        owner_instance_id: host_session_id.0.clone(),
+        lease_started_at_ms: 1,
+        lease_expires_at_ms,
+        last_renewed_at_ms: Some(1),
+        claim_epoch,
+        mode: RunClaimMode::ExclusiveMutation,
+        status,
     }
 }

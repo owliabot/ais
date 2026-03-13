@@ -13,8 +13,8 @@ use crate::service::host_service::{
 pub struct RuntimeCommandRouter;
 
 impl RuntimeCommandRouter {
-    pub fn route<R, C, M, K, E, S, G, A>(
-        service: &mut RuntimeHostService<R, C, M, K, E, S, G, A>,
+    pub fn route<R, C, M, K, E, S, G, A, Q>(
+        service: &mut RuntimeHostService<R, C, M, K, E, S, G, A, Q>,
         envelope: HostedRunCommand,
     ) -> Pin<Box<dyn Future<Output = RuntimeHostServiceResult> + Send + '_>>
     where
@@ -26,6 +26,7 @@ impl RuntimeCommandRouter {
         S: ais_agent_host::session::HostSessionStore + Send,
         G: crate::persistence::SignerStateArchive + Send,
         A: crate::persistence::RuntimeAuditArchive + Send,
+        Q: crate::persistence::RunClaimRepository + Send,
     {
         Box::pin(async move {
             let host_session_id = envelope.host_session_id;
@@ -35,6 +36,13 @@ impl RuntimeCommandRouter {
                 RunCommand::BeginRun(command) => service.begin_run(host_session_id, command).await,
                 RunCommand::InspectRun(command) => {
                     service.inspect_run(host_session_id, command).await
+                }
+                RunCommand::ClaimRun(command) => service.claim_run(host_session_id, command).await,
+                RunCommand::RenewRunClaim(command) => {
+                    service.renew_run_claim(host_session_id, command).await
+                }
+                RunCommand::ReleaseRunClaim(command) => {
+                    service.release_run_claim(host_session_id, command).await
                 }
                 RunCommand::StepRun(command) => service.step_run(host_session_id, command).await,
                 RunCommand::SubmitEvidence(command) => {

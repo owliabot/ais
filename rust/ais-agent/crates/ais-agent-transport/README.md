@@ -46,6 +46,15 @@ Current implementation status:
   - typed API error responses
   - error classification for event polling based on host error codes instead of a blanket `404`
 - transport e2e now runs against real `RuntimeHostService`
+- transport ownership passthrough now explicitly covers:
+  - `claim_run`
+  - `renew_run_claim`
+  - `release_run_claim`
+- transport wire error mapping now preserves ownership failures unchanged:
+  - `claim_required`
+  - `claim_conflict`
+  - `claim_expired`
+  - `observer_only`
 - runtime-backed transport regressions cover:
   - JSONL:
     - confirmation-wait pause payloads preserve typed `required_actions[*].action_kind` on the wire
@@ -63,6 +72,11 @@ Current implementation status:
     - preloaded `await_patch -> submit_plan_patch -> step -> complete`
     - stale patch rejection and illegal patch rejection round-trip
     - patch-audit event visibility on successful patch loops
+    - SQLite-backed release-style ownership handoff:
+      - session A `inspect -> claim_run -> release_run_claim`
+      - session B `inspect -> claim_run`
+      - stale session A mutation rejection with `claim_conflict`
+      - session B continuation to completion
     - recovery-aware inspect round-trip for `awaiting_evidence`
     - retry-ready inspect payload round-trip
     - await-user-input pause payload round-trip
@@ -82,6 +96,11 @@ Current implementation status:
       - `await_envelope`
       - retry-ready interruption inspect
       - await-user-input interruption pause
+    - SQLite-backed expiry-style ownership takeover:
+      - session A `claim_run(short lease) -> submit_evidence`
+      - session B `claim_run` after expiry
+      - stale session A mutation rejection with `claim_conflict`
+      - session B continuation to completion
     - host collaboration loop through:
       - `inspect`
       - `GET /runs/{run_id}/events`

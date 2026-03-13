@@ -2,6 +2,7 @@
 
 mod audit_archive;
 mod checkpoint_archive;
+mod claim_store;
 mod durable_executor;
 mod event_archive;
 mod migrate;

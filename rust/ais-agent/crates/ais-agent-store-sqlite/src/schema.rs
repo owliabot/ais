@@ -70,6 +70,33 @@ CREATE INDEX IF NOT EXISTS idx_runtime_audit_archive_latest_lookup
 ON runtime_audit_archive(run_id, audit_seq DESC)
 "#;
 
+pub const CREATE_RUN_CLAIMS_TABLE: &str = r#"
+CREATE TABLE IF NOT EXISTS run_claims (
+    claim_id TEXT PRIMARY KEY NOT NULL,
+    run_id TEXT NOT NULL,
+    host_session_id TEXT NOT NULL,
+    owner_kind_json TEXT NOT NULL,
+    owner_instance_id TEXT NOT NULL,
+    lease_started_at_ms INTEGER NOT NULL,
+    lease_expires_at_ms INTEGER,
+    last_renewed_at_ms INTEGER,
+    claim_epoch INTEGER NOT NULL,
+    mode_json TEXT NOT NULL,
+    status_json TEXT NOT NULL
+)
+"#;
+
+pub const CREATE_RUN_CLAIMS_ACTIVE_INDEX: &str = r#"
+CREATE UNIQUE INDEX IF NOT EXISTS idx_run_claims_active_by_run
+ON run_claims(run_id)
+WHERE status_json = '"active"'
+"#;
+
+pub const CREATE_RUN_CLAIMS_RUN_LOOKUP_INDEX: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_run_claims_run_epoch_lookup
+ON run_claims(run_id, claim_epoch DESC)
+"#;
+
 pub const CREATE_SIGNER_STATE_ARCHIVE_TABLE: &str = r#"
 CREATE TABLE IF NOT EXISTS signer_state_archive (
     run_id TEXT PRIMARY KEY NOT NULL,

@@ -27,7 +27,25 @@ Current implementation status:
 - local JSONL shell regression coverage now also preserves typed interruption/cancel projection fields and `required_actions[*].retry_intent`
 - daemon mode wires HTTP serving to the transport router
 - inspect mode decodes JSONL frames for debugging
-- runtime service is still intentionally stubbed at the CLI layer
+- the CLI now also owns the first typed service/deployment config seam for:
+  - transport
+  - storage
+  - provider endpoint wiring
+  - runtime defaults
+  - observability
+- config resolution now supports:
+  - built-in defaults
+  - optional YAML config file
+  - environment overrides
+  - CLI overrides
+- command handlers now go through a bootstrap seam instead of constructing the transport stub inline
+- `in_memory` bootstrap now constructs a real runtime-backed `RuntimeHostService`
+- SQLite-backed bootstrap now constructs a real archive-backed `RuntimeHostService` over:
+  - `SqliteStore` mission/checkpoint/catalog/event archives
+  - `SqliteStore` signer archive
+  - `SqliteStore` runtime audit archive
+  - `SqliteStore` claim repository
 
 Known gaps:
-- no real runtime service wiring yet
+- SQLite bootstrap still uses an in-memory hot `RunRepository` and in-memory host-session store on top of the durable SQLite archives
+- no capability discovery surface yet for Owliabot integration

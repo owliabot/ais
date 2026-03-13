@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    ids::{CommandId, IdempotencyKey, RunId, SignerRequestId},
+    ids::{ClaimId, CommandId, IdempotencyKey, RunId, SignerRequestId},
+    ownership::{RunClaimMode, RunClaimOwnerKind},
     patch::PlanPatchSubmission,
 };
 
@@ -22,6 +23,9 @@ use crate::{
 pub enum RunCommand {
     BeginRun(BeginRunCommand),
     InspectRun(InspectRunCommand),
+    ClaimRun(ClaimRunCommand),
+    RenewRunClaim(RenewRunClaimCommand),
+    ReleaseRunClaim(ReleaseRunClaimCommand),
     StepRun(StepRunCommand),
     SubmitEvidence(SubmitEvidenceCommand),
     SubmitEnvelope(SubmitEnvelopeCommand),
@@ -36,6 +40,9 @@ impl RunCommand {
         match self {
             Self::BeginRun(_) => "begin_run",
             Self::InspectRun(_) => "inspect_run",
+            Self::ClaimRun(_) => "claim_run",
+            Self::RenewRunClaim(_) => "renew_run_claim",
+            Self::ReleaseRunClaim(_) => "release_run_claim",
             Self::StepRun(_) => "step_run",
             Self::SubmitEvidence(_) => "submit_evidence",
             Self::SubmitEnvelope(_) => "submit_envelope",
@@ -50,6 +57,9 @@ impl RunCommand {
         matches!(
             self,
             Self::StepRun(_)
+                | Self::ClaimRun(_)
+                | Self::RenewRunClaim(_)
+                | Self::ReleaseRunClaim(_)
                 | Self::SubmitEvidence(_)
                 | Self::SubmitEnvelope(_)
                 | Self::SubmitSignerDecision(_)
@@ -68,7 +78,11 @@ impl RunCommand {
             Self::SubmitPlanPatch(command) => command.expected_version.as_ref(),
             Self::RequestCancelRun(command) => command.expected_version.as_ref(),
             Self::CancelRun(command) => command.expected_version.as_ref(),
-            Self::BeginRun(_) | Self::InspectRun(_) => None,
+            Self::BeginRun(_)
+            | Self::InspectRun(_)
+            | Self::ClaimRun(_)
+            | Self::RenewRunClaim(_)
+            | Self::ReleaseRunClaim(_) => None,
         }
     }
 }
@@ -84,6 +98,43 @@ pub struct BeginRunCommand {
 pub struct InspectRunCommand {
     pub command_id: CommandId,
     pub run_id: RunId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaimRunCommand {
+    pub command_id: CommandId,
+    pub run_id: RunId,
+    pub owner_kind: RunClaimOwnerKind,
+    pub owner_instance_id: String,
+    pub mode: RunClaimMode,
+    #[serde(default)]
+    pub requested_lease_ms: Option<u64>,
+    #[serde(default)]
+    pub allow_supersede: bool,
+    #[serde(default)]
+    pub expected_current_claim_id: Option<ClaimId>,
+    #[serde(default)]
+    pub expected_current_claim_epoch: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenewRunClaimCommand {
+    pub command_id: CommandId,
+    pub run_id: RunId,
+    pub claim_id: ClaimId,
+    pub claim_epoch: u64,
+    #[serde(default)]
+    pub requested_lease_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReleaseRunClaimCommand {
+    pub command_id: CommandId,
+    pub run_id: RunId,
+    pub claim_id: ClaimId,
+    pub claim_epoch: u64,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -263,4 +314,74 @@ pub struct SignerDecisionSubmission {
     pub tx_hash: Option<String>,
     #[serde(default)]
     pub details: BTreeMap<String, Value>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ClaimRunCommand, ReleaseRunClaimCommand, RenewRunClaimCommand, RunCommand};
+    use crate::{
+        ids::{ClaimId, CommandId, RunId},
+        ownership::{RunClaimMode, RunClaimOwnerKind},
+    };
+
+    #[test]
+    fn ownership_commands_serialize_with_stable_snake_case_tags() {
+        let claim = RunCommand::ClaimRun(ClaimRunCommand {
+            command_id: CommandId("cmd-claim".to_owned()),
+            run_id: RunId("run-1".to_owned()),
+            owner_kind: RunClaimOwnerKind::InteractiveHost,
+            owner_instance_id: "host-a".to_owned(),
+            mode: RunClaimMode::ExclusiveMutation,
+            requested_lease_ms: Some(30_000),
+            allow_supersede: false,
+            expected_current_claim_id: None,
+            expected_current_claim_epoch: None,
+        });
+        let renew = RunCommand::RenewRunClaim(RenewRunClaimCommand {
+            command_id: CommandId("cmd-renew".to_owned()),
+            run_id: RunId("run-1".to_owned()),
+            claim_id: ClaimId("claim-1".to_owned()),
+            claim_epoch: 2,
+            requested_lease_ms: Some(15_000),
+        });
+        let release = RunCommand::ReleaseRunClaim(ReleaseRunClaimCommand {
+            command_id: CommandId("cmd-release".to_owned()),
+            run_id: RunId("run-1".to_owned()),
+            claim_id: ClaimId("claim-1".to_owned()),
+            claim_epoch: 2,
+            reason: Some("handoff".to_owned()),
+        });
+
+        assert_eq!(
+            serde_json::to_value(&claim).unwrap()["type"],
+            serde_json::Value::String("claim_run".to_owned())
+        );
+        assert_eq!(
+            serde_json::to_value(&renew).unwrap()["type"],
+            serde_json::Value::String("renew_run_claim".to_owned())
+        );
+        assert_eq!(
+            serde_json::to_value(&release).unwrap()["type"],
+            serde_json::Value::String("release_run_claim".to_owned())
+        );
+    }
+
+    #[test]
+    fn ownership_commands_are_mutating_but_do_not_use_runtime_version_preconditions() {
+        let claim = RunCommand::ClaimRun(ClaimRunCommand {
+            command_id: CommandId("cmd-claim".to_owned()),
+            run_id: RunId("run-1".to_owned()),
+            owner_kind: RunClaimOwnerKind::InteractiveHost,
+            owner_instance_id: "host-a".to_owned(),
+            mode: RunClaimMode::ExclusiveMutation,
+            requested_lease_ms: None,
+            allow_supersede: true,
+            expected_current_claim_id: Some(ClaimId("claim-0".to_owned())),
+            expected_current_claim_epoch: Some(1),
+        });
+
+        assert!(claim.is_mutating());
+        assert_eq!(claim.kind(), "claim_run");
+        assert!(claim.expected_runtime_version().is_none());
+    }
 }

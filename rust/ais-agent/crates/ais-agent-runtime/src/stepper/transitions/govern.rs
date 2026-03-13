@@ -46,11 +46,12 @@ pub(crate) fn apply_govern_transition(runtime: &mut ActiveRun) -> Option<StepTra
         return None;
     };
 
-    let (mode, chain, requires_effect_contract) = match &node.payload {
+    let (mode, chain, requires_effect_contract, actuator_hint) = match &node.payload {
         ais_agent_core::action::ActionPayload::Actuate(actuate) => (
             Some(actuate.mode.clone()),
             actuate.chain.clone(),
             actuate.requires_effect_contract,
+            Some(actuate.actuator_hint.clone()),
         ),
         _ => return None,
     };
@@ -115,7 +116,7 @@ pub(crate) fn apply_govern_transition(runtime: &mut ActiveRun) -> Option<StepTra
                 request_id.clone(),
                 runtime.run_id.clone(),
                 chain.unwrap_or_else(|| "unknown".to_owned()),
-                format!("sign action {node_id}"),
+                actuator_hint.unwrap_or_else(|| format!("sign action {node_id}")),
             )
             .with_node_id(node_id.clone());
 

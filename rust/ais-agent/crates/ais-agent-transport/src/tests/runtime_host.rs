@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::Path};
 
 use ais_agent_control::{
     ids::{RunId, SignerRequestId},
@@ -30,6 +30,7 @@ use ais_agent_runtime::{
     runtime::{ActiveRun, InMemoryRunRepository, RunRepository},
     service::RuntimeHostService,
 };
+use ais_agent_store_sqlite::SqliteStore;
 
 pub fn build_runtime_host_service() -> RuntimeHostService<
     InMemoryRunRepository,
@@ -109,6 +110,69 @@ pub fn build_preloaded_evidence_wait_service() -> RuntimeHostService<
         run_catalog_repo,
         event_archive,
         session_store,
+    )
+}
+
+pub fn build_sqlite_preloaded_evidence_wait_service(
+    sqlite_path: &Path,
+    session_store: InMemoryHostSessionStore,
+) -> RuntimeHostService<
+    InMemoryRunRepository,
+    SqliteStore,
+    SqliteStore,
+    SqliteStore,
+    SqliteStore,
+    InMemoryHostSessionStore,
+    SqliteStore,
+    SqliteStore,
+    SqliteStore,
+> {
+    let run_id = RunId("run-1".to_owned());
+    let mission = sample_mission();
+    let mut checkpoint = checkpoint_with_nodes(
+        vec![derive_terminal_node("derive-quote")],
+        vec!["derive-quote".to_owned()],
+    );
+    checkpoint
+        .evidence_graph
+        .requirements
+        .push(EvidenceRequirement {
+            requirement_id: "req-1".to_owned(),
+            reference: "evidence.quote".to_owned(),
+            reason: "quote required".to_owned(),
+            required_by_node_id: Some("derive-quote".to_owned()),
+            satisfied_by_evidence_id: None,
+        });
+    checkpoint.pending_requests.pending_evidence_refs = vec!["evidence.quote".to_owned()];
+    checkpoint
+        .lifecycle
+        .await_evidence("need quote", vec!["evidence.quote".to_owned()]);
+
+    let mut mission_store = SqliteStore::open_path(sqlite_path).expect("mission store");
+    mission_store
+        .insert(run_id.clone(), mission.clone())
+        .expect("insert mission");
+
+    let mut checkpoint_store = SqliteStore::open_path(sqlite_path).expect("checkpoint store");
+    ais_agent_runtime::persistence::CheckpointRepository::append(
+        &mut checkpoint_store,
+        CheckpointArchiveEntry {
+            snapshot: checkpoint,
+            kind: CheckpointArchiveKind::Boundary,
+        },
+    )
+    .expect("save checkpoint");
+
+    RuntimeHostService::new_with_archives_and_claim_repo(
+        InMemoryRunRepository::default(),
+        SqliteStore::open_path(sqlite_path).expect("checkpoint store"),
+        SqliteStore::open_path(sqlite_path).expect("mission store"),
+        SqliteStore::open_path(sqlite_path).expect("catalog store"),
+        SqliteStore::open_path(sqlite_path).expect("event store"),
+        session_store,
+        SqliteStore::open_path(sqlite_path).expect("signer store"),
+        SqliteStore::open_path(sqlite_path).expect("audit store"),
+        SqliteStore::open_path(sqlite_path).expect("claim store"),
     )
 }
 

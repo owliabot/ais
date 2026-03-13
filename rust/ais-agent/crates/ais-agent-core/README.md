@@ -14,8 +14,10 @@ Public API entry points:
   - `checkpoint`
   - `driver`
   - `governor`
+  - `ownership`
   - `patch`
   - `recovery`
+  - `transfer`
   - `runtime`
 
 Dependencies on workspace crates:
@@ -88,11 +90,33 @@ Current implementation status:
   - `classify_allowed_recovery_actions(...)`
   - `classify_recovery_suggestions(...)`
   - classifier now prefers explicit durable interruption truth when present
+- shared ownership classification now also exists in core for the upcoming claim-based host/runtime phase:
+  - `ClaimPolicy`
+  - `classify_claim_policy(...)`
+  - explicit distinction between:
+    - observer-readable access
+    - exclusive mutation claim requirement
+    - stricter post-side-effect handoff
 - shared control classification now also owns first-pass cancel legality through:
   - `CancelRequestResolution`
   - `classify_cancel_request(...)`
   - explicit durable `cancel_state` preference over inferred cancel status
   - budget-exhaustion interruption can now project as `continue_wait` without requiring a failure state
+- first transfer-specific core contracts now also exist for the next execution slices:
+  - `TransferRequest`
+  - `TransferEffectTemplate`
+  - `NativeTransferEffectTemplate`
+  - `Erc20TransferEffectTemplate`
+  - conversion into generic `EffectContract`
+- first Uniswap V3 core contracts now also exist for the next DeFi slice:
+  - `UniswapV3Request`
+  - `UniswapV3EffectTemplate`
+  - `UniswapV3SwapEffectTemplate`
+  - `UniswapV3LpEffectTemplate`
+  - conversion into generic `EffectContract`
+  - first bounded swap effect assertion now aligns with the generic effect verifier scope:
+    - receipt success
+    - `post.decoded_u256 != pre.decoded_u256`
 - checkpoint snapshots now also persist runtime-owned effect contracts:
   - `CheckpointSnapshot.effect_contracts`
 - checkpoint pending-request truth now also persists:
@@ -121,6 +145,7 @@ Known gaps:
 - no conversions from command DTOs into core domain objects yet
 - no runtime evidence ingestion or eviction behavior yet
 - no graph execution or scheduling logic yet
+- ownership claim lifecycle semantics are now frozen at the core-helper level, but runtime enforcement and durable claim storage still land in later milestones
 - bounded patch legality is frozen and now consumed by runtime patch application, but slice-specific patch semantics are still incomplete
 - no durable store implementation beyond an in-memory skeleton
 - governor decisions are currently pure domain logic and not yet wired into a runtime stepper
@@ -128,3 +153,23 @@ Known gaps:
 - signer boundary state is defined, but not yet durably archived for restart/recovery
 - raw-envelope binding exists, but not yet wired into a stepper or broadcaster
 - Solana live ports still need to consume the new `Legacy / V0 + LUT` request contract in real read/simulate/broadcast code
+- transfer effect templates are frozen and transfer-family runtime execution is now in progress:
+- transfer effect templates are frozen and transfer-family runtime execution is now in progress:
+  - native-transfer runtime seeding and signer-submitted verify proofs now exist in `ais-agent-runtime`
+  - ERC20-transfer runtime seeding and signer-submitted verify proofs now also exist in `ais-agent-runtime`
+  - current native / ERC20 effect assertions verify:
+    - receipt success
+    - recipient balance change
+  - exact-amount delta strengthening still lands in later transfer milestones
+- Uniswap V3 effect templates are frozen and runtime execution is now partially in progress:
+  - bounded `uniswap_v3_swap` seeding and live verify proof now exist in `ais-agent-runtime`
+  - explicit `approval_required=true` approve-then-swap path now also exists in `ais-agent-runtime`
+  - bounded `uniswap_v3_lp` mint seeding and live verify proof now also exist in `ais-agent-runtime`
+  - current swap verification strength is still:
+    - receipt success
+    - recipient output-token balance change
+    - approval verification only checks allowance change, not exact target allowance
+  - current LP mint verification strength is still:
+    - receipt success
+    - position-manager `balanceOf(owner)` change
+  - richer LP position decoding, broader LP lifecycle operations, and richer swap quote/slippage verification still land in later milestones

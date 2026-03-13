@@ -1,5 +1,6 @@
 mod begin_inspect;
 mod mutation;
+mod ownership;
 
 use ais_agent_host::{
     control::{HostCommandOutcome, HostCommandResponse},
@@ -11,7 +12,7 @@ use crate::runtime::{classify_validated_recovery_view, ActiveRun};
 
 use super::{RuntimeHostService, RuntimeHostServiceError};
 
-impl<R, C, M, K, E, S, G, A> RuntimeHostService<R, C, M, K, E, S, G, A>
+impl<R, C, M, K, E, S, G, A, Q> RuntimeHostService<R, C, M, K, E, S, G, A, Q>
 where
     R: crate::runtime::RunRepository + Send,
     C: crate::persistence::CheckpointRepository + Send,
@@ -21,18 +22,20 @@ where
     S: ais_agent_host::session::HostSessionStore + Send,
     G: crate::persistence::SignerStateArchive + Send,
     A: crate::persistence::RuntimeAuditArchive + Send,
+    Q: crate::persistence::RunClaimRepository + Send,
 {
     fn apply_runtime_inspect_to_session(
         &mut self,
         host_session_id: &HostSessionId,
         runtime: &ActiveRun,
     ) -> Result<ais_agent_host::inspect::InspectSnapshot, RuntimeHostServiceError> {
-        let inspect = project_inspect_snapshot_with_recovery(
+        let mut inspect = project_inspect_snapshot_with_recovery(
             &runtime.mission,
             &runtime.checkpoint,
             classify_validated_recovery_view(&runtime.checkpoint)
                 .map_err(RuntimeHostServiceError::InvalidRecoveryContract)?,
         );
+        self.hydrate_inspect_ownership(&mut inspect)?;
         let _ = self.session_store.apply_inspect(host_session_id, &inspect);
         Ok(inspect)
     }
@@ -44,15 +47,19 @@ where
     ) -> Result<HostCommandResponse, RuntimeHostServiceError> {
         let recovery = classify_validated_recovery_view(&runtime.checkpoint)
             .map_err(RuntimeHostServiceError::InvalidRecoveryContract)?;
-        let inspect = project_inspect_snapshot_with_recovery(
+        let mut inspect = project_inspect_snapshot_with_recovery(
             &runtime.mission,
             &runtime.checkpoint,
             recovery.clone(),
         );
+        self.hydrate_inspect_ownership(&mut inspect)?;
         let _ = self.session_store.apply_inspect(host_session_id, &inspect);
 
         Ok(
-            if let Some(pause) = project_pause_bundle_with_recovery(&runtime.checkpoint, recovery) {
+            if let Some(mut pause) =
+                project_pause_bundle_with_recovery(&runtime.checkpoint, recovery)
+            {
+                self.hydrate_pause_ownership(&mut pause)?;
                 HostCommandResponse::Pause(pause)
             } else {
                 HostCommandResponse::Inspect(inspect)

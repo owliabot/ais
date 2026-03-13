@@ -1,5 +1,6 @@
 use ais_agent_control::{
     commands::RetryIntent,
+    ownership::{OwnershipVisibility, RunOwnershipSnapshot},
     recovery::{RecoveryActionKind, RecoveryDisposition},
 };
 use ais_agent_core::{
@@ -7,6 +8,7 @@ use ais_agent_core::{
     actuation::ActuationStatus,
     checkpoint::CheckpointSnapshot,
     mission::Mission,
+    ownership::classify_claim_policy,
     recovery::{classify_recovery_view as classify_core_recovery_view, RecoveryProjection},
     runtime::{
         BoundaryKind as CoreBoundaryKind, RunPhase as CoreRunPhase, RunStatus as CoreRunStatus,
@@ -35,6 +37,7 @@ pub fn project_inspect_snapshot_with_recovery(
     let lifecycle = &checkpoint.lifecycle;
     let pending_signer_requests = project_pending_signer_requests(checkpoint);
     let pending_confirmations = project_pending_confirmations(checkpoint);
+    let ownership = project_ownership_snapshot(checkpoint);
 
     InspectSnapshot {
         schema: "ais-agent/inspect_snapshot/v1".to_owned(),
@@ -86,7 +89,8 @@ pub fn project_inspect_snapshot_with_recovery(
             })
             .collect(),
         effect_status: Some(project_effect_status(checkpoint)),
-        run_result: project_run_result(checkpoint, &recovery),
+        ownership: ownership.clone(),
+        run_result: project_run_result(checkpoint, &recovery, ownership),
         progress: project_progress_view(checkpoint),
     }
 }
@@ -101,6 +105,7 @@ pub fn project_pause_bundle_with_recovery(
 ) -> Option<PauseBundle> {
     let lifecycle = &checkpoint.lifecycle;
     let boundary = lifecycle.active_boundary.as_ref()?;
+    let ownership = project_ownership_snapshot(checkpoint);
 
     let kind = match (&lifecycle.status, &boundary.kind) {
         (CoreRunStatus::AwaitingEvidence, _) => PauseKind::NeedEvidence,
@@ -130,8 +135,9 @@ pub fn project_pause_bundle_with_recovery(
             .clone()
             .unwrap_or(RecoveryDisposition::AwaitUserInput),
         summary: boundary.summary.clone(),
+        ownership: ownership.clone(),
         blocking_refs: boundary.blocking_refs.clone(),
-        required_actions: project_pause_actions(&recovery),
+        required_actions: project_pause_actions(&recovery, &ownership),
         failure_context: recovery.failure_context.clone(),
         recovery_suggestions: recovery.recovery_suggestions.clone(),
         allowed_recovery_actions: recovery.allowed_recovery_actions.clone(),
@@ -183,7 +189,10 @@ pub fn project_progress_view(checkpoint: &CheckpointSnapshot) -> ProgressView {
     }
 }
 
-fn project_pause_actions(recovery: &RecoveryView) -> Vec<PauseActionView> {
+fn project_pause_actions(
+    recovery: &RecoveryView,
+    ownership: &RunOwnershipSnapshot,
+) -> Vec<PauseActionView> {
     recovery
         .allowed_recovery_actions
         .clone()
@@ -192,6 +201,8 @@ fn project_pause_actions(recovery: &RecoveryView) -> Vec<PauseActionView> {
             action_kind: action.clone(),
             action: map_recovery_action_command(&action).to_owned(),
             description: map_recovery_action_description(&action).to_owned(),
+            requires_mutation_claim: ownership.claim_required_for_mutation
+                && action_requires_mutation_claim(&action),
             retry_intent: map_recovery_action_retry_intent(&action),
         })
         .collect()
@@ -288,6 +299,7 @@ fn project_effect_status(checkpoint: &CheckpointSnapshot) -> EffectStatusView {
 fn project_run_result(
     checkpoint: &CheckpointSnapshot,
     recovery: &RecoveryView,
+    ownership: RunOwnershipSnapshot,
 ) -> Option<RunResultView> {
     let lifecycle = &checkpoint.lifecycle;
     if !matches!(
@@ -314,10 +326,39 @@ fn project_run_result(
         terminal_failure_context: recovery.failure_context.clone(),
         final_recovery_disposition: recovery.recovery_disposition.clone(),
         final_recovery_suggestions: recovery.recovery_suggestions.clone(),
+        ownership,
         interruption_class: recovery.interruption_class.clone(),
         cancel_state: recovery.cancel_state.clone(),
         side_effect_phase: recovery.side_effect_phase.clone(),
     })
+}
+
+fn project_ownership_snapshot(checkpoint: &CheckpointSnapshot) -> RunOwnershipSnapshot {
+    let policy = classify_claim_policy(checkpoint);
+    RunOwnershipSnapshot {
+        run_id: checkpoint.lifecycle.run_id.clone(),
+        current_claim: None,
+        last_terminal_claim_id: None,
+        last_claim_transition: None,
+        claim_required_for_mutation: policy.claim_required_for_mutation,
+        owner_visibility: match policy.owner_visibility {
+            OwnershipVisibility::SameSessionOnly => OwnershipVisibility::SameSessionOnly,
+            OwnershipVisibility::ObserverReadAllowed => OwnershipVisibility::ObserverReadAllowed,
+        },
+    }
+}
+
+fn action_requires_mutation_claim(action: &RecoveryActionKind) -> bool {
+    matches!(
+        action,
+        RecoveryActionKind::SubmitEvidence
+            | RecoveryActionKind::SubmitEnvelope
+            | RecoveryActionKind::SubmitSignerDecision
+            | RecoveryActionKind::SubmitPlanPatch
+            | RecoveryActionKind::RetryStep
+            | RecoveryActionKind::CancelRun
+            | RecoveryActionKind::AwaitConfirmation
+    )
 }
 
 fn map_recovery_action_retry_intent(action: &RecoveryActionKind) -> Option<RetryIntent> {

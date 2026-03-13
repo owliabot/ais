@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 
 use ais_agent_control::{
     events::{RunEvent, RunEventEnvelope, RunProgress},
-    ids::{EventId, RunId},
+    ids::{ClaimId, EventId, RunId},
+    ownership::{RunClaim, RunClaimMode, RunClaimOwnerKind, RunClaimStatus},
 };
 use ais_agent_core::{
     mission::{Mission, MissionBudget, MissionPolicy},
@@ -11,11 +12,13 @@ use ais_agent_core::{
 
 use crate::persistence::{
     CheckpointArchive, CheckpointArchiveEntry, CheckpointArchiveError, CheckpointArchiveKind,
+    ClaimExpireRequest, ClaimReleaseRequest, ClaimRenewRequest, ClaimSupersedeRequest,
     DurableMutationExecutor, EventArchive, EventArchiveError, EventArchiveQuery,
     InMemoryCheckpointRepository, InMemoryEventArchive, InMemoryMissionRepository,
-    InMemoryRunCatalogRepository, InMemoryRuntimeAuditArchive, InMemorySignerStateArchive,
-    LinearDurableMutationExecutor, MissionRepository, MissionRepositoryError, RunCatalogEntry,
-    RunCatalogRepository, RunCatalogRepositoryError, RuntimeAuditArchive,
+    InMemoryRunCatalogRepository, InMemoryRunClaimRepository, InMemoryRuntimeAuditArchive,
+    InMemorySignerStateArchive, LinearDurableMutationExecutor, MissionRepository,
+    MissionRepositoryError, RunCatalogEntry, RunCatalogRepository, RunCatalogRepositoryError,
+    RunClaimRepository, RunClaimRepositoryError, RuntimeAuditArchive,
 };
 
 #[test]
@@ -115,6 +118,120 @@ fn run_catalog_repository_reports_structured_not_found() {
         RunCatalogRepositoryError::NotFound {
             run_id: "run-missing".to_owned(),
         }
+    );
+}
+
+#[test]
+fn run_claim_repository_acquires_renews_and_releases_active_claims() {
+    let mut repo = InMemoryRunClaimRepository::default();
+    let run_id = RunId("run-1".to_owned());
+
+    let acquired = repo
+        .acquire(sample_claim("claim-1", run_id.clone(), 1, Some(20)))
+        .expect("acquire claim");
+    assert_eq!(
+        repo.load_active(&run_id).expect("load active claim"),
+        Some(acquired.clone())
+    );
+
+    let renewed = repo
+        .renew(ClaimRenewRequest {
+            run_id: run_id.clone(),
+            claim_id: ClaimId("claim-1".to_owned()),
+            claim_epoch: 1,
+            renewed_at_ms: 15,
+            lease_expires_at_ms: Some(25),
+        })
+        .expect("renew claim");
+    assert_eq!(renewed.claim_epoch, 2);
+    assert_eq!(renewed.last_renewed_at_ms, Some(15));
+    assert_eq!(renewed.lease_expires_at_ms, Some(25));
+
+    let released = repo
+        .release(ClaimReleaseRequest {
+            run_id: run_id.clone(),
+            claim_id: ClaimId("claim-1".to_owned()),
+            claim_epoch: 2,
+        })
+        .expect("release claim");
+    assert_eq!(released.status, RunClaimStatus::Released);
+    assert!(repo.load_active(&run_id).expect("load active").is_none());
+}
+
+#[test]
+fn run_claim_repository_reports_conflict_and_epoch_mismatch() {
+    let mut repo = InMemoryRunClaimRepository::default();
+    let run_id = RunId("run-1".to_owned());
+    repo.acquire(sample_claim("claim-1", run_id.clone(), 1, Some(20)))
+        .expect("acquire claim");
+
+    let conflict = repo
+        .acquire(sample_claim("claim-2", run_id.clone(), 1, Some(30)))
+        .expect_err("second active claim should conflict");
+    assert_eq!(
+        conflict,
+        RunClaimRepositoryError::ActiveClaimConflict {
+            run_id: "run-1".to_owned(),
+            claim_id: "claim-1".to_owned(),
+        }
+    );
+
+    let stale_epoch = repo
+        .renew(ClaimRenewRequest {
+            run_id: run_id.clone(),
+            claim_id: ClaimId("claim-1".to_owned()),
+            claim_epoch: 9,
+            renewed_at_ms: 15,
+            lease_expires_at_ms: Some(25),
+        })
+        .expect_err("renew with stale epoch should fail");
+    assert_eq!(
+        stale_epoch,
+        RunClaimRepositoryError::ClaimEpochConflict {
+            claim_id: "claim-1".to_owned(),
+            expected_claim_epoch: 9,
+            actual_claim_epoch: 1,
+        }
+    );
+}
+
+#[test]
+fn run_claim_repository_expires_and_supersedes_claims() {
+    let mut repo = InMemoryRunClaimRepository::default();
+    let run_id = RunId("run-1".to_owned());
+    repo.acquire(sample_claim("claim-1", run_id.clone(), 1, Some(20)))
+        .expect("acquire claim");
+
+    let expired = repo
+        .expire_stale(ClaimExpireRequest {
+            run_id: run_id.clone(),
+            now_ms: 25,
+        })
+        .expect("expire stale claim")
+        .expect("claim should expire");
+    assert_eq!(expired.status, RunClaimStatus::Expired);
+    assert!(repo.load_active(&run_id).expect("load active").is_none());
+
+    repo.acquire(sample_claim("claim-2", run_id.clone(), 1, Some(40)))
+        .expect("acquire successor after expiry");
+
+    let supersede = repo
+        .supersede(ClaimSupersedeRequest {
+            run_id: run_id.clone(),
+            predecessor_claim_id: ClaimId("claim-2".to_owned()),
+            predecessor_claim_epoch: 1,
+            successor_claim: sample_claim("claim-3", run_id.clone(), 1, Some(60)),
+        })
+        .expect("supersede active claim");
+    assert_eq!(supersede.predecessor.status, RunClaimStatus::Superseded);
+    assert_eq!(supersede.successor.claim_id.0, "claim-3");
+    assert_eq!(
+        repo.load_active(&run_id)
+            .expect("load active successor")
+            .expect("active successor")
+            .claim_id
+            .0,
+        "claim-3"
     );
 }
 
@@ -386,6 +503,27 @@ fn sample_run_catalog_entry(
         } else {
             None
         },
+    }
+}
+
+fn sample_claim(
+    claim_id: &str,
+    run_id: RunId,
+    claim_epoch: u64,
+    lease_expires_at_ms: Option<u64>,
+) -> RunClaim {
+    RunClaim {
+        claim_id: ClaimId(claim_id.to_owned()),
+        run_id,
+        host_session_id: "session-1".to_owned(),
+        owner_kind: RunClaimOwnerKind::InteractiveHost,
+        owner_instance_id: "host-a".to_owned(),
+        lease_started_at_ms: 10,
+        lease_expires_at_ms,
+        last_renewed_at_ms: Some(10),
+        claim_epoch,
+        mode: RunClaimMode::ExclusiveMutation,
+        status: RunClaimStatus::Active,
     }
 }
 

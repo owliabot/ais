@@ -1,7 +1,7 @@
 use crate::control::HostCommandOutcome;
 use serde::{Deserialize, Serialize};
 
-use ais_agent_control::ids::{CommandId, IdempotencyKey, RunId};
+use ais_agent_control::ids::{ClaimId, CommandId, IdempotencyKey, RunId};
 
 use crate::session::HostSessionId;
 
@@ -11,6 +11,7 @@ pub struct IdempotencyRecord {
     pub key: IdempotencyKey,
     pub command_id: CommandId,
     pub run_id: Option<RunId>,
+    pub replay_claim_id: Option<ClaimId>,
     pub outcome: Option<HostCommandOutcome>,
 }
 

@@ -64,6 +64,8 @@ fn inspect_snapshot_projects_required_inputs_progress_and_side_effects() {
     assert_eq!(snapshot.progress.status_counts.blocked, 1);
     assert_eq!(snapshot.recent_side_effects.len(), 1);
     assert_eq!(snapshot.effect_status, Some(EffectStatusView::Unknown));
+    assert!(snapshot.ownership.claim_required_for_mutation);
+    assert!(snapshot.ownership.current_claim.is_none());
     assert!(snapshot.run_result.is_none());
 }
 
@@ -93,6 +95,8 @@ fn pause_bundle_projects_pause_kind_and_required_actions() {
             RecoveryActionKind::CancelRun
         ]
     );
+    assert!(pause.ownership.claim_required_for_mutation);
+    assert!(pause.required_actions[0].requires_mutation_claim);
 }
 
 #[test]
@@ -114,6 +118,7 @@ fn confirmation_pause_bundle_disambiguates_step_actions() {
                 action: "step_run".to_owned(),
                 description: "Run the stepper again when retry or confirmation polling is allowed."
                     .to_owned(),
+                requires_mutation_claim: true,
                 retry_intent: Some(ais_agent_control::commands::RetryIntent::ResumeExecution),
             },
             crate::inspect::PauseActionView {
@@ -122,16 +127,19 @@ fn confirmation_pause_bundle_disambiguates_step_actions() {
                 description:
                     "Wait for more chain confirmation information before making a new decision."
                         .to_owned(),
+                requires_mutation_claim: true,
                 retry_intent: Some(ais_agent_control::commands::RetryIntent::PollConfirmation),
             },
             crate::inspect::PauseActionView {
                 action_kind: RecoveryActionKind::CancelRun,
                 action: "cancel_run".to_owned(),
                 description: "Abort the run instead of attempting further recovery.".to_owned(),
+                requires_mutation_claim: true,
                 retry_intent: None,
             },
         ]
     );
+    assert!(pause.ownership.claim_required_for_mutation);
 }
 
 #[test]
@@ -188,6 +196,7 @@ fn paused_checkpoint_with_failure_projects_patch_required_recovery() {
         .required_actions
         .iter()
         .any(|action| action.action == "submit_plan_patch"));
+    assert!(pause.ownership.claim_required_for_mutation);
 }
 
 #[test]
@@ -216,6 +225,13 @@ fn failed_checkpoint_projects_terminal_run_result_with_recovery_context() {
             .and_then(|result| result.terminal_failure_context.as_ref())
             .map(|failure| &failure.code),
         Some(&RunFailureCode::VerifyMismatch)
+    );
+    assert_eq!(
+        snapshot
+            .run_result
+            .as_ref()
+            .map(|result| result.ownership.claim_required_for_mutation),
+        Some(false)
     );
     assert_eq!(pause.kind, PauseKind::RuntimeFailure);
     assert_eq!(

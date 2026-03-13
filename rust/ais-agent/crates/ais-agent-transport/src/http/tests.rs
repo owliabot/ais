@@ -1,7 +1,11 @@
 use ais_agent_control::{
-    commands::{BeginRunCommand, MissionSubmission, RunCommand},
+    commands::{
+        BeginRunCommand, ClaimRunCommand, MissionSubmission, ReleaseRunClaimCommand,
+        RenewRunClaimCommand, RunCommand,
+    },
     events::{RunEvent, RunEventEnvelope, RunStarted},
-    ids::{CommandId, EventId, IdempotencyKey, RunId},
+    ids::{ClaimId, CommandId, EventId, IdempotencyKey, RunId},
+    ownership::{OwnershipVisibility, RunClaimMode, RunClaimOwnerKind, RunOwnershipSnapshot},
     recovery::{
         InterruptionClass, RecoveryActionKind, RecoveryDisposition, RecoveryPriority,
         RecoverySuggestion, RunFailureCode, RunFailureContext, RunFailureStage, SideEffectPhase,
@@ -315,12 +319,120 @@ async fn http_transport_preserves_await_user_input_pause_fields() {
     }
 }
 
+#[tokio::test]
+async fn http_transport_passes_through_claim_run_command() {
+    let app = build_http_router(OwnershipPassthroughMockHostService);
+    let body = serde_json::to_vec(&sample_claim_command()).expect("encode command");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/commands")
+                .method("POST")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let outcome: HostCommandOutcome = serde_json::from_slice(&bytes).expect("decode outcome");
+    match outcome.response {
+        HostCommandResponse::Accepted(value) => {
+            assert_eq!(value.run_id, Some(RunId("run-1".to_owned())));
+            assert_eq!(value.message.as_deref(), Some("claim_run:worker-a"));
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn http_transport_passes_through_renew_and_release_claim_commands() {
+    let app = build_http_router(OwnershipPassthroughMockHostService);
+
+    for (command, expected_message) in [
+        (sample_renew_claim_command(), "renew_run_claim:claim-1:3"),
+        (
+            sample_release_claim_command(),
+            "release_run_claim:claim-1:3",
+        ),
+    ] {
+        let body = serde_json::to_vec(&command).expect("encode command");
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/commands")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let outcome: HostCommandOutcome = serde_json::from_slice(&bytes).expect("decode outcome");
+        match outcome.response {
+            HostCommandResponse::Accepted(value) => {
+                assert_eq!(value.message.as_deref(), Some(expected_message));
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn http_transport_surfaces_ownership_error_codes_in_host_outcomes() {
+    for code in [
+        "claim_required",
+        "claim_conflict",
+        "claim_expired",
+        "observer_only",
+    ] {
+        let app = build_http_router(OwnershipErrorMockHostService { code });
+        let body = serde_json::to_vec(&sample_claim_command()).expect("encode command");
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/commands")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let outcome: HostCommandOutcome = serde_json::from_slice(&bytes).expect("decode outcome");
+        match outcome.response {
+            HostCommandResponse::Error(error) => assert_eq!(error.code, code),
+            other => panic!("unexpected response: {other:?}"),
+        }
+    }
+}
+
 struct MockHostService;
 
 struct RecoveryInspectMockHostService;
 struct ConfirmationPauseMockHostService;
 struct RetryReadyInspectMockHostService;
 struct AwaitUserInputPauseMockHostService;
+struct OwnershipPassthroughMockHostService;
+struct OwnershipErrorMockHostService {
+    code: &'static str,
+}
 struct EventNotFoundMockHostService;
 struct EventConflictMockHostService;
 struct EventBackendFailureMockHostService;
@@ -413,6 +525,68 @@ impl HostCommandService for AwaitUserInputPauseMockHostService {
     }
 }
 
+impl HostCommandService for OwnershipPassthroughMockHostService {
+    fn handle(
+        &mut self,
+        command: HostedRunCommand,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = HostCommandOutcome> + Send + '_>> {
+        Box::pin(async move {
+            let message = match command.command {
+                RunCommand::ClaimRun(command) => {
+                    assert_eq!(command.run_id.0, "run-1");
+                    assert_eq!(command.owner_instance_id, "worker-a");
+                    assert_eq!(command.mode, RunClaimMode::ExclusiveMutation);
+                    format!("claim_run:{}", command.owner_instance_id)
+                }
+                RunCommand::RenewRunClaim(command) => {
+                    assert_eq!(command.claim_id.0, "claim-1");
+                    assert_eq!(command.claim_epoch, 3);
+                    format!(
+                        "renew_run_claim:{}:{}",
+                        command.claim_id.0, command.claim_epoch
+                    )
+                }
+                RunCommand::ReleaseRunClaim(command) => {
+                    assert_eq!(command.claim_id.0, "claim-1");
+                    assert_eq!(command.claim_epoch, 3);
+                    format!(
+                        "release_run_claim:{}:{}",
+                        command.claim_id.0, command.claim_epoch
+                    )
+                }
+                other => panic!("unexpected command: {other:?}"),
+            };
+
+            HostCommandOutcome {
+                response: HostCommandResponse::Accepted(HostAcceptedResponse {
+                    run_id: Some(RunId("run-1".to_owned())),
+                    message: Some(message),
+                    session: None,
+                }),
+                events: Vec::new(),
+            }
+        })
+    }
+}
+
+impl HostCommandService for OwnershipErrorMockHostService {
+    fn handle(
+        &mut self,
+        _command: HostedRunCommand,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = HostCommandOutcome> + Send + '_>> {
+        let code = self.code;
+        Box::pin(async move {
+            HostCommandOutcome {
+                response: HostCommandResponse::Error(ais_agent_host::control::HostCommandError {
+                    code: code.to_owned(),
+                    message: format!("ownership error: {code}"),
+                }),
+                events: Vec::new(),
+            }
+        })
+    }
+}
+
 impl HostRunEventService for ConfirmationPauseMockHostService {
     fn list_events(
         &self,
@@ -462,6 +636,54 @@ impl HostRunEventService for RetryReadyInspectMockHostService {
 }
 
 impl HostRunEventService for AwaitUserInputPauseMockHostService {
+    fn list_events(
+        &self,
+        query: HostRunEventQuery,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<HostRunEventBatch, HostEventServiceError>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            Ok(HostRunEventBatch {
+                run_id: query.run_id,
+                after_event_seq: query.after_event_seq,
+                latest_event_seq: None,
+                next_after_event_seq: None,
+                truncated: false,
+                events: Vec::new(),
+            })
+        })
+    }
+}
+
+impl HostRunEventService for OwnershipPassthroughMockHostService {
+    fn list_events(
+        &self,
+        query: HostRunEventQuery,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<HostRunEventBatch, HostEventServiceError>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            Ok(HostRunEventBatch {
+                run_id: query.run_id,
+                after_event_seq: query.after_event_seq,
+                latest_event_seq: None,
+                next_after_event_seq: None,
+                truncated: false,
+                events: Vec::new(),
+            })
+        })
+    }
+}
+
+impl HostRunEventService for OwnershipErrorMockHostService {
     fn list_events(
         &self,
         query: HostRunEventQuery,
@@ -648,11 +870,68 @@ fn sample_command() -> HostedRunCommand {
     }
 }
 
+fn sample_claim_command() -> HostedRunCommand {
+    HostCommandEnvelope {
+        host_session_id: HostSessionId("session-1".to_owned()),
+        host_request_id: Some(HostRequestId("request-claim".to_owned())),
+        command: RunCommand::ClaimRun(ClaimRunCommand {
+            command_id: CommandId("cmd-claim".to_owned()),
+            run_id: RunId("run-1".to_owned()),
+            owner_kind: RunClaimOwnerKind::InteractiveHost,
+            owner_instance_id: "worker-a".to_owned(),
+            mode: RunClaimMode::ExclusiveMutation,
+            requested_lease_ms: Some(30_000),
+            allow_supersede: false,
+            expected_current_claim_id: None,
+            expected_current_claim_epoch: None,
+        }),
+    }
+}
+
+fn sample_renew_claim_command() -> HostedRunCommand {
+    HostCommandEnvelope {
+        host_session_id: HostSessionId("session-1".to_owned()),
+        host_request_id: Some(HostRequestId("request-renew".to_owned())),
+        command: RunCommand::RenewRunClaim(RenewRunClaimCommand {
+            command_id: CommandId("cmd-renew".to_owned()),
+            run_id: RunId("run-1".to_owned()),
+            claim_id: ClaimId("claim-1".to_owned()),
+            claim_epoch: 3,
+            requested_lease_ms: Some(30_000),
+        }),
+    }
+}
+
+fn sample_release_claim_command() -> HostedRunCommand {
+    HostCommandEnvelope {
+        host_session_id: HostSessionId("session-1".to_owned()),
+        host_request_id: Some(HostRequestId("request-release".to_owned())),
+        command: RunCommand::ReleaseRunClaim(ReleaseRunClaimCommand {
+            command_id: CommandId("cmd-release".to_owned()),
+            run_id: RunId("run-1".to_owned()),
+            claim_id: ClaimId("claim-1".to_owned()),
+            claim_epoch: 3,
+            reason: Some("transport passthrough".to_owned()),
+        }),
+    }
+}
+
 async fn decode_json_body(response: axum::response::Response) -> serde_json::Value {
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("body");
     serde_json::from_slice(&bytes).expect("decode json body")
+}
+
+fn sample_ownership(claim_required_for_mutation: bool) -> RunOwnershipSnapshot {
+    RunOwnershipSnapshot {
+        run_id: RunId("run-1".to_owned()),
+        current_claim: None,
+        last_terminal_claim_id: None,
+        last_claim_transition: None,
+        claim_required_for_mutation,
+        owner_visibility: OwnershipVisibility::ObserverReadAllowed,
+    }
 }
 
 fn sample_recovery_aware_inspect() -> InspectSnapshot {
@@ -708,6 +987,7 @@ fn sample_recovery_aware_inspect() -> InspectSnapshot {
         pending_signer_requests: Vec::new(),
         recent_side_effects: Vec::new(),
         effect_status: None,
+        ownership: sample_ownership(true),
         run_result: None,
         progress: ProgressView {
             graph_id: Some("graph-1".to_owned()),
@@ -734,6 +1014,7 @@ fn sample_confirmation_pause() -> PauseBundle {
         side_effect_phase: Some(ais_agent_control::recovery::SideEffectPhase::AwaitingConfirmation),
         recovery_disposition: RecoveryDisposition::ContinueWait,
         summary: "waiting for chain receipt".to_owned(),
+        ownership: sample_ownership(true),
         blocking_refs: vec!["confirm-1".to_owned()],
         required_actions: vec![
             PauseActionView {
@@ -741,6 +1022,7 @@ fn sample_confirmation_pause() -> PauseBundle {
                 action: "step_run".to_owned(),
                 description: "Run the stepper again when retry or confirmation polling is allowed."
                     .to_owned(),
+                requires_mutation_claim: true,
                 retry_intent: Some(ais_agent_control::commands::RetryIntent::ResumeExecution),
             },
             PauseActionView {
@@ -749,6 +1031,7 @@ fn sample_confirmation_pause() -> PauseBundle {
                 description:
                     "Wait for more chain confirmation information before making a new decision."
                         .to_owned(),
+                requires_mutation_claim: true,
                 retry_intent: Some(ais_agent_control::commands::RetryIntent::PollConfirmation),
             },
         ],
@@ -826,6 +1109,7 @@ fn sample_retry_ready_inspect() -> InspectSnapshot {
         pending_signer_requests: Vec::new(),
         recent_side_effects: Vec::new(),
         effect_status: None,
+        ownership: sample_ownership(true),
         run_result: None,
         progress: ProgressView {
             graph_id: Some("graph-1".to_owned()),
@@ -864,11 +1148,13 @@ fn sample_await_user_input_pause() -> PauseBundle {
         side_effect_phase: Some(SideEffectPhase::BroadcastSubmitted),
         recovery_disposition: RecoveryDisposition::AwaitUserInput,
         summary: "provider accepted submission but tx outcome is uncertain".to_owned(),
+        ownership: sample_ownership(true),
         blocking_refs: vec!["confirm-uncertain".to_owned()],
         required_actions: vec![PauseActionView {
             action_kind: RecoveryActionKind::EscalateUserReview,
             action: "escalate_user_review".to_owned(),
             description: "escalate to host/user review".to_owned(),
+            requires_mutation_claim: false,
             retry_intent: None,
         }],
         failure_context: Some(failure),

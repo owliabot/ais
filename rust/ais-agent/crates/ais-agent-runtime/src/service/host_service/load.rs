@@ -1,7 +1,14 @@
-use ais_agent_control::ids::RunId;
-use ais_agent_core::{checkpoint::CheckpointSnapshot, mission::Mission};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use ais_agent_control::{
+    commands::RunCommand,
+    ids::{ClaimId, RunId},
+    ownership::{ClaimTransitionKind, OwnershipErrorCode, RunClaim, RunClaimMode, RunClaimStatus},
+};
+use ais_agent_core::{checkpoint::CheckpointSnapshot, mission::Mission, ownership::ClaimPolicy};
 use ais_agent_host::{
     events::{HostEventServiceError, HostRunEventBatch, HostRunEventQuery},
+    inspect::{InspectSnapshot, PauseBundle},
     session::{HostRunLink, HostSessionId},
 };
 use tracing::{debug, info};
@@ -15,7 +22,7 @@ use crate::{
 
 use super::{conversion, RuntimeHostService, RuntimeHostServiceError};
 
-impl<R, C, M, K, E, S, G, A> RuntimeHostService<R, C, M, K, E, S, G, A>
+impl<R, C, M, K, E, S, G, A, Q> RuntimeHostService<R, C, M, K, E, S, G, A, Q>
 where
     R: crate::runtime::RunRepository + Send,
     C: crate::persistence::CheckpointRepository + Send,
@@ -25,6 +32,7 @@ where
     S: ais_agent_host::session::HostSessionStore + Send,
     G: crate::persistence::SignerStateArchive + Send,
     A: crate::persistence::RuntimeAuditArchive + Send,
+    Q: crate::persistence::RunClaimRepository + Send,
 {
     pub(super) fn establish_inspect_session_link(
         &mut self,
@@ -79,6 +87,20 @@ where
             });
         }
         Ok(())
+    }
+
+    pub(super) fn force_session_link(
+        &mut self,
+        host_session_id: &HostSessionId,
+        run_id: &RunId,
+        mission: &Mission,
+    ) {
+        self.session_store.link_run(HostRunLink::new(
+            host_session_id.clone(),
+            run_id.clone(),
+            mission.goal.clone(),
+            mission.allowed_chains.clone(),
+        ));
     }
 
     pub(super) fn load_or_restore_active_run(
@@ -279,5 +301,347 @@ where
                 message: other.to_string(),
             }),
         }
+    }
+
+    pub(super) fn claim_now_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    }
+
+    pub(super) fn default_claim_lease_ms() -> u64 {
+        5 * 60 * 1_000
+    }
+
+    pub(super) fn requested_claim_lease_ms(requested_lease_ms: Option<u64>) -> u64 {
+        requested_lease_ms.unwrap_or_else(Self::default_claim_lease_ms)
+    }
+
+    pub(super) fn seed_initial_claim(
+        &mut self,
+        host_session_id: &HostSessionId,
+        run_id: &RunId,
+    ) -> Result<RunClaim, RuntimeHostServiceError> {
+        let lease_started_at_ms = Self::claim_now_ms();
+        self.acquire_claim(
+            host_session_id,
+            RunClaim {
+                claim_id: ClaimId(format!("claim-{}-1", run_id.0)),
+                run_id: run_id.clone(),
+                host_session_id: host_session_id.0.clone(),
+                owner_kind: ais_agent_control::ownership::RunClaimOwnerKind::InteractiveHost,
+                owner_instance_id: host_session_id.0.clone(),
+                lease_started_at_ms,
+                lease_expires_at_ms: Some(lease_started_at_ms + Self::default_claim_lease_ms()),
+                last_renewed_at_ms: Some(lease_started_at_ms),
+                claim_epoch: 1,
+                mode: ais_agent_control::ownership::RunClaimMode::ExclusiveMutation,
+                status: RunClaimStatus::Active,
+            },
+        )
+    }
+
+    pub(super) fn acquire_claim(
+        &mut self,
+        host_session_id: &HostSessionId,
+        claim: RunClaim,
+    ) -> Result<RunClaim, RuntimeHostServiceError> {
+        let run_id = claim.run_id.0.clone();
+        self.claim_repo
+            .acquire(claim)
+            .map_err(|error| Self::map_claim_error(host_session_id, &run_id, error))
+    }
+
+    pub(super) fn next_claim_id(&self, run_id: &RunId, host_session_id: &HostSessionId) -> ClaimId {
+        ClaimId(format!(
+            "claim-{}-{}-{}",
+            run_id.0,
+            host_session_id.0,
+            Self::claim_now_ms()
+        ))
+    }
+
+    pub(super) fn build_claim(
+        &self,
+        host_session_id: &HostSessionId,
+        run_id: &RunId,
+        owner_kind: ais_agent_control::ownership::RunClaimOwnerKind,
+        owner_instance_id: String,
+        mode: RunClaimMode,
+        requested_lease_ms: Option<u64>,
+    ) -> RunClaim {
+        let lease_started_at_ms = Self::claim_now_ms();
+        let lease_ms = Self::requested_claim_lease_ms(requested_lease_ms);
+        RunClaim {
+            claim_id: self.next_claim_id(run_id, host_session_id),
+            run_id: run_id.clone(),
+            host_session_id: host_session_id.0.clone(),
+            owner_kind,
+            owner_instance_id,
+            lease_started_at_ms,
+            lease_expires_at_ms: Some(lease_started_at_ms.saturating_add(lease_ms)),
+            last_renewed_at_ms: Some(lease_started_at_ms),
+            claim_epoch: 1,
+            mode,
+            status: RunClaimStatus::Active,
+        }
+    }
+
+    pub(super) fn claim_policy(
+        &mut self,
+        run_id: &RunId,
+    ) -> Result<ClaimPolicy, RuntimeHostServiceError> {
+        let (_, checkpoint) = self.load_inspect_projection_input(run_id)?;
+        Ok(ais_agent_core::ownership::classify_claim_policy(
+            &checkpoint,
+        ))
+    }
+
+    pub(super) fn expire_stale_claim_if_needed(
+        &mut self,
+        host_session_id: &HostSessionId,
+        run_id: &RunId,
+    ) -> Result<Option<RunClaim>, RuntimeHostServiceError> {
+        self.claim_repo
+            .expire_stale(crate::persistence::ClaimExpireRequest {
+                run_id: run_id.clone(),
+                now_ms: Self::claim_now_ms(),
+            })
+            .map_err(|error| Self::map_claim_error(host_session_id, &run_id.0, error))
+    }
+
+    fn map_claim_error(
+        host_session_id: &HostSessionId,
+        run_id: &str,
+        error: crate::persistence::RunClaimRepositoryError,
+    ) -> RuntimeHostServiceError {
+        let code = match error {
+            crate::persistence::RunClaimRepositoryError::ActiveClaimConflict { .. } => {
+                OwnershipErrorCode::ClaimConflict
+            }
+            crate::persistence::RunClaimRepositoryError::ClaimEpochConflict { .. } => {
+                OwnershipErrorCode::ClaimEpochStale
+            }
+            crate::persistence::RunClaimRepositoryError::ClaimNotFound { .. } => {
+                OwnershipErrorCode::ClaimRequired
+            }
+            crate::persistence::RunClaimRepositoryError::InvalidStatus { .. } => {
+                OwnershipErrorCode::ClaimTransferRequired
+            }
+            crate::persistence::RunClaimRepositoryError::InvalidClaim { .. }
+            | crate::persistence::RunClaimRepositoryError::Storage { .. } => {
+                OwnershipErrorCode::ClaimRequired
+            }
+        };
+        RuntimeHostServiceError::OwnershipViolation {
+            code,
+            run_id: run_id.to_owned(),
+            message: format!("session `{}`: {error}", host_session_id.0),
+        }
+    }
+
+    pub(super) fn load_effective_claim(
+        &self,
+        run_id: &RunId,
+    ) -> Result<Option<RunClaim>, RuntimeHostServiceError> {
+        let Some(mut claim) = self.claim_repo.load_active(run_id).map_err(|error| {
+            RuntimeHostServiceError::OwnershipViolation {
+                code: OwnershipErrorCode::ClaimRequired,
+                run_id: run_id.0.clone(),
+                message: error.to_string(),
+            }
+        })?
+        else {
+            return Ok(None);
+        };
+
+        if claim
+            .lease_expires_at_ms
+            .map(|expires| expires <= Self::claim_now_ms())
+            .unwrap_or(false)
+        {
+            claim.status = RunClaimStatus::Expired;
+            return Ok(Some(claim));
+        }
+
+        Ok(Some(claim))
+    }
+
+    fn bootstrap_legacy_mutation_claim(
+        &mut self,
+        host_session_id: &HostSessionId,
+        run_id: &RunId,
+    ) -> Result<RunClaim, RuntimeHostServiceError> {
+        let lease_started_at_ms = Self::claim_now_ms();
+        self.acquire_claim(
+            host_session_id,
+            RunClaim {
+                claim_id: ClaimId(format!(
+                    "claim-{}-bootstrap-{}",
+                    run_id.0, lease_started_at_ms
+                )),
+                run_id: run_id.clone(),
+                host_session_id: host_session_id.0.clone(),
+                owner_kind: ais_agent_control::ownership::RunClaimOwnerKind::InteractiveHost,
+                owner_instance_id: host_session_id.0.clone(),
+                lease_started_at_ms,
+                lease_expires_at_ms: Some(lease_started_at_ms + Self::default_claim_lease_ms()),
+                last_renewed_at_ms: Some(lease_started_at_ms),
+                claim_epoch: 1,
+                mode: ais_agent_control::ownership::RunClaimMode::ExclusiveMutation,
+                status: RunClaimStatus::Active,
+            },
+        )
+    }
+
+    pub(super) fn ensure_mutation_claim(
+        &mut self,
+        host_session_id: &HostSessionId,
+        run_id: &RunId,
+    ) -> Result<RunClaim, RuntimeHostServiceError> {
+        if let Some(expired) = self.expire_stale_claim_if_needed(host_session_id, run_id)? {
+            return Err(RuntimeHostServiceError::OwnershipViolation {
+                code: OwnershipErrorCode::ClaimExpired,
+                run_id: run_id.0.clone(),
+                message: format!("active claim `{}` has expired", expired.claim_id.0),
+            });
+        }
+        let Some(claim) = self.load_effective_claim(run_id)? else {
+            return match self.latest_claim_for_run(run_id)? {
+                Some(previous_claim) => Err(RuntimeHostServiceError::OwnershipViolation {
+                    code: OwnershipErrorCode::ClaimRequired,
+                    run_id: run_id.0.clone(),
+                    message: format!(
+                        "run `{}` requires an explicit claim after {:?} `{}`",
+                        run_id.0, previous_claim.status, previous_claim.claim_id.0
+                    ),
+                }),
+                None => self.bootstrap_legacy_mutation_claim(host_session_id, run_id),
+            };
+        };
+
+        if claim.status == RunClaimStatus::Expired {
+            return Err(RuntimeHostServiceError::OwnershipViolation {
+                code: OwnershipErrorCode::ClaimExpired,
+                run_id: run_id.0.clone(),
+                message: format!("active claim `{}` has expired", claim.claim_id.0),
+            });
+        }
+        if !claim.mode.allows_mutation() {
+            return Err(RuntimeHostServiceError::OwnershipViolation {
+                code: OwnershipErrorCode::ObserverOnly,
+                run_id: run_id.0.clone(),
+                message: format!("claim `{}` is observer_only", claim.claim_id.0),
+            });
+        }
+        if claim.host_session_id != host_session_id.0 {
+            return Err(RuntimeHostServiceError::OwnershipViolation {
+                code: OwnershipErrorCode::ClaimConflict,
+                run_id: run_id.0.clone(),
+                message: format!(
+                    "active claim `{}` belongs to session `{}`",
+                    claim.claim_id.0, claim.host_session_id
+                ),
+            });
+        }
+
+        Ok(claim)
+    }
+
+    pub(super) fn hydrate_inspect_ownership(
+        &self,
+        snapshot: &mut InspectSnapshot,
+    ) -> Result<(), RuntimeHostServiceError> {
+        if let Some(claim) = self.load_effective_claim(&snapshot.run_id)? {
+            if claim.status == RunClaimStatus::Expired {
+                snapshot.ownership.last_terminal_claim_id = Some(claim.claim_id.clone());
+                snapshot.ownership.last_claim_transition = Some(ClaimTransitionKind::ClaimExpired);
+            }
+            snapshot.ownership.current_claim = Some(claim);
+        } else if let Some(claim) = self.latest_claim_for_run(&snapshot.run_id)? {
+            snapshot.ownership.last_terminal_claim_id = Some(claim.claim_id.clone());
+            snapshot.ownership.last_claim_transition =
+                Some(claim_status_transition_kind(claim.status.clone()));
+        }
+        if let Some(run_result) = snapshot.run_result.as_mut() {
+            run_result.ownership = snapshot.ownership.clone();
+        }
+        Ok(())
+    }
+
+    pub(super) fn hydrate_pause_ownership(
+        &self,
+        pause: &mut PauseBundle,
+    ) -> Result<(), RuntimeHostServiceError> {
+        if let Some(claim) = self.load_effective_claim(&pause.run_id)? {
+            if claim.status == RunClaimStatus::Expired {
+                pause.ownership.last_terminal_claim_id = Some(claim.claim_id.clone());
+                pause.ownership.last_claim_transition = Some(ClaimTransitionKind::ClaimExpired);
+            }
+            pause.ownership.current_claim = Some(claim);
+        } else if let Some(claim) = self.latest_claim_for_run(&pause.run_id)? {
+            pause.ownership.last_terminal_claim_id = Some(claim.claim_id.clone());
+            pause.ownership.last_claim_transition =
+                Some(claim_status_transition_kind(claim.status.clone()));
+        }
+        Ok(())
+    }
+
+    fn latest_claim_for_run(
+        &self,
+        run_id: &RunId,
+    ) -> Result<Option<RunClaim>, RuntimeHostServiceError> {
+        self.claim_repo
+            .load_latest_for_run(run_id)
+            .map_err(|error| RuntimeHostServiceError::OwnershipViolation {
+                code: OwnershipErrorCode::ClaimRequired,
+                run_id: run_id.0.clone(),
+                message: error.to_string(),
+            })
+    }
+
+    pub(super) fn idempotency_claim_id_for_command(
+        &self,
+        command: &RunCommand,
+    ) -> Result<Option<ClaimId>, RuntimeHostServiceError> {
+        match command {
+            RunCommand::BeginRun(_) | RunCommand::InspectRun(_) => Ok(None),
+            RunCommand::ClaimRun(command) => Ok(self
+                .load_effective_claim(&command.run_id)?
+                .map(|claim| claim.claim_id)),
+            RunCommand::RenewRunClaim(command) => Ok(Some(command.claim_id.clone())),
+            RunCommand::ReleaseRunClaim(command) => Ok(Some(command.claim_id.clone())),
+            RunCommand::StepRun(command) => Ok(self
+                .load_effective_claim(&command.run_id)?
+                .map(|claim| claim.claim_id)),
+            RunCommand::SubmitEvidence(command) => Ok(self
+                .load_effective_claim(&command.run_id)?
+                .map(|claim| claim.claim_id)),
+            RunCommand::SubmitEnvelope(command) => Ok(self
+                .load_effective_claim(&command.run_id)?
+                .map(|claim| claim.claim_id)),
+            RunCommand::SubmitSignerDecision(command) => Ok(self
+                .load_effective_claim(&command.run_id)?
+                .map(|claim| claim.claim_id)),
+            RunCommand::SubmitPlanPatch(command) => Ok(self
+                .load_effective_claim(&command.run_id)?
+                .map(|claim| claim.claim_id)),
+            RunCommand::RequestCancelRun(command) => Ok(self
+                .load_effective_claim(&command.run_id)?
+                .map(|claim| claim.claim_id)),
+            RunCommand::CancelRun(command) => Ok(self
+                .load_effective_claim(&command.run_id)?
+                .map(|claim| claim.claim_id)),
+        }
+    }
+}
+
+fn claim_status_transition_kind(status: RunClaimStatus) -> ClaimTransitionKind {
+    match status {
+        RunClaimStatus::Active => ClaimTransitionKind::ClaimAcquired,
+        RunClaimStatus::Expired => ClaimTransitionKind::ClaimExpired,
+        RunClaimStatus::Released => ClaimTransitionKind::ClaimReleased,
+        RunClaimStatus::Superseded => ClaimTransitionKind::ClaimSuperseded,
     }
 }

@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use ais_agent_control::{
     commands::RetryIntent,
     ids::RunId,
+    ownership::RunOwnershipSnapshot,
     recovery::{
         CancelState, InterruptionClass, RecoveryActionKind, RecoveryDisposition,
         RecoverySuggestion, RunFailureContext, SideEffectPhase,
@@ -26,6 +27,7 @@ pub struct PauseActionView {
     pub action_kind: RecoveryActionKind,
     pub action: String,
     pub description: String,
+    pub requires_mutation_claim: bool,
     pub retry_intent: Option<RetryIntent>,
 }
 
@@ -39,6 +41,7 @@ pub struct PauseBundle {
     pub side_effect_phase: Option<SideEffectPhase>,
     pub recovery_disposition: RecoveryDisposition,
     pub summary: String,
+    pub ownership: RunOwnershipSnapshot,
     #[serde(default)]
     pub blocking_refs: Vec<String>,
     #[serde(default)]
