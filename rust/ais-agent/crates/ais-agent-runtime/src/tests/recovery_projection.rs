@@ -366,6 +366,7 @@ fn awaiting_evidence_checkpoint() -> CheckpointSnapshot {
         },
         last_completed_node_id: None,
         actuation_records: Vec::new(),
+        execution_artifact: None,
     }
 }
 
@@ -398,6 +399,7 @@ fn paused_patch_checkpoint() -> CheckpointSnapshot {
         pending_requests: PendingRequestsSnapshot::default(),
         last_completed_node_id: None,
         actuation_records: Vec::new(),
+        execution_artifact: None,
     }
 }
 
@@ -424,6 +426,7 @@ fn running_budget_interrupted_checkpoint() -> CheckpointSnapshot {
         pending_requests: PendingRequestsSnapshot::default(),
         last_completed_node_id: None,
         actuation_records: Vec::new(),
+        execution_artifact: None,
     }
 }
 
@@ -454,6 +457,7 @@ fn paused_broadcast_uncertain_checkpoint() -> CheckpointSnapshot {
         pending_requests: PendingRequestsSnapshot::default(),
         last_completed_node_id: None,
         actuation_records: Vec::new(),
+        execution_artifact: None,
     }
 }
 
@@ -494,6 +498,7 @@ fn paused_provider_failure_checkpoint() -> CheckpointSnapshot {
         },
         last_completed_node_id: None,
         actuation_records: Vec::new(),
+        execution_artifact: None,
     }
 }
 
@@ -537,6 +542,7 @@ fn paused_confirmation_timeout_checkpoint() -> CheckpointSnapshot {
         },
         last_completed_node_id: None,
         actuation_records: Vec::new(),
+        execution_artifact: None,
     }
 }
 
@@ -578,6 +584,7 @@ fn paused_observe_timeout_checkpoint() -> CheckpointSnapshot {
         pending_requests: PendingRequestsSnapshot::default(),
         last_completed_node_id: None,
         actuation_records: Vec::new(),
+        execution_artifact: None,
     }
 }
 
@@ -607,6 +614,7 @@ fn failed_checkpoint() -> CheckpointSnapshot {
         pending_requests: PendingRequestsSnapshot::default(),
         last_completed_node_id: None,
         actuation_records: Vec::new(),
+        execution_artifact: None,
     }
 }
 
@@ -648,6 +656,7 @@ fn paused_verify_mismatch_checkpoint() -> CheckpointSnapshot {
         },
         last_completed_node_id: None,
         actuation_records: Vec::new(),
+        execution_artifact: None,
     }
 }
 
@@ -683,6 +692,7 @@ fn paused_envelope_checkpoint() -> CheckpointSnapshot {
         },
         last_completed_node_id: None,
         actuation_records: Vec::new(),
+        execution_artifact: None,
     }
 }
 
@@ -705,6 +715,7 @@ fn cancelled_checkpoint() -> CheckpointSnapshot {
         pending_requests: PendingRequestsSnapshot::default(),
         last_completed_node_id: None,
         actuation_records: Vec::new(),
+        execution_artifact: None,
     }
 }
 
@@ -734,5 +745,6 @@ fn cancel_pending_confirmation_checkpoint() -> CheckpointSnapshot {
         },
         last_completed_node_id: None,
         actuation_records: Vec::new(),
+        execution_artifact: None,
     }
 }

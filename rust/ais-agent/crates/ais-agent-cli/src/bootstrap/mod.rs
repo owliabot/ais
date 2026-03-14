@@ -19,10 +19,7 @@ pub fn build_host_service(config: &AisAgentServiceConfig) -> CliHostService {
     let execution_wiring = RuntimeExecutionWiring {
         evm_rpc_url: config.providers.evm_rpc_url.clone(),
         solana_rpc_url: config.providers.solana_rpc_url.clone(),
-        native_transfer_enabled: config.features.native_transfer,
-        erc20_transfer_enabled: config.features.erc20_transfer,
-        uniswap_v3_swap_enabled: config.features.uniswap_v3_swap,
-        uniswap_v3_lp_enabled: config.features.uniswap_v3_lp,
+        allowed_protocol_packages: config.protocol_packages.allow.clone(),
     };
 
     match &config.storage {
@@ -155,6 +152,7 @@ mod tests {
                     budget: None,
                     metadata: Default::default(),
                 },
+                launch_spec: None,
             }),
         }
     }

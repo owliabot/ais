@@ -584,6 +584,7 @@ fn failed_runtime_and_patch() -> (ActiveRun, PlanPatchSubmission) {
         pending_requests: PendingRequestsSnapshot::default(),
         last_completed_node_id: None,
         actuation_records: Vec::new(),
+        execution_artifact: None,
     };
 
     let runtime = ActiveRun::new(mission, checkpoint);

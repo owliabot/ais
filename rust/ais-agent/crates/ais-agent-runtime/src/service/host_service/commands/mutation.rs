@@ -1,6 +1,7 @@
 use ais_agent_control::commands::{
     CancelRunCommand, RequestCancelRunCommand, StepRunCommand, SubmitEnvelopeCommand,
-    SubmitEvidenceCommand, SubmitPlanPatchCommand, SubmitSignerDecisionCommand,
+    SubmitEvidenceCommand, SubmitExecutionArtifactContinuationCommand, SubmitPlanPatchCommand,
+    SubmitSignerDecisionCommand,
 };
 use ais_agent_control::recovery::{CancelState, SideEffectPhase};
 use ais_agent_core::{
@@ -17,7 +18,8 @@ use crate::{
 };
 
 use super::super::{
-    conversion, persist::PendingCheckpointRecorder, DurableCheckpointWrite, RuntimeHostService,
+    artifact_planner::seed_execution_artifact_checkpoint, conversion,
+    persist::PendingCheckpointRecorder, DurableCheckpointWrite, RuntimeHostService,
     RuntimeHostServiceError, RuntimeHostServiceResult,
 };
 
@@ -348,6 +350,95 @@ where
         }
 
         self.inspect_outcome(&host_session_id, &runtime, patch_events)
+    }
+
+    pub async fn submit_execution_artifact_continuation(
+        &mut self,
+        host_session_id: HostSessionId,
+        command: SubmitExecutionArtifactContinuationCommand,
+    ) -> RuntimeHostServiceResult {
+        self.ensure_mutation_session_link(&host_session_id, &command.run_id)?;
+        let _claim = self.ensure_mutation_claim(&host_session_id, &command.run_id)?;
+        let mut runtime = self.load_or_restore_active_run(&command.run_id)?;
+        guard_run_command_version(
+            &ais_agent_control::commands::RunCommand::SubmitExecutionArtifactContinuation(
+                command.clone(),
+            ),
+            &runtime,
+        )
+        .map_err(RuntimeHostServiceError::VersionConflict)?;
+        let base_revision = runtime.revision;
+        let base_checkpoint = runtime.checkpoint.clone();
+        runtime.record_command(command.command_id, None);
+
+        let current_snapshot = runtime
+            .checkpoint
+            .execution_artifact
+            .as_ref()
+            .ok_or_else(|| {
+                RuntimeHostServiceError::ContinuationRejected(
+                    "run has no active execution artifact state".to_owned(),
+                )
+            })?;
+        let continuation = current_snapshot
+            .awaiting_continuation
+            .as_ref()
+            .ok_or_else(|| {
+                RuntimeHostServiceError::ContinuationRejected(
+                    "run is not waiting for an execution artifact continuation".to_owned(),
+                )
+            })?;
+        if continuation.package_entry != command.package_entry {
+            return Err(RuntimeHostServiceError::ContinuationRejected(format!(
+                "submitted package_entry `{}` does not match pending continuation `{}`",
+                command.package_entry, continuation.package_entry
+            )));
+        }
+
+        let exported_outputs = current_snapshot.exported_outputs.clone();
+        for required_output in &continuation.required_outputs {
+            if !exported_outputs.contains_key(required_output) {
+                return Err(RuntimeHostServiceError::ContinuationRejected(format!(
+                    "pending continuation requires exported output `{required_output}` but it is missing from runtime state"
+                )));
+            }
+        }
+
+        runtime.pending_signer_state = None;
+        runtime.checkpoint.pending_requests = PendingRequestsSnapshot::default();
+        runtime.checkpoint.last_completed_node_id = None;
+        seed_execution_artifact_checkpoint(
+            &mut runtime.checkpoint,
+            &self.execution_wiring,
+            &command.artifact,
+        )
+        .map_err(RuntimeHostServiceError::ContinuationRejected)?;
+        if let Some(snapshot) = runtime.checkpoint.execution_artifact.as_mut() {
+            snapshot.exported_outputs = exported_outputs;
+            snapshot.awaiting_continuation = None;
+        }
+        runtime
+            .checkpoint
+            .lifecycle
+            .mark_running(ais_agent_core::runtime::RunPhase::Planning);
+        runtime.touch_transition();
+
+        if let Err(error) = self.commit_existing_run_state(
+            &runtime,
+            Some(base_revision),
+            DurableMutationKind::Progress,
+            Some(self.capture_checkpoint_entry(&runtime, DurableCheckpointWrite::Progress)?),
+            &[],
+            None,
+        ) {
+            self.invalidate_hot_runtime_if_durable_checkpoint_advanced(
+                &runtime.run_id,
+                &base_checkpoint,
+            );
+            return Err(error);
+        }
+
+        self.inspect_outcome(&host_session_id, &runtime, Vec::new())
     }
 
     pub async fn cancel_run(

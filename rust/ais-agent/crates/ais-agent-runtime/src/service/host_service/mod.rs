@@ -1,9 +1,13 @@
 //! Runtime-backed host service.
 
-mod action_family;
+mod api_native_evm_common;
+pub(crate) mod artifact_planner;
 mod commands;
 mod conversion;
 mod error;
+mod launch_binding;
+mod launch_spec;
+mod launch_validation;
 mod load;
 mod persist;
 
@@ -24,10 +28,10 @@ use crate::{
     service::RuntimeCommandRouter,
 };
 
-#[cfg(test)]
-pub(crate) use action_family::seed_action_family_checkpoint;
-pub use action_family::RuntimeExecutionWiring;
+pub use api_native_evm_common::RuntimeExecutionWiring;
 pub use error::RuntimeHostServiceError;
+#[cfg(test)]
+pub(crate) use launch_spec::seed_launch_spec_checkpoint;
 
 pub type RuntimeHostServiceResult = Result<HostCommandOutcome, RuntimeHostServiceError>;
 

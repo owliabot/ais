@@ -24,6 +24,12 @@ The target property is:
 - concurrency-safe
 - chain-extensible
 
+Current launch-contract direction:
+- `LaunchSpecSubmission::ExecutionArtifact` is now part of the transport-neutral contract and is the intended product path
+- `ExecutionArtifact` branch/value expression surfaces are aligned around `literal | ref | cel` and are expected to reuse `ais-agent-expr` rather than grow a second artifact-only expression DSL
+- `ais-agent-runtime` now has an initial `ExecutionArtifact` planner slice for simple EVM candidates; branch/export/continuation semantics are still being cut over and remain explicitly fail-closed
+- protocol-specific Rust binder modules are no longer part of the product launch path
+
 ## Control Model
 
 The system is a two-loop controller:
@@ -224,10 +230,43 @@ Current implementation note:
 Forward-looking constraint:
 - do not keep expanding `ais-agent` by adding one hard-coded feature flag or action-family-specific branch per new capability
 - new execution slices should prefer:
-  - shared action-family seeding seams
-  - shared capability registration / discovery
+  - artifact-first launch contracts
+  - generic graph synthesis / branch evaluation
   - generic runtime wiring over feature-specific special cases
-- after the current bounded rollout phase, the feature-toggle seam should be refactored toward a capability/registry-driven model instead of a growing per-feature boolean table
+- the current package allowlist is only an enablement boundary; protocol-specific launch seams are no longer part of the architecture
+
+## Launch Contract Boundary
+
+Current launch-spec families:
+
+- `prebuilt_fragment`
+- `reflection_request`
+- `execution_artifact`
+
+Intended role of each:
+
+- `execution_artifact`
+  - target product contract
+  - host provides protocol-resolved execution semantics
+  - runtime owns graph synthesis, branch evaluation, verification, continuation, and recovery
+- `prebuilt_fragment`
+  - low-level escape hatch for explicitly authored graph fragments
+- `reflection_request`
+  - reserved / not yet implemented
+
+What `execution_artifact` is for:
+
+- package-owned transaction candidates
+- stage-bound expected effects that compile into runtime-owned effect verification
+- generic branch predicates and actions
+- exported verified outputs
+- continuation points for downstream artifact stages
+
+What `execution_artifact` is not:
+
+- a protocol-specific DTO surface
+- a per-protocol binder registry
+- a requirement for Owliabot to hand-author full runtime node graphs
 
 ## Host Collaboration Contract
 
@@ -240,6 +279,14 @@ The host-facing command plane is intentionally small:
 - `submit_plan_patch`
 - `submit_signer_decision`
 - `cancel_run`
+
+For `begin_run`, the current architectural target is:
+
+- host submits `mission`
+- host submits `launch_spec`
+- `launch_spec.kind = execution_artifact` should become the primary product path
+- host/outer-agent remains responsible for protocol semantics, external quote/evidence gathering, and staged continuation artifact construction
+- `ais-agent` remains responsible for guarded execution, branch judgment, signer/confirmation, verification, output export, and recovery
 
 The host-facing read plane is:
 - `InspectSnapshot`

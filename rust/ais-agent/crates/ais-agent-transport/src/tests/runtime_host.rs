@@ -508,6 +508,7 @@ fn checkpoint_with_nodes(nodes: Vec<ActionNode>, terminals: Vec<String>) -> Chec
         pending_requests: PendingRequestsSnapshot::default(),
         last_completed_node_id: None,
         actuation_records: Vec::new(),
+        execution_artifact: None,
     }
 }
 

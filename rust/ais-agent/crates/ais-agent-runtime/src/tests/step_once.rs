@@ -1,6 +1,11 @@
 use std::collections::BTreeMap;
 
 use ais_agent_control::{
+    execution_artifact::{
+        BranchStage, BranchTarget, EvmTransactionCandidate, ExecutionArtifactLaunchSpec,
+        ExecutionChainFamily, ExecutionStage, ExecutionTransactionCandidate, OutputExportSpec,
+        PredicateSpec, TransactionStage, ValueRef,
+    },
     ids::{RunId, SignerRequestId},
     recovery::RunFailureCode,
 };
@@ -17,7 +22,7 @@ use ais_agent_core::{
         ActionGraph, ActionNode, ActionNodeKind, ActionNodeStatus, ActionOrigin, ActionPayload,
     },
     binding::evm::{EvmActuateBinding, EvmCallRequest, EvmSimulateBinding},
-    checkpoint::{CheckpointSnapshot, PendingRequestsSnapshot},
+    checkpoint::{CheckpointSnapshot, ExecutionArtifactRuntimeSnapshot, PendingRequestsSnapshot},
     evidence::{
         EvidenceFreshness, EvidenceGraph, EvidenceKind, EvidenceProvenance, EvidenceRecord,
         EvidenceRequirement,
@@ -484,6 +489,226 @@ async fn step_once_completes_when_terminal_verify_node_succeeds() {
     assert_eq!(runtime.checkpoint.lifecycle.phase, RunPhase::Finalized);
 }
 
+#[tokio::test]
+async fn step_once_execution_artifact_branch_activates_transaction_stage() {
+    let mission = sample_mission();
+    let mut checkpoint = checkpoint_with_nodes(Vec::new());
+    checkpoint.execution_artifact = Some(ExecutionArtifactRuntimeSnapshot {
+        launch_spec: ExecutionArtifactLaunchSpec {
+            protocol_package_id: "owliabot.uniswap_v3".to_owned(),
+            action_key: "swap".to_owned(),
+            chain_family: ExecutionChainFamily::Evm,
+            allowed_chains: vec!["eip155:1".to_owned()],
+            entry_stage_id: "stage.branch".into(),
+            actor: None,
+            transactions: vec![ExecutionTransactionCandidate::EvmTransaction(
+                EvmTransactionCandidate {
+                    candidate_id: "tx.swap".into(),
+                    to: "0x1111111111111111111111111111111111111111".to_owned(),
+                    value: Some("0".to_owned()),
+                    calldata: Some("0xdeadbeef".to_owned()),
+                },
+            )],
+            stages: vec![
+                ExecutionStage::Branch(BranchStage {
+                    stage_id: "stage.branch".into(),
+                    predicate: PredicateSpec::Cel {
+                        expression: "refs.evidence.quote.quoted_at_ms > 0".to_owned(),
+                    },
+                    if_true: BranchTarget::GotoStage {
+                        stage_id: "stage.swap".into(),
+                    },
+                    if_false: BranchTarget::Assert {
+                        failure_code: "missing_quote".to_owned(),
+                        message: "quote missing".to_owned(),
+                    },
+                }),
+                ExecutionStage::Transaction(TransactionStage {
+                    stage_id: "stage.swap".into(),
+                    candidate_ref: "tx.swap".into(),
+                    exports: Vec::new(),
+                    next_stage_id: None,
+                }),
+            ],
+            preconditions: Vec::new(),
+            postconditions: Vec::new(),
+            expected_effects: Vec::new(),
+            execution_policy: None,
+            evidence: json!({
+                "quote": {
+                    "quoted_at_ms": 1
+                }
+            }),
+            metadata: BTreeMap::new(),
+        },
+        active_stage_id: Some("stage.branch".into()),
+        planned_stage_graphs: BTreeMap::from([(
+            "stage.swap".into(),
+            ActionGraph {
+                graph_id: Some("artifact.owliabot.uniswap_v3.swap".to_owned()),
+                roots: vec!["artifact.stage.swap.simulate".to_owned()],
+                terminals: vec!["artifact.stage.swap.simulate".to_owned()],
+                nodes: BTreeMap::from([(
+                    "artifact.stage.swap.simulate".to_owned(),
+                    simulate_node("artifact.stage.swap.simulate", vec![]),
+                )]),
+            },
+        )]),
+        exported_outputs: BTreeMap::new(),
+        awaiting_continuation: None,
+    });
+
+    let mut runtime = ActiveRun::new(mission, checkpoint);
+    let result = StepOnce::apply(&mut runtime).await;
+
+    assert_eq!(
+        result.applied_transition.as_ref().map(|t| t.kind),
+        Some(StepTransitionKind::Artifact)
+    );
+    assert_eq!(
+        runtime
+            .checkpoint
+            .execution_artifact
+            .as_ref()
+            .and_then(|snapshot| snapshot.active_stage_id.as_ref())
+            .map(|value| value.as_str()),
+        Some("stage.swap")
+    );
+    assert!(runtime
+        .checkpoint
+        .action_graph
+        .nodes
+        .contains_key("artifact.stage.swap.simulate"));
+}
+
+#[tokio::test]
+async fn step_once_execution_artifact_exports_and_pauses_for_continuation() {
+    let mission = sample_mission();
+    let mut checkpoint = checkpoint_with_terminal_nodes(
+        vec![{
+            let mut node = verify_node("artifact.stage.swap.verify", vec![]);
+            node.status = ActionNodeStatus::Succeeded;
+            node
+        }],
+        vec!["artifact.stage.swap.verify".to_owned()],
+    );
+    checkpoint.evidence_graph.records.insert(
+        "receipt.artifact.stage.swap.verify".to_owned(),
+        EvidenceRecord {
+            evidence_id: "receipt.artifact.stage.swap.verify".to_owned(),
+            kind: EvidenceKind::ExternalObservation,
+            provenance: EvidenceProvenance {
+                source: "evm.alloy.receipt".to_owned(),
+                chain_scope: Some("eip155:1".to_owned()),
+                trace_hint: Some("artifact.stage.swap.verify".to_owned()),
+            },
+            freshness: EvidenceFreshness {
+                observed_at_ms: Some(1),
+                expires_at_ms: None,
+                max_age_ms: None,
+            },
+            confidence_ppm: Some(1_000_000),
+            payload: json!({
+                "tx_hash": "0xabc",
+                "status": true
+            }),
+        },
+    );
+    checkpoint.execution_artifact = Some(ExecutionArtifactRuntimeSnapshot {
+        launch_spec: ExecutionArtifactLaunchSpec {
+            protocol_package_id: "owliabot.uniswap_v3".to_owned(),
+            action_key: "swap".to_owned(),
+            chain_family: ExecutionChainFamily::Evm,
+            allowed_chains: vec!["eip155:1".to_owned()],
+            entry_stage_id: "stage.swap".into(),
+            actor: None,
+            transactions: vec![ExecutionTransactionCandidate::EvmTransaction(
+                EvmTransactionCandidate {
+                    candidate_id: "tx.swap".into(),
+                    to: "0x1111111111111111111111111111111111111111".to_owned(),
+                    value: Some("0".to_owned()),
+                    calldata: Some("0xdeadbeef".to_owned()),
+                },
+            )],
+            stages: vec![
+                ExecutionStage::Transaction(TransactionStage {
+                    stage_id: "stage.swap".into(),
+                    candidate_ref: "tx.swap".into(),
+                    exports: vec![OutputExportSpec {
+                        output_key: "swap.tx_hash".into(),
+                        source: ValueRef::Ref {
+                            reference: "refs.receipts.stage.swap.tx_hash".to_owned(),
+                        },
+                    }],
+                    next_stage_id: Some("stage.continue".into()),
+                }),
+                ExecutionStage::Continuation(
+                    ais_agent_control::execution_artifact::ContinuationStage {
+                        stage_id: "stage.continue".into(),
+                        required_outputs: vec!["swap.tx_hash".into()],
+                        package_entry: "build_aave_supply_from_swap_output".into(),
+                        next_stage_id: None,
+                    },
+                ),
+            ],
+            preconditions: Vec::new(),
+            postconditions: Vec::new(),
+            expected_effects: Vec::new(),
+            execution_policy: None,
+            evidence: json!({}),
+            metadata: BTreeMap::new(),
+        },
+        active_stage_id: Some("stage.swap".into()),
+        planned_stage_graphs: BTreeMap::new(),
+        exported_outputs: BTreeMap::new(),
+        awaiting_continuation: None,
+    });
+
+    let mut runtime = ActiveRun::new(mission, checkpoint);
+    let first = StepOnce::apply(&mut runtime).await;
+    let second = StepOnce::apply(&mut runtime).await;
+
+    assert_eq!(
+        first.applied_transition.as_ref().map(|t| t.kind),
+        Some(StepTransitionKind::Artifact)
+    );
+    assert_eq!(
+        second.applied_transition.as_ref().map(|t| t.kind),
+        Some(StepTransitionKind::Artifact)
+    );
+    assert_eq!(
+        runtime.checkpoint.lifecycle.status,
+        RunStatus::AwaitingArtifactContinuation
+    );
+    assert_eq!(
+        runtime
+            .checkpoint
+            .execution_artifact
+            .as_ref()
+            .and_then(|snapshot| snapshot.awaiting_continuation.as_ref())
+            .map(|continuation| continuation.package_entry.as_str()),
+        Some("build_aave_supply_from_swap_output")
+    );
+    assert_eq!(
+        runtime
+            .checkpoint
+            .execution_artifact
+            .as_ref()
+            .and_then(|snapshot| { snapshot.exported_outputs.get(&"swap.tx_hash".into()) })
+            .and_then(|value| value.as_str()),
+        Some("0xabc")
+    );
+    assert_eq!(
+        runtime
+            .checkpoint
+            .lifecycle
+            .active_boundary
+            .as_ref()
+            .map(|boundary| boundary.blocking_refs.clone()),
+        Some(vec!["swap.tx_hash".to_owned()])
+    );
+}
+
 fn sample_mission() -> Mission {
     Mission {
         mission_id: "mission-1".to_owned(),
@@ -535,6 +760,7 @@ fn checkpoint_with_terminal_nodes(
         pending_requests: PendingRequestsSnapshot::default(),
         last_completed_node_id: None,
         actuation_records: Vec::new(),
+        execution_artifact: None,
     }
 }
 

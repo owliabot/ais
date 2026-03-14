@@ -9,7 +9,9 @@ use ais_agent_control::{
     },
 };
 
-use crate::inspect::{PendingConfirmationView, PendingSignerRequestView, ProgressView};
+use crate::inspect::{
+    PendingConfirmationView, PendingContinuationView, PendingSignerRequestView, ProgressView,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -20,6 +22,7 @@ pub enum RunStatus {
     AwaitingEvidence,
     AwaitingSigner,
     AwaitingConfirm,
+    AwaitingContinuation,
     Completed,
     Failed,
     Cancelled,
@@ -46,6 +49,7 @@ pub enum BoundaryKind {
     Evidence,
     Signer,
     Confirmation,
+    ArtifactContinuation,
     Completion,
     Failure,
     Cancellation,
@@ -136,6 +140,8 @@ pub struct InspectSnapshot {
     pub required_inputs: Vec<RequiredInputView>,
     #[serde(default)]
     pub pending_confirmations: Vec<PendingConfirmationView>,
+    #[serde(default)]
+    pub pending_continuations: Vec<PendingContinuationView>,
     #[serde(default)]
     pub pending_signer_requests: Vec<PendingSignerRequestView>,
     #[serde(default)]

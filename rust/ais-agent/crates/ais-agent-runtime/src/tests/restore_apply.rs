@@ -403,6 +403,7 @@ fn sample_awaiting_signer_checkpoint(signer_state: &SignerRequestState) -> Check
         },
         last_completed_node_id: Some("simulate-1".to_owned()),
         actuation_records: Vec::new(),
+        execution_artifact: None,
     }
 }
 
@@ -427,6 +428,7 @@ fn sample_running_checkpoint() -> CheckpointSnapshot {
         pending_requests: PendingRequestsSnapshot::default(),
         last_completed_node_id: Some("broadcast-1".to_owned()),
         actuation_records: Vec::new(),
+        execution_artifact: None,
     }
 }
 

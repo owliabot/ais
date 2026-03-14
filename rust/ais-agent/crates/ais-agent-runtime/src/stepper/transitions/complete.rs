@@ -31,6 +31,16 @@ pub(crate) fn apply_complete_transition(runtime: &mut ActiveRun) -> Option<StepT
     {
         return None;
     }
+    if runtime
+        .checkpoint
+        .execution_artifact
+        .as_ref()
+        .is_some_and(|snapshot| {
+            snapshot.active_stage_id.is_some() || snapshot.awaiting_continuation.is_some()
+        })
+    {
+        return None;
+    }
     if runtime.checkpoint.action_graph.terminals.is_empty() {
         return None;
     }

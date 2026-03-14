@@ -105,5 +105,6 @@ pub(crate) fn sample_checkpoint() -> CheckpointSnapshot {
         pending_requests: PendingRequestsSnapshot::default(),
         last_completed_node_id: None,
         actuation_records: Vec::new(),
+        execution_artifact: None,
     }
 }

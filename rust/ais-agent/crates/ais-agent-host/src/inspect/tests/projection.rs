@@ -1,6 +1,11 @@
 use std::collections::BTreeMap;
 
 use ais_agent_control::{
+    execution_artifact::{
+        ContinuationStage, EvmTransactionCandidate, ExecutionArtifactLaunchSpec,
+        ExecutionChainFamily, ExecutionStage, ExecutionTransactionCandidate, OutputExportSpec,
+        TransactionStage, ValueRef,
+    },
     ids::{RunId, SignerRequestId},
     recovery::{
         RecoveryActionKind, RecoveryDisposition, RunFailureCode, RunFailureContext,
@@ -18,7 +23,8 @@ use ais_agent_core::{
     },
     actuation::{ActuationKind, ActuationRecord, ActuationStatus},
     checkpoint::{
-        CheckpointSnapshot, CheckpointStore, InMemoryCheckpointStore, PendingRequestsSnapshot,
+        ArtifactContinuationSnapshot, CheckpointSnapshot, CheckpointStore,
+        ExecutionArtifactRuntimeSnapshot, InMemoryCheckpointStore, PendingRequestsSnapshot,
     },
     evidence::{
         EvidenceFreshness, EvidenceGraph, EvidenceKind, EvidenceProvenance, EvidenceRecord,
@@ -197,6 +203,60 @@ fn paused_checkpoint_with_failure_projects_patch_required_recovery() {
         .iter()
         .any(|action| action.action == "submit_plan_patch"));
     assert!(pause.ownership.claim_required_for_mutation);
+}
+
+#[test]
+fn continuation_wait_projects_explicit_wait_status_and_pending_metadata() {
+    let checkpoint = continuation_wait_checkpoint();
+
+    let snapshot = project_inspect_snapshot(&sample_mission(), &checkpoint);
+    let pause = project_pause_bundle(&checkpoint).expect("pause bundle");
+
+    assert_eq!(snapshot.status, RunStatus::AwaitingContinuation);
+    assert_eq!(
+        snapshot.recovery_disposition,
+        Some(RecoveryDisposition::AwaitContinuation)
+    );
+    assert_eq!(
+        snapshot.allowed_recovery_actions,
+        vec![
+            RecoveryActionKind::SubmitExecutionArtifactContinuation,
+            RecoveryActionKind::CancelRun
+        ]
+    );
+    assert_eq!(snapshot.pending_continuations.len(), 1);
+    assert_eq!(
+        snapshot.pending_continuations[0].package_entry.as_str(),
+        "build_aave_supply_from_swap_output"
+    );
+    assert_eq!(
+        snapshot.pending_continuations[0]
+            .required_outputs
+            .iter()
+            .map(|output| output.as_str())
+            .collect::<Vec<_>>(),
+        vec!["swap.tx_hash"]
+    );
+    assert_eq!(
+        snapshot.pending_continuations[0]
+            .resolved_outputs
+            .get(&"swap.tx_hash".into())
+            .and_then(|value| value.as_str()),
+        Some("0xabc")
+    );
+    assert_eq!(pause.kind, PauseKind::NeedContinuation);
+    assert_eq!(pause.pending_continuations.len(), 1);
+    assert_eq!(
+        pause.pending_continuations[0]
+            .resolved_outputs
+            .get(&"swap.tx_hash".into())
+            .and_then(|value| value.as_str()),
+        Some("0xabc")
+    );
+    assert!(pause
+        .required_actions
+        .iter()
+        .any(|action| { action.action == "submit_execution_artifact_continuation" }));
 }
 
 #[test]
@@ -454,6 +514,7 @@ fn sample_checkpoint() -> CheckpointSnapshot {
             tx_hash: None,
             summary: "swap envelope prepared".to_owned(),
         }],
+        execution_artifact: None,
     }
 }
 
@@ -531,6 +592,67 @@ fn paused_verify_mismatch_checkpoint() -> CheckpointSnapshot {
         signer_request_id: None,
     });
     checkpoint.pending_requests.pending_confirmation_id = Some("0xabc".to_owned());
+    checkpoint
+}
+
+fn continuation_wait_checkpoint() -> CheckpointSnapshot {
+    let mut checkpoint = sample_checkpoint();
+    checkpoint.lifecycle.await_artifact_continuation(
+        "waiting for continuation artifact",
+        vec!["swap.tx_hash".to_owned()],
+    );
+    checkpoint.execution_artifact = Some(ExecutionArtifactRuntimeSnapshot {
+        launch_spec: ExecutionArtifactLaunchSpec {
+            protocol_package_id: "owliabot.uniswap_v3".to_owned(),
+            action_key: "swap".to_owned(),
+            chain_family: ExecutionChainFamily::Evm,
+            allowed_chains: vec!["eip155:1".to_owned()],
+            entry_stage_id: "stage.swap".into(),
+            actor: None,
+            transactions: vec![ExecutionTransactionCandidate::EvmTransaction(
+                EvmTransactionCandidate {
+                    candidate_id: "swap.direct".into(),
+                    to: "0x1111111111111111111111111111111111111111".to_owned(),
+                    value: Some("0".to_owned()),
+                    calldata: Some("0xdeadbeef".to_owned()),
+                },
+            )],
+            stages: vec![
+                ExecutionStage::Transaction(TransactionStage {
+                    stage_id: "stage.swap".into(),
+                    candidate_ref: "swap.direct".into(),
+                    exports: vec![OutputExportSpec {
+                        output_key: "swap.tx_hash".into(),
+                        source: ValueRef::Ref {
+                            reference: "refs.receipts.stage.swap.tx_hash".to_owned(),
+                        },
+                    }],
+                    next_stage_id: Some("stage.continue".into()),
+                }),
+                ExecutionStage::Continuation(ContinuationStage {
+                    stage_id: "stage.continue".into(),
+                    required_outputs: vec!["swap.tx_hash".into()],
+                    package_entry: "build_aave_supply_from_swap_output".into(),
+                    next_stage_id: None,
+                }),
+            ],
+            preconditions: Vec::new(),
+            postconditions: Vec::new(),
+            expected_effects: Vec::new(),
+            execution_policy: None,
+            evidence: json!({}),
+            metadata: BTreeMap::new(),
+        },
+        active_stage_id: Some("stage.continue".into()),
+        planned_stage_graphs: BTreeMap::new(),
+        exported_outputs: BTreeMap::from([("swap.tx_hash".into(), json!("0xabc"))]),
+        awaiting_continuation: Some(ArtifactContinuationSnapshot {
+            stage_id: "stage.continue".into(),
+            required_outputs: vec!["swap.tx_hash".into()],
+            package_entry: "build_aave_supply_from_swap_output".into(),
+            next_stage_id: None,
+        }),
+    });
     checkpoint
 }
 

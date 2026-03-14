@@ -20,6 +20,7 @@ pub enum RunStatus {
     AwaitingEvidence,
     AwaitingSigner,
     AwaitingConfirmation,
+    AwaitingArtifactContinuation,
     Completed,
     Failed,
     Cancelled,
@@ -187,6 +188,22 @@ impl RunLifecycleState {
         });
     }
 
+    pub fn await_artifact_continuation(
+        &mut self,
+        summary: impl Into<String>,
+        blocking_refs: Vec<String>,
+    ) {
+        self.status = RunStatus::AwaitingArtifactContinuation;
+        self.phase = RunPhase::AwaitingHost;
+        self.interruption = None;
+        self.active_boundary = Some(StableBoundary {
+            kind: BoundaryKind::ArtifactContinuation,
+            summary: summary.into(),
+            blocking_refs,
+            signer_request_id: None,
+        });
+    }
+
     pub fn resolve_confirmation_wait(&mut self, phase: RunPhase) {
         self.status = RunStatus::Running;
         self.phase = phase;
@@ -299,6 +316,7 @@ impl RunLifecycleState {
                 | RunStatus::AwaitingEvidence
                 | RunStatus::AwaitingSigner
                 | RunStatus::AwaitingConfirmation
+                | RunStatus::AwaitingArtifactContinuation
         )
     }
 }

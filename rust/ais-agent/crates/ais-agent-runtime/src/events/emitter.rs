@@ -2,9 +2,10 @@
 
 use ais_agent_control::{
     events::{
-        GovernorDecisionAuditKind, PlanPatchAuditStatus, RunAwaitingEvidence, RunAwaitingSigner,
-        RunCompleted, RunEvent, RunEventEnvelope, RunFailed, RunGovernorDecision, RunPaused,
-        RunPlanPatchAudit, RunProgress, RunRecoveryAudit, RunStarted,
+        GovernorDecisionAuditKind, PlanPatchAuditStatus, RunAwaitingContinuation,
+        RunAwaitingEvidence, RunAwaitingSigner, RunCompleted, RunEvent, RunEventEnvelope,
+        RunFailed, RunGovernorDecision, RunPaused, RunPlanPatchAudit, RunProgress,
+        RunRecoveryAudit, RunStarted,
     },
     ids::EventId,
     patch::{PatchOutcome, PlanPatchSubmission},
@@ -121,6 +122,63 @@ impl RuntimeEventEmitter {
                         .as_ref()
                         .map(|boundary| boundary.summary.clone())
                         .unwrap_or_else(|| "waiting for chain confirmation".to_owned()),
+                }),
+            )),
+            RunStatus::AwaitingArtifactContinuation => events.push(envelope(
+                runtime,
+                RunEvent::AwaitingContinuation(RunAwaitingContinuation {
+                    event_id: event_id(runtime, "awaiting_artifact_continuation"),
+                    run_id: runtime.run_id.clone(),
+                    stage_id: runtime
+                        .checkpoint
+                        .execution_artifact
+                        .as_ref()
+                        .and_then(|artifact| artifact.awaiting_continuation.as_ref())
+                        .map(|continuation| continuation.stage_id.clone()),
+                    package_entry: runtime
+                        .checkpoint
+                        .execution_artifact
+                        .as_ref()
+                        .and_then(|artifact| artifact.awaiting_continuation.as_ref())
+                        .map(|continuation| continuation.package_entry.clone()),
+                    required_outputs: runtime
+                        .checkpoint
+                        .execution_artifact
+                        .as_ref()
+                        .and_then(|artifact| artifact.awaiting_continuation.as_ref())
+                        .map(|continuation| continuation.required_outputs.clone())
+                        .unwrap_or_default(),
+                    resolved_outputs: runtime
+                        .checkpoint
+                        .execution_artifact
+                        .as_ref()
+                        .and_then(|artifact| {
+                            artifact
+                                .awaiting_continuation
+                                .as_ref()
+                                .map(|continuation| (artifact, continuation))
+                        })
+                        .map(|(artifact, continuation)| {
+                            continuation
+                                .required_outputs
+                                .iter()
+                                .filter_map(|output_key| {
+                                    artifact
+                                        .exported_outputs
+                                        .get(output_key)
+                                        .cloned()
+                                        .map(|value| (output_key.clone(), value))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    reason: runtime
+                        .checkpoint
+                        .lifecycle
+                        .active_boundary
+                        .as_ref()
+                        .map(|boundary| boundary.summary.clone())
+                        .unwrap_or_else(|| "artifact continuation required".to_owned()),
                 }),
             )),
             RunStatus::Paused => events.push(envelope(

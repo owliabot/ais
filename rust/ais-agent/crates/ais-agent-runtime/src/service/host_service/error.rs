@@ -46,6 +46,8 @@ pub enum RuntimeHostServiceError {
     SignerDecisionMismatch,
     #[error("envelope submission rejected: {0}")]
     EnvelopeRejected(String),
+    #[error("execution artifact continuation rejected: {0}")]
+    ContinuationRejected(String),
     #[error("invalid command: {0}")]
     InvalidCommand(String),
     #[error("plan patch rejected: {0}")]
@@ -131,6 +133,9 @@ fn error_code(error: &RuntimeHostServiceError) -> String {
         RuntimeHostServiceError::Stepper(_) => "stepper_error".to_owned(),
         RuntimeHostServiceError::SignerDecisionMismatch => "signer_decision_mismatch".to_owned(),
         RuntimeHostServiceError::EnvelopeRejected(_) => "envelope_invalid".to_owned(),
+        RuntimeHostServiceError::ContinuationRejected(_) => {
+            "artifact_continuation_invalid".to_owned()
+        }
         RuntimeHostServiceError::InvalidCommand(_) => "invalid_command".to_owned(),
         RuntimeHostServiceError::PlanPatchLegality(_) => "plan_patch_illegal".to_owned(),
         RuntimeHostServiceError::CancelRejected(_) => "cancel_rejected".to_owned(),

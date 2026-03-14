@@ -45,6 +45,7 @@ impl RuntimeStateMachine {
                     RunStatus::AwaitingEvidence
                         | RunStatus::AwaitingSigner
                         | RunStatus::AwaitingConfirmation
+                        | RunStatus::AwaitingArtifactContinuation
                         | RunStatus::Paused
                 ) {
                     snapshot.pending_requests.pending_evidence_refs.clear();

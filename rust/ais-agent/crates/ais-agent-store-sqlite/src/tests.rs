@@ -16,6 +16,7 @@ use ais_agent_control::{
     },
     events::{RunEvent, RunEventEnvelope, RunProgress},
     ids::{AuditId, ClaimId, CommandId, EventId, RunId, SignerRequestId},
+    launch_spec::{LaunchSpecSubmission, PrebuiltFragmentLaunchSpec},
     ownership::{ClaimTransitionKind, RunClaim, RunClaimMode, RunClaimOwnerKind, RunClaimStatus},
     recovery::{CancelState, InterruptionClass},
 };
@@ -731,6 +732,9 @@ async fn sqlite_host_service_replays_grouped_begin_run_truth_after_restart() {
                     }),
                     metadata: BTreeMap::new(),
                 },
+                launch_spec: Some(LaunchSpecSubmission::PrebuiltFragment(
+                    PrebuiltFragmentLaunchSpec::default(),
+                )),
             }),
         })
         .await;

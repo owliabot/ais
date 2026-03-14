@@ -10,7 +10,13 @@ use ais_agent_control::{
         SignerDecisionSubmission, StepBudget, StepRunCommand, StepUntil, SubmitEnvelopeCommand,
         SubmitEvidenceCommand, SubmitPlanPatchCommand, SubmitSignerDecisionCommand,
     },
+    execution_artifact::{
+        BranchStage, BranchTarget, ComparisonOperator, ContinuationStage, EvmTransactionCandidate,
+        ExecutionArtifactLaunchSpec, ExecutionChainFamily, ExecutionStage,
+        ExecutionTransactionCandidate, OutputExportSpec, PredicateSpec, TransactionStage, ValueRef,
+    },
     ids::{ClaimId, CommandId, IdempotencyKey, RunId, SignerRequestId},
+    launch_spec::{LaunchSpecSubmission, PrebuiltFragmentLaunchSpec, ReflectionRequestLaunchSpec},
     ownership::{RunClaimMode, RunClaimOwnerKind},
     patch::{PlanPatchOperation, PlanPatchSubmission, PlanPatchTarget},
     recovery::RunFailureCode,
@@ -31,6 +37,316 @@ pub fn sample_begin_command() -> HostedRunCommand {
                 budget: None,
                 metadata: Default::default(),
             },
+            launch_spec: Some(LaunchSpecSubmission::PrebuiltFragment(
+                PrebuiltFragmentLaunchSpec::default(),
+            )),
+        }),
+    }
+}
+
+pub fn sample_reflection_begin_command() -> HostedRunCommand {
+    let mut command = sample_begin_command();
+    let RunCommand::BeginRun(begin) = &mut command.command else {
+        panic!("sample_begin_command must produce begin_run");
+    };
+    begin.launch_spec = Some(LaunchSpecSubmission::ReflectionRequest(
+        ReflectionRequestLaunchSpec {
+            request: json!({
+                "protocol_package_id": "owliabot.uniswap_v3",
+                "action_key": "uniswap_v3_swap"
+            }),
+        },
+    ));
+    command
+}
+
+pub fn sample_execution_artifact_begin_command() -> HostedRunCommand {
+    let mut command = sample_begin_command();
+    let RunCommand::BeginRun(begin) = &mut command.command else {
+        panic!("sample_begin_command must produce begin_run");
+    };
+    begin.launch_spec = Some(LaunchSpecSubmission::ExecutionArtifact(
+        ExecutionArtifactLaunchSpec {
+            protocol_package_id: "owliabot.uniswap_v3".to_owned(),
+            action_key: "uniswap_v3_swap".to_owned(),
+            chain_family: ExecutionChainFamily::Evm,
+            allowed_chains: vec!["8453".to_owned()],
+            entry_stage_id: "stage.allowance".into(),
+            actor: None,
+            transactions: vec![
+                ExecutionTransactionCandidate::EvmTransaction(EvmTransactionCandidate {
+                    candidate_id: "swap.direct".into(),
+                    to: "0x1111111111111111111111111111111111111111".to_owned(),
+                    value: Some("0".to_owned()),
+                    calldata: Some("0xdeadbeef".to_owned()),
+                }),
+                ExecutionTransactionCandidate::EvmTransaction(EvmTransactionCandidate {
+                    candidate_id: "swap.approval".into(),
+                    to: "0x3333333333333333333333333333333333333333".to_owned(),
+                    value: Some("0".to_owned()),
+                    calldata: Some("0x095ea7b3".to_owned()),
+                }),
+            ],
+            stages: vec![
+                ExecutionStage::Branch(BranchStage {
+                    stage_id: "stage.allowance".into(),
+                    predicate: PredicateSpec::Comparison {
+                        left: ValueRef::Ref {
+                            reference: "refs.allowance.current_atomic".to_owned(),
+                        },
+                        op: ComparisonOperator::Lt,
+                        right: ValueRef::Cel {
+                            expression: "mul_div(refs.swap.amount_in_atomic, 1, 1)".to_owned(),
+                        },
+                    },
+                    if_true: BranchTarget::GotoStage {
+                        stage_id: "stage.approval".into(),
+                    },
+                    if_false: BranchTarget::GotoStage {
+                        stage_id: "stage.swap".into(),
+                    },
+                }),
+                ExecutionStage::Transaction(TransactionStage {
+                    stage_id: "stage.approval".into(),
+                    candidate_ref: "swap.approval".into(),
+                    exports: Vec::new(),
+                    next_stage_id: Some("stage.swap".into()),
+                }),
+                ExecutionStage::Transaction(TransactionStage {
+                    stage_id: "stage.swap".into(),
+                    candidate_ref: "swap.direct".into(),
+                    exports: vec![OutputExportSpec {
+                        output_key: "swap.received_atomic".into(),
+                        source: ValueRef::Ref {
+                            reference: "refs.post.swap.received_atomic".to_owned(),
+                        },
+                    }],
+                    next_stage_id: Some("stage.continue".into()),
+                }),
+                ExecutionStage::Continuation(ContinuationStage {
+                    stage_id: "stage.continue".into(),
+                    required_outputs: vec!["swap.received_atomic".into()],
+                    package_entry: "build_aave_supply_from_swap_output".into(),
+                    next_stage_id: None,
+                }),
+            ],
+            preconditions: Vec::new(),
+            postconditions: Vec::new(),
+            expected_effects: Vec::new(),
+            execution_policy: None,
+            evidence: json!({
+                "quote": {
+                    "quotedAtMs": 1710000000000u64
+                }
+            }),
+            metadata: BTreeMap::from([("source".to_owned(), json!("transport-test"))]),
+        },
+    ));
+    command
+}
+
+pub fn sample_owliabot_uniswap_swap_begin_command() -> HostedRunCommand {
+    HostedRunCommand {
+        host_session_id: HostSessionId("test-session".to_owned()),
+        host_request_id: Some("test-session:begin".into()),
+        command: RunCommand::BeginRun(BeginRunCommand {
+            command_id: CommandId("cmd-test-session:begin".to_owned()),
+            idempotency_key: IdempotencyKey("test-session:begin".to_owned()),
+            mission: MissionSubmission {
+                goal: "owliabot:owliabot.uniswap_v3:uniswap_v3_swap".to_owned(),
+                allowed_chains: vec!["8453".to_owned()],
+                constraints: BTreeMap::from([
+                    ("owliabot_action_key".to_owned(), json!("uniswap_v3_swap")),
+                    (
+                        "owliabot_protocol_package_id".to_owned(),
+                        json!("owliabot.uniswap_v3"),
+                    ),
+                    ("owliabot_execution_mode".to_owned(), json!("harness")),
+                    (
+                        "owliabot_chain_family".to_owned(),
+                        json!("evm"),
+                    ),
+                    (
+                        "owliabot_execution_artifact".to_owned(),
+                        json!({
+                            "protocol_package_id": "owliabot.uniswap_v3",
+                            "action_key": "uniswap_v3_swap",
+                            "chain_family": "evm",
+                            "allowed_chains": ["8453"],
+                            "entry_stage_id": "stage.allowance",
+                            "transactions": [
+                                {
+                                    "kind": "evm_transaction",
+                                    "candidate_id": "swap.direct",
+                                    "to": "0x1111111111111111111111111111111111111111",
+                                    "value": "0",
+                                    "calldata": "0xdeadbeef"
+                                },
+                                {
+                                    "kind": "evm_transaction",
+                                    "candidate_id": "swap.approval",
+                                    "to": "0x3333333333333333333333333333333333333333",
+                                    "value": "0",
+                                    "calldata": "0x095ea7b3"
+                                }
+                            ],
+                            "stages": [
+                                {
+                                    "kind": "branch",
+                                    "stage_id": "stage.allowance",
+                                    "predicate": {
+                                        "kind": "comparison",
+                                        "left": {
+                                            "kind": "ref",
+                                            "ref": "refs.allowance.current_atomic"
+                                        },
+                                        "op": "lt",
+                                        "right": {
+                                            "kind": "cel",
+                                            "expression": "mul_div(refs.swap.amount_in_atomic, 1, 1)"
+                                        }
+                                    },
+                                    "if_true": {
+                                        "kind": "goto_stage",
+                                        "stage_id": "stage.approval"
+                                    },
+                                    "if_false": {
+                                        "kind": "goto_stage",
+                                        "stage_id": "stage.swap"
+                                    }
+                                },
+                                {
+                                    "kind": "transaction",
+                                    "stage_id": "stage.approval",
+                                    "candidate_ref": "swap.approval",
+                                    "exports": [],
+                                    "next_stage_id": "stage.swap"
+                                },
+                                {
+                                    "kind": "transaction",
+                                    "stage_id": "stage.swap",
+                                    "candidate_ref": "swap.direct",
+                                    "exports": [
+                                        {
+                                            "output_key": "swap.received_atomic",
+                                            "source": {
+                                                "kind": "ref",
+                                                "ref": "refs.post.swap.received_atomic"
+                                            }
+                                        }
+                                    ],
+                                    "next_stage_id": "stage.continue"
+                                },
+                                {
+                                    "kind": "continuation",
+                                    "stage_id": "stage.continue",
+                                    "required_outputs": ["swap.received_atomic"],
+                                    "package_entry": "build_aave_supply_from_swap_output"
+                                }
+                            ],
+                            "preconditions": [],
+                            "postconditions": [],
+                            "expected_effects": [],
+                            "evidence": {
+                                "quote": {
+                                    "quoted_at_ms": 1710000000000u64
+                                }
+                            },
+                            "metadata": {
+                                "source": "skill:uniswap-v3-swap",
+                                "tool_name": "ais_run_harness"
+                            }
+                        }),
+                    ),
+                ]),
+                budget: None,
+                metadata: BTreeMap::from([
+                    ("owliabot_agent_id".to_owned(), json!("test-agent")),
+                    ("source".to_owned(), json!("skill:uniswap-v3-swap")),
+                    ("tool_name".to_owned(), json!("ais_run_harness")),
+                ]),
+            },
+            launch_spec: Some(LaunchSpecSubmission::ExecutionArtifact(
+                ExecutionArtifactLaunchSpec {
+                    protocol_package_id: "owliabot.uniswap_v3".to_owned(),
+                    action_key: "uniswap_v3_swap".to_owned(),
+                    chain_family: ExecutionChainFamily::Evm,
+                    allowed_chains: vec!["8453".to_owned()],
+                    entry_stage_id: "stage.allowance".into(),
+                    actor: None,
+                    transactions: vec![
+                        ExecutionTransactionCandidate::EvmTransaction(EvmTransactionCandidate {
+                            candidate_id: "swap.direct".into(),
+                            to: "0x1111111111111111111111111111111111111111".to_owned(),
+                            value: Some("0".to_owned()),
+                            calldata: Some("0xdeadbeef".to_owned()),
+                        }),
+                        ExecutionTransactionCandidate::EvmTransaction(EvmTransactionCandidate {
+                            candidate_id: "swap.approval".into(),
+                            to: "0x3333333333333333333333333333333333333333".to_owned(),
+                            value: Some("0".to_owned()),
+                            calldata: Some("0x095ea7b3".to_owned()),
+                        }),
+                    ],
+                    stages: vec![
+                        ExecutionStage::Branch(BranchStage {
+                            stage_id: "stage.allowance".into(),
+                            predicate: PredicateSpec::Comparison {
+                                left: ValueRef::Ref {
+                                    reference: "refs.allowance.current_atomic".to_owned(),
+                                },
+                                op: ComparisonOperator::Lt,
+                                right: ValueRef::Cel {
+                                    expression: "mul_div(refs.swap.amount_in_atomic, 1, 1)"
+                                        .to_owned(),
+                                },
+                            },
+                            if_true: BranchTarget::GotoStage {
+                                stage_id: "stage.approval".into(),
+                            },
+                            if_false: BranchTarget::GotoStage {
+                                stage_id: "stage.swap".into(),
+                            },
+                        }),
+                        ExecutionStage::Transaction(TransactionStage {
+                            stage_id: "stage.approval".into(),
+                            candidate_ref: "swap.approval".into(),
+                            exports: Vec::new(),
+                            next_stage_id: Some("stage.swap".into()),
+                        }),
+                        ExecutionStage::Transaction(TransactionStage {
+                            stage_id: "stage.swap".into(),
+                            candidate_ref: "swap.direct".into(),
+                            exports: vec![OutputExportSpec {
+                                output_key: "swap.received_atomic".into(),
+                                source: ValueRef::Ref {
+                                    reference: "refs.post.swap.received_atomic".to_owned(),
+                                },
+                            }],
+                            next_stage_id: Some("stage.continue".into()),
+                        }),
+                        ExecutionStage::Continuation(ContinuationStage {
+                            stage_id: "stage.continue".into(),
+                            required_outputs: vec!["swap.received_atomic".into()],
+                            package_entry: "build_aave_supply_from_swap_output".into(),
+                            next_stage_id: None,
+                        }),
+                    ],
+                    preconditions: Vec::new(),
+                    postconditions: Vec::new(),
+                    expected_effects: Vec::new(),
+                    execution_policy: None,
+                    evidence: json!({
+                        "quote": {
+                            "quotedAtMs": 1710000000000u64
+                        }
+                    }),
+                    metadata: BTreeMap::from([
+                        ("source".to_owned(), json!("skill:uniswap-v3-swap")),
+                        ("tool_name".to_owned(), json!("ais_run_harness")),
+                    ]),
+                },
+            )),
         }),
     }
 }
@@ -257,6 +573,103 @@ pub fn request_cancel_command(run_id: &RunId) -> HostedRunCommand {
             reason: Some("cancel after side effect submission".to_owned()),
             expected_version: None,
         }),
+    }
+}
+
+#[test]
+fn hosted_command_round_trips_reflection_launch_spec() {
+    let encoded =
+        serde_json::to_string(&sample_reflection_begin_command()).expect("encode command");
+    assert!(encoded.contains("\"kind\":\"reflection_request\""));
+
+    let decoded: HostedRunCommand = serde_json::from_str(&encoded).expect("decode command");
+    let RunCommand::BeginRun(begin) = decoded.command else {
+        panic!("expected begin_run");
+    };
+
+    match begin.launch_spec.expect("launch_spec") {
+        LaunchSpecSubmission::ReflectionRequest(spec) => {
+            assert_eq!(
+                spec.request["protocol_package_id"],
+                json!("owliabot.uniswap_v3")
+            );
+        }
+        other => panic!("unexpected launch_spec: {other:?}"),
+    }
+}
+
+#[test]
+fn hosted_command_round_trips_execution_artifact_launch_spec() {
+    let encoded =
+        serde_json::to_string(&sample_execution_artifact_begin_command()).expect("encode command");
+    assert!(encoded.contains("\"kind\":\"execution_artifact\""));
+
+    let decoded: HostedRunCommand = serde_json::from_str(&encoded).expect("decode command");
+    let RunCommand::BeginRun(begin) = decoded.command else {
+        panic!("expected begin_run");
+    };
+
+    match begin.launch_spec.expect("launch_spec") {
+        LaunchSpecSubmission::ExecutionArtifact(spec) => {
+            assert_eq!(spec.protocol_package_id, "owliabot.uniswap_v3");
+            assert_eq!(spec.action_key, "uniswap_v3_swap");
+            assert_eq!(spec.allowed_chains, vec!["8453".to_owned()]);
+            assert_eq!(spec.transactions.len(), 2);
+            assert_eq!(spec.stages.len(), 4);
+            let export_stage = spec.stage("stage.swap").expect("swap stage");
+            let tx_stage = export_stage.as_transaction().expect("transaction stage");
+            assert_eq!(
+                tx_stage.exports[0].output_key.as_str(),
+                "swap.received_atomic"
+            );
+            assert_eq!(spec.metadata.get("source"), Some(&json!("transport-test")));
+        }
+        other => panic!("unexpected launch_spec: {other:?}"),
+    }
+}
+
+#[test]
+fn hosted_command_round_trips_owliabot_uniswap_skill_boundary_envelope() {
+    let encoded = serde_json::to_string(&sample_owliabot_uniswap_swap_begin_command())
+        .expect("encode owliabot uniswap begin command");
+    assert!(encoded.contains("owliabot:owliabot.uniswap_v3:uniswap_v3_swap"));
+    assert!(encoded.contains("\"kind\":\"execution_artifact\""));
+
+    let decoded: HostedRunCommand = serde_json::from_str(&encoded).expect("decode command");
+    let RunCommand::BeginRun(begin) = decoded.command else {
+        panic!("expected begin_run");
+    };
+
+    assert_eq!(
+        begin.mission.goal,
+        "owliabot:owliabot.uniswap_v3:uniswap_v3_swap"
+    );
+    assert_eq!(begin.mission.allowed_chains, vec!["8453".to_owned()]);
+    assert_eq!(
+        begin
+            .mission
+            .constraints
+            .get("owliabot_protocol_package_id"),
+        Some(&json!("owliabot.uniswap_v3"))
+    );
+    assert_eq!(
+        begin.mission.metadata.get("tool_name"),
+        Some(&json!("ais_run_harness"))
+    );
+
+    match begin.launch_spec.expect("launch_spec") {
+        LaunchSpecSubmission::ExecutionArtifact(spec) => {
+            assert_eq!(spec.protocol_package_id, "owliabot.uniswap_v3");
+            assert_eq!(spec.action_key, "uniswap_v3_swap");
+            assert_eq!(spec.allowed_chains, vec!["8453".to_owned()]);
+            assert_eq!(spec.transactions.len(), 2);
+            assert_eq!(spec.stages.len(), 4);
+            assert_eq!(
+                spec.metadata.get("source"),
+                Some(&json!("skill:uniswap-v3-swap"))
+            );
+        }
+        other => panic!("unexpected launch_spec: {other:?}"),
     }
 }
 

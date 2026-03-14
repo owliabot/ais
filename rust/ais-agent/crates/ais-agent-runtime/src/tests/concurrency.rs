@@ -117,6 +117,7 @@ fn non_mutating_command_skips_concurrency_guard() {
             budget: None,
             metadata: Default::default(),
         },
+        launch_spec: None,
     });
 
     let version =
@@ -184,6 +185,7 @@ fn sample_runtime(checkpoint_seq: u64, plan_epoch: u64) -> ActiveRun {
         pending_requests: PendingRequestsSnapshot::default(),
         last_completed_node_id: None,
         actuation_records: vec![],
+        execution_artifact: None,
         checkpoint_seq,
         plan_epoch,
     };

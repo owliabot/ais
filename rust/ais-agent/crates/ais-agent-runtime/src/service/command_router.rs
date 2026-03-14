@@ -59,6 +59,11 @@ impl RuntimeCommandRouter {
                 RunCommand::SubmitPlanPatch(command) => {
                     service.submit_plan_patch(host_session_id, command).await
                 }
+                RunCommand::SubmitExecutionArtifactContinuation(command) => {
+                    service
+                        .submit_execution_artifact_continuation(host_session_id, command)
+                        .await
+                }
                 RunCommand::RequestCancelRun(command) => {
                     service.request_cancel_run(host_session_id, command).await
                 }

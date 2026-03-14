@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
+    execution_artifact::{ExecutionArtifactLaunchSpec, ExecutionPackageEntry},
     ids::{ClaimId, CommandId, IdempotencyKey, RunId, SignerRequestId},
+    launch_spec::LaunchSpecSubmission,
     ownership::{RunClaimMode, RunClaimOwnerKind},
     patch::PlanPatchSubmission,
 };
@@ -31,6 +33,7 @@ pub enum RunCommand {
     SubmitEnvelope(SubmitEnvelopeCommand),
     SubmitSignerDecision(SubmitSignerDecisionCommand),
     SubmitPlanPatch(SubmitPlanPatchCommand),
+    SubmitExecutionArtifactContinuation(SubmitExecutionArtifactContinuationCommand),
     RequestCancelRun(RequestCancelRunCommand),
     CancelRun(CancelRunCommand),
 }
@@ -48,6 +51,9 @@ impl RunCommand {
             Self::SubmitEnvelope(_) => "submit_envelope",
             Self::SubmitSignerDecision(_) => "submit_signer_decision",
             Self::SubmitPlanPatch(_) => "submit_plan_patch",
+            Self::SubmitExecutionArtifactContinuation(_) => {
+                "submit_execution_artifact_continuation"
+            }
             Self::RequestCancelRun(_) => "request_cancel_run",
             Self::CancelRun(_) => "cancel_run",
         }
@@ -64,6 +70,7 @@ impl RunCommand {
                 | Self::SubmitEnvelope(_)
                 | Self::SubmitSignerDecision(_)
                 | Self::SubmitPlanPatch(_)
+                | Self::SubmitExecutionArtifactContinuation(_)
                 | Self::RequestCancelRun(_)
                 | Self::CancelRun(_)
         )
@@ -76,6 +83,7 @@ impl RunCommand {
             Self::SubmitEnvelope(command) => command.expected_version.as_ref(),
             Self::SubmitSignerDecision(command) => command.expected_version.as_ref(),
             Self::SubmitPlanPatch(command) => command.expected_version.as_ref(),
+            Self::SubmitExecutionArtifactContinuation(command) => command.expected_version.as_ref(),
             Self::RequestCancelRun(command) => command.expected_version.as_ref(),
             Self::CancelRun(command) => command.expected_version.as_ref(),
             Self::BeginRun(_)
@@ -92,6 +100,8 @@ pub struct BeginRunCommand {
     pub command_id: CommandId,
     pub idempotency_key: IdempotencyKey,
     pub mission: MissionSubmission,
+    #[serde(default)]
+    pub launch_spec: Option<LaunchSpecSubmission>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -193,6 +203,16 @@ pub struct SubmitPlanPatchCommand {
     pub command_id: CommandId,
     pub run_id: RunId,
     pub patch: PlanPatchSubmission,
+    #[serde(default)]
+    pub expected_version: Option<ExpectedRuntimeVersion>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubmitExecutionArtifactContinuationCommand {
+    pub command_id: CommandId,
+    pub run_id: RunId,
+    pub package_entry: ExecutionPackageEntry,
+    pub artifact: ExecutionArtifactLaunchSpec,
     #[serde(default)]
     pub expected_version: Option<ExpectedRuntimeVersion>,
 }
@@ -318,8 +338,12 @@ pub struct SignerDecisionSubmission {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClaimRunCommand, ReleaseRunClaimCommand, RenewRunClaimCommand, RunCommand};
+    use super::{
+        ClaimRunCommand, ReleaseRunClaimCommand, RenewRunClaimCommand, RunCommand,
+        SubmitExecutionArtifactContinuationCommand,
+    };
     use crate::{
+        execution_artifact::{ExecutionArtifactLaunchSpec, ExecutionChainFamily},
         ids::{ClaimId, CommandId, RunId},
         ownership::{RunClaimMode, RunClaimOwnerKind},
     };
@@ -383,5 +407,37 @@ mod tests {
         assert!(claim.is_mutating());
         assert_eq!(claim.kind(), "claim_run");
         assert!(claim.expected_runtime_version().is_none());
+    }
+
+    #[test]
+    fn execution_artifact_continuation_command_is_mutating_and_versioned() {
+        let command = RunCommand::SubmitExecutionArtifactContinuation(
+            SubmitExecutionArtifactContinuationCommand {
+                command_id: CommandId("cmd-cont".to_owned()),
+                run_id: RunId("run-1".to_owned()),
+                package_entry: "build_stage_b".into(),
+                artifact: ExecutionArtifactLaunchSpec {
+                    protocol_package_id: "owliabot.uniswap_v3".to_owned(),
+                    action_key: "stage_b".to_owned(),
+                    chain_family: ExecutionChainFamily::Evm,
+                    allowed_chains: vec!["eip155:1".to_owned()],
+                    entry_stage_id: "stage.b".into(),
+                    actor: None,
+                    transactions: Vec::new(),
+                    stages: Vec::new(),
+                    preconditions: Vec::new(),
+                    postconditions: Vec::new(),
+                    expected_effects: Vec::new(),
+                    execution_policy: None,
+                    evidence: serde_json::json!({}),
+                    metadata: Default::default(),
+                },
+                expected_version: Some(Default::default()),
+            },
+        );
+
+        assert!(command.is_mutating());
+        assert_eq!(command.kind(), "submit_execution_artifact_continuation");
+        assert!(command.expected_runtime_version().is_some());
     }
 }

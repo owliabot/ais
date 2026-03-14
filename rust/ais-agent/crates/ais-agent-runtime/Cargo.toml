@@ -8,6 +8,7 @@ license.workspace = true
 ais-agent-control = { path = "../ais-agent-control" }
 ais-agent-core = { path = "../ais-agent-core" }
 ais-agent-drivers = { path = "../ais-agent-drivers" }
+ais-agent-expr = { path = "../ais-agent-expr" }
 ais-agent-evm = { path = "../ais-agent-evm" }
 ais-agent-host = { path = "../ais-agent-host" }
 ais-agent-solana = { path = "../ais-agent-solana" }

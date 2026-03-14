@@ -10,8 +10,7 @@ use ais_agent_host::{
 use crate::runtime::{classify_validated_recovery_view, ActiveRun};
 
 use super::super::{
-    action_family, conversion, RuntimeHostService, RuntimeHostServiceError,
-    RuntimeHostServiceResult,
+    conversion, launch_spec, RuntimeHostService, RuntimeHostServiceError, RuntimeHostServiceResult,
 };
 
 impl<R, C, M, K, E, S, G, A, Q> RuntimeHostService<R, C, M, K, E, S, G, A, Q>
@@ -32,13 +31,16 @@ where
         command: BeginRunCommand,
     ) -> RuntimeHostServiceResult {
         let run_seq = self.allocate_next_run_seq()?;
-        let mission = conversion::normalize_mission(command.mission, run_seq);
+        let launch_spec = command.launch_spec.clone().ok_or_else(|| {
+            RuntimeHostServiceError::invalid_command("begin_run requires launch_spec")
+        })?;
+        let mission = conversion::normalize_mission(command.mission, run_seq, &launch_spec);
         let run_id = RunId(format!("run-{run_seq}"));
         let mut checkpoint = conversion::initial_checkpoint(run_id.clone(), &mission);
-        action_family::seed_action_family_checkpoint(
-            &mission,
+        launch_spec::seed_launch_spec_checkpoint(
             &mut checkpoint,
             &self.execution_wiring,
+            &launch_spec,
         )
         .map_err(RuntimeHostServiceError::invalid_command)?;
         let mut runtime = ActiveRun::new(mission.clone(), checkpoint.clone());

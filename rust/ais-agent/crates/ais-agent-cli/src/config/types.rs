@@ -11,7 +11,7 @@ pub struct AisAgentServiceConfig {
     pub providers: AisAgentProviderConfig,
     pub runtime_defaults: AisAgentRuntimeDefaultsConfig,
     pub observability: AisAgentObservabilityConfig,
-    pub features: AisAgentFeaturesConfig,
+    pub protocol_packages: AisAgentProtocolPackagesConfig,
 }
 
 impl Default for AisAgentServiceConfig {
@@ -23,7 +23,7 @@ impl Default for AisAgentServiceConfig {
             providers: AisAgentProviderConfig::default(),
             runtime_defaults: AisAgentRuntimeDefaultsConfig::default(),
             observability: AisAgentObservabilityConfig::default(),
-            features: AisAgentFeaturesConfig::default(),
+            protocol_packages: AisAgentProtocolPackagesConfig::default(),
         }
     }
 }
@@ -172,21 +172,13 @@ impl Default for AisAgentObservabilityConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct AisAgentFeaturesConfig {
-    pub native_transfer: bool,
-    pub erc20_transfer: bool,
-    pub uniswap_v3_swap: bool,
-    pub uniswap_v3_lp: bool,
+pub struct AisAgentProtocolPackagesConfig {
+    pub allow: Vec<String>,
 }
 
-impl Default for AisAgentFeaturesConfig {
+impl Default for AisAgentProtocolPackagesConfig {
     fn default() -> Self {
-        Self {
-            native_transfer: false,
-            erc20_transfer: false,
-            uniswap_v3_swap: false,
-            uniswap_v3_lp: false,
-        }
+        Self { allow: Vec::new() }
     }
 }
 

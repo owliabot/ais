@@ -8,7 +8,10 @@ mod store;
 mod tests;
 
 pub use replay::ReplayCursor;
-pub use snapshot::{CheckpointSnapshot, PendingRequestsSnapshot};
+pub use snapshot::{
+    ArtifactContinuationSnapshot, CheckpointSnapshot, ExecutionArtifactRuntimeSnapshot,
+    PendingRequestsSnapshot,
+};
 pub use store::{
     CheckpointPointer, CheckpointStore, CheckpointStoreError, InMemoryCheckpointStore,
 };

@@ -107,7 +107,8 @@ pub fn classify_cancel_request(checkpoint: &CheckpointSnapshot) -> CancelRequest
         | RunStatus::Paused
         | RunStatus::AwaitingEvidence
         | RunStatus::AwaitingSigner
-        | RunStatus::AwaitingConfirmation => {}
+        | RunStatus::AwaitingConfirmation
+        | RunStatus::AwaitingArtifactContinuation => {}
     }
 
     if matches!(
@@ -214,6 +215,7 @@ pub fn classify_recovery_disposition(
             }
             _ => RecoveryDisposition::ContinueWait,
         }),
+        RunStatus::AwaitingArtifactContinuation => Some(RecoveryDisposition::AwaitContinuation),
         RunStatus::Paused => Some(match failure.map(|failure| &failure.code) {
             Some(
                 RunFailureCode::SimulationRejected
@@ -264,6 +266,10 @@ pub fn classify_allowed_recovery_actions(
         ],
         Some(RecoveryDisposition::AwaitSigner) => vec![
             RecoveryActionKind::SubmitSignerDecision,
+            RecoveryActionKind::CancelRun,
+        ],
+        Some(RecoveryDisposition::AwaitContinuation) => vec![
+            RecoveryActionKind::SubmitExecutionArtifactContinuation,
             RecoveryActionKind::CancelRun,
         ],
         Some(RecoveryDisposition::ContinueWait) => {
@@ -443,6 +449,7 @@ pub fn classify_recovery_suggestions(checkpoint: &CheckpointSnapshot) -> Vec<Rec
                 constraints: Vec::new(),
             })
             .collect(),
+        Some(RecoveryDisposition::AwaitContinuation) => Vec::new(),
         Some(RecoveryDisposition::ContinueWait) => {
             let pending_confirmation_refs = checkpoint
                 .pending_requests

@@ -6,9 +6,9 @@ use crate::{
     runtime::ActiveRun,
     stepper::transitions::{
         apply_broadcast_transition, apply_complete_transition, apply_derive_transition,
-        apply_govern_transition, apply_ingest_transition, apply_observe_transition,
-        apply_recover_transition, apply_signer_transition, apply_simulate_transition,
-        apply_verify_transition,
+        apply_execution_artifact_transition, apply_govern_transition, apply_ingest_transition,
+        apply_observe_transition, apply_recover_transition, apply_signer_transition,
+        apply_simulate_transition, apply_verify_transition,
     },
 };
 
@@ -18,6 +18,7 @@ pub enum StepTransitionKind {
     Ingest,
     Observe,
     Derive,
+    Artifact,
     Simulate,
     Govern,
     Signer,
@@ -54,6 +55,8 @@ impl StepOnce {
         } else if let Some(transition) = apply_observe_transition(runtime).await {
             Some(transition)
         } else if let Some(transition) = apply_derive_transition(runtime) {
+            Some(transition)
+        } else if let Some(transition) = apply_execution_artifact_transition(runtime) {
             Some(transition)
         } else if let Some(transition) = apply_simulate_transition(runtime).await {
             Some(transition)

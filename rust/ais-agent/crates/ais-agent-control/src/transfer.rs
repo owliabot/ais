@@ -11,10 +11,13 @@ pub enum TransferActionFamily {
 pub struct NativeTransferRequest {
     pub chain: String,
     pub recipient: String,
+    #[serde(alias = "requestedAmount")]
     pub requested_amount: String,
     #[serde(default)]
+    #[serde(alias = "assetSymbol")]
     pub asset_symbol: Option<String>,
     #[serde(default)]
+    #[serde(alias = "senderAddressHint")]
     pub sender_address_hint: Option<String>,
 }
 
@@ -36,12 +39,16 @@ impl NativeTransferRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Erc20TransferRequest {
     pub chain: String,
+    #[serde(alias = "tokenAddress")]
     pub token_address: String,
     #[serde(default)]
+    #[serde(alias = "tokenSymbol")]
     pub token_symbol: Option<String>,
     pub recipient: String,
+    #[serde(alias = "requestedAmount")]
     pub requested_amount: String,
     #[serde(default)]
+    #[serde(alias = "senderAddressHint")]
     pub sender_address_hint: Option<String>,
 }
 
@@ -65,43 +72,56 @@ impl Erc20TransferRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransferRecipientEvidence {
+    #[serde(alias = "userInput")]
     pub user_input: String,
+    #[serde(alias = "normalizedAddress")]
     pub normalized_address: String,
     pub source: String,
     #[serde(default)]
+    #[serde(alias = "userConfirmed")]
     pub user_confirmed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransferAmountEvidence {
+    #[serde(alias = "userInput")]
     pub user_input: String,
+    #[serde(alias = "normalizedAmount")]
     pub normalized_amount: String,
     #[serde(default)]
+    #[serde(alias = "atomicAmount")]
     pub atomic_amount: Option<String>,
     #[serde(default)]
     pub decimals: Option<u8>,
     pub source: String,
     #[serde(default)]
+    #[serde(alias = "userConfirmed")]
     pub user_confirmed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransferTokenEvidence {
+    #[serde(alias = "tokenAddress")]
     pub token_address: String,
     #[serde(default)]
+    #[serde(alias = "tokenSymbol")]
     pub token_symbol: Option<String>,
     pub decimals: u8,
+    #[serde(alias = "resolutionSource")]
     pub resolution_source: String,
     #[serde(default)]
+    #[serde(alias = "userConfirmed")]
     pub user_confirmed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransferBalanceEvidence {
     pub owner: String,
+    #[serde(alias = "balanceAtomic")]
     pub balance_atomic: String,
     #[serde(default)]
     pub decimals: Option<u8>,
+    #[serde(alias = "observedAtMs")]
     pub observed_at_ms: u64,
     pub source: String,
 }
@@ -113,6 +133,7 @@ pub struct TransferEvidencePackage {
     #[serde(default)]
     pub token: Option<TransferTokenEvidence>,
     #[serde(default)]
+    #[serde(alias = "senderBalance")]
     pub sender_balance: Option<TransferBalanceEvidence>,
 }
 
@@ -158,14 +179,20 @@ impl TransferEvidencePackage {
 pub struct TransferVerificationContract {
     pub chain: String,
     #[serde(default)]
+    #[serde(alias = "tokenAddress")]
     pub token_address: Option<String>,
+    #[serde(alias = "recipientAddress")]
     pub recipient_address: String,
+    #[serde(alias = "expectedAmountAtomic")]
     pub expected_amount_atomic: String,
     #[serde(default)]
+    #[serde(alias = "senderAddressHint")]
     pub sender_address_hint: Option<String>,
     #[serde(default)]
+    #[serde(alias = "requireRecipientDelta")]
     pub require_recipient_delta: bool,
     #[serde(default)]
+    #[serde(alias = "requireSenderDelta")]
     pub require_sender_delta: bool,
 }
 
@@ -201,6 +228,7 @@ mod tests {
         TransferEvidencePackage, TransferRecipientEvidence, TransferTokenEvidence,
         TransferVerificationContract,
     };
+    use serde_json::json;
 
     #[test]
     fn native_transfer_request_requires_non_empty_fields() {
@@ -296,5 +324,70 @@ mod tests {
         .validate(TransferActionFamily::Erc20Transfer)
         .expect_err("erc20 verification requires token");
         assert!(err.contains("token_address"));
+    }
+
+    #[test]
+    fn erc20_transfer_deserializes_camel_case_skill_contract() {
+        let request: Erc20TransferRequest = serde_json::from_value(json!({
+            "chain": "eip155:8453",
+            "tokenAddress": "0x1c7d",
+            "tokenSymbol": "USDC",
+            "recipient": "0xabc",
+            "requestedAmount": "10",
+            "senderAddressHint": "0xsender"
+        }))
+        .expect("camelCase request should deserialize");
+        request
+            .validate()
+            .expect("camelCase request should validate");
+
+        let evidence: TransferEvidencePackage = serde_json::from_value(json!({
+            "recipient": {
+                "userInput": "alice.eth",
+                "normalizedAddress": "0xabc",
+                "source": "wallet.contacts",
+                "userConfirmed": true
+            },
+            "amount": {
+                "userInput": "10",
+                "normalizedAmount": "10",
+                "atomicAmount": "10000000",
+                "decimals": 6,
+                "source": "wallet.amount",
+                "userConfirmed": true
+            },
+            "token": {
+                "tokenAddress": "0x1c7d",
+                "tokenSymbol": "USDC",
+                "decimals": 6,
+                "resolutionSource": "wallet.tokens",
+                "userConfirmed": true
+            },
+            "senderBalance": {
+                "owner": "0xsender",
+                "balanceAtomic": "90000000",
+                "decimals": 6,
+                "observedAtMs": 1710000000000u64,
+                "source": "wallet.balance"
+            }
+        }))
+        .expect("camelCase evidence should deserialize");
+        evidence
+            .validate_for(TransferActionFamily::Erc20Transfer)
+            .expect("camelCase evidence should validate");
+
+        let verification: TransferVerificationContract = serde_json::from_value(json!({
+            "chain": "eip155:8453",
+            "tokenAddress": "0x1c7d",
+            "recipientAddress": "0xabc",
+            "expectedAmountAtomic": "10000000",
+            "senderAddressHint": "0xsender",
+            "requireRecipientDelta": true,
+            "requireSenderDelta": false
+        }))
+        .expect("camelCase verification should deserialize");
+        verification
+            .validate(TransferActionFamily::Erc20Transfer)
+            .expect("camelCase verification should validate");
     }
 }

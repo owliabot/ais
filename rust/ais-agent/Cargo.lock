@@ -202,6 +202,7 @@ dependencies = [
  "ais-agent-core",
  "ais-agent-drivers",
  "ais-agent-evm",
+ "ais-agent-expr",
  "ais-agent-host",
  "ais-agent-solana",
  "alloy",

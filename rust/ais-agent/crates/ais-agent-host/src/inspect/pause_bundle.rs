@@ -10,7 +10,7 @@ use ais_agent_control::{
     },
 };
 
-use crate::inspect::{PendingConfirmationView, PendingSignerRequestView};
+use crate::inspect::{PendingConfirmationView, PendingContinuationView, PendingSignerRequestView};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -19,6 +19,7 @@ pub enum PauseKind {
     NeedEvidence,
     NeedSigner,
     NeedConfirmation,
+    NeedContinuation,
     RuntimeFailure,
 }
 
@@ -55,6 +56,8 @@ pub struct PauseBundle {
     pub pending_signer_requests: Vec<PendingSignerRequestView>,
     #[serde(default)]
     pub pending_confirmations: Vec<PendingConfirmationView>,
+    #[serde(default)]
+    pub pending_continuations: Vec<PendingContinuationView>,
     #[serde(default)]
     pub notes: Vec<String>,
 }

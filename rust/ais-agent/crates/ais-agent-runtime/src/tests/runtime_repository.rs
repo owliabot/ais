@@ -159,5 +159,6 @@ fn sample_checkpoint() -> CheckpointSnapshot {
         },
         last_completed_node_id: None,
         actuation_records: Vec::new(),
+        execution_artifact: None,
     }
 }

@@ -240,6 +240,7 @@ fn inspect_projection_updates_run_link_cursor() {
         },
         required_inputs: Vec::new(),
         pending_confirmations: Vec::new(),
+        pending_continuations: Vec::new(),
         pending_signer_requests: Vec::new(),
         recent_side_effects: Vec::new(),
         effect_status: None,

@@ -20,23 +20,36 @@ pub enum UniswapLpOperationKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UniswapV3SwapRequest {
     pub chain: String,
+    #[serde(alias = "tokenInAddress")]
     pub token_in_address: String,
     #[serde(default)]
+    #[serde(alias = "tokenInSymbol")]
     pub token_in_symbol: Option<String>,
+    #[serde(alias = "tokenOutAddress")]
     pub token_out_address: String,
     #[serde(default)]
+    #[serde(alias = "tokenOutSymbol")]
     pub token_out_symbol: Option<String>,
+    #[serde(alias = "feeTier")]
     pub fee_tier: u32,
+    #[serde(alias = "requestedAmount")]
     pub requested_amount: String,
+    #[serde(alias = "amountMode")]
     pub amount_mode: UniswapSwapAmountMode,
+    #[serde(alias = "slippageBps")]
     pub slippage_bps: u16,
+    #[serde(alias = "deadlineSeconds")]
     pub deadline_seconds: u64,
+    #[serde(alias = "routerAddress")]
     pub router_address: String,
     #[serde(default)]
+    #[serde(alias = "recipientAddress")]
     pub recipient_address: Option<String>,
     #[serde(default)]
+    #[serde(alias = "senderAddressHint")]
     pub sender_address_hint: Option<String>,
     #[serde(default)]
+    #[serde(alias = "unwrapNativeOut")]
     pub unwrap_native_out: bool,
 }
 
@@ -79,27 +92,40 @@ impl UniswapV3SwapRequest {
 pub struct UniswapV3LpRequest {
     pub chain: String,
     pub operation: UniswapLpOperationKind,
+    #[serde(alias = "token0Address")]
     pub token0_address: String,
     #[serde(default)]
+    #[serde(alias = "token0Symbol")]
     pub token0_symbol: Option<String>,
+    #[serde(alias = "token1Address")]
     pub token1_address: String,
     #[serde(default)]
+    #[serde(alias = "token1Symbol")]
     pub token1_symbol: Option<String>,
+    #[serde(alias = "feeTier")]
     pub fee_tier: u32,
     #[serde(default)]
+    #[serde(alias = "desiredAmount0")]
     pub desired_amount0: Option<String>,
     #[serde(default)]
+    #[serde(alias = "desiredAmount1")]
     pub desired_amount1: Option<String>,
     #[serde(default)]
+    #[serde(alias = "tickLower")]
     pub tick_lower: Option<i32>,
     #[serde(default)]
+    #[serde(alias = "tickUpper")]
     pub tick_upper: Option<i32>,
+    #[serde(alias = "positionManagerAddress")]
     pub position_manager_address: String,
     #[serde(default)]
+    #[serde(alias = "positionTokenId")]
     pub position_token_id: Option<String>,
     #[serde(default)]
+    #[serde(alias = "deadlineSeconds")]
     pub deadline_seconds: Option<u64>,
     #[serde(default)]
+    #[serde(alias = "senderAddressHint")]
     pub sender_address_hint: Option<String>,
 }
 
@@ -213,93 +239,129 @@ impl UniswapV3LpRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UniswapTokenEvidence {
+    #[serde(alias = "tokenAddress")]
     pub token_address: String,
     #[serde(default)]
+    #[serde(alias = "tokenSymbol")]
     pub token_symbol: Option<String>,
     pub decimals: u8,
+    #[serde(alias = "resolutionSource")]
     pub resolution_source: String,
     #[serde(default)]
+    #[serde(alias = "userConfirmed")]
     pub user_confirmed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UniswapQuoteEvidence {
     pub source: String,
+    #[serde(alias = "quotedAtMs")]
     pub quoted_at_ms: u64,
     #[serde(default)]
+    #[serde(alias = "expiresAtMs")]
     pub expires_at_ms: Option<u64>,
     #[serde(default)]
+    #[serde(alias = "routeSummary")]
     pub route_summary: Option<String>,
     #[serde(default)]
+    #[serde(alias = "amountInAtomic")]
     pub amount_in_atomic: Option<String>,
     #[serde(default)]
+    #[serde(alias = "amountOutAtomic")]
     pub amount_out_atomic: Option<String>,
     #[serde(default)]
+    #[serde(alias = "minAmountOutAtomic")]
     pub min_amount_out_atomic: Option<String>,
     #[serde(default)]
+    #[serde(alias = "maxAmountInAtomic")]
     pub max_amount_in_atomic: Option<String>,
     #[serde(default)]
+    #[serde(alias = "userConfirmed")]
     pub user_confirmed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UniswapRouterEvidence {
+    #[serde(alias = "routerAddress")]
     pub router_address: String,
     #[serde(default)]
+    #[serde(alias = "approvalTargetAddress")]
     pub approval_target_address: Option<String>,
     #[serde(default)]
+    #[serde(alias = "approvalRequired")]
     pub approval_required: bool,
     #[serde(default)]
+    #[serde(alias = "quoterAddress")]
     pub quoter_address: Option<String>,
+    #[serde(alias = "resolutionSource")]
     pub resolution_source: String,
     #[serde(default)]
+    #[serde(alias = "userConfirmed")]
     pub user_confirmed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UniswapPoolEvidence {
+    #[serde(alias = "poolAddress")]
     pub pool_address: String,
+    #[serde(alias = "token0Address")]
     pub token0_address: String,
+    #[serde(alias = "token1Address")]
     pub token1_address: String,
+    #[serde(alias = "feeTier")]
     pub fee_tier: u32,
     #[serde(default)]
+    #[serde(alias = "tickSpacing")]
     pub tick_spacing: Option<i32>,
     #[serde(default)]
+    #[serde(alias = "slot0SqrtPriceX96")]
     pub slot0_sqrt_price_x96: Option<String>,
     #[serde(default)]
+    #[serde(alias = "slot0Tick")]
     pub slot0_tick: Option<i32>,
     #[serde(default)]
+    #[serde(alias = "observedAtMs")]
     pub observed_at_ms: Option<u64>,
+    #[serde(alias = "resolutionSource")]
     pub resolution_source: String,
     #[serde(default)]
+    #[serde(alias = "userConfirmed")]
     pub user_confirmed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UniswapDeadlineEvidence {
+    #[serde(alias = "deadlineUnixSeconds")]
     pub deadline_unix_seconds: u64,
     pub source: String,
     #[serde(default)]
+    #[serde(alias = "userConfirmed")]
     pub user_confirmed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UniswapLpPositionEvidence {
+    #[serde(alias = "positionTokenId")]
     pub position_token_id: String,
     #[serde(default)]
     pub liquidity: Option<String>,
     #[serde(default)]
+    #[serde(alias = "tickLower")]
     pub tick_lower: Option<i32>,
     #[serde(default)]
+    #[serde(alias = "tickUpper")]
     pub tick_upper: Option<i32>,
     #[serde(default)]
+    #[serde(alias = "observedAtMs")]
     pub observed_at_ms: Option<u64>,
     pub source: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UniswapV3SwapEvidencePackage {
+    #[serde(alias = "tokenIn")]
     pub token_in: UniswapTokenEvidence,
+    #[serde(alias = "tokenOut")]
     pub token_out: UniswapTokenEvidence,
     pub quote: UniswapQuoteEvidence,
     pub router: UniswapRouterEvidence,
@@ -469,24 +531,37 @@ impl UniswapV3LpEvidencePackage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UniswapV3SwapVerificationContract {
     pub chain: String,
+    #[serde(alias = "tokenInAddress")]
     pub token_in_address: String,
+    #[serde(alias = "tokenOutAddress")]
     pub token_out_address: String,
+    #[serde(alias = "feeTier")]
     pub fee_tier: u32,
+    #[serde(alias = "recipientAddress")]
     pub recipient_address: String,
+    #[serde(alias = "amountMode")]
     pub amount_mode: UniswapSwapAmountMode,
     #[serde(default)]
+    #[serde(alias = "quotedAmountInAtomic")]
     pub quoted_amount_in_atomic: Option<String>,
     #[serde(default)]
+    #[serde(alias = "quotedAmountOutAtomic")]
     pub quoted_amount_out_atomic: Option<String>,
     #[serde(default)]
+    #[serde(alias = "minAmountOutAtomic")]
     pub min_amount_out_atomic: Option<String>,
     #[serde(default)]
+    #[serde(alias = "maxAmountInAtomic")]
     pub max_amount_in_atomic: Option<String>,
+    #[serde(alias = "routerAddress")]
     pub router_address: String,
+    #[serde(alias = "deadlineUnixSeconds")]
     pub deadline_unix_seconds: u64,
     #[serde(default)]
+    #[serde(alias = "senderAddressHint")]
     pub sender_address_hint: Option<String>,
     #[serde(default)]
+    #[serde(alias = "requireRecipientOutDelta")]
     pub require_recipient_out_delta: bool,
 }
 
@@ -571,22 +646,33 @@ impl UniswapV3SwapVerificationContract {
 pub struct UniswapV3LpVerificationContract {
     pub chain: String,
     pub operation: UniswapLpOperationKind,
+    #[serde(alias = "positionManagerAddress")]
     pub position_manager_address: String,
+    #[serde(alias = "poolAddress")]
     pub pool_address: String,
+    #[serde(alias = "token0Address")]
     pub token0_address: String,
+    #[serde(alias = "token1Address")]
     pub token1_address: String,
+    #[serde(alias = "feeTier")]
     pub fee_tier: u32,
     #[serde(default)]
+    #[serde(alias = "positionTokenId")]
     pub position_token_id: Option<String>,
     #[serde(default)]
+    #[serde(alias = "expectedLiquidityDelta")]
     pub expected_liquidity_delta: Option<String>,
     #[serde(default)]
+    #[serde(alias = "expectedAmount0Max")]
     pub expected_amount0_max: Option<String>,
     #[serde(default)]
+    #[serde(alias = "expectedAmount1Max")]
     pub expected_amount1_max: Option<String>,
     #[serde(default)]
+    #[serde(alias = "tickLower")]
     pub tick_lower: Option<i32>,
     #[serde(default)]
+    #[serde(alias = "tickUpper")]
     pub tick_upper: Option<i32>,
 }
 
@@ -671,6 +757,7 @@ mod tests {
         UniswapV3LpEvidencePackage, UniswapV3LpRequest, UniswapV3LpVerificationContract,
         UniswapV3SwapEvidencePackage, UniswapV3SwapRequest, UniswapV3SwapVerificationContract,
     };
+    use serde_json::json;
 
     #[test]
     fn uniswap_swap_request_and_evidence_validate() {
@@ -873,5 +960,141 @@ mod tests {
         .expect_err("mint verification requires range");
 
         assert!(err.contains("tick_lower"));
+    }
+
+    #[test]
+    fn uniswap_swap_deserializes_camel_case_skill_contract() {
+        let request: UniswapV3SwapRequest = serde_json::from_value(json!({
+            "chain": "8453",
+            "tokenInAddress": "0x1111",
+            "tokenInSymbol": "USDC",
+            "tokenOutAddress": "0x2222",
+            "tokenOutSymbol": "WETH",
+            "feeTier": 3000,
+            "requestedAmount": "25",
+            "amountMode": "exact_in",
+            "slippageBps": 50,
+            "deadlineSeconds": 900,
+            "routerAddress": "0xe592",
+            "recipientAddress": "0xaaaa",
+            "senderAddressHint": "0xbbbb",
+            "unwrapNativeOut": false
+        }))
+        .expect("camelCase swap request should deserialize");
+        request
+            .validate()
+            .expect("camelCase swap request should validate");
+
+        let evidence: UniswapV3SwapEvidencePackage = serde_json::from_value(json!({
+            "tokenIn": {
+                "tokenAddress": "0x1111",
+                "tokenSymbol": "USDC",
+                "decimals": 6,
+                "resolutionSource": "wallet.tokens",
+                "userConfirmed": true
+            },
+            "tokenOut": {
+                "tokenAddress": "0x2222",
+                "tokenSymbol": "WETH",
+                "decimals": 18,
+                "resolutionSource": "wallet.tokens",
+                "userConfirmed": true
+            },
+            "quote": {
+                "source": "uniswap.quote",
+                "quotedAtMs": 1710000000000u64,
+                "expiresAtMs": 1710000030000u64,
+                "routeSummary": "USDC -> WETH",
+                "amountInAtomic": "25000000",
+                "amountOutAtomic": "10000000000000000",
+                "minAmountOutAtomic": "9900000000000000",
+                "userConfirmed": true
+            },
+            "router": {
+                "routerAddress": "0xe592",
+                "approvalTargetAddress": "0xe592",
+                "approvalRequired": false,
+                "resolutionSource": "uniswap.router",
+                "userConfirmed": true
+            },
+            "deadline": {
+                "deadlineUnixSeconds": 1710000900u64,
+                "source": "policy.default",
+                "userConfirmed": true
+            }
+        }))
+        .expect("camelCase swap evidence should deserialize");
+        evidence
+            .validate_for(&request)
+            .expect("camelCase swap evidence should validate");
+    }
+
+    #[test]
+    fn uniswap_lp_deserializes_camel_case_skill_contract() {
+        let request: UniswapV3LpRequest = serde_json::from_value(json!({
+            "chain": "8453",
+            "operation": "mint",
+            "token0Address": "0x1111",
+            "token0Symbol": "USDC",
+            "token1Address": "0x2222",
+            "token1Symbol": "WETH",
+            "feeTier": 3000,
+            "desiredAmount0": "100",
+            "desiredAmount1": "1",
+            "tickLower": -887220,
+            "tickUpper": 887220,
+            "positionManagerAddress": "0x1234",
+            "deadlineSeconds": 900,
+            "senderAddressHint": "0xaaaa"
+        }))
+        .expect("camelCase lp request should deserialize");
+        request
+            .validate()
+            .expect("camelCase lp request should validate");
+
+        let evidence: UniswapV3LpEvidencePackage = serde_json::from_value(json!({
+            "token0": {
+                "tokenAddress": "0x1111",
+                "tokenSymbol": "USDC",
+                "decimals": 6,
+                "resolutionSource": "wallet.tokens",
+                "userConfirmed": true
+            },
+            "token1": {
+                "tokenAddress": "0x2222",
+                "tokenSymbol": "WETH",
+                "decimals": 18,
+                "resolutionSource": "wallet.tokens",
+                "userConfirmed": true
+            },
+            "pool": {
+                "poolAddress": "0xpool",
+                "token0Address": "0x1111",
+                "token1Address": "0x2222",
+                "feeTier": 3000,
+                "tickSpacing": 60,
+                "slot0SqrtPriceX96": "1",
+                "slot0Tick": 0,
+                "observedAtMs": 1710000000000u64,
+                "resolutionSource": "uniswap.pool",
+                "userConfirmed": true
+            },
+            "router": {
+                "routerAddress": "0x1234",
+                "approvalTargetAddress": "0x1234",
+                "approvalRequired": false,
+                "resolutionSource": "uniswap.position_manager",
+                "userConfirmed": true
+            },
+            "deadline": {
+                "deadlineUnixSeconds": 1710000900u64,
+                "source": "policy.default",
+                "userConfirmed": true
+            }
+        }))
+        .expect("camelCase lp evidence should deserialize");
+        evidence
+            .validate_for(&request)
+            .expect("camelCase lp evidence should validate");
     }
 }

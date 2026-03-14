@@ -627,6 +627,9 @@ where
             RunCommand::SubmitPlanPatch(command) => Ok(self
                 .load_effective_claim(&command.run_id)?
                 .map(|claim| claim.claim_id)),
+            RunCommand::SubmitExecutionArtifactContinuation(command) => Ok(self
+                .load_effective_claim(&command.run_id)?
+                .map(|claim| claim.claim_id)),
             RunCommand::RequestCancelRun(command) => Ok(self
                 .load_effective_claim(&command.run_id)?
                 .map(|claim| claim.claim_id)),

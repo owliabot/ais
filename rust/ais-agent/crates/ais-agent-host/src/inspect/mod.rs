@@ -10,7 +10,7 @@ pub mod snapshot;
 mod tests;
 
 pub use pause_bundle::{PauseActionView, PauseBundle, PauseKind};
-pub use pending::{PendingConfirmationView, PendingSignerRequestView};
+pub use pending::{PendingConfirmationView, PendingContinuationView, PendingSignerRequestView};
 pub use progress::{ActionStatusCountsView, ProgressView};
 pub use projector::{
     project_inspect_snapshot, project_inspect_snapshot_with_recovery, project_pause_bundle,

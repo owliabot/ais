@@ -8,6 +8,7 @@ use ais_agent_control::{
     commands::{MissionBudgetSubmission, MissionSubmission, RunCommand, StepUntil},
     events::RunEvent,
     ids::{AuditId, ClaimId, IdempotencyKey, RunId},
+    launch_spec::LaunchSpecSubmission,
     patch::{PatchOutcome, PlanPatchOperation, PlanPatchSubmission},
 };
 use ais_agent_core::{
@@ -56,6 +57,7 @@ pub(super) fn replay_key(command: &HostedRunCommand) -> Option<IdempotencyKey> {
         | RunCommand::SubmitEnvelope(_)
         | RunCommand::SubmitSignerDecision(_)
         | RunCommand::SubmitPlanPatch(_)
+        | RunCommand::SubmitExecutionArtifactContinuation(_)
         | RunCommand::RequestCancelRun(_)
         | RunCommand::CancelRun(_) => command
             .host_request_id
@@ -76,6 +78,7 @@ pub(super) fn command_id(command: &RunCommand) -> &ais_agent_control::ids::Comma
         RunCommand::SubmitEnvelope(command) => &command.command_id,
         RunCommand::SubmitSignerDecision(command) => &command.command_id,
         RunCommand::SubmitPlanPatch(command) => &command.command_id,
+        RunCommand::SubmitExecutionArtifactContinuation(command) => &command.command_id,
         RunCommand::RequestCancelRun(command) => &command.command_id,
         RunCommand::CancelRun(command) => &command.command_id,
     }
@@ -93,6 +96,7 @@ pub(super) fn command_run_id(command: &RunCommand) -> Option<RunId> {
         RunCommand::SubmitEnvelope(command) => Some(command.run_id.clone()),
         RunCommand::SubmitSignerDecision(command) => Some(command.run_id.clone()),
         RunCommand::SubmitPlanPatch(command) => Some(command.run_id.clone()),
+        RunCommand::SubmitExecutionArtifactContinuation(command) => Some(command.run_id.clone()),
         RunCommand::RequestCancelRun(command) => Some(command.run_id.clone()),
         RunCommand::CancelRun(command) => Some(command.run_id.clone()),
     }
@@ -133,7 +137,11 @@ pub(super) fn outcome_claim_id(outcome: &HostCommandOutcome) -> Option<ClaimId> 
     }
 }
 
-pub(super) fn normalize_mission(submission: MissionSubmission, run_seq: u64) -> Mission {
+pub(super) fn normalize_mission(
+    submission: MissionSubmission,
+    run_seq: u64,
+    launch_spec: &LaunchSpecSubmission,
+) -> Mission {
     Mission {
         mission_id: format!("mission-{run_seq}"),
         goal: submission.goal,
@@ -142,10 +150,21 @@ pub(super) fn normalize_mission(submission: MissionSubmission, run_seq: u64) -> 
         policy: MissionPolicy {
             policy_mode: Some("guarded".to_owned()),
             allow_raw_envelopes: true,
-            require_effect_contract_for_writes: true,
+            require_effect_contract_for_writes: requires_effect_contract_for_launch_spec(
+                launch_spec,
+            ),
         },
         constraints: submission.constraints,
         metadata: submission.metadata,
+    }
+}
+
+fn requires_effect_contract_for_launch_spec(launch_spec: &LaunchSpecSubmission) -> bool {
+    match launch_spec {
+        LaunchSpecSubmission::ExecutionArtifact(_) => false,
+        LaunchSpecSubmission::PrebuiltFragment(_) | LaunchSpecSubmission::ReflectionRequest(_) => {
+            true
+        }
     }
 }
 
@@ -180,6 +199,7 @@ pub(super) fn initial_checkpoint(run_id: RunId, mission: &Mission) -> Checkpoint
         pending_requests: PendingRequestsSnapshot::default(),
         last_completed_node_id: None,
         actuation_records: Vec::new(),
+        execution_artifact: None,
     }
 }
 

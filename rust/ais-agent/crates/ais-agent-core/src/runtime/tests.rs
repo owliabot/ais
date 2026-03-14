@@ -95,3 +95,34 @@ fn lifecycle_fail_records_typed_failure_context() {
     assert_eq!(failure.observed_at_plan_epoch, 1);
     assert_eq!(failure.summary, "post-state balance mismatch");
 }
+
+#[test]
+fn lifecycle_can_enter_and_resolve_awaiting_artifact_continuation() {
+    let mut lifecycle = RunLifecycleState::new(RunId("run-1".to_owned()), "mission-1");
+
+    lifecycle.await_artifact_continuation(
+        "awaiting artifact continuation `build_next_stage`",
+        vec!["swap.tx_hash".to_owned()],
+    );
+
+    assert_eq!(lifecycle.status, RunStatus::AwaitingArtifactContinuation);
+    assert_eq!(lifecycle.phase, RunPhase::AwaitingHost);
+    assert_eq!(
+        lifecycle
+            .active_boundary
+            .as_ref()
+            .map(|boundary| &boundary.kind),
+        Some(&crate::runtime::BoundaryKind::ArtifactContinuation)
+    );
+    assert_eq!(
+        lifecycle
+            .active_boundary
+            .as_ref()
+            .map(|boundary| boundary.blocking_refs.clone()),
+        Some(vec!["swap.tx_hash".to_owned()])
+    );
+
+    lifecycle.mark_running(RunPhase::Planning);
+    assert_eq!(lifecycle.status, RunStatus::Running);
+    assert!(lifecycle.active_boundary.is_none());
+}

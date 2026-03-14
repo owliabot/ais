@@ -162,6 +162,7 @@ fn sample_evidence_wait_checkpoint() -> CheckpointSnapshot {
         },
         last_completed_node_id: Some("observe-balance".to_owned()),
         actuation_records: Vec::new(),
+        execution_artifact: None,
     }
 }
 
@@ -209,6 +210,7 @@ fn sample_signer_wait_checkpoint() -> CheckpointSnapshot {
             tx_hash: None,
             summary: "signer request issued".to_owned(),
         }],
+        execution_artifact: None,
     }
 }
 
@@ -269,5 +271,6 @@ fn sample_submitted_tx_checkpoint() -> CheckpointSnapshot {
             tx_hash: Some("0xdeadbeef".to_owned()),
             summary: "transaction broadcasted; awaiting verification".to_owned(),
         }],
+        execution_artifact: None,
     }
 }

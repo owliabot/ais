@@ -9,10 +9,12 @@ Public API entry points:
 - `commands`
 - `events`
 - `ids`
+- `launch_spec`
 - `ownership`
 - `patch`
 - `recovery`
 - `transfer`
+- `uniswap`
 
 Dependencies on workspace crates:
 - none
@@ -21,6 +23,10 @@ Current implementation status:
 - run command contract implemented
 - run event contract implemented
 - stable ids implemented
+- `BeginRunCommand` now carries top-level `launch_spec` as the primary runtime ingress:
+  - `prebuilt_fragment`
+  - `reflection_request`
+  - `execution_artifact`
 - mutable commands now carry optional `expected_version` preconditions:
   - `checkpoint_seq`
   - `plan_epoch`
@@ -66,7 +72,7 @@ Current implementation status:
   - `RenewRunClaimCommand`
   - `ReleaseRunClaimCommand`
   - `RunCommand::{ClaimRun, RenewRunClaim, ReleaseRunClaim}`
-- transfer action-family DTOs are now frozen for the first product slices:
+- transfer DTOs for package-owned `execution_artifact` builders are now frozen for the first product slices:
   - `NativeTransferRequest`
   - `Erc20TransferRequest`
   - `TransferEvidencePackage`
@@ -103,11 +109,11 @@ Known gaps:
 - interruption/cancellation legality plus transport/restart proof are now implemented; remaining future work on this seam is narrower:
   - any explicit retry-command split beyond `RetryIntent`
   - automatic terminal-resolution policy for post-side-effect cancel flows
-- transfer DTOs are frozen and now wired into runtime action-family execution for:
+- transfer DTOs are frozen and now wired into runtime `launch_spec -> execution_artifact` execution for:
   - native transfer
   - ERC20 transfer
   - exact-delta verifier strengthening still remains future work
-- Uniswap V3 DTOs are frozen and runtime execution is now partially in progress:
+- Uniswap V3 DTOs are frozen and runtime execution through `execution_artifact` is now partially in progress:
   - bounded swap seeding and live verify proof now exist
   - explicit `approval_required=true` approve-then-swap path is now supported
   - LP lifecycle operations and richer swap verification still land in later milestones

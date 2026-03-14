@@ -18,8 +18,8 @@ use ais_agent_core::{
 use crate::inspect::{
     progress::ActionStatusCountsView, ActiveBoundaryView, BoundaryKind, EffectStatusView,
     InspectSnapshot, MissionSummaryView, PauseActionView, PauseBundle, PauseKind,
-    PendingConfirmationView, PendingSignerRequestView, ProgressView, RecoveryView,
-    RequiredInputView, RunPhase, RunResultView, RunStatus, SideEffectView,
+    PendingConfirmationView, PendingContinuationView, PendingSignerRequestView, ProgressView,
+    RecoveryView, RequiredInputView, RunPhase, RunResultView, RunStatus, SideEffectView,
 };
 
 pub fn project_inspect_snapshot(
@@ -37,6 +37,7 @@ pub fn project_inspect_snapshot_with_recovery(
     let lifecycle = &checkpoint.lifecycle;
     let pending_signer_requests = project_pending_signer_requests(checkpoint);
     let pending_confirmations = project_pending_confirmations(checkpoint);
+    let pending_continuations = project_pending_continuations(checkpoint);
     let ownership = project_ownership_snapshot(checkpoint);
 
     InspectSnapshot {
@@ -76,6 +77,7 @@ pub fn project_inspect_snapshot_with_recovery(
             })
             .collect(),
         pending_confirmations,
+        pending_continuations,
         pending_signer_requests,
         recent_side_effects: checkpoint
             .actuation_records
@@ -118,6 +120,8 @@ pub fn project_pause_bundle_with_recovery(
         {
             PauseKind::NeedConfirmation
         }
+        (CoreRunStatus::AwaitingArtifactContinuation, _)
+        | (_, CoreBoundaryKind::ArtifactContinuation) => PauseKind::NeedContinuation,
         (CoreRunStatus::Paused, _) => PauseKind::NeedUserInput,
         (CoreRunStatus::Failed, _) | (_, CoreBoundaryKind::Failure) => PauseKind::RuntimeFailure,
         _ => return None,
@@ -143,6 +147,7 @@ pub fn project_pause_bundle_with_recovery(
         allowed_recovery_actions: recovery.allowed_recovery_actions.clone(),
         pending_signer_requests: project_pending_signer_requests(checkpoint),
         pending_confirmations: project_pending_confirmations(checkpoint),
+        pending_continuations: project_pending_continuations(checkpoint),
         notes: project_pause_notes(checkpoint),
     })
 }
@@ -270,6 +275,47 @@ fn project_pending_confirmations(checkpoint: &CheckpointSnapshot) -> Vec<Pending
         .collect()
 }
 
+fn project_pending_continuations(checkpoint: &CheckpointSnapshot) -> Vec<PendingContinuationView> {
+    let summary = checkpoint
+        .lifecycle
+        .active_boundary
+        .as_ref()
+        .map(|boundary| boundary.summary.clone())
+        .unwrap_or_else(|| "artifact continuation required".to_owned());
+    checkpoint
+        .execution_artifact
+        .as_ref()
+        .and_then(|snapshot| snapshot.awaiting_continuation.as_ref())
+        .into_iter()
+        .map(|continuation| {
+            let resolved_outputs = checkpoint
+                .execution_artifact
+                .as_ref()
+                .map(|snapshot| {
+                    continuation
+                        .required_outputs
+                        .iter()
+                        .filter_map(|output_key| {
+                            snapshot
+                                .exported_outputs
+                                .get(output_key)
+                                .cloned()
+                                .map(|value| (output_key.clone(), value))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            PendingContinuationView {
+                stage_id: continuation.stage_id.clone(),
+                package_entry: continuation.package_entry.clone(),
+                required_outputs: continuation.required_outputs.clone(),
+                resolved_outputs,
+                summary: summary.clone(),
+            }
+        })
+        .collect()
+}
+
 fn project_effect_status(checkpoint: &CheckpointSnapshot) -> EffectStatusView {
     if checkpoint
         .action_graph
@@ -354,6 +400,7 @@ fn action_requires_mutation_claim(action: &RecoveryActionKind) -> bool {
         RecoveryActionKind::SubmitEvidence
             | RecoveryActionKind::SubmitEnvelope
             | RecoveryActionKind::SubmitSignerDecision
+            | RecoveryActionKind::SubmitExecutionArtifactContinuation
             | RecoveryActionKind::SubmitPlanPatch
             | RecoveryActionKind::RetryStep
             | RecoveryActionKind::CancelRun
@@ -374,6 +421,9 @@ fn map_recovery_action_command(action: &RecoveryActionKind) -> &'static str {
         RecoveryActionKind::SubmitEvidence => "submit_evidence",
         RecoveryActionKind::SubmitEnvelope => "submit_envelope",
         RecoveryActionKind::SubmitSignerDecision => "submit_signer_decision",
+        RecoveryActionKind::SubmitExecutionArtifactContinuation => {
+            "submit_execution_artifact_continuation"
+        }
         RecoveryActionKind::SubmitPlanPatch => "submit_plan_patch",
         RecoveryActionKind::RetryStep => "step_run",
         RecoveryActionKind::CancelRun => "cancel_run",
@@ -392,6 +442,9 @@ fn map_recovery_action_description(action: &RecoveryActionKind) -> &'static str 
         }
         RecoveryActionKind::SubmitSignerDecision => {
             "Resolve the pending signer request so execution can continue."
+        }
+        RecoveryActionKind::SubmitExecutionArtifactContinuation => {
+            "Submit the package-built continuation artifact needed to resume execution."
         }
         RecoveryActionKind::SubmitPlanPatch => {
             "Submit a bounded patch for the active frontier before retrying execution."
@@ -431,6 +484,7 @@ fn map_run_status(status: &CoreRunStatus) -> RunStatus {
         CoreRunStatus::AwaitingEvidence => RunStatus::AwaitingEvidence,
         CoreRunStatus::AwaitingSigner => RunStatus::AwaitingSigner,
         CoreRunStatus::AwaitingConfirmation => RunStatus::AwaitingConfirm,
+        CoreRunStatus::AwaitingArtifactContinuation => RunStatus::AwaitingContinuation,
         CoreRunStatus::Completed => RunStatus::Completed,
         CoreRunStatus::Failed => RunStatus::Failed,
         CoreRunStatus::Cancelled => RunStatus::Cancelled,
@@ -457,6 +511,7 @@ fn map_boundary_kind(kind: &CoreBoundaryKind) -> BoundaryKind {
         CoreBoundaryKind::Evidence => BoundaryKind::Evidence,
         CoreBoundaryKind::Signer => BoundaryKind::Signer,
         CoreBoundaryKind::Confirmation => BoundaryKind::Confirmation,
+        CoreBoundaryKind::ArtifactContinuation => BoundaryKind::ArtifactContinuation,
         CoreBoundaryKind::Completion => BoundaryKind::Completion,
         CoreBoundaryKind::Failure => BoundaryKind::Failure,
         CoreBoundaryKind::Cancellation => BoundaryKind::Cancellation,

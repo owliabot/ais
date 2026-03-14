@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::execution_artifact::{ExecutionOutputKey, ExecutionPackageEntry, ExecutionStageId};
 use crate::ids::{EventId, RunId, SignerRequestId};
 use crate::{
     patch::{PatchOutcome, PlanPatchSubmission},
@@ -37,6 +38,7 @@ pub enum RunEvent {
     AwaitingEvidence(RunAwaitingEvidence),
     AwaitingConfirm(RunAwaitingConfirm),
     AwaitingSigner(RunAwaitingSigner),
+    AwaitingContinuation(RunAwaitingContinuation),
     Completed(RunCompleted),
     Failed(RunFailed),
 }
@@ -120,6 +122,19 @@ pub struct RunAwaitingSigner {
     pub event_id: EventId,
     pub run_id: RunId,
     pub request_id: SignerRequestId,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunAwaitingContinuation {
+    pub event_id: EventId,
+    pub run_id: RunId,
+    pub stage_id: Option<ExecutionStageId>,
+    pub package_entry: Option<ExecutionPackageEntry>,
+    #[serde(default)]
+    pub required_outputs: Vec<ExecutionOutputKey>,
+    #[serde(default)]
+    pub resolved_outputs: std::collections::BTreeMap<ExecutionOutputKey, Value>,
     pub reason: String,
 }
 

@@ -28,6 +28,11 @@ Current implementation status:
   - stepper
   - persistence
   - events
+- `begin_run` now treats top-level `launch_spec` as the primary ingress:
+  - missing `launch_spec` fails closed as an invalid command
+  - `prebuilt_fragment` can seed action/evidence/effect-contract graphs directly
+  - `reflection_request` is reserved but still fail-closed
+  - `execution_artifact` is the only product-grade launch contract
 - `ActiveRun` implemented
 - `RuntimeDriverBinder` implemented for attaching driver-produced fragments into hot runtime state
 - `RuntimeDriverBinder` now also attaches:
@@ -176,10 +181,10 @@ Current implementation status:
 - runtime stepper is now async so live chain I/O can happen inside:
   - observe transitions
   - simulate transitions
-- first Owliabot transfer action-family seeding now exists for:
+- artifact-backed transfer runtime proof now exists for:
   - `native_transfer`
   - `erc20_transfer`
-  - `begin_run` can seed real action graphs from `owliabot_action_family=*`
+  - `begin_run` can seed real action graphs from top-level `launch_spec`
   - seeded checkpoints now carry:
     - transfer-specific observe / simulate / actuate / verify nodes
     - transfer evidence records / requirements
@@ -196,7 +201,13 @@ Current implementation status:
     - receipt success
     - recipient balance change
     - exact-amount delta arithmetic remains deferred until effect-verifier big-integer expressions are strengthened
-- first bounded Uniswap V3 swap action-family seeding now also exists for:
+- `execution_artifact.expected_effects` now has an initial artifact-first runtime slice for EVM:
+  - each effect spec binds explicitly to one transaction `stage_id`
+  - host validation now checks effect kinds, transaction-stage linkage, and effect-predicate CEL
+  - planner seeds checkpoint `effect_contracts` and switches affected verify nodes onto `VerifyKind::EffectContract`
+  - current slice allows at most one expected effect per transaction stage
+  - native / ERC20 transfer now prove the slice end-to-end through builder -> begin_run -> live verify -> restart-cut coverage
+- artifact-backed Uniswap V3 swap runtime proof now also exists for:
   - `uniswap_v3_swap`
   - `begin_run` can now seed a real action graph for the current bounded swap slice:
     - exact-in
@@ -212,13 +223,13 @@ Current implementation status:
     - signer-submitted swap completion via live verify
     - approval-then-swap completion through two signer boundaries
     - stale quote recovery stopping at `await_evidence`
-    - durable host-service seeding of the swap action family
+    - durable host-service seeding of the swap binder path
   - current swap effect assertion strength is still:
     - receipt success
     - recipient output-token balance change
     - approval verification currently checks allowance change, not exact allowance target
   - auto allowance-policy selection and richer slippage-bound verification remain deferred within later Uniswap milestones
-- first bounded Uniswap V3 LP action-family seeding now also exists for:
+- artifact-backed Uniswap V3 LP runtime proof now also exists for:
   - `uniswap_v3_lp`
   - `begin_run` can now seed a real action graph for the current bounded LP slice:
     - `mint`
@@ -231,7 +242,7 @@ Current implementation status:
   - runtime proof now exists for:
     - signer-submitted LP mint completion via live verify
     - restart from signer-submitted side-effect cut
-    - durable host-service seeding of the LP action family
+    - durable host-service seeding of the LP binder path
   - current LP effect assertion strength is still bounded to:
     - receipt success
     - position-manager `balanceOf(owner)` change

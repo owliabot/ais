@@ -6,10 +6,18 @@ use ais_agent_control::{
         EvidenceKind, EvidenceSubmission, ExpectedRuntimeVersion, MissionBudgetSubmission,
         MissionSubmission, ReleaseRunClaimCommand, RenewRunClaimCommand, RequestCancelRunCommand,
         RunCommand, SignerDecisionKind, SignerDecisionSubmission, StepBudget, StepRunCommand,
-        StepUntil, SubmitEnvelopeCommand, SubmitEvidenceCommand, SubmitSignerDecisionCommand,
+        StepUntil, SubmitEnvelopeCommand, SubmitEvidenceCommand,
+        SubmitExecutionArtifactContinuationCommand, SubmitSignerDecisionCommand,
     },
     events::RunEvent,
+    execution_artifact::{
+        BranchStage, BranchTarget, ComparisonOperator, ContinuationStage, EffectSpec,
+        EvmTransactionCandidate, ExecutionArtifactActor, ExecutionArtifactLaunchSpec,
+        ExecutionChainFamily, ExecutionStage, ExecutionTransactionCandidate, ObservationSpec,
+        OutputExportSpec, PredicateSpec, TransactionStage, ValueRef,
+    },
     ids::{CommandId, IdempotencyKey, RunId, SignerRequestId},
+    launch_spec::{LaunchSpecSubmission, PrebuiltFragmentLaunchSpec, ReflectionRequestLaunchSpec},
     ownership::{RunClaimMode, RunClaimOwnerKind},
     recovery::{
         CancelState, InterruptionClass, RunFailureCode, RunFailureContext, RunFailureStage,
@@ -25,7 +33,10 @@ use ais_agent_core::{
         ActionGraph, ActionNode, ActionNodeKind, ActionNodeStatus, ActionOrigin, ActionPayload,
     },
     binding::solana::{SolanaActuateBinding, SolanaConnectionSpec, SolanaVerifyBinding},
-    checkpoint::{CheckpointSnapshot, PendingRequestsSnapshot},
+    checkpoint::{
+        ArtifactContinuationSnapshot, CheckpointSnapshot, ExecutionArtifactRuntimeSnapshot,
+        PendingRequestsSnapshot,
+    },
     evidence::{EvidenceGraph, EvidenceRequirement},
     mission::{Mission, MissionBudget, MissionPolicy},
     runtime::{RunLifecycleState, RunPhase, SignerRequestState},
@@ -86,6 +97,7 @@ async fn runtime_host_service_handles_begin_inspect_and_cancel() {
                     }),
                     metadata: BTreeMap::new(),
                 },
+                launch_spec: empty_prebuilt_launch_spec(),
             }),
         })
         .await;
@@ -140,8 +152,91 @@ async fn runtime_host_service_handles_begin_inspect_and_cancel() {
 }
 
 #[tokio::test]
-async fn runtime_host_service_begin_run_seeds_native_transfer_action_family_checkpoint() {
-    let host_session_id: HostSessionId = "session-native-transfer-begin".into();
+async fn runtime_host_service_begin_run_requires_launch_spec() {
+    let mut service = RuntimeHostService::new(
+        InMemoryRunRepository::default(),
+        InMemoryCheckpointRepository::default(),
+        InMemoryMissionRepository::default(),
+        InMemoryRunCatalogRepository::default(),
+        InMemoryEventArchive::default(),
+        InMemoryHostSessionStore::default(),
+    );
+
+    let begin = service
+        .handle(HostCommandEnvelope {
+            host_session_id: HostSessionId("session-missing-launch-spec".into()),
+            host_request_id: None,
+            command: RunCommand::BeginRun(BeginRunCommand {
+                command_id: CommandId("cmd-missing-launch-spec".to_owned()),
+                idempotency_key: IdempotencyKey("idem-missing-launch-spec".to_owned()),
+                mission: MissionSubmission {
+                    goal: "swap".to_owned(),
+                    allowed_chains: vec!["eip155:1".to_owned()],
+                    constraints: BTreeMap::new(),
+                    budget: None,
+                    metadata: BTreeMap::new(),
+                },
+                launch_spec: None,
+            }),
+        })
+        .await;
+
+    match begin.response {
+        HostCommandResponse::Error(error) => {
+            assert_eq!(error.code, "invalid_command");
+            assert!(error.message.contains("launch_spec"));
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn runtime_host_service_begin_run_rejects_reflection_request_launch_spec() {
+    let mut service = RuntimeHostService::new(
+        InMemoryRunRepository::default(),
+        InMemoryCheckpointRepository::default(),
+        InMemoryMissionRepository::default(),
+        InMemoryRunCatalogRepository::default(),
+        InMemoryEventArchive::default(),
+        InMemoryHostSessionStore::default(),
+    );
+
+    let begin = service
+        .handle(HostCommandEnvelope {
+            host_session_id: HostSessionId("session-reflection-request".into()),
+            host_request_id: None,
+            command: RunCommand::BeginRun(BeginRunCommand {
+                command_id: CommandId("cmd-reflection-request".to_owned()),
+                idempotency_key: IdempotencyKey("idem-reflection-request".to_owned()),
+                mission: MissionSubmission {
+                    goal: "reflect".to_owned(),
+                    allowed_chains: vec!["eip155:1".to_owned()],
+                    constraints: BTreeMap::new(),
+                    budget: None,
+                    metadata: BTreeMap::new(),
+                },
+                launch_spec: Some(LaunchSpecSubmission::ReflectionRequest(
+                    ReflectionRequestLaunchSpec {
+                        request: json!({ "protocol": "uniswap_v3", "intent": "swap_exact_in" }),
+                    },
+                )),
+            }),
+        })
+        .await;
+
+    match begin.response {
+        HostCommandResponse::Error(error) => {
+            assert_eq!(error.code, "invalid_command");
+            assert!(error.message.contains("reflection_request"));
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn runtime_host_service_begin_run_seeds_execution_artifact_runtime_state_for_exports_and_continuation(
+) {
+    let host_session_id: HostSessionId = "session-execution-artifact".into();
     let mut service = RuntimeHostService::new(
         InMemoryRunRepository::default(),
         InMemoryCheckpointRepository::default(),
@@ -153,10 +248,763 @@ async fn runtime_host_service_begin_run_seeds_native_transfer_action_family_chec
     .with_execution_wiring(RuntimeExecutionWiring {
         evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
         solana_rpc_url: None,
-        native_transfer_enabled: true,
-        erc20_transfer_enabled: false,
-        uniswap_v3_swap_enabled: false,
-        uniswap_v3_lp_enabled: false,
+        allowed_protocol_packages: vec!["owliabot.uniswap_v3".to_owned()],
+    });
+
+    let begin = service
+        .handle(HostCommandEnvelope {
+            host_session_id,
+            host_request_id: None,
+            command: RunCommand::BeginRun(BeginRunCommand {
+                command_id: CommandId("cmd-execution-artifact".to_owned()),
+                idempotency_key: IdempotencyKey("idem-execution-artifact".to_owned()),
+                mission: MissionSubmission {
+                    goal: "artifact".to_owned(),
+                    allowed_chains: vec!["8453".to_owned()],
+                    constraints: BTreeMap::new(),
+                    budget: None,
+                    metadata: BTreeMap::new(),
+                },
+                launch_spec: Some(LaunchSpecSubmission::ExecutionArtifact(
+                    ExecutionArtifactLaunchSpec {
+                        protocol_package_id: "owliabot.uniswap_v3".to_owned(),
+                        action_key: "swap".to_owned(),
+                        chain_family: ExecutionChainFamily::Evm,
+                        allowed_chains: vec!["8453".to_owned()],
+                        entry_stage_id: "stage.swap".into(),
+                        actor: None,
+                        transactions: vec![ExecutionTransactionCandidate::EvmTransaction(
+                            EvmTransactionCandidate {
+                                candidate_id: "swap.direct".into(),
+                                to: "0x1111111111111111111111111111111111111111".to_owned(),
+                                value: Some("0".to_owned()),
+                                calldata: Some("0xdeadbeef".to_owned()),
+                            },
+                        )],
+                        stages: vec![
+                            ExecutionStage::Transaction(TransactionStage {
+                                stage_id: "stage.swap".into(),
+                                candidate_ref: "swap.direct".into(),
+                                exports: vec![OutputExportSpec {
+                                    output_key: "swap.tx_hash".into(),
+                                    source: ValueRef::Ref {
+                                        reference: "refs.receipts.stage.swap.tx_hash".to_owned(),
+                                    },
+                                }],
+                                next_stage_id: Some("stage.continue".into()),
+                            }),
+                            ExecutionStage::Continuation(ContinuationStage {
+                                stage_id: "stage.continue".into(),
+                                required_outputs: vec!["swap.tx_hash".into()],
+                                package_entry: "build_aave_supply_from_swap_output".into(),
+                                next_stage_id: None,
+                            }),
+                        ],
+                        preconditions: Vec::new(),
+                        postconditions: Vec::new(),
+                        expected_effects: Vec::new(),
+                        execution_policy: None,
+                        evidence: json!({}),
+                        metadata: BTreeMap::new(),
+                    },
+                )),
+            }),
+        })
+        .await;
+
+    let run_id = match begin.response {
+        HostCommandResponse::Accepted(response) => response.run_id.expect("run id"),
+        other => panic!("unexpected response: {other:?}"),
+    };
+
+    let (run_repo, checkpoint_repo, _, _, _, _, _) = service.into_parts();
+    let runtime = run_repo.load(&run_id).expect("runtime");
+    let artifact = runtime
+        .checkpoint
+        .execution_artifact
+        .as_ref()
+        .expect("execution artifact state");
+    assert_eq!(
+        artifact
+            .active_stage_id
+            .as_ref()
+            .map(|value| value.as_str()),
+        Some("stage.swap")
+    );
+    assert!(artifact
+        .planned_stage_graphs
+        .contains_key(&"stage.swap".into()));
+    assert!(runtime
+        .checkpoint
+        .action_graph
+        .nodes
+        .contains_key("artifact.stage.swap.verify"));
+
+    let latest = checkpoint_repo
+        .latest(run_id.0.as_str())
+        .expect("latest checkpoint");
+    assert!(latest.execution_artifact.is_some());
+}
+
+#[tokio::test]
+async fn runtime_host_service_begin_run_seeds_simple_execution_artifact_checkpoint() {
+    let host_session_id: HostSessionId = "session-execution-artifact-simple".into();
+    let mut service = RuntimeHostService::new(
+        InMemoryRunRepository::default(),
+        InMemoryCheckpointRepository::default(),
+        InMemoryMissionRepository::default(),
+        InMemoryRunCatalogRepository::default(),
+        InMemoryEventArchive::default(),
+        InMemoryHostSessionStore::default(),
+    )
+    .with_execution_wiring(RuntimeExecutionWiring {
+        evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
+        solana_rpc_url: None,
+        allowed_protocol_packages: vec!["owliabot.transfer".to_owned()],
+    });
+
+    let begin = service
+        .handle(HostCommandEnvelope {
+            host_session_id,
+            host_request_id: Some("request-execution-artifact-simple".into()),
+            command: RunCommand::BeginRun(BeginRunCommand {
+                command_id: CommandId("cmd-execution-artifact-simple".to_owned()),
+                idempotency_key: IdempotencyKey("idem-execution-artifact-simple".to_owned()),
+                mission: MissionSubmission {
+                    goal: "artifact_simple".to_owned(),
+                    allowed_chains: vec!["eip155:8453".to_owned()],
+                    constraints: BTreeMap::new(),
+                    budget: None,
+                    metadata: BTreeMap::new(),
+                },
+                launch_spec: Some(LaunchSpecSubmission::ExecutionArtifact(
+                    ExecutionArtifactLaunchSpec {
+                        protocol_package_id: "owliabot.transfer".to_owned(),
+                        action_key: "erc20_transfer".to_owned(),
+                        chain_family: ExecutionChainFamily::Evm,
+                        allowed_chains: vec!["eip155:8453".to_owned()],
+                        entry_stage_id: "stage.transfer".into(),
+                        actor: None,
+                        transactions: vec![ExecutionTransactionCandidate::EvmTransaction(
+                            EvmTransactionCandidate {
+                                candidate_id: "transfer.call".into(),
+                                to: "0x1111111111111111111111111111111111111111".to_owned(),
+                                value: Some("0".to_owned()),
+                                calldata: Some("0xa9059cbb".to_owned()),
+                            },
+                        )],
+                        stages: vec![ExecutionStage::Transaction(TransactionStage {
+                            stage_id: "stage.transfer".into(),
+                            candidate_ref: "transfer.call".into(),
+                            exports: Vec::new(),
+                            next_stage_id: None,
+                        })],
+                        preconditions: Vec::new(),
+                        postconditions: Vec::new(),
+                        expected_effects: Vec::new(),
+                        execution_policy: None,
+                        evidence: json!({}),
+                        metadata: BTreeMap::new(),
+                    },
+                )),
+            }),
+        })
+        .await;
+
+    let run_id = match begin.response {
+        HostCommandResponse::Accepted(response) => response.run_id.expect("run id"),
+        other => panic!("unexpected response: {other:?}"),
+    };
+
+    let (run_repo, checkpoint_repo, _, _, _, _, _) = service.into_parts();
+    let runtime = run_repo.load(&run_id).expect("runtime");
+    assert!(runtime
+        .checkpoint
+        .action_graph
+        .nodes
+        .contains_key("artifact.stage.transfer.simulate"));
+    assert!(runtime
+        .checkpoint
+        .action_graph
+        .nodes
+        .contains_key("artifact.stage.transfer.actuate"));
+    assert!(runtime
+        .checkpoint
+        .action_graph
+        .nodes
+        .contains_key("artifact.stage.transfer.verify"));
+
+    match &runtime
+        .checkpoint
+        .action_graph
+        .nodes
+        .get("artifact.stage.transfer.simulate")
+        .expect("simulate node")
+        .payload
+    {
+        ActionPayload::Simulate(action) => {
+            let live = action.live.as_ref().expect("live simulate binding");
+            let ais_agent_core::action::kinds::simulate::SimulateLiveBinding::Evm(live) = live
+            else {
+                panic!("expected evm simulate binding");
+            };
+            assert_eq!(
+                live.request.data,
+                alloy::primitives::Bytes::copy_from_slice(&[0xa9, 0x05, 0x9c, 0xbb])
+            );
+        }
+        other => panic!("unexpected simulate payload: {other:?}"),
+    }
+
+    let latest = checkpoint_repo
+        .latest(run_id.0.as_str())
+        .expect("latest checkpoint");
+    assert!(latest
+        .action_graph
+        .nodes
+        .contains_key("artifact.stage.transfer.verify"));
+}
+
+#[tokio::test]
+async fn runtime_host_service_accepts_generic_execution_artifact_for_new_protocol_package() {
+    let host_session_id: HostSessionId = "session-execution-artifact-generic-package".into();
+    let mut service = RuntimeHostService::new(
+        InMemoryRunRepository::default(),
+        InMemoryCheckpointRepository::default(),
+        InMemoryMissionRepository::default(),
+        InMemoryRunCatalogRepository::default(),
+        InMemoryEventArchive::default(),
+        InMemoryHostSessionStore::default(),
+    )
+    .with_execution_wiring(RuntimeExecutionWiring {
+        evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
+        solana_rpc_url: None,
+        allowed_protocol_packages: vec!["demo.protocol".to_owned()],
+    });
+
+    let begin = service
+        .handle(HostCommandEnvelope {
+            host_session_id,
+            host_request_id: Some("request-execution-artifact-generic-package".into()),
+            command: RunCommand::BeginRun(BeginRunCommand {
+                command_id: CommandId("cmd-execution-artifact-generic-package".to_owned()),
+                idempotency_key: IdempotencyKey(
+                    "idem-execution-artifact-generic-package".to_owned(),
+                ),
+                mission: MissionSubmission {
+                    goal: "owliabot:demo.protocol:custom_call".to_owned(),
+                    allowed_chains: vec!["8453".to_owned()],
+                    constraints: BTreeMap::from([
+                        ("owliabot_action_key".to_owned(), json!("custom_call")),
+                        (
+                            "owliabot_protocol_package_id".to_owned(),
+                            json!("demo.protocol"),
+                        ),
+                        ("owliabot_execution_mode".to_owned(), json!("harness")),
+                    ]),
+                    budget: None,
+                    metadata: BTreeMap::from([("proof".to_owned(), json!("m38.generic_package"))]),
+                },
+                launch_spec: Some(LaunchSpecSubmission::ExecutionArtifact(
+                    ExecutionArtifactLaunchSpec {
+                        protocol_package_id: "demo.protocol".to_owned(),
+                        action_key: "custom_call".to_owned(),
+                        chain_family: ExecutionChainFamily::Evm,
+                        allowed_chains: vec!["8453".to_owned()],
+                        entry_stage_id: "stage.call".into(),
+                        actor: None,
+                        transactions: vec![ExecutionTransactionCandidate::EvmTransaction(
+                            EvmTransactionCandidate {
+                                candidate_id: "call.direct".into(),
+                                to: "0x9999999999999999999999999999999999999999".to_owned(),
+                                value: Some("0".to_owned()),
+                                calldata: Some("0xdeadbeef".to_owned()),
+                            },
+                        )],
+                        stages: vec![ExecutionStage::Transaction(TransactionStage {
+                            stage_id: "stage.call".into(),
+                            candidate_ref: "call.direct".into(),
+                            exports: Vec::new(),
+                            next_stage_id: None,
+                        })],
+                        preconditions: Vec::new(),
+                        postconditions: Vec::new(),
+                        expected_effects: Vec::new(),
+                        execution_policy: None,
+                        evidence: json!({ "shape": "generic" }),
+                        metadata: BTreeMap::from([("builder".to_owned(), json!("test.generic"))]),
+                    },
+                )),
+            }),
+        })
+        .await;
+
+    let run_id = match begin.response {
+        HostCommandResponse::Accepted(response) => response.run_id.expect("run id"),
+        other => panic!("unexpected response: {other:?}"),
+    };
+
+    let (run_repo, checkpoint_repo, mission_repo, _, _, _, _) = service.into_parts();
+    let mission = mission_repo.load(&run_id).expect("persisted mission");
+    assert_eq!(mission.goal, "owliabot:demo.protocol:custom_call");
+    assert_eq!(
+        mission.constraints.get("owliabot_protocol_package_id"),
+        Some(&json!("demo.protocol"))
+    );
+
+    let runtime = run_repo.load(&run_id).expect("runtime");
+    let artifact = runtime
+        .checkpoint
+        .execution_artifact
+        .as_ref()
+        .expect("execution artifact runtime state");
+    assert_eq!(artifact.launch_spec.protocol_package_id, "demo.protocol");
+    assert_eq!(artifact.launch_spec.action_key, "custom_call");
+    assert!(runtime
+        .checkpoint
+        .action_graph
+        .nodes
+        .contains_key("artifact.stage.call.simulate"));
+    assert!(runtime
+        .checkpoint
+        .action_graph
+        .nodes
+        .contains_key("artifact.stage.call.actuate"));
+    assert!(runtime
+        .checkpoint
+        .action_graph
+        .nodes
+        .contains_key("artifact.stage.call.verify"));
+
+    let latest = checkpoint_repo
+        .latest(run_id.0.as_str())
+        .expect("latest checkpoint");
+    assert!(latest.execution_artifact.is_some());
+}
+
+#[tokio::test]
+async fn runtime_host_service_submits_execution_artifact_continuation_and_reseeds_runtime() {
+    let (
+        run_repo,
+        checkpoint_repo,
+        mission_repo,
+        run_catalog_repo,
+        event_archive,
+        session_store,
+        run_id,
+        host_session_id,
+    ) = preloaded_continuation_wait_runtime();
+    let mut service = RuntimeHostService::new(
+        run_repo,
+        checkpoint_repo,
+        mission_repo,
+        run_catalog_repo,
+        event_archive,
+        session_store,
+    )
+    .with_execution_wiring(RuntimeExecutionWiring {
+        evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
+        solana_rpc_url: None,
+        allowed_protocol_packages: vec![
+            "owliabot.uniswap_v3".to_owned(),
+            "owliabot.aave_v3".to_owned(),
+        ],
+    });
+
+    let inspect = service
+        .handle(HostCommandEnvelope {
+            host_session_id: host_session_id.clone(),
+            host_request_id: None,
+            command: RunCommand::InspectRun(ais_agent_control::commands::InspectRunCommand {
+                command_id: CommandId("cmd-execution-artifact-continuation-inspect".to_owned()),
+                run_id: run_id.clone(),
+            }),
+        })
+        .await;
+
+    match inspect.response {
+        HostCommandResponse::Inspect(snapshot) => {
+            assert_eq!(snapshot.status, RunStatus::AwaitingContinuation);
+            assert_eq!(snapshot.pending_continuations.len(), 1);
+        }
+        other => panic!("unexpected inspect response: {other:?}"),
+    }
+
+    let paused = service
+        .handle(HostCommandEnvelope {
+            host_session_id: host_session_id.clone(),
+            host_request_id: Some("request-execution-artifact-continuation-pause".into()),
+            command: RunCommand::StepRun(StepRunCommand {
+                command_id: CommandId("cmd-execution-artifact-continuation-pause".to_owned()),
+                run_id: run_id.clone(),
+                until: StepUntil::CompleteOrBoundary,
+                budget: Some(StepBudget {
+                    max_nodes: Some(1),
+                    max_wall_clock_ms: None,
+                }),
+                expected_version: None,
+            }),
+        })
+        .await;
+
+    match paused.response {
+        HostCommandResponse::Pause(pause) => {
+            assert_eq!(
+                pause.kind,
+                ais_agent_host::inspect::PauseKind::NeedContinuation
+            );
+            assert_eq!(pause.pending_continuations.len(), 1);
+            assert_eq!(
+                pause.pending_continuations[0].package_entry.as_str(),
+                "build_aave_supply_from_swap_output"
+            );
+        }
+        other => panic!("unexpected pause response: {other:?}"),
+    }
+
+    let continuation_batch = service
+        .list_events(HostRunEventQuery {
+            run_id: run_id.clone(),
+            after_event_seq: Some(0),
+            limit: Some(20),
+        })
+        .await
+        .expect("continuation event batch");
+    assert!(continuation_batch.events.iter().any(|event| matches!(
+        event.event,
+        RunEvent::AwaitingContinuation(ref awaiting)
+            if awaiting.stage_id.as_ref().map(|stage_id| stage_id.as_str()) == Some("stage.continue")
+                && awaiting
+                    .package_entry
+                    .as_ref()
+                    .map(|package_entry| package_entry.as_str())
+                    == Some("build_aave_supply_from_swap_output")
+                && awaiting.required_outputs.len() == 1
+                && awaiting.required_outputs[0].as_str() == "swap.tx_hash"
+                && awaiting
+                    .resolved_outputs
+                    .get(&"swap.tx_hash".into())
+                    .and_then(|value| value.as_str())
+                    == Some("0xabc")
+    )));
+
+    let submit = service
+        .handle(HostCommandEnvelope {
+            host_session_id: host_session_id.clone(),
+            host_request_id: Some("request-execution-artifact-continuation-submit".into()),
+            command: RunCommand::SubmitExecutionArtifactContinuation(
+                SubmitExecutionArtifactContinuationCommand {
+                    command_id: CommandId("cmd-execution-artifact-continuation-submit".to_owned()),
+                    run_id: run_id.clone(),
+                    package_entry: "build_aave_supply_from_swap_output".into(),
+                    artifact: ExecutionArtifactLaunchSpec {
+                        protocol_package_id: "owliabot.aave_v3".to_owned(),
+                        action_key: "supply".to_owned(),
+                        chain_family: ExecutionChainFamily::Evm,
+                        allowed_chains: vec!["8453".to_owned()],
+                        entry_stage_id: "stage.supply".into(),
+                        actor: None,
+                        transactions: vec![ExecutionTransactionCandidate::EvmTransaction(
+                            EvmTransactionCandidate {
+                                candidate_id: "supply.direct".into(),
+                                to: "0x2222222222222222222222222222222222222222".to_owned(),
+                                value: Some("0".to_owned()),
+                                calldata: Some("0xbeadfeed".to_owned()),
+                            },
+                        )],
+                        stages: vec![ExecutionStage::Transaction(TransactionStage {
+                            stage_id: "stage.supply".into(),
+                            candidate_ref: "supply.direct".into(),
+                            exports: Vec::new(),
+                            next_stage_id: None,
+                        })],
+                        preconditions: Vec::new(),
+                        postconditions: Vec::new(),
+                        expected_effects: Vec::new(),
+                        execution_policy: None,
+                        evidence: json!({}),
+                        metadata: BTreeMap::new(),
+                    },
+                    expected_version: None,
+                },
+            ),
+        })
+        .await;
+
+    match submit.response {
+        HostCommandResponse::Inspect(snapshot) => {
+            assert_eq!(snapshot.status, RunStatus::Running);
+            assert!(snapshot.pending_continuations.is_empty());
+        }
+        other => panic!("unexpected submit response: {other:?}"),
+    }
+
+    let (run_repo, checkpoint_repo, _, _, _, _, _) = service.into_parts();
+    let runtime = run_repo.load(&run_id).expect("runtime");
+    let artifact = runtime
+        .checkpoint
+        .execution_artifact
+        .as_ref()
+        .expect("execution artifact state");
+    assert_eq!(artifact.launch_spec.action_key, "supply");
+    assert_eq!(
+        artifact
+            .active_stage_id
+            .as_ref()
+            .map(|stage_id| stage_id.as_str()),
+        Some("stage.supply")
+    );
+    assert!(artifact.awaiting_continuation.is_none());
+    assert_eq!(
+        artifact
+            .exported_outputs
+            .get(&"swap.tx_hash".into())
+            .and_then(|value| value.as_str()),
+        Some("0xabc")
+    );
+
+    let latest = checkpoint_repo
+        .latest(run_id.0.as_str())
+        .expect("latest checkpoint");
+    assert_eq!(
+        latest.lifecycle.status,
+        ais_agent_core::runtime::RunStatus::Running
+    );
+    assert!(latest
+        .execution_artifact
+        .as_ref()
+        .and_then(|artifact| artifact.awaiting_continuation.as_ref())
+        .is_none());
+}
+
+#[tokio::test]
+async fn runtime_host_service_begin_run_accepts_branching_execution_artifact_entry_stage() {
+    let mut service = RuntimeHostService::new(
+        InMemoryRunRepository::default(),
+        InMemoryCheckpointRepository::default(),
+        InMemoryMissionRepository::default(),
+        InMemoryRunCatalogRepository::default(),
+        InMemoryEventArchive::default(),
+        InMemoryHostSessionStore::default(),
+    )
+    .with_execution_wiring(RuntimeExecutionWiring {
+        evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
+        solana_rpc_url: None,
+        allowed_protocol_packages: vec!["owliabot.uniswap_v3".to_owned()],
+    });
+
+    let begin = service
+        .handle(HostCommandEnvelope {
+            host_session_id: HostSessionId("session-execution-artifact-branch".into()),
+            host_request_id: None,
+            command: RunCommand::BeginRun(BeginRunCommand {
+                command_id: CommandId("cmd-execution-artifact-branch".to_owned()),
+                idempotency_key: IdempotencyKey("idem-execution-artifact-branch".to_owned()),
+                mission: MissionSubmission {
+                    goal: "artifact_branch".to_owned(),
+                    allowed_chains: vec!["8453".to_owned()],
+                    constraints: BTreeMap::new(),
+                    budget: None,
+                    metadata: BTreeMap::new(),
+                },
+                launch_spec: Some(LaunchSpecSubmission::ExecutionArtifact(
+                    ExecutionArtifactLaunchSpec {
+                        protocol_package_id: "owliabot.uniswap_v3".to_owned(),
+                        action_key: "swap".to_owned(),
+                        chain_family: ExecutionChainFamily::Evm,
+                        allowed_chains: vec!["8453".to_owned()],
+                        entry_stage_id: "stage.allowance".into(),
+                        actor: None,
+                        transactions: vec![ExecutionTransactionCandidate::EvmTransaction(
+                            EvmTransactionCandidate {
+                                candidate_id: "swap.call".into(),
+                                to: "0x1111111111111111111111111111111111111111".to_owned(),
+                                value: Some("0".to_owned()),
+                                calldata: Some("0xdeadbeef".to_owned()),
+                            },
+                        )],
+                        stages: vec![
+                            ExecutionStage::Branch(BranchStage {
+                                stage_id: "stage.allowance".into(),
+                                predicate: PredicateSpec::Comparison {
+                                    left: ValueRef::Ref {
+                                        reference: "refs.allowance.current_atomic".to_owned(),
+                                    },
+                                    op: ComparisonOperator::Lt,
+                                    right: ValueRef::Literal {
+                                        value: json!("100"),
+                                    },
+                                },
+                                if_true: BranchTarget::GotoStage {
+                                    stage_id: "stage.swap".into(),
+                                },
+                                if_false: BranchTarget::Assert {
+                                    failure_code: "unexpected".to_owned(),
+                                    message: "unexpected".to_owned(),
+                                },
+                            }),
+                            ExecutionStage::Transaction(TransactionStage {
+                                stage_id: "stage.swap".into(),
+                                candidate_ref: "swap.call".into(),
+                                exports: Vec::new(),
+                                next_stage_id: None,
+                            }),
+                        ],
+                        preconditions: Vec::new(),
+                        postconditions: Vec::new(),
+                        expected_effects: Vec::new(),
+                        execution_policy: None,
+                        evidence: json!({}),
+                        metadata: BTreeMap::new(),
+                    },
+                )),
+            }),
+        })
+        .await;
+
+    let run_id = match begin.response {
+        HostCommandResponse::Accepted(response) => response.run_id.expect("run id"),
+        other => panic!("unexpected response: {other:?}"),
+    };
+
+    let (run_repo, checkpoint_repo, _, _, _, _, _) = service.into_parts();
+    let runtime = run_repo.load(&run_id).expect("runtime");
+    assert!(runtime.checkpoint.action_graph.nodes.is_empty());
+    let artifact = runtime
+        .checkpoint
+        .execution_artifact
+        .as_ref()
+        .expect("execution artifact state");
+    assert_eq!(
+        artifact
+            .active_stage_id
+            .as_ref()
+            .map(|value| value.as_str()),
+        Some("stage.allowance")
+    );
+
+    let latest = checkpoint_repo
+        .latest(run_id.0.as_str())
+        .expect("latest checkpoint");
+    assert!(latest.execution_artifact.is_some());
+    assert!(latest.action_graph.nodes.is_empty());
+}
+
+#[tokio::test]
+async fn runtime_host_service_begin_run_rejects_invalid_prebuilt_action_graph() {
+    let mut service = RuntimeHostService::new(
+        InMemoryRunRepository::default(),
+        InMemoryCheckpointRepository::default(),
+        InMemoryMissionRepository::default(),
+        InMemoryRunCatalogRepository::default(),
+        InMemoryEventArchive::default(),
+        InMemoryHostSessionStore::default(),
+    );
+
+    let begin = service
+        .handle(HostCommandEnvelope {
+            host_session_id: HostSessionId("session-invalid-prebuilt-action-graph".into()),
+            host_request_id: None,
+            command: RunCommand::BeginRun(BeginRunCommand {
+                command_id: CommandId("cmd-invalid-prebuilt-action-graph".to_owned()),
+                idempotency_key: IdempotencyKey("idem-invalid-prebuilt-action-graph".to_owned()),
+                mission: MissionSubmission {
+                    goal: "invalid_prebuilt".to_owned(),
+                    allowed_chains: vec!["eip155:1".to_owned()],
+                    constraints: BTreeMap::new(),
+                    budget: None,
+                    metadata: BTreeMap::new(),
+                },
+                launch_spec: Some(LaunchSpecSubmission::PrebuiltFragment(
+                    PrebuiltFragmentLaunchSpec {
+                        action_graph: Some(json!("not-an-action-graph")),
+                        evidence_graph: None,
+                        effect_contracts: None,
+                    },
+                )),
+            }),
+        })
+        .await;
+
+    match begin.response {
+        HostCommandResponse::Error(error) => {
+            assert_eq!(error.code, "invalid_command");
+            assert!(error.message.contains("prebuilt_fragment.action_graph"));
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn runtime_host_service_begin_run_rejects_prebuilt_effect_contract_key_mismatch() {
+    let mut service = RuntimeHostService::new(
+        InMemoryRunRepository::default(),
+        InMemoryCheckpointRepository::default(),
+        InMemoryMissionRepository::default(),
+        InMemoryRunCatalogRepository::default(),
+        InMemoryEventArchive::default(),
+        InMemoryHostSessionStore::default(),
+    );
+
+    let begin = service
+        .handle(HostCommandEnvelope {
+            host_session_id: HostSessionId("session-invalid-prebuilt-effect-contracts".into()),
+            host_request_id: None,
+            command: RunCommand::BeginRun(BeginRunCommand {
+                command_id: CommandId("cmd-invalid-prebuilt-effect-contracts".to_owned()),
+                idempotency_key: IdempotencyKey(
+                    "idem-invalid-prebuilt-effect-contracts".to_owned(),
+                ),
+                mission: MissionSubmission {
+                    goal: "invalid_prebuilt".to_owned(),
+                    allowed_chains: vec!["eip155:1".to_owned()],
+                    constraints: BTreeMap::new(),
+                    budget: None,
+                    metadata: BTreeMap::new(),
+                },
+                launch_spec: Some(LaunchSpecSubmission::PrebuiltFragment(
+                    PrebuiltFragmentLaunchSpec {
+                        action_graph: None,
+                        evidence_graph: None,
+                        effect_contracts: Some(json!({
+                            "effect.expected": {
+                                "effect_id": "effect.other",
+                                "kind": "asset_delta",
+                                "assertions": [],
+                                "tolerance_hint": null
+                            }
+                        })),
+                    },
+                )),
+            }),
+        })
+        .await;
+
+    match begin.response {
+        HostCommandResponse::Error(error) => {
+            assert_eq!(error.code, "invalid_command");
+            assert!(error.message.contains("effect_contracts key"));
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn runtime_host_service_begin_run_accepts_native_transfer_execution_artifact() {
+    let host_session_id: HostSessionId = "session-native-transfer-begin".into();
+    let artifact = sample_native_transfer_execution_artifact();
+    let mut service = RuntimeHostService::new(
+        InMemoryRunRepository::default(),
+        InMemoryCheckpointRepository::default(),
+        InMemoryMissionRepository::default(),
+        InMemoryRunCatalogRepository::default(),
+        InMemoryEventArchive::default(),
+        InMemoryHostSessionStore::default(),
+    )
+    .with_execution_wiring(RuntimeExecutionWiring {
+        evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
+        solana_rpc_url: None,
+        allowed_protocol_packages: vec!["owliabot.transfer".to_owned()],
     });
 
     let begin = service
@@ -167,40 +1015,18 @@ async fn runtime_host_service_begin_run_seeds_native_transfer_action_family_chec
                 command_id: CommandId("cmd-native-transfer-begin".to_owned()),
                 idempotency_key: IdempotencyKey("idem-native-transfer-begin".to_owned()),
                 mission: MissionSubmission {
-                    goal: "owliabot:native_transfer".to_owned(),
-                    allowed_chains: vec!["eip155:11155111".to_owned()],
+                    goal: "owliabot:owliabot.transfer:native_transfer".to_owned(),
+                    allowed_chains: vec!["11155111".to_owned()],
                     constraints: BTreeMap::from([
+                        ("owliabot_action_key".to_owned(), json!("native_transfer")),
                         (
-                            "owliabot_action_family".to_owned(),
-                            json!("native_transfer"),
+                            "owliabot_protocol_package_id".to_owned(),
+                            json!("owliabot.transfer"),
                         ),
+                        ("owliabot_execution_mode".to_owned(), json!("harness")),
                         (
-                            "owliabot_submission".to_owned(),
-                            json!({
-                                "payload": {
-                                    "chain": "11155111",
-                                    "recipient": "0x1111111111111111111111111111111111111111",
-                                    "requested_amount": "0.00000000000000003",
-                                    "asset_symbol": "ETH",
-                                    "sender_address_hint": "0x2222222222222222222222222222222222222222"
-                                },
-                                "evidence": {
-                                    "recipient": {
-                                        "user_input": "0x1111111111111111111111111111111111111111",
-                                        "normalized_address": "0x1111111111111111111111111111111111111111",
-                                        "source": "wallet_transfer",
-                                        "user_confirmed": true
-                                    },
-                                    "amount": {
-                                        "user_input": "0.00000000000000003",
-                                        "normalized_amount": "0.00000000000000003",
-                                        "atomic_amount": "30",
-                                        "decimals": 18,
-                                        "source": "wallet_transfer",
-                                        "user_confirmed": true
-                                    }
-                                }
-                            }),
+                            "owliabot_execution_artifact".to_owned(),
+                            serde_json::to_value(&artifact).expect("execution artifact json"),
                         ),
                     ]),
                     budget: Some(MissionBudgetSubmission {
@@ -208,8 +1034,12 @@ async fn runtime_host_service_begin_run_seeds_native_transfer_action_family_chec
                         max_signer_requests: Some(1),
                         max_wall_clock_ms: Some(30_000),
                     }),
-                    metadata: BTreeMap::new(),
+                    metadata: BTreeMap::from([
+                        ("owliabot_agent_id".to_owned(), json!("test-agent")),
+                        ("tool_name".to_owned(), json!("wallet_transfer")),
+                    ]),
                 },
+                launch_spec: Some(LaunchSpecSubmission::ExecutionArtifact(artifact.clone())),
             }),
         })
         .await;
@@ -229,31 +1059,68 @@ async fn runtime_host_service_begin_run_seeds_native_transfer_action_family_chec
         _signer_state_archive,
     ) = service.into_parts();
     let runtime = run_repo.load(&run_id).expect("runtime");
-    assert!(runtime
+    let execution_artifact = runtime
         .checkpoint
-        .action_graph
-        .nodes
-        .contains_key("observe.native_transfer.recipient_balance"));
-    assert!(runtime
-        .checkpoint
-        .action_graph
-        .nodes
-        .contains_key("verify.native_transfer.effect"));
+        .execution_artifact
+        .as_ref()
+        .expect("execution artifact state");
+    assert_eq!(execution_artifact.launch_spec.action_key, "native_transfer");
+    assert_eq!(
+        execution_artifact.launch_spec.expected_effects.len(),
+        1,
+        "native transfer artifact should seed one expected effect"
+    );
+    assert_eq!(
+        execution_artifact
+            .active_stage_id
+            .as_ref()
+            .map(|stage_id| stage_id.as_str()),
+        Some("stage.transfer")
+    );
     assert!(runtime
         .checkpoint
         .effect_contracts
-        .contains_key("effect.native_transfer"));
+        .contains_key("effect.transfer"));
+    let verify_node = runtime
+        .checkpoint
+        .action_graph
+        .nodes
+        .get("artifact.stage.transfer.verify")
+        .expect("verify node");
+    let ActionPayload::Verify(verify_payload) = &verify_node.payload else {
+        panic!("expected verify payload");
+    };
+    assert_eq!(verify_payload.verify_kind, VerifyKind::EffectContract);
+    assert_eq!(
+        verify_node.expected_effect_ref.as_deref(),
+        Some("effect.transfer")
+    );
+    assert_eq!(
+        execution_artifact
+            .launch_spec
+            .metadata
+            .get("builder")
+            .and_then(|value| value.as_str()),
+        Some("buildNativeTransferExecutionArtifact")
+    );
     assert!(runtime
         .checkpoint
-        .evidence_graph
-        .records
-        .contains_key("evidence.transfer.amount"));
+        .action_graph
+        .nodes
+        .contains_key("artifact.stage.transfer.pre_observe.state.pre.recipient_balance"));
+    assert!(runtime
+        .checkpoint
+        .action_graph
+        .nodes
+        .contains_key("artifact.stage.transfer.verify"));
+    assert_eq!(runtime.checkpoint.effect_contracts.len(), 1);
+    assert!(runtime.checkpoint.evidence_graph.records.is_empty());
 
     match &runtime
         .checkpoint
         .action_graph
         .nodes
-        .get("simulate.native_transfer.call")
+        .get("artifact.stage.transfer.simulate")
         .expect("simulate node")
         .payload
     {
@@ -271,15 +1138,23 @@ async fn runtime_host_service_begin_run_seeds_native_transfer_action_family_chec
     let latest = checkpoint_repo
         .latest(run_id.0.as_str())
         .expect("latest checkpoint");
+    assert!(latest.execution_artifact.as_ref().is_some_and(|artifact| {
+        artifact
+            .active_stage_id
+            .as_ref()
+            .map(|stage_id| stage_id.as_str())
+            == Some("stage.transfer")
+    }));
     assert!(latest
         .action_graph
         .nodes
-        .contains_key("actuate.native_transfer.send"));
+        .contains_key("artifact.stage.transfer.actuate"));
 }
 
 #[tokio::test]
-async fn runtime_host_service_begin_run_seeds_erc20_transfer_action_family_checkpoint() {
+async fn runtime_host_service_begin_run_accepts_erc20_transfer_execution_artifact() {
     let host_session_id: HostSessionId = "session-erc20-transfer-begin".into();
+    let artifact = sample_erc20_transfer_execution_artifact();
     let mut service = RuntimeHostService::new(
         InMemoryRunRepository::default(),
         InMemoryCheckpointRepository::default(),
@@ -291,10 +1166,7 @@ async fn runtime_host_service_begin_run_seeds_erc20_transfer_action_family_check
     .with_execution_wiring(RuntimeExecutionWiring {
         evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
         solana_rpc_url: None,
-        native_transfer_enabled: false,
-        erc20_transfer_enabled: true,
-        uniswap_v3_swap_enabled: false,
-        uniswap_v3_lp_enabled: false,
+        allowed_protocol_packages: vec!["owliabot.transfer".to_owned()],
     });
 
     let begin = service
@@ -305,45 +1177,18 @@ async fn runtime_host_service_begin_run_seeds_erc20_transfer_action_family_check
                 command_id: CommandId("cmd-erc20-transfer-begin".to_owned()),
                 idempotency_key: IdempotencyKey("idem-erc20-transfer-begin".to_owned()),
                 mission: MissionSubmission {
-                    goal: "owliabot:erc20_transfer".to_owned(),
-                    allowed_chains: vec!["eip155:11155111".to_owned()],
+                    goal: "owliabot:owliabot.transfer:erc20_transfer".to_owned(),
+                    allowed_chains: vec!["11155111".to_owned()],
                     constraints: BTreeMap::from([
-                        ("owliabot_action_family".to_owned(), json!("erc20_transfer")),
+                        ("owliabot_action_key".to_owned(), json!("erc20_transfer")),
                         (
-                            "owliabot_submission".to_owned(),
-                            json!({
-                                "payload": {
-                                    "chain": "11155111",
-                                    "token_address": "0x3333333333333333333333333333333333333333",
-                                    "token_symbol": "USDC",
-                                    "recipient": "0x1111111111111111111111111111111111111111",
-                                    "requested_amount": "10",
-                                    "sender_address_hint": "0x2222222222222222222222222222222222222222"
-                                },
-                                "evidence": {
-                                    "recipient": {
-                                        "user_input": "0x1111111111111111111111111111111111111111",
-                                        "normalized_address": "0x1111111111111111111111111111111111111111",
-                                        "source": "wallet_transfer",
-                                        "user_confirmed": true
-                                    },
-                                    "amount": {
-                                        "user_input": "10",
-                                        "normalized_amount": "10",
-                                        "atomic_amount": "10000000",
-                                        "decimals": 6,
-                                        "source": "wallet_transfer",
-                                        "user_confirmed": true
-                                    },
-                                    "token": {
-                                        "token_address": "0x3333333333333333333333333333333333333333",
-                                        "token_symbol": "USDC",
-                                        "decimals": 6,
-                                        "resolution_source": "token_registry",
-                                        "user_confirmed": true
-                                    }
-                                }
-                            }),
+                            "owliabot_protocol_package_id".to_owned(),
+                            json!("owliabot.transfer"),
+                        ),
+                        ("owliabot_execution_mode".to_owned(), json!("harness")),
+                        (
+                            "owliabot_execution_artifact".to_owned(),
+                            serde_json::to_value(&artifact).expect("execution artifact json"),
                         ),
                     ]),
                     budget: Some(MissionBudgetSubmission {
@@ -351,8 +1196,12 @@ async fn runtime_host_service_begin_run_seeds_erc20_transfer_action_family_check
                         max_signer_requests: Some(1),
                         max_wall_clock_ms: Some(30_000),
                     }),
-                    metadata: BTreeMap::new(),
+                    metadata: BTreeMap::from([
+                        ("owliabot_agent_id".to_owned(), json!("test-agent")),
+                        ("tool_name".to_owned(), json!("wallet_transfer")),
+                    ]),
                 },
+                launch_spec: Some(LaunchSpecSubmission::ExecutionArtifact(artifact.clone())),
             }),
         })
         .await;
@@ -372,31 +1221,68 @@ async fn runtime_host_service_begin_run_seeds_erc20_transfer_action_family_check
         _signer_state_archive,
     ) = service.into_parts();
     let runtime = run_repo.load(&run_id).expect("runtime");
-    assert!(runtime
+    let execution_artifact = runtime
         .checkpoint
-        .action_graph
-        .nodes
-        .contains_key("observe.erc20_transfer.recipient_token_balance"));
-    assert!(runtime
-        .checkpoint
-        .action_graph
-        .nodes
-        .contains_key("verify.erc20_transfer.effect"));
+        .execution_artifact
+        .as_ref()
+        .expect("execution artifact state");
+    assert_eq!(execution_artifact.launch_spec.action_key, "erc20_transfer");
+    assert_eq!(
+        execution_artifact.launch_spec.expected_effects.len(),
+        1,
+        "erc20 transfer artifact should seed one expected effect"
+    );
+    assert_eq!(
+        execution_artifact
+            .active_stage_id
+            .as_ref()
+            .map(|stage_id| stage_id.as_str()),
+        Some("stage.transfer")
+    );
     assert!(runtime
         .checkpoint
         .effect_contracts
-        .contains_key("effect.erc20_transfer"));
+        .contains_key("effect.transfer"));
+    let verify_node = runtime
+        .checkpoint
+        .action_graph
+        .nodes
+        .get("artifact.stage.transfer.verify")
+        .expect("verify node");
+    let ActionPayload::Verify(verify_payload) = &verify_node.payload else {
+        panic!("expected verify payload");
+    };
+    assert_eq!(verify_payload.verify_kind, VerifyKind::EffectContract);
+    assert_eq!(
+        verify_node.expected_effect_ref.as_deref(),
+        Some("effect.transfer")
+    );
+    assert_eq!(
+        execution_artifact
+            .launch_spec
+            .metadata
+            .get("builder")
+            .and_then(|value| value.as_str()),
+        Some("buildErc20TransferExecutionArtifact")
+    );
     assert!(runtime
         .checkpoint
-        .evidence_graph
-        .records
-        .contains_key("evidence.transfer.token"));
+        .action_graph
+        .nodes
+        .contains_key("artifact.stage.transfer.pre_observe.state.pre.recipient_token_balance"));
+    assert!(runtime
+        .checkpoint
+        .action_graph
+        .nodes
+        .contains_key("artifact.stage.transfer.verify"));
+    assert_eq!(runtime.checkpoint.effect_contracts.len(), 1);
+    assert!(runtime.checkpoint.evidence_graph.records.is_empty());
 
     match &runtime
         .checkpoint
         .action_graph
         .nodes
-        .get("simulate.erc20_transfer.call")
+        .get("artifact.stage.transfer.simulate")
         .expect("simulate node")
         .payload
     {
@@ -418,15 +1304,23 @@ async fn runtime_host_service_begin_run_seeds_erc20_transfer_action_family_check
     let latest = checkpoint_repo
         .latest(run_id.0.as_str())
         .expect("latest checkpoint");
+    assert!(latest.execution_artifact.as_ref().is_some_and(|artifact| {
+        artifact
+            .active_stage_id
+            .as_ref()
+            .map(|stage_id| stage_id.as_str())
+            == Some("stage.transfer")
+    }));
     assert!(latest
         .action_graph
         .nodes
-        .contains_key("actuate.erc20_transfer.send"));
+        .contains_key("artifact.stage.transfer.actuate"));
 }
 
 #[tokio::test]
-async fn runtime_host_service_begin_run_seeds_uniswap_v3_swap_action_family_checkpoint() {
+async fn runtime_host_service_begin_run_accepts_owliabot_uniswap_v3_swap_execution_artifact() {
     let host_session_id: HostSessionId = "session-uniswap-v3-swap-begin".into();
+    let artifact = sample_uniswap_v3_swap_execution_artifact();
     let mut service = RuntimeHostService::new(
         InMemoryRunRepository::default(),
         InMemoryCheckpointRepository::default(),
@@ -438,10 +1332,7 @@ async fn runtime_host_service_begin_run_seeds_uniswap_v3_swap_action_family_chec
     .with_execution_wiring(RuntimeExecutionWiring {
         evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
         solana_rpc_url: None,
-        native_transfer_enabled: false,
-        erc20_transfer_enabled: false,
-        uniswap_v3_swap_enabled: true,
-        uniswap_v3_lp_enabled: false,
+        allowed_protocol_packages: vec!["owliabot.uniswap_v3".to_owned()],
     });
 
     let begin = service
@@ -452,68 +1343,18 @@ async fn runtime_host_service_begin_run_seeds_uniswap_v3_swap_action_family_chec
                 command_id: CommandId("cmd-uniswap-v3-swap-begin".to_owned()),
                 idempotency_key: IdempotencyKey("idem-uniswap-v3-swap-begin".to_owned()),
                 mission: MissionSubmission {
-                    goal: "owliabot:uniswap_v3_swap".to_owned(),
-                    allowed_chains: vec!["eip155:11155111".to_owned()],
+                    goal: "owliabot:owliabot.uniswap_v3:uniswap_v3_swap".to_owned(),
+                    allowed_chains: vec!["8453".to_owned()],
                     constraints: BTreeMap::from([
-                        ("owliabot_action_family".to_owned(), json!("uniswap_v3_swap")),
+                        ("owliabot_action_key".to_owned(), json!("uniswap_v3_swap")),
                         (
-                            "owliabot_submission".to_owned(),
-                            json!({
-                                "payload": {
-                                    "chain": "11155111",
-                                    "token_in_address": "0x3333333333333333333333333333333333333333",
-                                    "token_in_symbol": "USDC",
-                                    "token_out_address": "0x4444444444444444444444444444444444444444",
-                                    "token_out_symbol": "WETH",
-                                    "fee_tier": 3000,
-                                    "requested_amount": "10",
-                                    "amount_mode": "exact_in",
-                                    "slippage_bps": 50,
-                                    "deadline_seconds": 4102444800u64,
-                                    "router_address": "0x5555555555555555555555555555555555555555",
-                                    "recipient_address": "0x1111111111111111111111111111111111111111",
-                                    "sender_address_hint": "0x2222222222222222222222222222222222222222",
-                                    "unwrap_native_out": false
-                                },
-                                "evidence": {
-                                    "token_in": {
-                                        "token_address": "0x3333333333333333333333333333333333333333",
-                                        "token_symbol": "USDC",
-                                        "decimals": 6,
-                                        "resolution_source": "token_registry",
-                                        "user_confirmed": true
-                                    },
-                                    "token_out": {
-                                        "token_address": "0x4444444444444444444444444444444444444444",
-                                        "token_symbol": "WETH",
-                                        "decimals": 18,
-                                        "resolution_source": "token_registry",
-                                        "user_confirmed": true
-                                    },
-                                    "quote": {
-                                        "source": "quoter",
-                                        "quoted_at_ms": 4102444800000u64,
-                                        "expires_at_ms": 4102444900000u64,
-                                        "route_summary": "USDC/WETH 0.3%",
-                                        "amount_in_atomic": "10000000",
-                                        "amount_out_atomic": "3000000000000000",
-                                        "min_amount_out_atomic": "2900000000000000",
-                                        "user_confirmed": true
-                                    },
-                                    "router": {
-                                        "router_address": "0x5555555555555555555555555555555555555555",
-                                        "approval_target_address": "0x5555555555555555555555555555555555555555",
-                                        "quoter_address": "0x6666666666666666666666666666666666666666",
-                                        "resolution_source": "sepolia_registry",
-                                        "user_confirmed": true
-                                    },
-                                    "deadline": {
-                                        "deadline_unix_seconds": 4102444800u64,
-                                        "source": "policy",
-                                        "user_confirmed": true
-                                    }
-                                }
-                            }),
+                            "owliabot_protocol_package_id".to_owned(),
+                            json!("owliabot.uniswap_v3"),
+                        ),
+                        ("owliabot_execution_mode".to_owned(), json!("harness")),
+                        (
+                            "owliabot_execution_artifact".to_owned(),
+                            serde_json::to_value(&artifact).expect("execution artifact json"),
                         ),
                     ]),
                     budget: Some(MissionBudgetSubmission {
@@ -521,8 +1362,13 @@ async fn runtime_host_service_begin_run_seeds_uniswap_v3_swap_action_family_chec
                         max_signer_requests: Some(1),
                         max_wall_clock_ms: Some(30_000),
                     }),
-                    metadata: BTreeMap::new(),
+                    metadata: BTreeMap::from([
+                        ("owliabot_agent_id".to_owned(), json!("test-agent")),
+                        ("source".to_owned(), json!("skill:uniswap-v3-swap")),
+                        ("tool_name".to_owned(), json!("ais_run_harness")),
+                    ]),
                 },
+                launch_spec: Some(LaunchSpecSubmission::ExecutionArtifact(artifact.clone())),
             }),
         })
         .await;
@@ -535,48 +1381,111 @@ async fn runtime_host_service_begin_run_seeds_uniswap_v3_swap_action_family_chec
     let (
         run_repo,
         checkpoint_repo,
-        _mission_repo,
+        mission_repo,
         _run_catalog_repo,
         _event_archive,
         _session_store,
         _signer_state_archive,
     ) = service.into_parts();
+    let mission = mission_repo.load(&run_id).expect("persisted mission");
+    assert_eq!(mission.goal, "owliabot:owliabot.uniswap_v3:uniswap_v3_swap");
+    assert_eq!(mission.allowed_chains, vec!["8453".to_owned()]);
+    assert_eq!(
+        mission.constraints.get("owliabot_protocol_package_id"),
+        Some(&json!("owliabot.uniswap_v3"))
+    );
+    assert_eq!(
+        mission
+            .constraints
+            .get("owliabot_execution_artifact")
+            .and_then(|value| value.get("action_key")),
+        Some(&json!("uniswap_v3_swap"))
+    );
+    assert_eq!(
+        mission.metadata.get("source"),
+        Some(&json!("skill:uniswap-v3-swap"))
+    );
+    assert_eq!(
+        mission.metadata.get("tool_name"),
+        Some(&json!("ais_run_harness"))
+    );
+
     let runtime = run_repo.load(&run_id).expect("runtime");
+    let execution_artifact = runtime
+        .checkpoint
+        .execution_artifact
+        .as_ref()
+        .expect("execution artifact state");
+    assert_eq!(execution_artifact.launch_spec.action_key, "uniswap_v3_swap");
+    assert_eq!(
+        execution_artifact
+            .active_stage_id
+            .as_ref()
+            .map(|stage_id| stage_id.as_str()),
+        Some("stage.swap")
+    );
+    assert!(execution_artifact
+        .planned_stage_graphs
+        .contains_key(&"stage.swap".into()));
     assert!(runtime
         .checkpoint
         .action_graph
         .nodes
-        .contains_key("actuate.uniswap_v3_swap.send"));
+        .contains_key("artifact.stage.swap.simulate"));
     assert!(runtime
         .checkpoint
-        .effect_contracts
-        .contains_key("effect.uniswap_v3_swap"));
+        .action_graph
+        .nodes
+        .contains_key("artifact.stage.swap.actuate"));
     assert!(runtime
         .checkpoint
-        .evidence_graph
-        .records
-        .contains_key("evidence.uniswap.swap.quote"));
+        .action_graph
+        .nodes
+        .contains_key("artifact.stage.swap.verify"));
+
+    match &runtime
+        .checkpoint
+        .action_graph
+        .nodes
+        .get("artifact.stage.swap.simulate")
+        .expect("swap simulate node")
+        .payload
+    {
+        ActionPayload::Simulate(action) => {
+            let ais_agent_core::action::kinds::simulate::SimulateLiveBinding::Evm(live) =
+                action.live.as_ref().expect("live simulate binding")
+            else {
+                panic!("expected evm simulate binding");
+            };
+            assert_eq!(
+                format!("{:#x}", live.request.to),
+                "0x5555555555555555555555555555555555555555"
+            );
+            assert_eq!(live.request.data[0..4], [0x41, 0x4b, 0xf3, 0x89]);
+        }
+        other => panic!("unexpected simulate payload: {other:?}"),
+    }
 
     let latest = checkpoint_repo
         .latest(run_id.0.as_str())
         .expect("latest checkpoint");
-
+    assert!(latest.execution_artifact.as_ref().is_some_and(|artifact| {
+        artifact
+            .active_stage_id
+            .as_ref()
+            .map(|stage_id| stage_id.as_str())
+            == Some("stage.swap")
+    }));
     assert!(latest
         .action_graph
         .nodes
-        .contains_key("actuate.uniswap_v3_swap.send"));
-    assert!(latest
-        .effect_contracts
-        .contains_key("effect.uniswap_v3_swap"));
-    assert!(latest
-        .evidence_graph
-        .records
-        .contains_key("evidence.uniswap.swap.quote"));
+        .contains_key("artifact.stage.swap.verify"));
 }
 
 #[tokio::test]
-async fn runtime_host_service_begin_run_seeds_uniswap_v3_lp_action_family_checkpoint() {
-    let host_session_id: HostSessionId = "session-uniswap-v3-lp-begin".into();
+async fn runtime_host_service_begin_run_accepts_owliabot_uniswap_v3_lp_execution_artifact() {
+    let host_session_id: HostSessionId = "session-uniswap-v3-lp-artifact-begin".into();
+    let artifact = sample_uniswap_v3_lp_execution_artifact();
     let mut service = RuntimeHostService::new(
         InMemoryRunRepository::default(),
         InMemoryCheckpointRepository::default(),
@@ -588,76 +1497,29 @@ async fn runtime_host_service_begin_run_seeds_uniswap_v3_lp_action_family_checkp
     .with_execution_wiring(RuntimeExecutionWiring {
         evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
         solana_rpc_url: None,
-        native_transfer_enabled: false,
-        erc20_transfer_enabled: false,
-        uniswap_v3_swap_enabled: false,
-        uniswap_v3_lp_enabled: true,
+        allowed_protocol_packages: vec!["owliabot.uniswap_v3".to_owned()],
     });
 
     let begin = service
         .handle(HostCommandEnvelope {
             host_session_id,
-            host_request_id: Some("request-uniswap-v3-lp-begin".into()),
+            host_request_id: Some("request-uniswap-v3-lp-artifact-begin".into()),
             command: RunCommand::BeginRun(BeginRunCommand {
-                command_id: CommandId("cmd-uniswap-v3-lp-begin".to_owned()),
-                idempotency_key: IdempotencyKey("idem-uniswap-v3-lp-begin".to_owned()),
+                command_id: CommandId("cmd-uniswap-v3-lp-artifact-begin".to_owned()),
+                idempotency_key: IdempotencyKey("idem-uniswap-v3-lp-artifact-begin".to_owned()),
                 mission: MissionSubmission {
-                    goal: "owliabot:uniswap_v3_lp".to_owned(),
-                    allowed_chains: vec!["eip155:11155111".to_owned()],
+                    goal: "owliabot:owliabot.uniswap_v3:uniswap_v3_lp".to_owned(),
+                    allowed_chains: vec!["8453".to_owned()],
                     constraints: BTreeMap::from([
-                        ("owliabot_action_family".to_owned(), json!("uniswap_v3_lp")),
+                        ("owliabot_action_key".to_owned(), json!("uniswap_v3_lp")),
                         (
-                            "owliabot_submission".to_owned(),
-                            json!({
-                                "payload": {
-                                    "chain": "11155111",
-                                    "operation": "mint",
-                                    "token0_address": "0x3333333333333333333333333333333333333333",
-                                    "token0_symbol": "USDC",
-                                    "token1_address": "0x4444444444444444444444444444444444444444",
-                                    "token1_symbol": "WETH",
-                                    "fee_tier": 3000,
-                                    "desired_amount0": "10",
-                                    "desired_amount1": "0.003",
-                                    "tick_lower": -600,
-                                    "tick_upper": 600,
-                                    "position_manager_address": "0x1238536071E1c677A632429e3655c799b22cDA52",
-                                    "deadline_seconds": 4102444800u64,
-                                    "sender_address_hint": "0x2222222222222222222222222222222222222222"
-                                },
-                                "evidence": {
-                                    "token0": {
-                                        "token_address": "0x3333333333333333333333333333333333333333",
-                                        "token_symbol": "USDC",
-                                        "decimals": 6,
-                                        "resolution_source": "token_registry",
-                                        "user_confirmed": true
-                                    },
-                                    "token1": {
-                                        "token_address": "0x4444444444444444444444444444444444444444",
-                                        "token_symbol": "WETH",
-                                        "decimals": 18,
-                                        "resolution_source": "token_registry",
-                                        "user_confirmed": true
-                                    },
-                                    "pool": {
-                                        "pool_address": "0x5555555555555555555555555555555555555555",
-                                        "token0_address": "0x3333333333333333333333333333333333333333",
-                                        "token1_address": "0x4444444444444444444444444444444444444444",
-                                        "fee_tier": 3000,
-                                        "tick_spacing": 60,
-                                        "slot0_tick": 0,
-                                        "observed_at_ms": 4102444800000u64,
-                                        "resolution_source": "sepolia_registry",
-                                        "user_confirmed": true
-                                    },
-                                    "deadline": {
-                                        "deadline_unix_seconds": 4102444800u64,
-                                        "source": "policy",
-                                        "user_confirmed": true
-                                    }
-                                }
-                            }),
+                            "owliabot_protocol_package_id".to_owned(),
+                            json!("owliabot.uniswap_v3"),
+                        ),
+                        ("owliabot_execution_mode".to_owned(), json!("harness")),
+                        (
+                            "owliabot_execution_artifact".to_owned(),
+                            serde_json::to_value(&artifact).expect("execution artifact json"),
                         ),
                     ]),
                     budget: Some(MissionBudgetSubmission {
@@ -665,8 +1527,13 @@ async fn runtime_host_service_begin_run_seeds_uniswap_v3_lp_action_family_checkp
                         max_signer_requests: Some(1),
                         max_wall_clock_ms: Some(30_000),
                     }),
-                    metadata: BTreeMap::new(),
+                    metadata: BTreeMap::from([
+                        ("owliabot_agent_id".to_owned(), json!("test-agent")),
+                        ("source".to_owned(), json!("skill:uniswap-v3-lp")),
+                        ("tool_name".to_owned(), json!("ais_run_harness")),
+                    ]),
                 },
+                launch_spec: Some(LaunchSpecSubmission::ExecutionArtifact(artifact.clone())),
             }),
         })
         .await;
@@ -679,40 +1546,110 @@ async fn runtime_host_service_begin_run_seeds_uniswap_v3_lp_action_family_checkp
     let (
         run_repo,
         checkpoint_repo,
-        _mission_repo,
+        mission_repo,
         _run_catalog_repo,
         _event_archive,
         _session_store,
         _signer_state_archive,
     ) = service.into_parts();
+    let mission = mission_repo.load(&run_id).expect("persisted mission");
+    assert_eq!(mission.goal, "owliabot:owliabot.uniswap_v3:uniswap_v3_lp");
+    assert_eq!(mission.allowed_chains, vec!["8453".to_owned()]);
+    assert_eq!(
+        mission.constraints.get("owliabot_protocol_package_id"),
+        Some(&json!("owliabot.uniswap_v3"))
+    );
+    assert_eq!(
+        mission
+            .constraints
+            .get("owliabot_execution_artifact")
+            .and_then(|value| value.get("action_key")),
+        Some(&json!("uniswap_v3_lp"))
+    );
+    assert_eq!(
+        mission.metadata.get("source"),
+        Some(&json!("skill:uniswap-v3-lp"))
+    );
+    assert_eq!(
+        mission.metadata.get("tool_name"),
+        Some(&json!("ais_run_harness"))
+    );
+
     let runtime = run_repo.load(&run_id).expect("runtime");
+    let execution_artifact = runtime
+        .checkpoint
+        .execution_artifact
+        .as_ref()
+        .expect("execution artifact state");
+    assert_eq!(execution_artifact.launch_spec.action_key, "uniswap_v3_lp");
+    assert_eq!(
+        execution_artifact
+            .active_stage_id
+            .as_ref()
+            .map(|stage_id| stage_id.as_str()),
+        Some("stage.mint")
+    );
+    assert!(execution_artifact
+        .planned_stage_graphs
+        .contains_key(&"stage.mint".into()));
     assert!(runtime
         .checkpoint
         .action_graph
         .nodes
-        .contains_key("actuate.uniswap_v3_lp.mint"));
+        .contains_key("artifact.stage.mint.pre_observe.state.pre.uniswap_v3_lp.position_count"));
     assert!(runtime
         .checkpoint
-        .effect_contracts
-        .contains_key("effect.uniswap_v3_lp"));
+        .action_graph
+        .nodes
+        .contains_key("artifact.stage.mint.simulate"));
     assert!(runtime
         .checkpoint
-        .evidence_graph
-        .records
-        .contains_key("evidence.uniswap.lp.pool"));
+        .action_graph
+        .nodes
+        .contains_key("artifact.stage.mint.verify"));
+    assert!(runtime
+        .checkpoint
+        .action_graph
+        .nodes
+        .contains_key("artifact.stage.mint.post_observe.state.post.uniswap_v3_lp.position_count"));
+
+    match &runtime
+        .checkpoint
+        .action_graph
+        .nodes
+        .get("artifact.stage.mint.simulate")
+        .expect("lp mint simulate node")
+        .payload
+    {
+        ActionPayload::Simulate(action) => {
+            let ais_agent_core::action::kinds::simulate::SimulateLiveBinding::Evm(live) =
+                action.live.as_ref().expect("live simulate binding")
+            else {
+                panic!("expected evm simulate binding");
+            };
+            assert_eq!(
+                format!("{:#x}", live.request.to),
+                "0x1234567890abcdef1234567890abcdef12345678"
+            );
+            assert_eq!(live.request.data[0..4], [0x88, 0x31, 0x64, 0x56]);
+        }
+        other => panic!("unexpected simulate payload: {other:?}"),
+    }
 
     let latest = checkpoint_repo
         .latest(run_id.0.as_str())
         .expect("latest checkpoint");
+    assert!(latest.execution_artifact.as_ref().is_some_and(|artifact| {
+        artifact
+            .active_stage_id
+            .as_ref()
+            .map(|stage_id| stage_id.as_str())
+            == Some("stage.mint")
+    }));
     assert!(latest
         .action_graph
         .nodes
-        .contains_key("actuate.uniswap_v3_lp.mint"));
-    assert!(latest.effect_contracts.contains_key("effect.uniswap_v3_lp"));
-    assert!(latest
-        .evidence_graph
-        .records
-        .contains_key("evidence.uniswap.lp.pool"));
+        .contains_key("artifact.stage.mint.verify"));
 }
 
 #[tokio::test]
@@ -830,6 +1767,7 @@ async fn runtime_host_service_rejects_cancel_request_for_terminal_run() {
                     budget: None,
                     metadata: BTreeMap::new(),
                 },
+                launch_spec: empty_prebuilt_launch_spec(),
             }),
         })
         .await;
@@ -1242,6 +2180,7 @@ async fn runtime_host_service_begin_run_skips_existing_durable_run_ids_after_res
                     }),
                     metadata: BTreeMap::new(),
                 },
+                launch_spec: empty_prebuilt_launch_spec(),
             }),
         })
         .await;
@@ -1296,6 +2235,7 @@ async fn runtime_host_service_fails_closed_when_grouped_begin_run_mission_write_
                     }),
                     metadata: BTreeMap::new(),
                 },
+                launch_spec: empty_prebuilt_launch_spec(),
             }),
         })
         .await;
@@ -2224,6 +3164,7 @@ async fn runtime_host_service_lists_streamable_event_batches() {
                     budget: None,
                     metadata: BTreeMap::new(),
                 },
+                launch_spec: empty_prebuilt_launch_spec(),
             }),
         })
         .await;
@@ -2513,6 +3454,7 @@ async fn runtime_host_service_persists_run_catalog_latest_pointers() {
                     budget: None,
                     metadata: BTreeMap::new(),
                 },
+                launch_spec: empty_prebuilt_launch_spec(),
             }),
         })
         .await;
@@ -3143,6 +4085,110 @@ fn preloaded_evidence_wait_runtime() -> (
     )
 }
 
+fn preloaded_continuation_wait_runtime() -> (
+    InMemoryRunRepository,
+    InMemoryCheckpointRepository,
+    InMemoryMissionRepository,
+    InMemoryRunCatalogRepository,
+    InMemoryEventArchive,
+    InMemoryHostSessionStore,
+    RunId,
+    HostSessionId,
+) {
+    let run_id = RunId("run-1".to_owned());
+    let host_session_id: HostSessionId = "session-continuation".into();
+    let mission = sample_mission();
+    let mut checkpoint = checkpoint_with_nodes(Vec::new(), Vec::new());
+    checkpoint.lifecycle.await_artifact_continuation(
+        "waiting for continuation artifact",
+        vec!["swap.tx_hash".to_owned()],
+    );
+    checkpoint.execution_artifact = Some(ExecutionArtifactRuntimeSnapshot {
+        launch_spec: ExecutionArtifactLaunchSpec {
+            protocol_package_id: "owliabot.uniswap_v3".to_owned(),
+            action_key: "swap".to_owned(),
+            chain_family: ExecutionChainFamily::Evm,
+            allowed_chains: vec!["8453".to_owned()],
+            entry_stage_id: "stage.swap".into(),
+            actor: None,
+            transactions: vec![ExecutionTransactionCandidate::EvmTransaction(
+                EvmTransactionCandidate {
+                    candidate_id: "swap.direct".into(),
+                    to: "0x1111111111111111111111111111111111111111".to_owned(),
+                    value: Some("0".to_owned()),
+                    calldata: Some("0xdeadbeef".to_owned()),
+                },
+            )],
+            stages: vec![
+                ExecutionStage::Transaction(TransactionStage {
+                    stage_id: "stage.swap".into(),
+                    candidate_ref: "swap.direct".into(),
+                    exports: vec![OutputExportSpec {
+                        output_key: "swap.tx_hash".into(),
+                        source: ValueRef::Ref {
+                            reference: "refs.receipts.stage.swap.tx_hash".to_owned(),
+                        },
+                    }],
+                    next_stage_id: Some("stage.continue".into()),
+                }),
+                ExecutionStage::Continuation(ContinuationStage {
+                    stage_id: "stage.continue".into(),
+                    required_outputs: vec!["swap.tx_hash".into()],
+                    package_entry: "build_aave_supply_from_swap_output".into(),
+                    next_stage_id: None,
+                }),
+            ],
+            preconditions: Vec::new(),
+            postconditions: Vec::new(),
+            expected_effects: Vec::new(),
+            execution_policy: None,
+            evidence: json!({}),
+            metadata: BTreeMap::new(),
+        },
+        active_stage_id: Some("stage.continue".into()),
+        planned_stage_graphs: BTreeMap::new(),
+        exported_outputs: BTreeMap::from([("swap.tx_hash".into(), json!("0xabc"))]),
+        awaiting_continuation: Some(ArtifactContinuationSnapshot {
+            stage_id: "stage.continue".into(),
+            required_outputs: vec!["swap.tx_hash".into()],
+            package_entry: "build_aave_supply_from_swap_output".into(),
+            next_stage_id: None,
+        }),
+    });
+
+    let runtime = ActiveRun::new(mission.clone(), checkpoint.clone());
+    let mut run_repo = InMemoryRunRepository::default();
+    run_repo.insert(runtime).expect("insert runtime");
+    let mut checkpoint_repo = InMemoryCheckpointRepository::default();
+    checkpoint_repo
+        .append(CheckpointArchiveEntry {
+            snapshot: checkpoint,
+            kind: CheckpointArchiveKind::Boundary,
+        })
+        .expect("save checkpoint");
+    let mut session_store = InMemoryHostSessionStore::default();
+    session_store.link_run(HostRunLink::new(
+        host_session_id.clone(),
+        run_id.clone(),
+        mission.goal.clone(),
+        mission.allowed_chains.clone(),
+    ));
+    let mission_repo = preloaded_mission_repo(run_id.clone(), mission);
+    let run_catalog_repo = InMemoryRunCatalogRepository::default();
+    let event_archive = InMemoryEventArchive::default();
+
+    (
+        run_repo,
+        checkpoint_repo,
+        mission_repo,
+        run_catalog_repo,
+        event_archive,
+        session_store,
+        run_id,
+        host_session_id,
+    )
+}
+
 fn preloaded_signer_wait_runtime() -> (
     InMemoryRunRepository,
     InMemoryCheckpointRepository,
@@ -3666,6 +4712,7 @@ fn checkpoint_with_nodes(nodes: Vec<ActionNode>, terminals: Vec<String>) -> Chec
         pending_requests: PendingRequestsSnapshot::default(),
         last_completed_node_id: None,
         actuation_records: Vec::new(),
+        execution_artifact: None,
     }
 }
 
@@ -3802,4 +4849,418 @@ fn verify_solana_terminal_node(node_id: &str, depends_on: Vec<&str>) -> ActionNo
         implementation_hint: Some("solana.verify".to_owned()),
         expected_effect_ref: Some("effect.sol".to_owned()),
     }
+}
+
+fn sample_uniswap_v3_swap_execution_artifact() -> ExecutionArtifactLaunchSpec {
+    ExecutionArtifactLaunchSpec {
+        protocol_package_id: "owliabot.uniswap_v3".to_owned(),
+        action_key: "uniswap_v3_swap".to_owned(),
+        chain_family: ExecutionChainFamily::Evm,
+        allowed_chains: vec!["8453".to_owned()],
+        entry_stage_id: "stage.swap".into(),
+        actor: Some(ExecutionArtifactActor {
+            sender_address_hint: Some("0x2222222222222222222222222222222222222222".to_owned()),
+            recipient_address: Some("0x1111111111111111111111111111111111111111".to_owned()),
+        }),
+        transactions: vec![
+            ExecutionTransactionCandidate::EvmTransaction(EvmTransactionCandidate {
+                candidate_id: "approve.direct".into(),
+                to: "0x3333333333333333333333333333333333333333".to_owned(),
+                value: Some("0".to_owned()),
+                calldata: Some("0x095ea7b300".to_owned()),
+            }),
+            ExecutionTransactionCandidate::EvmTransaction(EvmTransactionCandidate {
+                candidate_id: "swap.direct".into(),
+                to: "0x5555555555555555555555555555555555555555".to_owned(),
+                value: Some("0".to_owned()),
+                calldata: Some("0x414bf38900".to_owned()),
+            }),
+        ],
+        stages: vec![
+            ExecutionStage::Branch(BranchStage {
+                stage_id: "stage.quote_freshness".into(),
+                predicate: PredicateSpec::Comparison {
+                    left: ValueRef::Ref {
+                        reference: "refs.evidence.quote.expires_at_ms".to_owned(),
+                    },
+                    op: ComparisonOperator::Gte,
+                    right: ValueRef::Ref {
+                        reference: "refs.evidence.clock.now_ms".to_owned(),
+                    },
+                },
+                if_true: BranchTarget::GotoStage {
+                    stage_id: "stage.approval_required".into(),
+                },
+                if_false: BranchTarget::Assert {
+                    failure_code: "stale_quote".to_owned(),
+                    message: "quote evidence is stale".to_owned(),
+                },
+            }),
+            ExecutionStage::Branch(BranchStage {
+                stage_id: "stage.approval_required".into(),
+                predicate: PredicateSpec::Comparison {
+                    left: ValueRef::Ref {
+                        reference: "refs.evidence.router.approval_required".to_owned(),
+                    },
+                    op: ComparisonOperator::Eq,
+                    right: ValueRef::Literal { value: json!(true) },
+                },
+                if_true: BranchTarget::GotoStage {
+                    stage_id: "stage.approve".into(),
+                },
+                if_false: BranchTarget::GotoStage {
+                    stage_id: "stage.swap".into(),
+                },
+            }),
+            ExecutionStage::Transaction(TransactionStage {
+                stage_id: "stage.approve".into(),
+                candidate_ref: "approve.direct".into(),
+                exports: Vec::new(),
+                next_stage_id: Some("stage.swap".into()),
+            }),
+            ExecutionStage::Transaction(TransactionStage {
+                stage_id: "stage.swap".into(),
+                candidate_ref: "swap.direct".into(),
+                exports: Vec::new(),
+                next_stage_id: None,
+            }),
+        ],
+        preconditions: Vec::new(),
+        postconditions: Vec::new(),
+        expected_effects: Vec::new(),
+        execution_policy: None,
+        evidence: json!({
+            "clock": {
+                "now_ms": 1710000015000u64,
+            },
+            "quote": {
+                "source": "uniswap.quote",
+                "quoted_at_ms": 1710000000000u64,
+                "expires_at_ms": 1710000030000u64,
+                "route_summary": "USDC -> WETH",
+                "amount_in_atomic": "25000000",
+                "amount_out_atomic": "10000000000000000",
+                "min_amount_out_atomic": "9900000000000000",
+            },
+            "router": {
+                "router_address": "0x5555555555555555555555555555555555555555",
+                "approval_target_address": "0x5555555555555555555555555555555555555555",
+                "approval_required": false,
+            },
+            "deadline": {
+                "deadline_unix_seconds": 1710000900u64,
+            }
+        }),
+        metadata: BTreeMap::from([
+            ("source".to_owned(), json!("skill:uniswap-v3-swap")),
+            ("tool_name".to_owned(), json!("ais_run_harness")),
+        ]),
+    }
+}
+
+fn sample_uniswap_v3_lp_execution_artifact() -> ExecutionArtifactLaunchSpec {
+    ExecutionArtifactLaunchSpec {
+        protocol_package_id: "owliabot.uniswap_v3".to_owned(),
+        action_key: "uniswap_v3_lp".to_owned(),
+        chain_family: ExecutionChainFamily::Evm,
+        allowed_chains: vec!["8453".to_owned()],
+        entry_stage_id: "stage.mint".into(),
+        actor: Some(ExecutionArtifactActor {
+            sender_address_hint: Some("0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00".to_owned()),
+            recipient_address: Some("0x742d35Cc6634C0532925a3b844Bc9e7595f8fE00".to_owned()),
+        }),
+        transactions: vec![ExecutionTransactionCandidate::EvmTransaction(
+            EvmTransactionCandidate {
+                candidate_id: "lp.mint".into(),
+                to: "0x1234567890abcdef1234567890ABCDEF12345678".to_owned(),
+                value: Some("0".to_owned()),
+                calldata: Some("0x8831645600".to_owned()),
+            },
+        )],
+        stages: vec![ExecutionStage::Transaction(TransactionStage {
+            stage_id: "stage.mint".into(),
+            candidate_ref: "lp.mint".into(),
+            exports: Vec::new(),
+            next_stage_id: None,
+        })],
+        preconditions: vec![ObservationSpec {
+            observation_id: "state.pre.uniswap_v3_lp.position_count".to_owned(),
+            kind: "evm.contract_state_read".to_owned(),
+            params: BTreeMap::from([
+                (
+                    "to".to_owned(),
+                    json!("0x1234567890abcdef1234567890ABCDEF12345678"),
+                ),
+                (
+                    "data".to_owned(),
+                    json!("0x70a08231000000000000000000000000742d35cc6634c0532925a3b844bc9e7595f8fe00"),
+                ),
+            ]),
+        }],
+        postconditions: vec![ObservationSpec {
+            observation_id: "state.post.uniswap_v3_lp.position_count".to_owned(),
+            kind: "evm.contract_state_read".to_owned(),
+            params: BTreeMap::from([
+                (
+                    "to".to_owned(),
+                    json!("0x1234567890abcdef1234567890ABCDEF12345678"),
+                ),
+                (
+                    "data".to_owned(),
+                    json!("0x70a08231000000000000000000000000742d35cc6634c0532925a3b844bc9e7595f8fe00"),
+                ),
+            ]),
+        }],
+        expected_effects: Vec::new(),
+        execution_policy: None,
+        evidence: json!({
+            "token0": {
+                "token_address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+            },
+            "token1": {
+                "token_address": "0x4200000000000000000000000000000000000006",
+            },
+            "pool": {
+                "pool_address": "0x1111111111111111111111111111111111111111",
+                "token0_address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+                "token1_address": "0x4200000000000000000000000000000000000006",
+                "fee_tier": 3000,
+                "tick_spacing": 60,
+                "slot0_sqrt_price_x96": "79228162514264337593543950336",
+                "slot0_tick": 0,
+                "observed_at_ms": 4102444800000u64,
+            },
+            "deadline": {
+                "deadline_unix_seconds": 4102444800u64,
+            }
+        }),
+        metadata: BTreeMap::from([
+            ("source".to_owned(), json!("skill:uniswap-v3-lp")),
+            ("tool_name".to_owned(), json!("ais_run_harness")),
+            ("builder".to_owned(), json!("buildUniswapV3LpExecutionArtifact")),
+        ]),
+    }
+}
+
+fn sample_native_transfer_expected_effect() -> EffectSpec {
+    EffectSpec {
+        effect_id: "effect.transfer".to_owned(),
+        stage_id: "stage.transfer".into(),
+        kind: "asset_delta".to_owned(),
+        params: BTreeMap::from([
+            (
+                "assertions".to_owned(),
+                json!([{
+                    "expression": "receipt.status == true && post.decoded_u256 != pre.decoded_u256",
+                    "description": "native transfer must change recipient balance"
+                }]),
+            ),
+            (
+                "pre_observation_id".to_owned(),
+                json!("state.pre.recipient_balance"),
+            ),
+            (
+                "post_observation_id".to_owned(),
+                json!("state.post.recipient_balance"),
+            ),
+            (
+                "tolerance_hint".to_owned(),
+                json!("recipient balance delta"),
+            ),
+        ]),
+    }
+}
+
+fn sample_erc20_transfer_expected_effect() -> EffectSpec {
+    EffectSpec {
+        effect_id: "effect.transfer".to_owned(),
+        stage_id: "stage.transfer".into(),
+        kind: "asset_delta".to_owned(),
+        params: BTreeMap::from([
+            (
+                "assertions".to_owned(),
+                json!([{
+                    "expression": "receipt.status == true && post.decoded_u256 != pre.decoded_u256",
+                    "description": "erc20 transfer must change recipient token balance"
+                }]),
+            ),
+            (
+                "pre_observation_id".to_owned(),
+                json!("state.pre.recipient_token_balance"),
+            ),
+            (
+                "post_observation_id".to_owned(),
+                json!("state.post.recipient_token_balance"),
+            ),
+            (
+                "tolerance_hint".to_owned(),
+                json!("recipient token balance delta"),
+            ),
+        ]),
+    }
+}
+
+fn sample_native_transfer_execution_artifact() -> ExecutionArtifactLaunchSpec {
+    ExecutionArtifactLaunchSpec {
+        protocol_package_id: "owliabot.transfer".to_owned(),
+        action_key: "native_transfer".to_owned(),
+        chain_family: ExecutionChainFamily::Evm,
+        allowed_chains: vec!["11155111".to_owned()],
+        entry_stage_id: "stage.transfer".into(),
+        actor: Some(ExecutionArtifactActor {
+            sender_address_hint: Some("0x2222222222222222222222222222222222222222".to_owned()),
+            recipient_address: Some("0x1111111111111111111111111111111111111111".to_owned()),
+        }),
+        transactions: vec![ExecutionTransactionCandidate::EvmTransaction(
+            EvmTransactionCandidate {
+                candidate_id: "transfer.call".into(),
+                to: "0x1111111111111111111111111111111111111111".to_owned(),
+                value: Some("30".to_owned()),
+                calldata: None,
+            },
+        )],
+        stages: vec![ExecutionStage::Transaction(TransactionStage {
+            stage_id: "stage.transfer".into(),
+            candidate_ref: "transfer.call".into(),
+            exports: Vec::new(),
+            next_stage_id: None,
+        })],
+        preconditions: vec![ObservationSpec {
+            observation_id: "state.pre.recipient_balance".to_owned(),
+            kind: "evm.native_balance".to_owned(),
+            params: BTreeMap::from([(
+                "address".to_owned(),
+                json!("0x1111111111111111111111111111111111111111"),
+            )]),
+        }],
+        postconditions: vec![ObservationSpec {
+            observation_id: "state.post.recipient_balance".to_owned(),
+            kind: "evm.native_balance".to_owned(),
+            params: BTreeMap::from([(
+                "address".to_owned(),
+                json!("0x1111111111111111111111111111111111111111"),
+            )]),
+        }],
+        expected_effects: vec![sample_native_transfer_expected_effect()],
+        execution_policy: None,
+        evidence: json!({
+            "recipient": {
+                "user_input": "0x1111111111111111111111111111111111111111",
+                "normalized_address": "0x1111111111111111111111111111111111111111",
+                "source": "wallet_transfer",
+                "user_confirmed": true
+            },
+            "amount": {
+                "user_input": "0.00000000000000003",
+                "normalized_amount": "0.00000000000000003",
+                "atomic_amount": "30",
+                "decimals": 18,
+                "source": "wallet_transfer",
+                "user_confirmed": true
+            }
+        }),
+        metadata: BTreeMap::from([
+            ("tool_name".to_owned(), json!("wallet_transfer")),
+            (
+                "builder".to_owned(),
+                json!("buildNativeTransferExecutionArtifact"),
+            ),
+        ]),
+    }
+}
+
+fn sample_erc20_transfer_execution_artifact() -> ExecutionArtifactLaunchSpec {
+    ExecutionArtifactLaunchSpec {
+        protocol_package_id: "owliabot.transfer".to_owned(),
+        action_key: "erc20_transfer".to_owned(),
+        chain_family: ExecutionChainFamily::Evm,
+        allowed_chains: vec!["11155111".to_owned()],
+        entry_stage_id: "stage.transfer".into(),
+        actor: Some(ExecutionArtifactActor {
+            sender_address_hint: Some("0x2222222222222222222222222222222222222222".to_owned()),
+            recipient_address: Some("0x1111111111111111111111111111111111111111".to_owned()),
+        }),
+        transactions: vec![ExecutionTransactionCandidate::EvmTransaction(
+            EvmTransactionCandidate {
+                candidate_id: "transfer.call".into(),
+                to: "0x3333333333333333333333333333333333333333".to_owned(),
+                value: Some("0".to_owned()),
+                calldata: Some(
+                    "0xa9059cbb00000000000000000000000011111111111111111111111111111111111111110000000000000000000000000000000000000000000000000000000000989680".to_owned(),
+                ),
+            },
+        )],
+        stages: vec![ExecutionStage::Transaction(TransactionStage {
+            stage_id: "stage.transfer".into(),
+            candidate_ref: "transfer.call".into(),
+            exports: Vec::new(),
+            next_stage_id: None,
+        })],
+        preconditions: vec![ObservationSpec {
+            observation_id: "state.pre.recipient_token_balance".to_owned(),
+            kind: "evm.erc20_balance_of".to_owned(),
+            params: BTreeMap::from([
+                (
+                    "token".to_owned(),
+                    json!("0x3333333333333333333333333333333333333333"),
+                ),
+                (
+                    "owner".to_owned(),
+                    json!("0x1111111111111111111111111111111111111111"),
+                ),
+            ]),
+        }],
+        postconditions: vec![ObservationSpec {
+            observation_id: "state.post.recipient_token_balance".to_owned(),
+            kind: "evm.erc20_balance_of".to_owned(),
+            params: BTreeMap::from([
+                (
+                    "token".to_owned(),
+                    json!("0x3333333333333333333333333333333333333333"),
+                ),
+                (
+                    "owner".to_owned(),
+                    json!("0x1111111111111111111111111111111111111111"),
+                ),
+            ]),
+        }],
+        expected_effects: vec![sample_erc20_transfer_expected_effect()],
+        execution_policy: None,
+        evidence: json!({
+            "recipient": {
+                "user_input": "0x1111111111111111111111111111111111111111",
+                "normalized_address": "0x1111111111111111111111111111111111111111",
+                "source": "wallet_transfer",
+                "user_confirmed": true
+            },
+            "amount": {
+                "user_input": "10",
+                "normalized_amount": "10",
+                "atomic_amount": "10000000",
+                "decimals": 6,
+                "source": "wallet_transfer",
+                "user_confirmed": true
+            },
+            "token": {
+                "token_address": "0x3333333333333333333333333333333333333333",
+                "token_symbol": "USDC",
+                "decimals": 6,
+                "resolution_source": "wallet_transfer",
+                "user_confirmed": true
+            }
+        }),
+        metadata: BTreeMap::from([
+            ("tool_name".to_owned(), json!("wallet_transfer")),
+            (
+                "builder".to_owned(),
+                json!("buildErc20TransferExecutionArtifact"),
+            ),
+        ]),
+    }
+}
+
+fn empty_prebuilt_launch_spec() -> Option<LaunchSpecSubmission> {
+    Some(LaunchSpecSubmission::PrebuiltFragment(
+        PrebuiltFragmentLaunchSpec::default(),
+    ))
 }

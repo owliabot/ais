@@ -5,6 +5,7 @@ use ais_agent_control::{
     },
     events::{RunEvent, RunEventEnvelope, RunStarted},
     ids::{ClaimId, CommandId, EventId, IdempotencyKey, RunId},
+    launch_spec::{LaunchSpecSubmission, PrebuiltFragmentLaunchSpec},
     ownership::{OwnershipVisibility, RunClaimMode, RunClaimOwnerKind, RunOwnershipSnapshot},
     recovery::{
         InterruptionClass, RecoveryActionKind, RecoveryDisposition, RecoveryPriority,
@@ -866,6 +867,9 @@ fn sample_command() -> HostedRunCommand {
                 budget: None,
                 metadata: Default::default(),
             },
+            launch_spec: Some(LaunchSpecSubmission::PrebuiltFragment(
+                PrebuiltFragmentLaunchSpec::default(),
+            )),
         }),
     }
 }
@@ -983,6 +987,7 @@ fn sample_recovery_aware_inspect() -> InspectSnapshot {
             policy_mode: Some("guarded".to_owned()),
         },
         required_inputs: Vec::new(),
+        pending_continuations: Vec::new(),
         pending_confirmations: Vec::new(),
         pending_signer_requests: Vec::new(),
         recent_side_effects: Vec::new(),
@@ -1048,6 +1053,7 @@ fn sample_confirmation_pause() -> PauseBundle {
             kind: "chain_confirmation".to_owned(),
             summary: "waiting for confirmation".to_owned(),
         }],
+        pending_continuations: Vec::new(),
         notes: vec!["confirmation polling in progress".to_owned()],
     }
 }
@@ -1101,6 +1107,7 @@ fn sample_retry_ready_inspect() -> InspectSnapshot {
             policy_mode: Some("guarded".to_owned()),
         },
         required_inputs: Vec::new(),
+        pending_continuations: Vec::new(),
         pending_confirmations: vec![PendingConfirmationView {
             confirmation_id: "confirm-1".to_owned(),
             kind: "chain_confirmation".to_owned(),
@@ -1180,6 +1187,7 @@ fn sample_await_user_input_pause() -> PauseBundle {
             kind: "chain_confirmation".to_owned(),
             summary: "submission outcome uncertain".to_owned(),
         }],
+        pending_continuations: Vec::new(),
         notes: vec!["manual review required".to_owned()],
     }
 }

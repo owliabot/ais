@@ -1653,6 +1653,7 @@ fn base_checkpoint(lifecycle: RunLifecycleState, nodes: Vec<ActionNode>) -> Chec
         pending_requests: PendingRequestsSnapshot::default(),
         last_completed_node_id: None,
         actuation_records: Vec::new(),
+        execution_artifact: None,
     }
 }
 

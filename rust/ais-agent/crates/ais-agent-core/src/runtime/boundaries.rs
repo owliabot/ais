@@ -10,6 +10,7 @@ pub enum BoundaryKind {
     Evidence,
     Signer,
     Confirmation,
+    ArtifactContinuation,
     Completion,
     Failure,
     Cancellation,

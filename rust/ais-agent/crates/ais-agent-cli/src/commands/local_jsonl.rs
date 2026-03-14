@@ -75,6 +75,7 @@ mod tests {
                     budget: None,
                     metadata: Default::default(),
                 },
+                launch_spec: None,
             }),
         };
         let input =
@@ -119,6 +120,7 @@ mod tests {
                     budget: None,
                     metadata: Default::default(),
                 },
+                launch_spec: None,
             }),
         };
         let input =

@@ -171,6 +171,7 @@ fn sample_checkpoint(run_id: &RunId, mission_id: &str, checkpoint_seq: u64) -> C
         pending_requests: PendingRequestsSnapshot::default(),
         last_completed_node_id: None,
         actuation_records: Vec::new(),
+        execution_artifact: None,
     }
 }
 

@@ -1,5 +1,6 @@
 //! Fine-grained runtime transitions.
 
+mod artifact;
 mod broadcast;
 mod complete;
 mod derive;
@@ -21,11 +22,12 @@ use ais_agent_core::{
 use crate::runtime::ActiveRun;
 
 pub(crate) use self::{
-    broadcast::apply_broadcast_transition, complete::apply_complete_transition,
-    derive::apply_derive_transition, govern::apply_govern_transition,
-    ingest::apply_ingest_transition, observe::apply_observe_transition,
-    recover::apply_recover_transition, signer::apply_signer_transition,
-    simulate::apply_simulate_transition, verify::apply_verify_transition,
+    artifact::apply_execution_artifact_transition, broadcast::apply_broadcast_transition,
+    complete::apply_complete_transition, derive::apply_derive_transition,
+    govern::apply_govern_transition, ingest::apply_ingest_transition,
+    observe::apply_observe_transition, recover::apply_recover_transition,
+    signer::apply_signer_transition, simulate::apply_simulate_transition,
+    verify::apply_verify_transition,
 };
 
 #[cfg(test)]
