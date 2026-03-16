@@ -130,6 +130,7 @@ pub fn sample_execution_artifact_begin_command() -> HostedRunCommand {
                     next_stage_id: None,
                 }),
             ],
+            observations: Vec::new(),
             preconditions: Vec::new(),
             postconditions: Vec::new(),
             expected_effects: Vec::new(),
@@ -162,10 +163,7 @@ pub fn sample_owliabot_uniswap_swap_begin_command() -> HostedRunCommand {
                         json!("owliabot.uniswap_v3"),
                     ),
                     ("owliabot_execution_mode".to_owned(), json!("harness")),
-                    (
-                        "owliabot_chain_family".to_owned(),
-                        json!("evm"),
-                    ),
+                    ("owliabot_chain_family".to_owned(), json!("evm")),
                     (
                         "owliabot_execution_artifact".to_owned(),
                         json!({
@@ -332,6 +330,7 @@ pub fn sample_owliabot_uniswap_swap_begin_command() -> HostedRunCommand {
                             next_stage_id: None,
                         }),
                     ],
+                    observations: Vec::new(),
                     preconditions: Vec::new(),
                     postconditions: Vec::new(),
                     expected_effects: Vec::new(),

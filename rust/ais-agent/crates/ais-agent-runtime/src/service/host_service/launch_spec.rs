@@ -4,8 +4,7 @@ use ais_agent_core::checkpoint::CheckpointSnapshot;
 use super::{
     artifact_planner::seed_execution_artifact_checkpoint,
     launch_binding::seed_prebuilt_fragment_checkpoint,
-    launch_validation::validate_launch_spec_submission,
-    RuntimeExecutionWiring,
+    launch_validation::validate_launch_spec_submission, RuntimeExecutionWiring,
 };
 
 pub(crate) fn seed_launch_spec_checkpoint(

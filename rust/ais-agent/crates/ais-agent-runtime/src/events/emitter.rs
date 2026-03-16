@@ -423,3 +423,167 @@ fn event_id(runtime: &ActiveRun, kind: &str) -> EventId {
         runtime.event_seq + 1
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use ais_agent_control::{
+        events::RunEvent,
+        execution_artifact::{ExecutionArtifactLaunchSpec, ExecutionChainFamily},
+        ids::RunId,
+    };
+    use ais_agent_core::{
+        action::{
+            kinds::observe::{ObserveAction, ObserveSourceKind},
+            ActionGraph, ActionNode, ActionNodeKind, ActionNodeStatus, ActionOrigin, ActionPayload,
+        },
+        checkpoint::{
+            CheckpointSnapshot, ExecutionArtifactRuntimeSnapshot, PendingRequestsSnapshot,
+        },
+        evidence::{
+            EvidenceFreshness, EvidenceGraph, EvidenceKind, EvidenceProvenance, EvidenceRecord,
+        },
+        mission::{Mission, MissionBudget, MissionPolicy},
+        runtime::{RunLifecycleState, RunPhase},
+    };
+    use serde_json::json;
+
+    use crate::{
+        runtime::ActiveRun,
+        stepper::{StepTransition, StepTransitionKind},
+    };
+
+    use super::RuntimeEventEmitter;
+
+    #[test]
+    fn observe_only_completion_reuses_generic_completed_event_contract() {
+        let mut lifecycle = RunLifecycleState::new(RunId("run-observe".to_owned()), "mission-1");
+        lifecycle.mark_running(RunPhase::Planning);
+        lifecycle.bump_checkpoint();
+        lifecycle.bump_plan_epoch();
+        lifecycle.complete("observe-only artifact completed");
+
+        let checkpoint = CheckpointSnapshot {
+            run_id: "run-observe".to_owned(),
+            mission_id: "mission-1".to_owned(),
+            checkpoint_seq: lifecycle.checkpoint_seq,
+            plan_epoch: lifecycle.plan_epoch,
+            lifecycle,
+            action_graph: ActionGraph {
+                graph_id: Some("artifact.stage.quote".to_owned()),
+                roots: vec!["artifact.stage.quote.observe".to_owned()],
+                terminals: vec!["artifact.stage.quote.observe".to_owned()],
+                nodes: BTreeMap::from([(
+                    "artifact.stage.quote.observe".to_owned(),
+                    ActionNode {
+                        node_id: "artifact.stage.quote.observe".to_owned(),
+                        kind: ActionNodeKind::Observe,
+                        origin: ActionOrigin::DriverFragment,
+                        status: ActionNodeStatus::Succeeded,
+                        depends_on: Vec::new(),
+                        inputs: Vec::new(),
+                        evidence_refs: vec!["query.quote".to_owned()],
+                        payload: ActionPayload::Observe(ObserveAction {
+                            source_kind: ObserveSourceKind::ChainRead,
+                            source_hint: "observe-only query completed".to_owned(),
+                            output_key: Some("query.quote".to_owned()),
+                            live: None,
+                        }),
+                        implementation_hint: Some("execution_artifact".to_owned()),
+                        expected_effect_ref: None,
+                    },
+                )]),
+            },
+            evidence_graph: EvidenceGraph {
+                records: BTreeMap::from([(
+                    "query.quote".to_owned(),
+                    EvidenceRecord {
+                        evidence_id: "query.quote".to_owned(),
+                        kind: EvidenceKind::ExternalObservation,
+                        provenance: EvidenceProvenance {
+                            source: "evm.alloy.live_read".to_owned(),
+                            chain_scope: Some("eip155:1".to_owned()),
+                            trace_hint: Some("artifact.stage.quote.observe".to_owned()),
+                        },
+                        freshness: EvidenceFreshness {
+                            observed_at_ms: Some(1_000),
+                            expires_at_ms: None,
+                            max_age_ms: None,
+                        },
+                        confidence_ppm: Some(1_000_000),
+                        payload: json!({"decoded_u256": "10000000000000000"}),
+                    },
+                )]),
+                requirements: Vec::new(),
+                usages: Vec::new(),
+            },
+            effect_contracts: Default::default(),
+            pending_requests: PendingRequestsSnapshot::default(),
+            last_completed_node_id: Some("artifact.stage.quote.observe".to_owned()),
+            actuation_records: Vec::new(),
+            execution_artifact: Some(ExecutionArtifactRuntimeSnapshot {
+                launch_spec: ExecutionArtifactLaunchSpec {
+                    protocol_package_id: "owliabot.uniswap_v3".to_owned(),
+                    action_key: "quote_exact_in_single".to_owned(),
+                    chain_family: ExecutionChainFamily::Evm,
+                    allowed_chains: vec!["eip155:1".to_owned()],
+                    entry_stage_id: "stage.quote".into(),
+                    actor: None,
+                    transactions: Vec::new(),
+                    stages: Vec::new(),
+                    observations: Vec::new(),
+                    preconditions: Vec::new(),
+                    postconditions: Vec::new(),
+                    expected_effects: Vec::new(),
+                    execution_policy: None,
+                    evidence: json!({}),
+                    metadata: BTreeMap::new(),
+                },
+                active_stage_id: None,
+                planned_stage_graphs: BTreeMap::new(),
+                exported_outputs: BTreeMap::from([(
+                    "quote.amount_out_atomic".into(),
+                    json!("10000000000000000"),
+                )]),
+                branch_trace: Vec::new(),
+                awaiting_continuation: None,
+            }),
+        };
+        let mission = Mission {
+            mission_id: "mission-1".to_owned(),
+            goal: "quote".to_owned(),
+            allowed_chains: vec!["eip155:1".to_owned()],
+            budget: MissionBudget {
+                max_steps: Some(4),
+                max_signer_requests: Some(0),
+                max_wall_clock_ms: Some(5_000),
+            },
+            policy: MissionPolicy {
+                policy_mode: Some("guarded".to_owned()),
+                allow_raw_envelopes: false,
+                require_effect_contract_for_writes: false,
+            },
+            constraints: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+        };
+        let mut runtime = ActiveRun::new(mission, checkpoint);
+
+        let events = RuntimeEventEmitter::emit_after_step(
+            &mut runtime,
+            &StepTransition {
+                kind: StepTransitionKind::Complete,
+                node_id: None,
+                summary: "observe-only artifact completed".to_owned(),
+            },
+        );
+
+        assert!(matches!(events[0].event, RunEvent::Progress(_)));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event.event, RunEvent::Completed(_))));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event.event, RunEvent::Paused(_))));
+    }
+}

@@ -16,10 +16,11 @@ use ais_agent_core::{
 };
 
 use crate::inspect::{
-    progress::ActionStatusCountsView, ActiveBoundaryView, BoundaryKind, EffectStatusView,
-    InspectSnapshot, MissionSummaryView, PauseActionView, PauseBundle, PauseKind,
-    PendingConfirmationView, PendingContinuationView, PendingSignerRequestView, ProgressView,
-    RecoveryView, RequiredInputView, RunPhase, RunResultView, RunStatus, SideEffectView,
+    progress::ActionStatusCountsView, ActiveBoundaryView, BranchTraceView, BoundaryKind,
+    EffectStatusView, InspectSnapshot, MissionSummaryView, PauseActionView, PauseBundle,
+    PauseKind, PendingConfirmationView, PendingContinuationView, PendingSignerRequestView,
+    ProgressView, RecoveryView, RequiredInputView, RunPhase, RunResultView, RunStatus,
+    SideEffectView,
 };
 
 pub fn project_inspect_snapshot(
@@ -91,6 +92,7 @@ pub fn project_inspect_snapshot_with_recovery(
             })
             .collect(),
         effect_status: Some(project_effect_status(checkpoint)),
+        branch_trace: project_branch_trace(checkpoint),
         ownership: ownership.clone(),
         run_result: project_run_result(checkpoint, &recovery, ownership),
         progress: project_progress_view(checkpoint),
@@ -148,6 +150,7 @@ pub fn project_pause_bundle_with_recovery(
         pending_signer_requests: project_pending_signer_requests(checkpoint),
         pending_confirmations: project_pending_confirmations(checkpoint),
         pending_continuations: project_pending_continuations(checkpoint),
+        branch_trace: project_branch_trace(checkpoint),
         notes: project_pause_notes(checkpoint),
     })
 }
@@ -372,11 +375,31 @@ fn project_run_result(
         terminal_failure_context: recovery.failure_context.clone(),
         final_recovery_disposition: recovery.recovery_disposition.clone(),
         final_recovery_suggestions: recovery.recovery_suggestions.clone(),
+        branch_trace: project_branch_trace(checkpoint),
         ownership,
         interruption_class: recovery.interruption_class.clone(),
         cancel_state: recovery.cancel_state.clone(),
         side_effect_phase: recovery.side_effect_phase.clone(),
     })
+}
+
+fn project_branch_trace(checkpoint: &CheckpointSnapshot) -> Vec<BranchTraceView> {
+    checkpoint
+        .execution_artifact
+        .as_ref()
+        .map(|snapshot| {
+            snapshot
+                .branch_trace
+                .iter()
+                .map(|entry| BranchTraceView {
+                    branch_stage_id: entry.branch_stage_id.to_string(),
+                    available_targets: entry.available_targets.clone(),
+                    selected_target: entry.selected_target.clone(),
+                    predicate_value: entry.predicate_value,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn project_ownership_snapshot(checkpoint: &CheckpointSnapshot) -> RunOwnershipSnapshot {

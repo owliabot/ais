@@ -6,6 +6,7 @@ Purpose:
 
 Public API entry points:
 - `EvmChainSurface`
+- `artifact_planner::plan_execution_artifact`
 - EVM capability adapters under:
   - `read`
   - `simulate`
@@ -62,6 +63,10 @@ Current implementation status:
   - snapshot / revert
   - time controls
 - live read regressions now use the `alloy` mock provider stack instead of pure local stubs
+- family-owned `ExecutionArtifact` planning now lives in `artifact_planner` for:
+  - `observe` stages
+  - `transaction` stages
+  - stage-bound expected effects
 
 Known gaps:
 - no live trace-call simulator yet

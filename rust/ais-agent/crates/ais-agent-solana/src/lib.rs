@@ -1,5 +1,6 @@
 //! Solana chain-family capabilities and reflection builders.
 
+pub mod artifact_planner;
 pub mod broadcast;
 pub mod read;
 pub mod receipt;

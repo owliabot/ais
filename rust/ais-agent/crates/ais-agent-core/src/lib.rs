@@ -14,5 +14,3 @@ pub mod ownership;
 pub mod patch;
 pub mod recovery;
 pub mod runtime;
-pub mod transfer;
-pub mod uniswap;

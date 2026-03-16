@@ -105,12 +105,23 @@ pub struct RecoveryView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BranchTraceView {
+    pub branch_stage_id: String,
+    #[serde(default)]
+    pub available_targets: Vec<String>,
+    pub selected_target: String,
+    pub predicate_value: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunResultView {
     pub summary: String,
     pub terminal_failure_context: Option<RunFailureContext>,
     pub final_recovery_disposition: Option<RecoveryDisposition>,
     #[serde(default)]
     pub final_recovery_suggestions: Vec<RecoverySuggestion>,
+    #[serde(default)]
+    pub branch_trace: Vec<BranchTraceView>,
     pub ownership: RunOwnershipSnapshot,
     pub interruption_class: Option<InterruptionClass>,
     pub cancel_state: Option<CancelState>,
@@ -147,6 +158,8 @@ pub struct InspectSnapshot {
     #[serde(default)]
     pub recent_side_effects: Vec<SideEffectView>,
     pub effect_status: Option<EffectStatusView>,
+    #[serde(default)]
+    pub branch_trace: Vec<BranchTraceView>,
     pub ownership: RunOwnershipSnapshot,
     pub run_result: Option<RunResultView>,
     pub progress: ProgressView,

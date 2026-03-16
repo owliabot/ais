@@ -1,32 +1,25 @@
-use std::{collections::BTreeMap, str::FromStr};
+use std::collections::BTreeMap;
 
 use ais_agent_control::execution_artifact::{
     EffectSpec, EvmTransactionCandidate, ExecutionArtifactLaunchSpec, ExecutionChainFamily,
-    ExecutionStage, ObservationSpec, TransactionStage,
+    ExecutionStage, ObservationSpec, SolanaInstructionAccount, SolanaInstructionCandidate,
+    SolanaTransactionCandidate, TransactionStage,
 };
 use ais_agent_core::{
-    action::{
-        kinds::{
-            actuate::{ActuateAction, ActuateMode},
-            observe::{
-                EvmObserveLiveBinding, ObserveAction, ObserveLiveBinding, ObserveSourceKind,
-            },
-            simulate::{EvmSimulateLiveBinding, SimulateAction, SimulateKind, SimulateLiveBinding},
-            verify::{EvmVerifyLiveBinding, VerifyAction, VerifyKind, VerifyLiveBinding},
-        },
-        ActionGraph, ActionNode, ActionNodeKind, ActionNodeStatus, ActionOrigin, ActionPayload,
-    },
-    binding::evm::{
-        EvmCallRequest, EvmObserveBinding, EvmObserveRequest, EvmSimulateBinding, EvmVerifyBinding,
-    },
+    action::{ActionGraph, ActionPayload},
     checkpoint::{CheckpointSnapshot, ExecutionArtifactRuntimeSnapshot},
-    effect::{EffectAssertion, EffectContract, EffectContractKind},
+    effect::EffectContract,
     evidence::EvidenceGraph,
 };
-use alloy::primitives::{Address, Bytes, U256};
-use serde_json::Value;
+use ais_agent_evm::artifact_planner::{
+    plan_execution_artifact as plan_evm_execution_artifact, PlannedEvmExecutionArtifact,
+};
+use ais_agent_solana::artifact_planner::{
+    plan_execution_artifact as plan_solana_execution_artifact, PlannedSolanaExecutionArtifact,
+};
+use serde_json::json;
 
-use super::api_native_evm_common::{parse_address, parse_u256_decimal, RuntimeExecutionWiring};
+use super::api_native_evm_common::RuntimeExecutionWiring;
 
 pub(crate) fn seed_execution_artifact_checkpoint(
     checkpoint: &mut CheckpointSnapshot,
@@ -40,92 +33,23 @@ pub(crate) fn seed_execution_artifact_checkpoint(
         ));
     }
 
-    match spec.chain_family {
-        ExecutionChainFamily::Evm => {}
-        ExecutionChainFamily::Solana => {
-            return Err(
-                "execution_artifact solana planning is not implemented in the current M35 slice"
-                    .to_owned(),
-            )
-        }
-    }
-
-    let chain_scope = spec.allowed_chains.first().cloned().ok_or_else(|| {
-        "execution_artifact.allowed_chains must contain one chain for evm planning".to_owned()
+    let chain_scope = spec.chain_scope().map(str::to_owned).ok_or_else(|| {
+        "execution_artifact.allowed_chains must contain exactly one chain scope".to_owned()
     })?;
+    let planned = plan_family_execution_artifact(spec, wiring, chain_scope.as_str())?;
 
-    let planned_effects = plan_evm_effects(spec)?;
-    let planned_stage_graphs =
-        plan_transaction_stage_graphs(wiring, spec, chain_scope.as_str(), &planned_effects)?;
     checkpoint.execution_artifact = Some(ExecutionArtifactRuntimeSnapshot {
         launch_spec: spec.clone(),
         active_stage_id: Some(spec.entry_stage_id.clone()),
-        planned_stage_graphs,
+        planned_stage_graphs: planned.planned_stage_graphs,
         exported_outputs: BTreeMap::new(),
+        branch_trace: Vec::new(),
         awaiting_continuation: None,
     });
     activate_execution_artifact_stage(checkpoint)?;
     checkpoint.evidence_graph = EvidenceGraph::default();
-    checkpoint.effect_contracts = planned_effects
-        .values()
-        .map(|effect| {
-            (
-                effect.effect_contract.effect_id.clone(),
-                effect.effect_contract.clone(),
-            )
-        })
-        .collect();
+    checkpoint.effect_contracts = planned.effect_contracts;
     Ok(())
-}
-
-#[derive(Debug, Clone)]
-struct PlannedExecutionEffect {
-    effect_contract: EffectContract,
-    pre_observation_ref: Option<String>,
-    post_observation_ref: Option<String>,
-    post_request: Option<EvmObserveRequest>,
-}
-
-fn plan_transaction_stage_graphs(
-    wiring: &RuntimeExecutionWiring,
-    spec: &ExecutionArtifactLaunchSpec,
-    chain_scope: &str,
-    planned_effects: &BTreeMap<
-        ais_agent_control::execution_artifact::ExecutionStageId,
-        PlannedExecutionEffect,
-    >,
-) -> Result<BTreeMap<ais_agent_control::execution_artifact::ExecutionStageId, ActionGraph>, String>
-{
-    let mut planned = BTreeMap::new();
-    for stage in &spec.stages {
-        let Some(stage) = stage.as_transaction() else {
-            continue;
-        };
-        let candidate = spec
-            .transaction_candidate(stage.candidate_ref.as_str())
-            .ok_or_else(|| {
-                format!(
-                    "execution_artifact stage `{}` references unknown candidate `{}`",
-                    stage.stage_id, stage.candidate_ref
-                )
-            })?;
-        let graph = plan_single_evm_transaction_stage(
-            spec.protocol_package_id.as_str(),
-            spec.action_key.as_str(),
-            stage,
-            candidate,
-            &spec.preconditions,
-            &spec.postconditions,
-            spec.actor
-                .as_ref()
-                .and_then(|actor| actor.sender_address_hint.as_deref()),
-            wiring.evm_rpc_url.as_deref(),
-            chain_scope,
-            planned_effects.get(&stage.stage_id),
-        )?;
-        planned.insert(stage.stage_id.clone(), graph);
-    }
-    Ok(planned)
 }
 
 pub(crate) fn activate_execution_artifact_stage(
@@ -156,6 +80,16 @@ pub(crate) fn activate_execution_artifact_stage(
                     stage.stage_id
                 )
             })?,
+        ExecutionStage::Observe(stage) => snapshot
+            .planned_stage_graphs
+            .get(&stage.stage_id)
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "execution_artifact planned graph missing for observe stage `{}`",
+                    stage.stage_id
+                )
+            })?,
         ExecutionStage::Branch(_) | ExecutionStage::Continuation(_) => ActionGraph {
             graph_id: Some(format!(
                 "artifact.{}.{}",
@@ -169,741 +103,60 @@ pub(crate) fn activate_execution_artifact_stage(
     Ok(())
 }
 
-fn plan_single_evm_transaction_stage(
-    protocol_package_id: &str,
-    action_key: &str,
-    stage: &TransactionStage,
-    candidate: &ais_agent_control::execution_artifact::ExecutionTransactionCandidate,
-    preconditions: &[ObservationSpec],
-    postconditions: &[ObservationSpec],
-    sender_address_hint: Option<&str>,
-    evm_rpc_url: Option<&str>,
-    chain_scope: &str,
-    expected_effect: Option<&PlannedExecutionEffect>,
-) -> Result<ActionGraph, String> {
-    let sender = sender_address_hint
-        .map(|value| parse_address(value, "execution_artifact.actor.sender_address_hint"))
-        .transpose()?;
-    let live_connection =
-        evm_rpc_url.map(|rpc_url| ais_agent_core::binding::evm::EvmConnectionSpec {
-            rpc_url: rpc_url.to_owned(),
-        });
-    let graph_id = format!("artifact.{protocol_package_id}.{action_key}");
-    let node_prefix = format!("artifact.{}", stage.stage_id);
-
-    let Some(candidate) = candidate.as_evm_transaction() else {
-        return Err(
-            "execution_artifact current evm planner requires evm_transaction candidates".to_owned(),
-        );
-    };
-
-    let call = evm_call_request(sender, candidate)?;
-    let actuator_hint = if candidate.calldata.is_some() {
-        format!(
-            "execute contract call {} on {chain_scope}",
-            candidate.candidate_id
-        )
-    } else {
-        format!(
-            "execute native transfer {} on {chain_scope}",
-            candidate.candidate_id
-        )
-    };
-
-    single_call_graph(
-        graph_id,
-        node_prefix,
-        chain_scope,
-        live_connection,
-        call,
-        actuator_hint,
-        preconditions,
-        postconditions,
-        expected_effect,
-    )
+#[derive(Debug, Clone)]
+struct PlannedExecutionArtifact {
+    planned_stage_graphs:
+        BTreeMap<ais_agent_control::execution_artifact::ExecutionStageId, ActionGraph>,
+    effect_contracts: BTreeMap<String, EffectContract>,
 }
 
-fn single_call_graph(
-    graph_id: String,
-    node_prefix: String,
-    chain_scope: &str,
-    live_connection: Option<ais_agent_core::binding::evm::EvmConnectionSpec>,
-    request: EvmCallRequest,
-    actuator_hint: String,
-    preconditions: &[ObservationSpec],
-    postconditions: &[ObservationSpec],
-    expected_effect: Option<&PlannedExecutionEffect>,
-) -> Result<ActionGraph, String> {
-    let pre_observations = preconditions
-        .iter()
-        .map(|spec| {
-            observation_node(
-                format!("{node_prefix}.pre_observe.{}", spec.observation_id),
-                spec,
-                chain_scope,
-                live_connection.clone(),
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let post_observations = postconditions
-        .iter()
-        .map(|spec| {
-            let mut node = observation_node(
-                format!("{node_prefix}.post_observe.{}", spec.observation_id),
-                spec,
-                chain_scope,
-                live_connection.clone(),
-            )?;
-            node.depends_on = vec![format!("{node_prefix}.verify")];
-            Ok::<ActionNode, String>(node)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    let simulate_id = format!("{node_prefix}.simulate");
-    let actuate_id = format!("{node_prefix}.actuate");
-    let verify_id = format!("{node_prefix}.verify");
-    let effect_ref = expected_effect.map(|effect| effect.effect_contract.effect_id.clone());
-
-    let mut nodes = BTreeMap::new();
-    for node in &pre_observations {
-        nodes.insert(node.node_id.clone(), node.clone());
+impl From<PlannedEvmExecutionArtifact> for PlannedExecutionArtifact {
+    fn from(value: PlannedEvmExecutionArtifact) -> Self {
+        Self {
+            planned_stage_graphs: value.planned_stage_graphs,
+            effect_contracts: value.effect_contracts,
+        }
     }
-    nodes.insert(
-        simulate_id.clone(),
-        ActionNode {
-            node_id: simulate_id.clone(),
-            kind: ActionNodeKind::Simulate,
-            origin: ActionOrigin::DriverFragment,
-            status: ActionNodeStatus::Pending,
-            depends_on: pre_observations
-                .iter()
-                .map(|node| node.node_id.clone())
-                .collect(),
-            inputs: Vec::new(),
-            evidence_refs: Vec::new(),
-            payload: ActionPayload::Simulate(SimulateAction {
-                simulate_kind: SimulateKind::Call,
-                simulator_hint: format!("simulate {node_prefix}"),
-                live: live_connection.clone().map(|connection| {
-                    SimulateLiveBinding::Evm(EvmSimulateLiveBinding {
-                        connection: Some(connection),
-                        binding: EvmSimulateBinding::EthCall,
-                        request: request.clone(),
-                    })
-                }),
-            }),
-            implementation_hint: Some("execution_artifact".to_owned()),
-            expected_effect_ref: None,
-        },
-    );
-    nodes.insert(
-        actuate_id.clone(),
-        ActionNode {
-            node_id: actuate_id.clone(),
-            kind: ActionNodeKind::Actuate,
-            origin: ActionOrigin::DriverFragment,
-            status: ActionNodeStatus::Pending,
-            depends_on: vec![simulate_id.clone()],
-            inputs: Vec::new(),
-            evidence_refs: Vec::new(),
-            payload: ActionPayload::Actuate(ActuateAction {
-                mode: ActuateMode::DriverCall,
-                actuator_hint,
-                chain: Some(chain_scope.to_owned()),
-                envelope_ref: None,
-                requires_effect_contract: expected_effect.is_some(),
-                live: None,
-            }),
-            implementation_hint: Some("execution_artifact".to_owned()),
-            expected_effect_ref: effect_ref.clone(),
-        },
-    );
-    for node in &post_observations {
-        nodes.insert(node.node_id.clone(), node.clone());
-    }
-    nodes.insert(
-        verify_id.clone(),
-        ActionNode {
-            node_id: verify_id.clone(),
-            kind: ActionNodeKind::Verify,
-            origin: ActionOrigin::DriverFragment,
-            status: ActionNodeStatus::Pending,
-            depends_on: vec![actuate_id.clone()],
-            inputs: Vec::new(),
-            evidence_refs: Vec::new(),
-            payload: ActionPayload::Verify(VerifyAction {
-                verify_kind: if expected_effect.is_some() {
-                    VerifyKind::EffectContract
-                } else {
-                    VerifyKind::ReceiptObserved
-                },
-                verifier_hint: if expected_effect.is_some() {
-                    format!("verify expected effect for {node_prefix}")
-                } else {
-                    format!("verify {node_prefix}")
-                },
-                pre_observation_ref: expected_effect.and_then(|effect| effect.pre_observation_ref.clone()),
-                post_observation_ref: expected_effect.and_then(|effect| effect.post_observation_ref.clone()),
-                live: live_connection.map(|connection| {
-                    VerifyLiveBinding::Evm(EvmVerifyLiveBinding {
-                        connection: Some(connection),
-                        binding: if let Some(effect) = expected_effect {
-                            if effect.post_request.is_some() {
-                                EvmVerifyBinding::EffectContractFromReceiptAndPostState
-                            } else {
-                                EvmVerifyBinding::EffectContractFromReceipt
-                            }
-                        } else {
-                            EvmVerifyBinding::ReceiptStatus
-                        },
-                        post_request: expected_effect.and_then(|effect| effect.post_request.clone()),
-                    })
-                }),
-            }),
-            implementation_hint: Some("execution_artifact".to_owned()),
-            expected_effect_ref: effect_ref,
-        },
-    );
-
-    Ok(ActionGraph {
-        graph_id: Some(graph_id),
-        roots: if pre_observations.is_empty() {
-            vec![simulate_id]
-        } else {
-            pre_observations
-                .iter()
-                .map(|node| node.node_id.clone())
-                .collect()
-        },
-        terminals: if post_observations.is_empty() {
-            vec![verify_id]
-        } else {
-            post_observations
-                .iter()
-                .map(|node| node.node_id.clone())
-                .collect()
-        },
-        nodes,
-    })
 }
 
-fn plan_evm_effects(
+impl From<PlannedSolanaExecutionArtifact> for PlannedExecutionArtifact {
+    fn from(value: PlannedSolanaExecutionArtifact) -> Self {
+        Self {
+            planned_stage_graphs: value.planned_stage_graphs,
+            effect_contracts: value.effect_contracts,
+        }
+    }
+}
+
+fn plan_family_execution_artifact(
     spec: &ExecutionArtifactLaunchSpec,
-) -> Result<
-    BTreeMap<ais_agent_control::execution_artifact::ExecutionStageId, PlannedExecutionEffect>,
-    String,
-> {
-    let preconditions = spec
-        .preconditions
-        .iter()
-        .map(|observation| (observation.observation_id.as_str(), observation))
-        .collect::<BTreeMap<_, _>>();
-    let postconditions = spec
-        .postconditions
-        .iter()
-        .map(|observation| (observation.observation_id.as_str(), observation))
-        .collect::<BTreeMap<_, _>>();
-    let mut planned = BTreeMap::new();
-
-    for effect in &spec.expected_effects {
-        let pre_observation_ref = optional_effect_string_param(effect, "pre_observation_id")?;
-        let post_observation_ref = optional_effect_string_param(effect, "post_observation_id")?;
-        let post_request = post_observation_ref
-            .as_ref()
-            .map(|reference| {
-                postconditions
-                    .get(reference.as_str())
-                    .ok_or_else(|| {
-                        format!(
-                            "execution_artifact expected effect `{}` references unknown post observation `{reference}`",
-                            effect.effect_id
-                        )
-                    })
-                    .and_then(|spec| parse_evm_observation_spec(spec).map(|(_, request)| request))
-            })
-            .transpose()?;
-
-        if let Some(reference) = pre_observation_ref.as_ref() {
-            if !preconditions.contains_key(reference.as_str()) {
-                return Err(format!(
-                    "execution_artifact expected effect `{}` references unknown pre observation `{reference}`",
-                    effect.effect_id
-                ));
-            }
-        }
-
-        let stage_id = effect.stage_id.clone();
-        if planned.contains_key(&stage_id) {
-            return Err(format!(
-                "execution_artifact currently supports at most one expected effect per stage; `{stage_id}` has multiple effect specs"
-            ));
-        }
-
-        planned.insert(
-            stage_id,
-            PlannedExecutionEffect {
-                effect_contract: effect_spec_to_contract(effect)?,
-                pre_observation_ref,
-                post_observation_ref,
-                post_request,
-            },
-        );
-    }
-
-    Ok(planned)
-}
-
-fn effect_spec_to_contract(effect: &EffectSpec) -> Result<EffectContract, String> {
-    Ok(EffectContract {
-        effect_id: effect.effect_id.clone(),
-        kind: effect_contract_kind(effect)?,
-        assertions: effect_assertions(effect)?,
-        tolerance_hint: optional_effect_string_param(effect, "tolerance_hint")?,
-    })
-}
-
-fn effect_contract_kind(effect: &EffectSpec) -> Result<EffectContractKind, String> {
-    match effect.kind.as_str() {
-        "asset_delta" => Ok(EffectContractKind::AssetDelta),
-        "state_transition" => Ok(EffectContractKind::StateTransition),
-        "external_job_outcome" => Ok(EffectContractKind::ExternalJobOutcome),
-        other => Err(format!(
-            "execution_artifact expected effect `{}` uses unsupported kind `{other}`",
-            effect.effect_id
-        )),
-    }
-}
-
-fn effect_assertions(effect: &EffectSpec) -> Result<Vec<EffectAssertion>, String> {
-    let Some(assertions) = effect.params.get("assertions").and_then(Value::as_array) else {
-        return Err(format!(
-            "execution_artifact expected effect `{}` requires params.assertions",
-            effect.effect_id
-        ));
-    };
-
-    assertions
-        .iter()
-        .enumerate()
-        .map(|(index, assertion)| {
-            let expression = assertion
-                .get("expression")
-                .and_then(Value::as_str)
-                .filter(|value| !value.trim().is_empty())
-                .ok_or_else(|| {
-                    format!(
-                        "execution_artifact expected effect `{}` assertions[{index}] requires non-empty `expression`",
-                        effect.effect_id
-                    )
-                })?;
-            let description = assertion
-                .get("description")
-                .and_then(Value::as_str)
-                .filter(|value| !value.trim().is_empty())
-                .ok_or_else(|| {
-                    format!(
-                        "execution_artifact expected effect `{}` assertions[{index}] requires non-empty `description`",
-                        effect.effect_id
-                    )
-                })?;
-            Ok(EffectAssertion {
-                expression: expression.to_owned(),
-                description: description.to_owned(),
-            })
-        })
-        .collect()
-}
-
-fn optional_effect_string_param(effect: &EffectSpec, key: &str) -> Result<Option<String>, String> {
-    let Some(value) = effect.params.get(key) else {
-        return Ok(None);
-    };
-    let value = value.as_str().filter(|value| !value.trim().is_empty()).ok_or_else(|| {
-        format!(
-            "execution_artifact expected effect `{}` requires non-empty string param `{key}`",
-            effect.effect_id
-        )
-    })?;
-    Ok(Some(value.to_owned()))
-}
-
-fn observation_node(
-    node_id: String,
-    spec: &ObservationSpec,
+    wiring: &RuntimeExecutionWiring,
     chain_scope: &str,
-    live_connection: Option<ais_agent_core::binding::evm::EvmConnectionSpec>,
-) -> Result<ActionNode, String> {
-    let (binding, request) = parse_evm_observation_spec(spec)?;
-    Ok(ActionNode {
-        node_id,
-        kind: ActionNodeKind::Observe,
-        origin: ActionOrigin::DriverFragment,
-        status: ActionNodeStatus::Pending,
-        depends_on: Vec::new(),
-        inputs: Vec::new(),
-        evidence_refs: Vec::new(),
-        payload: ActionPayload::Observe(ObserveAction {
-            source_kind: ObserveSourceKind::ChainRead,
-            source_hint: format!("observe {} on {chain_scope}", spec.observation_id),
-            output_key: Some(spec.observation_id.clone()),
-            live: Some(ObserveLiveBinding::Evm(EvmObserveLiveBinding {
-                connection: live_connection,
-                binding,
-                request,
-            })),
-        }),
-        implementation_hint: Some("execution_artifact".to_owned()),
-        expected_effect_ref: None,
-    })
-}
-
-fn parse_evm_observation_spec(
-    spec: &ObservationSpec,
-) -> Result<(EvmObserveBinding, EvmObserveRequest), String> {
-    match spec.kind.as_str() {
-        "evm.block_number" => Ok((
-            EvmObserveBinding::BlockNumber,
-            EvmObserveRequest::BlockNumber,
-        )),
-        "evm.native_balance" => {
-            let address = address_param(spec, "address")?;
-            Ok((
-                EvmObserveBinding::NativeBalance,
-                EvmObserveRequest::NativeBalance { address },
-            ))
+) -> Result<PlannedExecutionArtifact, String> {
+    match spec.chain_family {
+        ExecutionChainFamily::Evm => {
+            plan_evm_execution_artifact(spec, wiring.evm_rpc_url.as_deref(), chain_scope)
+                .map(Into::into)
         }
-        "evm.storage_slot" => {
-            let address = address_param(spec, "address")?;
-            let slot = u256_param(spec, "slot")?;
-            Ok((
-                EvmObserveBinding::StorageSlot,
-                EvmObserveRequest::StorageSlot { address, slot },
-            ))
+        ExecutionChainFamily::Solana => {
+            plan_solana_execution_artifact(spec, wiring.solana_rpc_url.as_deref(), chain_scope)
+                .map(Into::into)
         }
-        "evm.erc20_balance_of" => {
-            let token = address_param(spec, "token")?;
-            let owner = address_param(spec, "owner")?;
-            Ok((
-                EvmObserveBinding::Erc20BalanceOf,
-                EvmObserveRequest::Erc20BalanceOf { token, owner },
-            ))
-        }
-        "evm.erc20_allowance" => {
-            let token = address_param(spec, "token")?;
-            let owner = address_param(spec, "owner")?;
-            let spender = address_param(spec, "spender")?;
-            Ok((
-                EvmObserveBinding::Erc20Allowance,
-                EvmObserveRequest::Erc20Allowance {
-                    token,
-                    owner,
-                    spender,
-                },
-            ))
-        }
-        "evm.contract_state_read" => {
-            let to = address_param(spec, "to")?;
-            let data = bytes_param(spec, "data")?;
-            Ok((
-                EvmObserveBinding::ContractStateRead,
-                EvmObserveRequest::ContractStateRead { to, data },
-            ))
-        }
-        other => Err(format!(
-            "execution_artifact observation `{}` uses unsupported kind `{other}`",
-            spec.observation_id
-        )),
     }
-}
-
-fn string_param<'a>(spec: &'a ObservationSpec, key: &str) -> Result<&'a str, String> {
-    spec.params
-        .get(key)
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| {
-            format!(
-                "execution_artifact observation `{}` requires string param `{key}`",
-                spec.observation_id
-            )
-        })
-}
-
-fn address_param(spec: &ObservationSpec, key: &str) -> Result<Address, String> {
-    parse_address(
-        string_param(spec, key)?,
-        &format!(
-            "execution_artifact.observations.{}.{}",
-            spec.observation_id, key
-        ),
-    )
-}
-
-fn bytes_param(spec: &ObservationSpec, key: &str) -> Result<Bytes, String> {
-    Bytes::from_str(string_param(spec, key)?).map_err(|error| {
-        format!(
-            "invalid execution_artifact observation `{}` bytes param `{key}`: {error}",
-            spec.observation_id
-        )
-    })
-}
-
-fn u256_param(spec: &ObservationSpec, key: &str) -> Result<U256, String> {
-    let value = string_param(spec, key)?;
-    if let Some(value) = value.strip_prefix("0x") {
-        U256::from_str_radix(value, 16).map_err(|error| {
-            format!(
-                "invalid execution_artifact observation `{}` hex param `{key}`: {error}",
-                spec.observation_id
-            )
-        })
-    } else {
-        parse_u256_decimal(value)
-    }
-}
-
-fn evm_call_request(
-    sender: Option<Address>,
-    candidate: &EvmTransactionCandidate,
-) -> Result<EvmCallRequest, String> {
-    let to = parse_address(candidate.to.as_str(), "execution_artifact.transactions.to")?;
-    let value = candidate
-        .value
-        .as_deref()
-        .map(parse_u256_decimal)
-        .transpose()?;
-    let data = parse_optional_calldata_hex(candidate.calldata.as_deref())?;
-    Ok(EvmCallRequest {
-        from: sender,
-        to,
-        data,
-        value,
-    })
-}
-
-fn parse_optional_calldata_hex(value: Option<&str>) -> Result<Bytes, String> {
-    let Some(value) = value else {
-        return Ok(Bytes::default());
-    };
-    Bytes::from_str(value)
-        .map_err(|error| format!("invalid execution_artifact calldata `{value}`: {error}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+
+    use ais_agent_core::{
+        action::kinds::verify::VerifyKind,
+        runtime::{RunLifecycleState, RunPhase},
+    };
 
     #[test]
-    fn planner_places_post_observations_after_verify() {
-        let graph = plan_single_evm_transaction_stage(
-            "owliabot.transfer",
-            "native_transfer",
-            &TransactionStage {
-                stage_id: "stage.transfer".into(),
-                candidate_ref: "tx.transfer".into(),
-                exports: Vec::new(),
-                next_stage_id: None,
-            },
-            &ais_agent_control::execution_artifact::ExecutionTransactionCandidate::EvmTransaction(
-                EvmTransactionCandidate {
-                    candidate_id: "tx.transfer".into(),
-                    to: "0x1111111111111111111111111111111111111111".to_owned(),
-                    value: Some("1".to_owned()),
-                    calldata: None,
-                },
-            ),
-            &[ObservationSpec {
-                observation_id: "state.pre.sender_balance".to_owned(),
-                kind: "evm.native_balance".to_owned(),
-                params: BTreeMap::from([(
-                    "address".to_owned(),
-                    json!("0x2222222222222222222222222222222222222222"),
-                )]),
-            }],
-            &[ObservationSpec {
-                observation_id: "state.post.recipient_balance".to_owned(),
-                kind: "evm.native_balance".to_owned(),
-                params: BTreeMap::from([(
-                    "address".to_owned(),
-                    json!("0x3333333333333333333333333333333333333333"),
-                )]),
-            }],
-            None,
-            Some("http://127.0.0.1:8545"),
-            "eip155:8453",
-            None,
-        )
-        .expect("planned graph");
-
-        let pre_observe_id = "artifact.stage.transfer.pre_observe.state.pre.sender_balance";
-        let simulate_id = "artifact.stage.transfer.simulate";
-        let verify_id = "artifact.stage.transfer.verify";
-        let post_observe_id = "artifact.stage.transfer.post_observe.state.post.recipient_balance";
-
-        assert_eq!(graph.roots, vec![pre_observe_id.to_owned()]);
-        assert_eq!(graph.terminals, vec![post_observe_id.to_owned()]);
-        assert_eq!(
-            graph
-                .nodes
-                .get(pre_observe_id)
-                .expect("pre observe node")
-                .depends_on,
-            Vec::<String>::new()
-        );
-        assert_eq!(
-            graph
-                .nodes
-                .get(simulate_id)
-                .expect("simulate node")
-                .depends_on,
-            vec![pre_observe_id.to_owned()]
-        );
-        assert_eq!(
-            graph.nodes.get(verify_id).expect("verify node").depends_on,
-            vec!["artifact.stage.transfer.actuate".to_owned()]
-        );
-        assert_eq!(
-            graph
-                .nodes
-                .get(post_observe_id)
-                .expect("post observe node")
-                .depends_on,
-            vec![verify_id.to_owned()]
-        );
-    }
-
-    #[test]
-    fn planner_attaches_effect_contract_verify_for_expected_effect() {
-        let effect = PlannedExecutionEffect {
-            effect_contract: EffectContract {
-                effect_id: "effect.transfer".to_owned(),
-                kind: EffectContractKind::AssetDelta,
-                assertions: vec![EffectAssertion {
-                    expression: "receipt.status == true".to_owned(),
-                    description: "transfer receipt must succeed".to_owned(),
-                }],
-                tolerance_hint: Some("receipt".to_owned()),
-            },
-            pre_observation_ref: Some("state.pre.sender_balance".to_owned()),
-            post_observation_ref: Some("state.post.recipient_balance".to_owned()),
-            post_request: Some(EvmObserveRequest::NativeBalance {
-                address: parse_address(
-                    "0x3333333333333333333333333333333333333333",
-                    "tests.effect.post_request.address",
-                )
-                .expect("valid address"),
-            }),
-        };
-
-        let graph = plan_single_evm_transaction_stage(
-            "owliabot.transfer",
-            "native_transfer",
-            &TransactionStage {
-                stage_id: "stage.transfer".into(),
-                candidate_ref: "tx.transfer".into(),
-                exports: Vec::new(),
-                next_stage_id: None,
-            },
-            &ais_agent_control::execution_artifact::ExecutionTransactionCandidate::EvmTransaction(
-                EvmTransactionCandidate {
-                    candidate_id: "tx.transfer".into(),
-                    to: "0x1111111111111111111111111111111111111111".to_owned(),
-                    value: Some("1".to_owned()),
-                    calldata: None,
-                },
-            ),
-            &[ObservationSpec {
-                observation_id: "state.pre.sender_balance".to_owned(),
-                kind: "evm.native_balance".to_owned(),
-                params: BTreeMap::from([(
-                    "address".to_owned(),
-                    json!("0x2222222222222222222222222222222222222222"),
-                )]),
-            }],
-            &[ObservationSpec {
-                observation_id: "state.post.recipient_balance".to_owned(),
-                kind: "evm.native_balance".to_owned(),
-                params: BTreeMap::from([(
-                    "address".to_owned(),
-                    json!("0x3333333333333333333333333333333333333333"),
-                )]),
-            }],
-            None,
-            Some("http://127.0.0.1:8545"),
-            "eip155:8453",
-            Some(&effect),
-        )
-        .expect("planned graph");
-
-        let actuate = graph
-            .nodes
-            .get("artifact.stage.transfer.actuate")
-            .expect("actuate node");
-        let verify = graph
-            .nodes
-            .get("artifact.stage.transfer.verify")
-            .expect("verify node");
-
-        let ActionPayload::Actuate(actuate_payload) = &actuate.payload else {
-            panic!("expected actuate payload");
-        };
-        assert!(actuate_payload.requires_effect_contract);
-        assert_eq!(
-            actuate.expected_effect_ref.as_deref(),
-            Some("effect.transfer")
-        );
-
-        let ActionPayload::Verify(verify_payload) = &verify.payload else {
-            panic!("expected verify payload");
-        };
-        assert_eq!(verify_payload.verify_kind, VerifyKind::EffectContract);
-        assert_eq!(
-            verify_payload.pre_observation_ref.as_deref(),
-            Some("state.pre.sender_balance")
-        );
-        assert_eq!(
-            verify_payload.post_observation_ref.as_deref(),
-            Some("state.post.recipient_balance")
-        );
-        let Some(VerifyLiveBinding::Evm(live)) = &verify_payload.live else {
-            panic!("expected evm verify binding");
-        };
-        assert_eq!(
-            live.binding,
-            EvmVerifyBinding::EffectContractFromReceiptAndPostState
-        );
-        assert!(live.post_request.is_some());
-        assert_eq!(
-            verify.expected_effect_ref.as_deref(),
-            Some("effect.transfer")
-        );
-    }
-
-    #[test]
-    fn seed_execution_artifact_checkpoint_persists_expected_effect_contracts() {
-        let mut checkpoint = CheckpointSnapshot {
-            run_id: "run-1".to_owned(),
-            mission_id: "mission-1".to_owned(),
-            checkpoint_seq: 0,
-            plan_epoch: 0,
-            lifecycle: ais_agent_core::runtime::RunLifecycleState::new(
-                ais_agent_control::ids::RunId("run-1".to_owned()),
-                "mission-1",
-            ),
-            action_graph: ActionGraph {
-                graph_id: Some("graph".to_owned()),
-                roots: Vec::new(),
-                terminals: Vec::new(),
-                nodes: BTreeMap::new(),
-            },
-            evidence_graph: EvidenceGraph::default(),
-            effect_contracts: BTreeMap::new(),
-            pending_requests: ais_agent_core::checkpoint::PendingRequestsSnapshot::default(),
-            last_completed_node_id: None,
-            actuation_records: Vec::new(),
-            execution_artifact: None,
-        };
+    fn seed_execution_artifact_checkpoint_persists_expected_effect_contracts_for_evm() {
+        let mut checkpoint = sample_checkpoint();
         let spec = ExecutionArtifactLaunchSpec {
             protocol_package_id: "owliabot.transfer".to_owned(),
             action_key: "native_transfer".to_owned(),
@@ -911,20 +164,23 @@ mod tests {
             allowed_chains: vec!["eip155:8453".to_owned()],
             entry_stage_id: "stage.transfer".into(),
             actor: None,
-            transactions: vec![ais_agent_control::execution_artifact::ExecutionTransactionCandidate::EvmTransaction(
-                EvmTransactionCandidate {
-                    candidate_id: "tx.transfer".into(),
-                    to: "0x1111111111111111111111111111111111111111".to_owned(),
-                    value: Some("1".to_owned()),
-                    calldata: None,
-                },
-            )],
+            transactions: vec![
+                ais_agent_control::execution_artifact::ExecutionTransactionCandidate::EvmTransaction(
+                    EvmTransactionCandidate {
+                        candidate_id: "tx.transfer".into(),
+                        to: "0x1111111111111111111111111111111111111111".to_owned(),
+                        value: Some("1".to_owned()),
+                        calldata: None,
+                    },
+                ),
+            ],
             stages: vec![ExecutionStage::Transaction(TransactionStage {
                 stage_id: "stage.transfer".into(),
                 candidate_ref: "tx.transfer".into(),
                 exports: Vec::new(),
                 next_stage_id: None,
             })],
+            observations: Vec::new(),
             preconditions: Vec::new(),
             postconditions: vec![ObservationSpec {
                 observation_id: "state.post.recipient_balance".to_owned(),
@@ -973,5 +229,94 @@ mod tests {
             verify.expected_effect_ref.as_deref(),
             Some("effect.transfer")
         );
+    }
+
+    #[test]
+    fn seed_execution_artifact_checkpoint_dispatches_solana_family_planner() {
+        let mut checkpoint = sample_checkpoint();
+        let spec = ExecutionArtifactLaunchSpec {
+            protocol_package_id: "owliabot.solana".to_owned(),
+            action_key: "native_transfer".to_owned(),
+            chain_family: ExecutionChainFamily::Solana,
+            allowed_chains: vec!["solana:mainnet".to_owned()],
+            entry_stage_id: "stage.transfer".into(),
+            actor: Some(ais_agent_control::execution_artifact::ExecutionArtifactActor {
+                sender_address_hint: Some("11111111111111111111111111111111".to_owned()),
+                recipient_address: None,
+            }),
+            transactions: vec![
+                ais_agent_control::execution_artifact::ExecutionTransactionCandidate::SolanaTransaction(
+                    SolanaTransactionCandidate {
+                        candidate_id: "tx.transfer".into(),
+                        instructions: vec![SolanaInstructionCandidate {
+                            program_id: "11111111111111111111111111111111".to_owned(),
+                            accounts: vec![SolanaInstructionAccount {
+                                address: "11111111111111111111111111111111".to_owned(),
+                                is_signer: true,
+                                is_writable: true,
+                            }],
+                            data_base64: Some("AQID".to_owned()),
+                        }],
+                    },
+                ),
+            ],
+            stages: vec![ExecutionStage::Transaction(TransactionStage {
+                stage_id: "stage.transfer".into(),
+                candidate_ref: "tx.transfer".into(),
+                exports: Vec::new(),
+                next_stage_id: None,
+            })],
+            observations: Vec::new(),
+            preconditions: Vec::new(),
+            postconditions: Vec::new(),
+            expected_effects: Vec::new(),
+            execution_policy: None,
+            evidence: json!({}),
+            metadata: BTreeMap::new(),
+        };
+        let wiring = RuntimeExecutionWiring {
+            evm_rpc_url: None,
+            solana_rpc_url: Some("http://127.0.0.1:8899".to_owned()),
+            allowed_protocol_packages: vec!["owliabot.solana".to_owned()],
+        };
+
+        seed_execution_artifact_checkpoint(&mut checkpoint, &wiring, &spec)
+            .expect("seed artifact checkpoint");
+
+        assert_eq!(
+            checkpoint
+                .execution_artifact
+                .as_ref()
+                .and_then(|artifact| artifact.active_stage_id.as_ref())
+                .map(|stage_id| stage_id.as_str()),
+            Some("stage.transfer")
+        );
+        assert!(checkpoint
+            .action_graph
+            .nodes
+            .contains_key("artifact.stage.transfer.simulate"));
+        assert!(checkpoint
+            .action_graph
+            .nodes
+            .contains_key("artifact.stage.transfer.verify"));
+    }
+
+    fn sample_checkpoint() -> CheckpointSnapshot {
+        let mut lifecycle = RunLifecycleState::new("run-1".into(), "mission-1");
+        lifecycle.mark_running(RunPhase::Planning);
+        CheckpointSnapshot {
+            run_id: "run-1".to_owned(),
+            checkpoint_seq: 0,
+            mission_id: "mission-1".into(),
+            plan_epoch: 0,
+            lifecycle,
+            action_graph: ActionGraph::default(),
+            evidence_graph: EvidenceGraph::default(),
+            effect_contracts: BTreeMap::new(),
+            pending_requests: ais_agent_core::checkpoint::PendingRequestsSnapshot::default(),
+            last_completed_node_id: None,
+            actuation_records: Vec::new(),
+            execution_artifact: None,
+        }
     }
 }

@@ -244,6 +244,7 @@ fn inspect_projection_updates_run_link_cursor() {
         pending_signer_requests: Vec::new(),
         recent_side_effects: Vec::new(),
         effect_status: None,
+        branch_trace: Vec::new(),
         ownership: RunOwnershipSnapshot {
             run_id: run_id.clone(),
             current_claim: None,

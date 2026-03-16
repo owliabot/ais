@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use ais_agent_control::{
     execution_artifact::{
         ContinuationStage, EvmTransactionCandidate, ExecutionArtifactLaunchSpec,
-        ExecutionChainFamily, ExecutionStage, ExecutionTransactionCandidate, OutputExportSpec,
-        TransactionStage, ValueRef,
+        ExecutionChainFamily, ExecutionStage, ExecutionTransactionCandidate, ObservationSpec,
+        OutputExportSpec, TransactionStage, ValueRef,
     },
     ids::{RunId, SignerRequestId},
     recovery::{
@@ -17,14 +17,16 @@ use ais_agent_core::{
         kinds::{
             actuate::{ActuateAction, ActuateMode},
             derive::{DeriveAction, DeriveKind},
+            observe::{ObserveAction, ObserveSourceKind},
         },
         ActionGraph, ActionInputRef, ActionNode, ActionNodeKind, ActionNodeStatus, ActionOrigin,
         ActionPayload,
     },
     actuation::{ActuationKind, ActuationRecord, ActuationStatus},
     checkpoint::{
-        ArtifactContinuationSnapshot, CheckpointSnapshot, CheckpointStore,
-        ExecutionArtifactRuntimeSnapshot, InMemoryCheckpointStore, PendingRequestsSnapshot,
+        ArtifactBranchTraceSnapshot, ArtifactContinuationSnapshot, CheckpointSnapshot,
+        CheckpointStore, ExecutionArtifactRuntimeSnapshot, InMemoryCheckpointStore,
+        PendingRequestsSnapshot,
     },
     evidence::{
         EvidenceFreshness, EvidenceGraph, EvidenceKind, EvidenceProvenance, EvidenceRecord,
@@ -257,6 +259,58 @@ fn continuation_wait_projects_explicit_wait_status_and_pending_metadata() {
         .required_actions
         .iter()
         .any(|action| { action.action == "submit_execution_artifact_continuation" }));
+}
+
+#[test]
+fn inspect_and_pause_project_runtime_branch_trace() {
+    let mut checkpoint = continuation_wait_checkpoint();
+    checkpoint
+        .execution_artifact
+        .as_mut()
+        .expect("execution artifact")
+        .branch_trace = vec![ArtifactBranchTraceSnapshot {
+        branch_stage_id: "stage.guard".into(),
+        available_targets: vec![
+            "stage.swap".to_owned(),
+            "assert:quote_rejected".to_owned(),
+        ],
+        selected_target: "stage.swap".to_owned(),
+        predicate_value: true,
+    }];
+
+    let snapshot = project_inspect_snapshot(&sample_mission(), &checkpoint);
+    let pause = project_pause_bundle(&checkpoint).expect("pause bundle");
+
+    assert_eq!(snapshot.branch_trace.len(), 1);
+    assert_eq!(snapshot.branch_trace[0].branch_stage_id, "stage.guard");
+    assert_eq!(snapshot.branch_trace[0].selected_target, "stage.swap");
+    assert_eq!(
+        snapshot.branch_trace[0].available_targets,
+        vec!["stage.swap", "assert:quote_rejected"]
+    );
+    assert_eq!(pause.branch_trace.len(), 1);
+    assert_eq!(pause.branch_trace[0].branch_stage_id, "stage.guard");
+    assert_eq!(pause.branch_trace[0].selected_target, "stage.swap");
+}
+
+#[test]
+fn observe_only_completion_projects_generic_completed_snapshot() {
+    let checkpoint = completed_observe_only_checkpoint();
+
+    let snapshot = project_inspect_snapshot(&sample_mission(), &checkpoint);
+    let pause = project_pause_bundle(&checkpoint);
+
+    assert_eq!(snapshot.status, RunStatus::Completed);
+    assert_eq!(snapshot.progress.total_nodes, 1);
+    assert_eq!(snapshot.progress.status_counts.succeeded, 1);
+    assert_eq!(
+        snapshot
+            .run_result
+            .as_ref()
+            .map(|result| result.summary.as_str()),
+        Some("observe-only artifact completed")
+    );
+    assert!(pause.is_none());
 }
 
 #[test]
@@ -636,6 +690,7 @@ fn continuation_wait_checkpoint() -> CheckpointSnapshot {
                     next_stage_id: None,
                 }),
             ],
+            observations: Vec::new(),
             preconditions: Vec::new(),
             postconditions: Vec::new(),
             expected_effects: Vec::new(),
@@ -646,6 +701,7 @@ fn continuation_wait_checkpoint() -> CheckpointSnapshot {
         active_stage_id: Some("stage.continue".into()),
         planned_stage_graphs: BTreeMap::new(),
         exported_outputs: BTreeMap::from([("swap.tx_hash".into(), json!("0xabc"))]),
+        branch_trace: Vec::new(),
         awaiting_continuation: Some(ArtifactContinuationSnapshot {
             stage_id: "stage.continue".into(),
             required_outputs: vec!["swap.tx_hash".into()],
@@ -667,4 +723,124 @@ fn awaiting_confirmation_checkpoint() -> CheckpointSnapshot {
         signer_request_id: None,
     });
     checkpoint
+}
+
+fn completed_observe_only_checkpoint() -> CheckpointSnapshot {
+    let mut lifecycle = RunLifecycleState::new(RunId("run-observe-only".to_owned()), "mission-1");
+    lifecycle.mark_running(RunPhase::Planning);
+    lifecycle.bump_checkpoint();
+    lifecycle.bump_plan_epoch();
+    lifecycle.complete("observe-only artifact completed");
+
+    CheckpointSnapshot {
+        run_id: "run-observe-only".to_owned(),
+        mission_id: "mission-1".to_owned(),
+        checkpoint_seq: lifecycle.checkpoint_seq,
+        plan_epoch: lifecycle.plan_epoch,
+        lifecycle,
+        action_graph: ActionGraph {
+            graph_id: Some("artifact.stage.quote".to_owned()),
+            roots: vec!["artifact.stage.quote.observe".to_owned()],
+            terminals: vec!["artifact.stage.quote.observe".to_owned()],
+            nodes: BTreeMap::from([(
+                "artifact.stage.quote.observe".to_owned(),
+                ActionNode {
+                    node_id: "artifact.stage.quote.observe".to_owned(),
+                    kind: ActionNodeKind::Observe,
+                    origin: ActionOrigin::DriverFragment,
+                    status: ActionNodeStatus::Succeeded,
+                    depends_on: Vec::new(),
+                    inputs: Vec::new(),
+                    evidence_refs: vec!["query.quote".to_owned()],
+                    payload: ActionPayload::Observe(ObserveAction {
+                        source_kind: ObserveSourceKind::ChainRead,
+                        source_hint: "observe-only query completed".to_owned(),
+                        output_key: Some("query.quote".to_owned()),
+                        live: None,
+                    }),
+                    implementation_hint: Some("execution_artifact".to_owned()),
+                    expected_effect_ref: None,
+                },
+            )]),
+        },
+        evidence_graph: EvidenceGraph {
+            records: BTreeMap::from([(
+                "query.quote".to_owned(),
+                EvidenceRecord {
+                    evidence_id: "query.quote".to_owned(),
+                    kind: EvidenceKind::ExternalObservation,
+                    provenance: EvidenceProvenance {
+                        source: "evm.alloy.live_read".to_owned(),
+                        chain_scope: Some("eip155:1".to_owned()),
+                        trace_hint: Some("artifact.stage.quote.observe".to_owned()),
+                    },
+                    freshness: EvidenceFreshness {
+                        observed_at_ms: Some(1_000),
+                        expires_at_ms: None,
+                        max_age_ms: None,
+                    },
+                    confidence_ppm: Some(1_000_000),
+                    payload: json!({
+                        "decoded_u256": "10000000000000000",
+                        "return_data": "0x0de0b6b3a7640000",
+                    }),
+                },
+            )]),
+            requirements: Vec::new(),
+            usages: Vec::new(),
+        },
+        effect_contracts: Default::default(),
+        pending_requests: PendingRequestsSnapshot::default(),
+        last_completed_node_id: Some("artifact.stage.quote.observe".to_owned()),
+        actuation_records: Vec::new(),
+        execution_artifact: Some(ExecutionArtifactRuntimeSnapshot {
+            launch_spec: ExecutionArtifactLaunchSpec {
+                protocol_package_id: "owliabot.uniswap_v3".to_owned(),
+                action_key: "quote_exact_in_single".to_owned(),
+                chain_family: ExecutionChainFamily::Evm,
+                allowed_chains: vec!["eip155:1".to_owned()],
+                entry_stage_id: "stage.quote".into(),
+                actor: None,
+                transactions: Vec::new(),
+                stages: vec![ExecutionStage::Observe(
+                    ais_agent_control::execution_artifact::ObserveStage {
+                        stage_id: "stage.quote".into(),
+                        observation_ref: "query.quote".to_owned(),
+                        exports: vec![OutputExportSpec {
+                            output_key: "quote.amount_out_atomic".into(),
+                            source: ValueRef::Ref {
+                                reference: "refs.evidence.query.quote.decoded_u256".to_owned(),
+                            },
+                        }],
+                        next_stage_id: None,
+                    },
+                )],
+                observations: vec![ObservationSpec {
+                    observation_id: "query.quote".to_owned(),
+                    kind: "evm.contract_state_read".to_owned(),
+                    params: BTreeMap::from([
+                        (
+                            "to".to_owned(),
+                            json!("0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6"),
+                        ),
+                        ("data".to_owned(), json!("0xf7729d4300")),
+                    ]),
+                }],
+                preconditions: Vec::new(),
+                postconditions: Vec::new(),
+                expected_effects: Vec::new(),
+                execution_policy: None,
+                evidence: json!({}),
+                metadata: BTreeMap::new(),
+            },
+            active_stage_id: None,
+            planned_stage_graphs: BTreeMap::new(),
+            exported_outputs: BTreeMap::from([(
+                "quote.amount_out_atomic".into(),
+                json!("10000000000000000"),
+            )]),
+            branch_trace: Vec::new(),
+            awaiting_continuation: None,
+        }),
+    }
 }

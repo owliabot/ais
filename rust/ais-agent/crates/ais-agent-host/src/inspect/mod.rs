@@ -17,6 +17,7 @@ pub use projector::{
     project_pause_bundle_with_recovery, project_progress_view,
 };
 pub use snapshot::{
-    ActiveBoundaryView, BoundaryKind, EffectStatusView, InspectSnapshot, MissionSummaryView,
-    RecoveryView, RequiredInputView, RunPhase, RunResultView, RunStatus, SideEffectView,
+    ActiveBoundaryView, BranchTraceView, BoundaryKind, EffectStatusView, InspectSnapshot,
+    MissionSummaryView, RecoveryView, RequiredInputView, RunPhase, RunResultView, RunStatus,
+    SideEffectView,
 };

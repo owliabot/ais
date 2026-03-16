@@ -50,7 +50,18 @@ pub struct ExecutionArtifactRuntimeSnapshot {
     #[serde(default)]
     pub exported_outputs: BTreeMap<ExecutionOutputKey, Value>,
     #[serde(default)]
+    pub branch_trace: Vec<ArtifactBranchTraceSnapshot>,
+    #[serde(default)]
     pub awaiting_continuation: Option<ArtifactContinuationSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactBranchTraceSnapshot {
+    pub branch_stage_id: ExecutionStageId,
+    #[serde(default)]
+    pub available_targets: Vec<String>,
+    pub selected_target: String,
+    pub predicate_value: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

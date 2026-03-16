@@ -8,6 +8,10 @@ Purpose:
 Primary architecture reference:
 - [ARCHITECTURE.md](/home/xcshuan/work/owlia/ais/rust/ais-agent/ARCHITECTURE.md)
 
+Current final-goal closeout references:
+- [acceptance-proof-matrix-ais-agent-final-goal-2026-03-16.md](/home/xcshuan/work/owlia/ais/docs/ais-agent-design/acceptance-proof-matrix-ais-agent-final-goal-2026-03-16.md)
+- [closeout-ais-agent-final-goal-evm-first-2026-03-16.md](/home/xcshuan/work/owlia/ais/docs/ais-agent-design/closeout-ais-agent-final-goal-evm-first-2026-03-16.md)
+
 Crate graph:
 - `ais-agent-control`
   - command, event, and id contracts
@@ -43,6 +47,10 @@ Hard boundary rules:
 
 Current status:
 - M0 through M5 milestones are implemented
+- final-goal boundary cleanup is now materially complete for the current EVM-first scope:
+  - protocol-specific Rust public ABI for transfer / Uniswap has been removed
+  - current accepted product proof is EVM-first, not full multi-family closeout
+  - Solana product proof remains explicitly deferred in the closeout docs
 - runtime milestones now completed:
   - `M6 Runtime Stepper`
   - `M7 Persistence And Concurrency`

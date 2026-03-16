@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use ais_agent_control::execution_artifact::{
     BranchStage, BranchTarget, EffectSpec, EvmTransactionCandidate, ExecutionArtifactLaunchSpec,
     ExecutionChainFamily, ExecutionStage, ExecutionTransactionCandidate, ObservationSpec,
-    PredicateSpec, SolanaTransactionCandidate, TransactionStage, ValueRef,
+    ObserveStage, PredicateSpec, SolanaTransactionCandidate, TransactionStage, ValueRef,
 };
 use ais_agent_control::launch_spec::{
     LaunchSpecSubmission, PrebuiltFragmentLaunchSpec, ReflectionRequestLaunchSpec,
@@ -76,12 +76,22 @@ fn validate_execution_artifact(spec: &ExecutionArtifactLaunchSpec) -> Result<(),
         return Err("execution_artifact.allowed_chains entries must not be blank".to_owned());
     }
 
-    if spec.transactions.is_empty() {
-        return Err("execution_artifact.transactions must not be empty".to_owned());
+    if spec.allowed_chains.len() != 1 {
+        return Err(
+            "execution_artifact.allowed_chains must contain exactly one active chain scope"
+                .to_owned(),
+        );
     }
 
     if spec.stages.is_empty() {
         return Err("execution_artifact.stages must not be empty".to_owned());
+    }
+
+    if spec.transactions.is_empty() && !spec.stages.iter().any(|stage| stage.as_observe().is_some())
+    {
+        return Err(
+            "execution_artifact must provide at least one transaction or observe stage".to_owned(),
+        );
     }
 
     let candidate_ids: Vec<&str> = spec
@@ -109,13 +119,14 @@ fn validate_execution_artifact(spec: &ExecutionArtifactLaunchSpec) -> Result<(),
     }
 
     let exported_output_keys = collect_export_keys(spec)?;
-    validate_observations(spec)?;
+    let observation_ids = validate_observations(spec)?;
     validate_effects(spec, &stage_ids)?;
 
     for stage in &spec.stages {
         validate_stage(
             stage,
             &candidate_ids,
+            &observation_ids,
             &stage_ids,
             &exported_output_keys,
             "execution_artifact.stages",
@@ -125,21 +136,19 @@ fn validate_execution_artifact(spec: &ExecutionArtifactLaunchSpec) -> Result<(),
     Ok(())
 }
 
-fn validate_observations(spec: &ExecutionArtifactLaunchSpec) -> Result<(), String> {
+fn validate_observations(spec: &ExecutionArtifactLaunchSpec) -> Result<Vec<&str>, String> {
     let observation_ids = spec
-        .preconditions
+        .observations
         .iter()
+        .chain(spec.preconditions.iter())
         .chain(spec.postconditions.iter())
         .map(|spec| validate_observation_spec(spec))
         .collect::<Result<Vec<_>, _>>()?;
     ensure_unique("execution_artifact.observations", &observation_ids)?;
-    Ok(())
+    Ok(observation_ids)
 }
 
-fn validate_effects(
-    spec: &ExecutionArtifactLaunchSpec,
-    stage_ids: &[&str],
-) -> Result<(), String> {
+fn validate_effects(spec: &ExecutionArtifactLaunchSpec, stage_ids: &[&str]) -> Result<(), String> {
     let effect_ids = spec
         .expected_effects
         .iter()
@@ -272,29 +281,27 @@ fn collect_export_keys(spec: &ExecutionArtifactLaunchSpec) -> Result<Vec<&str>, 
     let export_keys = spec
         .stages
         .iter()
-        .filter_map(|stage| stage.as_transaction().map(|stage| stage.exports.iter()))
-        .flatten()
+        .flat_map(|stage| match stage {
+            ExecutionStage::Transaction(stage) => stage.exports.iter().collect::<Vec<_>>(),
+            ExecutionStage::Observe(stage) => stage.exports.iter().collect::<Vec<_>>(),
+            ExecutionStage::Branch(_) | ExecutionStage::Continuation(_) => Vec::new(),
+        })
         .map(|export| {
             if export.output_key.trim().is_empty() {
-                Err(
-                    "execution_artifact.stages.transaction.exports output_key must not be empty"
-                        .to_owned(),
-                )
+                Err("execution_artifact.stages.exports output_key must not be empty".to_owned())
             } else {
                 Ok(export.output_key.as_str())
             }
         })
         .collect::<Result<Vec<_>, _>>()?;
-    ensure_unique(
-        "execution_artifact.stages.transaction.exports",
-        &export_keys,
-    )?;
+    ensure_unique("execution_artifact.stages.exports", &export_keys)?;
     Ok(export_keys)
 }
 
 fn validate_stage(
     stage: &ExecutionStage,
     candidate_ids: &[&str],
+    observation_ids: &[&str],
     stage_ids: &[&str],
     export_keys: &[&str],
     field_path: &str,
@@ -302,6 +309,9 @@ fn validate_stage(
     match stage {
         ExecutionStage::Transaction(stage) => {
             validate_transaction_stage(stage, candidate_ids, stage_ids, field_path)
+        }
+        ExecutionStage::Observe(stage) => {
+            validate_observe_stage(stage, observation_ids, stage_ids, field_path)
         }
         ExecutionStage::Branch(stage) => validate_branch_stage(stage, stage_ids, field_path),
         ExecutionStage::Continuation(stage) => {
@@ -354,6 +364,37 @@ fn validate_branch_stage(
         stage_ids,
         &format!("{stage_path}.if_false"),
     )?;
+    Ok(())
+}
+
+fn validate_observe_stage(
+    stage: &ObserveStage,
+    observation_ids: &[&str],
+    stage_ids: &[&str],
+    field_path: &str,
+) -> Result<(), String> {
+    let stage_path = format!("{field_path}[{}]", stage.stage_id);
+    if !observation_ids
+        .iter()
+        .any(|observation_id| observation_id == &stage.observation_ref.as_str())
+    {
+        return Err(format!(
+            "{stage_path}.observation_ref references unknown observation `{}`",
+            stage.observation_ref
+        ));
+    }
+    validate_next_stage_ref(stage.next_stage_id.as_deref(), stage_ids, &stage_path)?;
+
+    for export in &stage.exports {
+        if export.output_key.trim().is_empty() {
+            return Err(format!("{stage_path}.exports output_key must not be empty"));
+        }
+        validate_value_ref(
+            &export.source,
+            &format!("{stage_path}.exports[{}].source", export.output_key),
+        )?;
+    }
+
     Ok(())
 }
 
@@ -517,7 +558,10 @@ fn validate_effect_spec<'a>(
             spec.effect_id
         ));
     }
-    if !stage_ids.iter().any(|stage_id| stage_id == &spec.stage_id.as_str()) {
+    if !stage_ids
+        .iter()
+        .any(|stage_id| stage_id == &spec.stage_id.as_str())
+    {
         return Err(format!(
             "execution_artifact.expected_effects[{}].stage_id references unknown stage `{}`",
             spec.effect_id, spec.stage_id
@@ -679,7 +723,7 @@ mod tests {
     use super::*;
     use ais_agent_control::execution_artifact::{
         BranchStage, BranchTarget, ComparisonOperator, ContinuationStage, EvmTransactionCandidate,
-        ExecutionChainFamily, ObservationSpec, OutputExportSpec, TransactionStage,
+        ExecutionChainFamily, ObservationSpec, ObserveStage, OutputExportSpec, TransactionStage,
     };
 
     fn sample_execution_artifact() -> ExecutionArtifactLaunchSpec {
@@ -747,6 +791,7 @@ mod tests {
                     next_stage_id: None,
                 }),
             ],
+            observations: Vec::new(),
             preconditions: Vec::new(),
             postconditions: Vec::new(),
             expected_effects: Vec::new(),
@@ -759,6 +804,91 @@ mod tests {
     #[test]
     fn execution_artifact_validation_accepts_minimal_valid_contract() {
         validate_execution_artifact(&sample_execution_artifact()).expect("valid artifact");
+    }
+
+    fn sample_observe_only_artifact() -> ExecutionArtifactLaunchSpec {
+        ExecutionArtifactLaunchSpec {
+            protocol_package_id: "owliabot.uniswap_v3".to_owned(),
+            action_key: "quote_exact_in_single".to_owned(),
+            chain_family: ExecutionChainFamily::Evm,
+            allowed_chains: vec!["eip155:1".to_owned()],
+            entry_stage_id: "stage.quote".into(),
+            actor: None,
+            transactions: Vec::new(),
+            stages: vec![ExecutionStage::Observe(ObserveStage {
+                stage_id: "stage.quote".into(),
+                observation_ref: "query.quote".to_owned(),
+                exports: vec![OutputExportSpec {
+                    output_key: "quote.amount_out_atomic".into(),
+                    source: ValueRef::Ref {
+                        reference: "refs.evidence.query.quote.amount_out_atomic".to_owned(),
+                    },
+                }],
+                next_stage_id: None,
+            })],
+            observations: vec![ObservationSpec {
+                observation_id: "query.quote".to_owned(),
+                kind: "evm.contract_state_read".to_owned(),
+                params: BTreeMap::from([
+                    (
+                        "to".to_owned(),
+                        json!("0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6"),
+                    ),
+                    (
+                        "data".to_owned(),
+                        json!("0xf7729d43000000000000000000000000"),
+                    ),
+                ]),
+            }],
+            preconditions: Vec::new(),
+            postconditions: Vec::new(),
+            expected_effects: Vec::new(),
+            execution_policy: None,
+            evidence: json!({}),
+            metadata: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn execution_artifact_validation_accepts_observe_only_contract() {
+        validate_execution_artifact(&sample_observe_only_artifact())
+            .expect("valid observe-only artifact");
+    }
+
+    #[test]
+    fn execution_artifact_validation_rejects_missing_chain_scope() {
+        let mut artifact = sample_execution_artifact();
+        artifact.allowed_chains.clear();
+
+        let error = validate_execution_artifact(&artifact).expect_err("missing chain scope");
+        assert!(
+            error.contains("allowed_chains must contain exactly one active chain scope"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn execution_artifact_validation_rejects_multiple_chain_scopes() {
+        let mut artifact = sample_execution_artifact();
+        artifact.allowed_chains.push("eip155:1".to_owned());
+
+        let error = validate_execution_artifact(&artifact).expect_err("multiple chain scopes");
+        assert!(
+            error.contains("allowed_chains must contain exactly one active chain scope"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn execution_artifact_validation_rejects_observe_stage_unknown_observation_ref() {
+        let mut artifact = sample_observe_only_artifact();
+        let ExecutionStage::Observe(stage) = &mut artifact.stages[0] else {
+            panic!("expected observe stage");
+        };
+        stage.observation_ref = "query.missing".to_owned();
+
+        let error = validate_execution_artifact(&artifact).expect_err("unknown observation ref");
+        assert!(error.contains("unknown observation"), "{error}");
     }
 
     #[test]

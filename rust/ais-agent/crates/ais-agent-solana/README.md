@@ -6,6 +6,7 @@ Purpose:
 
 Public API entry points:
 - `SolanaChainSurface`
+- `artifact_planner::plan_execution_artifact`
 - Solana capability adapters under:
   - `read`
   - `simulate`
@@ -49,7 +50,14 @@ Current implementation status:
 - live Solana transport now uses:
   - `solana-client` for RPC
   - `solana_sdk` concrete types for requests and transactions
+- family-owned `ExecutionArtifact` planning now exists in `artifact_planner` for:
+  - `observe` stages
+  - `transaction` stages
+  - stage-bound effect-contract verification hooks
 
 Known gaps:
 - reflection is still reduced-scope and not yet backed by full `solana_sdk` instruction assembly
 - no full Solana state-reconcile layer beyond signature-status and simple read/simulate/broadcast slices yet
+- Solana planner parity is still runtime-skeleton scope:
+  - observe/transaction lifecycle is wired
+  - protocol/package breadth is intentionally deferred to later milestones

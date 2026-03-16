@@ -530,6 +530,7 @@ async fn step_once_execution_artifact_branch_activates_transaction_stage() {
                     next_stage_id: None,
                 }),
             ],
+            observations: Vec::new(),
             preconditions: Vec::new(),
             postconditions: Vec::new(),
             expected_effects: Vec::new(),
@@ -555,6 +556,7 @@ async fn step_once_execution_artifact_branch_activates_transaction_stage() {
             },
         )]),
         exported_outputs: BTreeMap::new(),
+        branch_trace: Vec::new(),
         awaiting_continuation: None,
     });
 
@@ -573,6 +575,23 @@ async fn step_once_execution_artifact_branch_activates_transaction_stage() {
             .and_then(|snapshot| snapshot.active_stage_id.as_ref())
             .map(|value| value.as_str()),
         Some("stage.swap")
+    );
+    assert_eq!(
+        runtime
+            .checkpoint
+            .execution_artifact
+            .as_ref()
+            .map(|snapshot| snapshot.branch_trace.clone())
+            .unwrap_or_default(),
+        vec![ais_agent_core::checkpoint::ArtifactBranchTraceSnapshot {
+            branch_stage_id: "stage.branch".into(),
+            available_targets: vec![
+                "stage.swap".to_owned(),
+                "assert:missing_quote".to_owned(),
+            ],
+            selected_target: "stage.swap".to_owned(),
+            predicate_value: true,
+        }]
     );
     assert!(runtime
         .checkpoint
@@ -651,6 +670,7 @@ async fn step_once_execution_artifact_exports_and_pauses_for_continuation() {
                     },
                 ),
             ],
+            observations: Vec::new(),
             preconditions: Vec::new(),
             postconditions: Vec::new(),
             expected_effects: Vec::new(),
@@ -661,6 +681,7 @@ async fn step_once_execution_artifact_exports_and_pauses_for_continuation() {
         active_stage_id: Some("stage.swap".into()),
         planned_stage_graphs: BTreeMap::new(),
         exported_outputs: BTreeMap::new(),
+        branch_trace: Vec::new(),
         awaiting_continuation: None,
     });
 

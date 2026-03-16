@@ -9,7 +9,7 @@ use ais_agent_core::{
 use crate::{
     runtime::ActiveRun,
     runtime_branch::evaluate_predicate,
-    runtime_exports::export_transaction_outputs,
+    runtime_exports::{export_observe_outputs, export_transaction_outputs},
     service::host_service::artifact_planner::activate_execution_artifact_stage,
     stepper::{StepTransition, StepTransitionKind},
 };
@@ -37,9 +37,22 @@ pub(crate) fn apply_execution_artifact_transition(
             } else {
                 &stage.if_false
             };
+            let available_targets = vec![
+                describe_branch_target(&stage.if_true),
+                describe_branch_target(&stage.if_false),
+            ];
+            let selected_target = describe_branch_target(target);
             match target {
                 BranchTarget::GotoStage { stage_id } => {
                     if let Some(snapshot) = runtime.checkpoint.execution_artifact.as_mut() {
+                        snapshot.branch_trace.push(
+                            ais_agent_core::checkpoint::ArtifactBranchTraceSnapshot {
+                                branch_stage_id: active_stage_id.clone(),
+                                available_targets,
+                                selected_target,
+                                predicate_value: predicate,
+                            },
+                        );
                         snapshot.active_stage_id = Some(stage_id.clone());
                         snapshot.awaiting_continuation = None;
                     }
@@ -64,6 +77,16 @@ pub(crate) fn apply_execution_artifact_transition(
                     failure_code,
                     message,
                 } => {
+                    if let Some(snapshot) = runtime.checkpoint.execution_artifact.as_mut() {
+                        snapshot.branch_trace.push(
+                            ais_agent_core::checkpoint::ArtifactBranchTraceSnapshot {
+                                branch_stage_id: active_stage_id.clone(),
+                                available_targets,
+                                selected_target,
+                                predicate_value: predicate,
+                            },
+                        );
+                    }
                     runtime.checkpoint.lifecycle.pause_with_failure(
                         RunFailureStage::Verify,
                         RunFailureCode::VerifyMismatch,
@@ -81,10 +104,66 @@ pub(crate) fn apply_execution_artifact_transition(
             }
         }
         ExecutionStage::Transaction(stage) => {
-            if !transaction_stage_complete(runtime) {
+            if !active_stage_graph_complete(runtime) {
                 return None;
             }
             let exported = match export_transaction_outputs(runtime, &stage) {
+                Ok(exported) => exported,
+                Err(error) => {
+                    return fail_artifact(runtime, active_stage_id.as_str(), error);
+                }
+            };
+            if let Some(snapshot) = runtime.checkpoint.execution_artifact.as_mut() {
+                snapshot.active_stage_id = stage.next_stage_id.clone();
+                snapshot.awaiting_continuation = None;
+            }
+            if let Some(next_stage_id) = stage.next_stage_id.as_ref() {
+                if let Err(error) = activate_execution_artifact_stage(&mut runtime.checkpoint) {
+                    return fail_artifact(runtime, active_stage_id.as_str(), error);
+                }
+                runtime
+                    .checkpoint
+                    .lifecycle
+                    .mark_running(RunPhase::Planning);
+                runtime.touch_transition();
+                Some(StepTransition {
+                    kind: StepTransitionKind::Artifact,
+                    node_id: None,
+                    summary: if exported.is_empty() {
+                        format!(
+                            "execution artifact advanced from `{}` to `{}`",
+                            active_stage_id, next_stage_id
+                        )
+                    } else {
+                        format!(
+                            "execution artifact exported {} output(s) and advanced to `{}`",
+                            exported.len(),
+                            next_stage_id
+                        )
+                    },
+                })
+            } else {
+                runtime.touch_transition();
+                Some(StepTransition {
+                    kind: StepTransitionKind::Artifact,
+                    node_id: None,
+                    summary: if exported.is_empty() {
+                        format!("execution artifact stage `{active_stage_id}` completed")
+                    } else {
+                        format!(
+                            "execution artifact exported {} output(s) from `{}`",
+                            exported.len(),
+                            active_stage_id
+                        )
+                    },
+                })
+            }
+        }
+        ExecutionStage::Observe(stage) => {
+            if !active_stage_graph_complete(runtime) {
+                return None;
+            }
+            let exported = match export_observe_outputs(runtime, &stage) {
                 Ok(exported) => exported,
                 Err(error) => {
                     return fail_artifact(runtime, active_stage_id.as_str(), error);
@@ -170,7 +249,14 @@ pub(crate) fn apply_execution_artifact_transition(
     }
 }
 
-fn transaction_stage_complete(runtime: &ActiveRun) -> bool {
+fn describe_branch_target(target: &BranchTarget) -> String {
+    match target {
+        BranchTarget::GotoStage { stage_id } => stage_id.to_string(),
+        BranchTarget::Assert { failure_code, .. } => format!("assert:{failure_code}"),
+    }
+}
+
+fn active_stage_graph_complete(runtime: &ActiveRun) -> bool {
     !runtime.checkpoint.action_graph.terminals.is_empty()
         && runtime
             .checkpoint
@@ -218,8 +304,8 @@ mod tests {
     use ais_agent_control::{
         execution_artifact::{
             EvmTransactionCandidate, ExecutionArtifactLaunchSpec, ExecutionChainFamily,
-            ExecutionStage, ExecutionTransactionCandidate, OutputExportSpec, TransactionStage,
-            ValueRef,
+            ExecutionStage, ExecutionTransactionCandidate, ObserveStage, OutputExportSpec,
+            TransactionStage, ValueRef,
         },
         ids::RunId,
     };
@@ -334,6 +420,7 @@ mod tests {
                             },
                         )],
                         stages: vec![ExecutionStage::Transaction(stage.clone())],
+                        observations: Vec::new(),
                         preconditions: Vec::new(),
                         postconditions: Vec::new(),
                         expected_effects: Vec::new(),
@@ -344,6 +431,7 @@ mod tests {
                     active_stage_id: Some(stage.stage_id.clone()),
                     planned_stage_graphs: BTreeMap::new(),
                     exported_outputs: BTreeMap::new(),
+                    branch_trace: Vec::new(),
                     awaiting_continuation: None,
                 }),
             },
@@ -371,6 +459,134 @@ mod tests {
             .execution_artifact
             .as_ref()
             .expect("artifact snapshot")
+            .active_stage_id
+            .is_none());
+    }
+
+    #[test]
+    fn observe_stage_exports_outputs_from_observation_evidence() {
+        let stage = ObserveStage {
+            stage_id: "stage.quote".into(),
+            observation_ref: "query.quote".to_owned(),
+            exports: vec![OutputExportSpec {
+                output_key: "quote.amount_out_atomic".into(),
+                source: ValueRef::Ref {
+                    reference: "refs.evidence.query.quote.amount_out_atomic".to_owned(),
+                },
+            }],
+            next_stage_id: None,
+        };
+        let mut runtime = ActiveRun::new(
+            sample_mission(),
+            CheckpointSnapshot {
+                run_id: "run-1".to_owned(),
+                mission_id: "mission-1".to_owned(),
+                checkpoint_seq: 0,
+                plan_epoch: 0,
+                lifecycle: RunLifecycleState::new(RunId("run-1".to_owned()), "mission-1"),
+                action_graph: ActionGraph {
+                    graph_id: Some("artifact.owliabot.uniswap_v3.quote".to_owned()),
+                    roots: vec!["artifact.stage.quote.observe".to_owned()],
+                    terminals: vec!["artifact.stage.quote.observe".to_owned()],
+                    nodes: BTreeMap::from([(
+                        "artifact.stage.quote.observe".to_owned(),
+                        ActionNode {
+                            node_id: "artifact.stage.quote.observe".to_owned(),
+                            kind: ActionNodeKind::Observe,
+                            origin: ActionOrigin::DriverFragment,
+                            status: ActionNodeStatus::Succeeded,
+                            depends_on: Vec::new(),
+                            inputs: Vec::new(),
+                            evidence_refs: Vec::new(),
+                            payload: ActionPayload::Observe(ObserveAction {
+                                source_kind: ObserveSourceKind::ChainRead,
+                                source_hint: "query quote".to_owned(),
+                                output_key: Some("query.quote".to_owned()),
+                                live: None,
+                            }),
+                            implementation_hint: Some("execution_artifact".to_owned()),
+                            expected_effect_ref: None,
+                        },
+                    )]),
+                },
+                evidence_graph: EvidenceGraph::default(),
+                effect_contracts: BTreeMap::new(),
+                pending_requests: PendingRequestsSnapshot::default(),
+                last_completed_node_id: None,
+                actuation_records: Vec::new(),
+                execution_artifact: None,
+            },
+        );
+        runtime.checkpoint.evidence_graph.records.insert(
+            "query.quote".to_owned(),
+            EvidenceRecord {
+                evidence_id: "query.quote".to_owned(),
+                kind: EvidenceKind::ExternalObservation,
+                provenance: EvidenceProvenance {
+                    source: "test".to_owned(),
+                    chain_scope: Some("eip155:1".to_owned()),
+                    trace_hint: None,
+                },
+                freshness: EvidenceFreshness {
+                    observed_at_ms: Some(1),
+                    expires_at_ms: None,
+                    max_age_ms: None,
+                },
+                confidence_ppm: Some(1_000_000),
+                payload: json!({
+                    "amount_out_atomic": "1000"
+                }),
+            },
+        );
+        runtime.checkpoint.execution_artifact = Some(ExecutionArtifactRuntimeSnapshot {
+            launch_spec: ExecutionArtifactLaunchSpec {
+                protocol_package_id: "owliabot.uniswap_v3".to_owned(),
+                action_key: "quote_exact_in_single".to_owned(),
+                chain_family: ExecutionChainFamily::Evm,
+                allowed_chains: vec!["eip155:1".to_owned()],
+                entry_stage_id: "stage.quote".into(),
+                actor: None,
+                transactions: Vec::new(),
+                stages: vec![ExecutionStage::Observe(stage.clone())],
+                observations: vec![ais_agent_control::execution_artifact::ObservationSpec {
+                    observation_id: "query.quote".to_owned(),
+                    kind: "evm.contract_state_read".to_owned(),
+                    params: BTreeMap::new(),
+                }],
+                preconditions: Vec::new(),
+                postconditions: Vec::new(),
+                expected_effects: Vec::new(),
+                execution_policy: None,
+                evidence: serde_json::Value::Null,
+                metadata: BTreeMap::new(),
+            },
+            active_stage_id: Some(stage.stage_id.clone()),
+            planned_stage_graphs: BTreeMap::new(),
+            exported_outputs: BTreeMap::new(),
+            branch_trace: Vec::new(),
+            awaiting_continuation: None,
+        });
+
+        let transition =
+            apply_execution_artifact_transition(&mut runtime).expect("artifact transition");
+
+        assert!(transition.summary.contains("exported 1 output(s)"));
+        assert_eq!(
+            runtime
+                .checkpoint
+                .execution_artifact
+                .as_ref()
+                .expect("artifact state")
+                .exported_outputs
+                .get(&"quote.amount_out_atomic".into())
+                .expect("exported amount"),
+            &json!("1000")
+        );
+        assert!(runtime
+            .checkpoint
+            .execution_artifact
+            .as_ref()
+            .expect("artifact state")
             .active_stage_id
             .is_none());
     }

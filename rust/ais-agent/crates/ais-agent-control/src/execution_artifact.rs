@@ -195,6 +195,17 @@ pub struct TransactionStage {
     pub next_stage_id: Option<ExecutionStageId>,
 }
 
+/// Execute the referenced observation, export values, then optionally continue.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ObserveStage {
+    pub stage_id: ExecutionStageId,
+    pub observation_ref: String,
+    #[serde(default)]
+    pub exports: Vec<OutputExportSpec>,
+    #[serde(default)]
+    pub next_stage_id: Option<ExecutionStageId>,
+}
+
 /// Evaluate a generic predicate and jump to the next stage or fail closed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BranchStage {
@@ -243,6 +254,7 @@ pub struct ContinuationStage {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ExecutionStage {
     Transaction(TransactionStage),
+    Observe(ObserveStage),
     Branch(BranchStage),
     Continuation(ContinuationStage),
 }
@@ -278,6 +290,8 @@ pub struct ExecutionArtifactLaunchSpec {
     pub transactions: Vec<ExecutionTransactionCandidate>,
     #[serde(default)]
     pub stages: Vec<ExecutionStage>,
+    #[serde(default)]
+    pub observations: Vec<ObservationSpec>,
     #[serde(default)]
     pub preconditions: Vec<ObservationSpec>,
     #[serde(default)]
@@ -363,6 +377,7 @@ impl ExecutionStage {
     pub fn stage_id(&self) -> &ExecutionStageId {
         match self {
             Self::Transaction(stage) => &stage.stage_id,
+            Self::Observe(stage) => &stage.stage_id,
             Self::Branch(stage) => &stage.stage_id,
             Self::Continuation(stage) => &stage.stage_id,
         }
@@ -372,6 +387,7 @@ impl ExecutionStage {
     pub fn next_stage_id(&self) -> Option<&ExecutionStageId> {
         match self {
             Self::Transaction(stage) => stage.next_stage_id.as_ref(),
+            Self::Observe(stage) => stage.next_stage_id.as_ref(),
             Self::Branch(_) => None,
             Self::Continuation(stage) => stage.next_stage_id.as_ref(),
         }
@@ -381,14 +397,22 @@ impl ExecutionStage {
     pub fn as_transaction(&self) -> Option<&TransactionStage> {
         match self {
             Self::Transaction(stage) => Some(stage),
-            Self::Branch(_) | Self::Continuation(_) => None,
+            Self::Observe(_) | Self::Branch(_) | Self::Continuation(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn as_observe(&self) -> Option<&ObserveStage> {
+        match self {
+            Self::Observe(stage) => Some(stage),
+            Self::Transaction(_) | Self::Branch(_) | Self::Continuation(_) => None,
         }
     }
 
     #[must_use]
     pub fn as_branch(&self) -> Option<&BranchStage> {
         match self {
-            Self::Transaction(_) | Self::Continuation(_) => None,
+            Self::Transaction(_) | Self::Observe(_) | Self::Continuation(_) => None,
             Self::Branch(stage) => Some(stage),
         }
     }
@@ -396,13 +420,21 @@ impl ExecutionStage {
     #[must_use]
     pub fn as_continuation(&self) -> Option<&ContinuationStage> {
         match self {
-            Self::Transaction(_) | Self::Branch(_) => None,
+            Self::Transaction(_) | Self::Observe(_) | Self::Branch(_) => None,
             Self::Continuation(stage) => Some(stage),
         }
     }
 }
 
 impl ExecutionArtifactLaunchSpec {
+    #[must_use]
+    pub fn chain_scope(&self) -> Option<&str> {
+        match self.allowed_chains.as_slice() {
+            [chain_scope] => Some(chain_scope.as_str()),
+            _ => None,
+        }
+    }
+
     #[must_use]
     pub fn entry_stage(&self) -> Option<&ExecutionStage> {
         self.stage(self.entry_stage_id.as_str())
@@ -475,6 +507,7 @@ mod tests {
                 }],
                 next_stage_id: None,
             })],
+            observations: Vec::new(),
             preconditions: Vec::new(),
             postconditions: Vec::new(),
             expected_effects: Vec::new(),
@@ -496,5 +529,35 @@ mod tests {
                 .as_str(),
             "tx.swap"
         );
+        assert_eq!(artifact.chain_scope(), Some("8453"));
+    }
+
+    #[test]
+    fn execution_artifact_chain_scope_helper_requires_exactly_one_scope() {
+        let mut artifact = ExecutionArtifactLaunchSpec {
+            protocol_package_id: "owliabot.transfer".to_owned(),
+            action_key: "native_transfer".to_owned(),
+            chain_family: ExecutionChainFamily::Evm,
+            allowed_chains: vec!["eip155:1".to_owned()],
+            entry_stage_id: "stage.transfer".into(),
+            actor: None,
+            transactions: Vec::new(),
+            stages: Vec::new(),
+            observations: Vec::new(),
+            preconditions: Vec::new(),
+            postconditions: Vec::new(),
+            expected_effects: Vec::new(),
+            execution_policy: None,
+            evidence: Value::Null,
+            metadata: BTreeMap::new(),
+        };
+
+        assert_eq!(artifact.chain_scope(), Some("eip155:1"));
+
+        artifact.allowed_chains = Vec::new();
+        assert_eq!(artifact.chain_scope(), None);
+
+        artifact.allowed_chains = vec!["eip155:1".to_owned(), "eip155:8453".to_owned()];
+        assert_eq!(artifact.chain_scope(), None);
     }
 }

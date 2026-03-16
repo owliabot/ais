@@ -13,8 +13,6 @@ Public API entry points:
 - `ownership`
 - `patch`
 - `recovery`
-- `transfer`
-- `uniswap`
 
 Dependencies on workspace crates:
 - none
@@ -72,21 +70,6 @@ Current implementation status:
   - `RenewRunClaimCommand`
   - `ReleaseRunClaimCommand`
   - `RunCommand::{ClaimRun, RenewRunClaim, ReleaseRunClaim}`
-- transfer DTOs for package-owned `execution_artifact` builders are now frozen for the first product slices:
-  - `NativeTransferRequest`
-  - `Erc20TransferRequest`
-  - `TransferEvidencePackage`
-  - `TransferVerificationContract`
-  - explicit recipient / amount / token-resolution evidence shapes
-- first Uniswap V3 contract DTOs are now also frozen for the next product slice:
-  - `UniswapV3SwapRequest`
-  - `UniswapV3LpRequest`
-  - `UniswapV3SwapEvidencePackage`
-  - `UniswapV3LpEvidencePackage`
-  - `UniswapV3SwapVerificationContract`
-  - `UniswapV3LpVerificationContract`
-  - quote / router / pool / deadline / position evidence shapes
-  - router evidence now also carries explicit `approval_required` truth for bounded approve-then-swap flows
 - interruption DTOs now distinguish:
   - `provider_timeout`
   - `provider_unavailable`
@@ -109,11 +92,6 @@ Known gaps:
 - interruption/cancellation legality plus transport/restart proof are now implemented; remaining future work on this seam is narrower:
   - any explicit retry-command split beyond `RetryIntent`
   - automatic terminal-resolution policy for post-side-effect cancel flows
-- transfer DTOs are frozen and now wired into runtime `launch_spec -> execution_artifact` execution for:
-  - native transfer
-  - ERC20 transfer
-  - exact-delta verifier strengthening still remains future work
-- Uniswap V3 DTOs are frozen and runtime execution through `execution_artifact` is now partially in progress:
-  - bounded swap seeding and live verify proof now exist
-  - explicit `approval_required=true` approve-then-swap path is now supported
-  - LP lifecycle operations and richer swap verification still land in later milestones
+- protocol-specific transfer / Uniswap DTOs are no longer part of this crate's public API:
+  - package-owned protocol shapes now live on the Owliabot/package side
+  - runtime ingress stays centered on `launch_spec` and `execution_artifact`

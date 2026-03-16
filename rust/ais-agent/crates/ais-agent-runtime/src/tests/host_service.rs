@@ -14,7 +14,7 @@ use ais_agent_control::{
         BranchStage, BranchTarget, ComparisonOperator, ContinuationStage, EffectSpec,
         EvmTransactionCandidate, ExecutionArtifactActor, ExecutionArtifactLaunchSpec,
         ExecutionChainFamily, ExecutionStage, ExecutionTransactionCandidate, ObservationSpec,
-        OutputExportSpec, PredicateSpec, TransactionStage, ValueRef,
+        ObserveStage, OutputExportSpec, PredicateSpec, TransactionStage, ValueRef,
     },
     ids::{CommandId, IdempotencyKey, RunId, SignerRequestId},
     launch_spec::{LaunchSpecSubmission, PrebuiltFragmentLaunchSpec, ReflectionRequestLaunchSpec},
@@ -300,6 +300,7 @@ async fn runtime_host_service_begin_run_seeds_execution_artifact_runtime_state_f
                                 next_stage_id: None,
                             }),
                         ],
+                        observations: Vec::new(),
                         preconditions: Vec::new(),
                         postconditions: Vec::new(),
                         expected_effects: Vec::new(),
@@ -399,6 +400,7 @@ async fn runtime_host_service_begin_run_seeds_simple_execution_artifact_checkpoi
                             exports: Vec::new(),
                             next_stage_id: None,
                         })],
+                        observations: Vec::new(),
                         preconditions: Vec::new(),
                         postconditions: Vec::new(),
                         expected_effects: Vec::new(),
@@ -527,6 +529,7 @@ async fn runtime_host_service_accepts_generic_execution_artifact_for_new_protoco
                             exports: Vec::new(),
                             next_stage_id: None,
                         })],
+                        observations: Vec::new(),
                         preconditions: Vec::new(),
                         postconditions: Vec::new(),
                         expected_effects: Vec::new(),
@@ -575,6 +578,118 @@ async fn runtime_host_service_accepts_generic_execution_artifact_for_new_protoco
         .action_graph
         .nodes
         .contains_key("artifact.stage.call.verify"));
+
+    let latest = checkpoint_repo
+        .latest(run_id.0.as_str())
+        .expect("latest checkpoint");
+    assert!(latest.execution_artifact.is_some());
+}
+
+#[tokio::test]
+async fn runtime_host_service_begin_run_accepts_observe_only_execution_artifact() {
+    let host_session_id: HostSessionId = "session-execution-artifact-observe".into();
+    let mut service = RuntimeHostService::new(
+        InMemoryRunRepository::default(),
+        InMemoryCheckpointRepository::default(),
+        InMemoryMissionRepository::default(),
+        InMemoryRunCatalogRepository::default(),
+        InMemoryEventArchive::default(),
+        InMemoryHostSessionStore::default(),
+    )
+    .with_execution_wiring(RuntimeExecutionWiring {
+        evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
+        solana_rpc_url: None,
+        allowed_protocol_packages: vec!["owliabot.uniswap_v3".to_owned()],
+    });
+
+    let begin = service
+        .handle(HostCommandEnvelope {
+            host_session_id,
+            host_request_id: Some("request-execution-artifact-observe".into()),
+            command: RunCommand::BeginRun(BeginRunCommand {
+                command_id: CommandId("cmd-execution-artifact-observe".to_owned()),
+                idempotency_key: IdempotencyKey("idem-execution-artifact-observe".to_owned()),
+                mission: MissionSubmission {
+                    goal: "artifact_observe".to_owned(),
+                    allowed_chains: vec!["eip155:1".to_owned()],
+                    constraints: BTreeMap::new(),
+                    budget: None,
+                    metadata: BTreeMap::new(),
+                },
+                launch_spec: Some(LaunchSpecSubmission::ExecutionArtifact(
+                    ExecutionArtifactLaunchSpec {
+                        protocol_package_id: "owliabot.uniswap_v3".to_owned(),
+                        action_key: "quote_exact_in_single".to_owned(),
+                        chain_family: ExecutionChainFamily::Evm,
+                        allowed_chains: vec!["eip155:1".to_owned()],
+                        entry_stage_id: "stage.quote".into(),
+                        actor: None,
+                        transactions: Vec::new(),
+                        stages: vec![ExecutionStage::Observe(ObserveStage {
+                            stage_id: "stage.quote".into(),
+                            observation_ref: "query.quote".to_owned(),
+                            exports: vec![OutputExportSpec {
+                                output_key: "quote.amount_out_atomic".into(),
+                                source: ValueRef::Ref {
+                                    reference: "refs.evidence.query.quote.amount_out_atomic"
+                                        .to_owned(),
+                                },
+                            }],
+                            next_stage_id: None,
+                        })],
+                        observations: vec![ObservationSpec {
+                            observation_id: "query.quote".to_owned(),
+                            kind: "evm.contract_state_read".to_owned(),
+                            params: BTreeMap::from([
+                                (
+                                    "to".to_owned(),
+                                    json!("0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6"),
+                                ),
+                                (
+                                    "data".to_owned(),
+                                    json!("0xf7729d43000000000000000000000000"),
+                                ),
+                            ]),
+                        }],
+                        preconditions: Vec::new(),
+                        postconditions: Vec::new(),
+                        expected_effects: Vec::new(),
+                        execution_policy: None,
+                        evidence: json!({}),
+                        metadata: BTreeMap::new(),
+                    },
+                )),
+            }),
+        })
+        .await;
+
+    let run_id = match begin.response {
+        HostCommandResponse::Accepted(response) => response.run_id.expect("run id"),
+        other => panic!("unexpected response: {other:?}"),
+    };
+
+    let (run_repo, checkpoint_repo, _, _, _, _, _) = service.into_parts();
+    let runtime = run_repo.load(&run_id).expect("runtime");
+    let artifact = runtime
+        .checkpoint
+        .execution_artifact
+        .as_ref()
+        .expect("execution artifact state");
+    assert_eq!(
+        artifact
+            .active_stage_id
+            .as_ref()
+            .map(|value| value.as_str()),
+        Some("stage.quote")
+    );
+    assert!(artifact
+        .planned_stage_graphs
+        .contains_key(&"stage.quote".into()));
+    assert!(runtime
+        .checkpoint
+        .action_graph
+        .nodes
+        .contains_key("artifact.stage.quote.observe"));
 
     let latest = checkpoint_repo
         .latest(run_id.0.as_str())
@@ -718,6 +833,7 @@ async fn runtime_host_service_submits_execution_artifact_continuation_and_reseed
                             exports: Vec::new(),
                             next_stage_id: None,
                         })],
+                        observations: Vec::new(),
                         preconditions: Vec::new(),
                         postconditions: Vec::new(),
                         expected_effects: Vec::new(),
@@ -850,6 +966,7 @@ async fn runtime_host_service_begin_run_accepts_branching_execution_artifact_ent
                                 next_stage_id: None,
                             }),
                         ],
+                        observations: Vec::new(),
                         preconditions: Vec::new(),
                         postconditions: Vec::new(),
                         expected_effects: Vec::new(),
@@ -4138,6 +4255,7 @@ fn preloaded_continuation_wait_runtime() -> (
                     next_stage_id: None,
                 }),
             ],
+            observations: Vec::new(),
             preconditions: Vec::new(),
             postconditions: Vec::new(),
             expected_effects: Vec::new(),
@@ -4148,6 +4266,7 @@ fn preloaded_continuation_wait_runtime() -> (
         active_stage_id: Some("stage.continue".into()),
         planned_stage_graphs: BTreeMap::new(),
         exported_outputs: BTreeMap::from([("swap.tx_hash".into(), json!("0xabc"))]),
+        branch_trace: Vec::new(),
         awaiting_continuation: Some(ArtifactContinuationSnapshot {
             stage_id: "stage.continue".into(),
             required_outputs: vec!["swap.tx_hash".into()],
@@ -4925,6 +5044,7 @@ fn sample_uniswap_v3_swap_execution_artifact() -> ExecutionArtifactLaunchSpec {
                 next_stage_id: None,
             }),
         ],
+        observations: Vec::new(),
         preconditions: Vec::new(),
         postconditions: Vec::new(),
         expected_effects: Vec::new(),
@@ -4983,6 +5103,7 @@ fn sample_uniswap_v3_lp_execution_artifact() -> ExecutionArtifactLaunchSpec {
             exports: Vec::new(),
             next_stage_id: None,
         })],
+        observations: Vec::new(),
         preconditions: vec![ObservationSpec {
             observation_id: "state.pre.uniswap_v3_lp.position_count".to_owned(),
             kind: "evm.contract_state_read".to_owned(),
@@ -5125,6 +5246,7 @@ fn sample_native_transfer_execution_artifact() -> ExecutionArtifactLaunchSpec {
             exports: Vec::new(),
             next_stage_id: None,
         })],
+        observations: Vec::new(),
         preconditions: vec![ObservationSpec {
             observation_id: "state.pre.recipient_balance".to_owned(),
             kind: "evm.native_balance".to_owned(),
@@ -5196,6 +5318,7 @@ fn sample_erc20_transfer_execution_artifact() -> ExecutionArtifactLaunchSpec {
             exports: Vec::new(),
             next_stage_id: None,
         })],
+        observations: Vec::new(),
         preconditions: vec![ObservationSpec {
             observation_id: "state.pre.recipient_token_balance".to_owned(),
             kind: "evm.erc20_balance_of".to_owned(),

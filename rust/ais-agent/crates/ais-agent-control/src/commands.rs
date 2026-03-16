@@ -425,6 +425,7 @@ mod tests {
                     actor: None,
                     transactions: Vec::new(),
                     stages: Vec::new(),
+                    observations: Vec::new(),
                     preconditions: Vec::new(),
                     postconditions: Vec::new(),
                     expected_effects: Vec::new(),

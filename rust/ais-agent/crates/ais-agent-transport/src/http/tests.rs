@@ -992,6 +992,7 @@ fn sample_recovery_aware_inspect() -> InspectSnapshot {
         pending_signer_requests: Vec::new(),
         recent_side_effects: Vec::new(),
         effect_status: None,
+        branch_trace: Vec::new(),
         ownership: sample_ownership(true),
         run_result: None,
         progress: ProgressView {
@@ -1054,6 +1055,7 @@ fn sample_confirmation_pause() -> PauseBundle {
             summary: "waiting for confirmation".to_owned(),
         }],
         pending_continuations: Vec::new(),
+        branch_trace: Vec::new(),
         notes: vec!["confirmation polling in progress".to_owned()],
     }
 }
@@ -1116,6 +1118,7 @@ fn sample_retry_ready_inspect() -> InspectSnapshot {
         pending_signer_requests: Vec::new(),
         recent_side_effects: Vec::new(),
         effect_status: None,
+        branch_trace: Vec::new(),
         ownership: sample_ownership(true),
         run_result: None,
         progress: ProgressView {
@@ -1188,6 +1191,7 @@ fn sample_await_user_input_pause() -> PauseBundle {
             summary: "submission outcome uncertain".to_owned(),
         }],
         pending_continuations: Vec::new(),
+        branch_trace: Vec::new(),
         notes: vec!["manual review required".to_owned()],
     }
 }

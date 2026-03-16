@@ -162,6 +162,7 @@ name = "ais-agent-evm"
 version = "0.1.0"
 dependencies = [
  "ais-agent-chain-shared",
+ "ais-agent-control",
  "ais-agent-core",
  "alloy",
  "alloy-primitives",
@@ -223,6 +224,7 @@ name = "ais-agent-solana"
 version = "0.1.0"
 dependencies = [
  "ais-agent-chain-shared",
+ "ais-agent-control",
  "ais-agent-core",
  "async-trait",
  "base64 0.22.1",

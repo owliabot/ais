@@ -9,6 +9,15 @@ Status:
 - authoritative for current crate boundaries and runtime collaboration model
 - historical design docs in `/docs` remain useful as decision history, not as the primary implementation reference
 
+Current closeout status:
+- the intended product ingress is now `ExecutionArtifact` plus Owliabot package/runtime orchestration
+- protocol-specific Rust public ABI for `transfer` / `uniswap` has been removed from `ais-agent-control` and `ais-agent-core`
+- Owliabot shared `ais-agent` TS barrel no longer acts as a protocol-specific ingress surface
+- an EVM-first acceptance baseline is now archived in:
+  - [`acceptance-proof-matrix-ais-agent-final-goal-2026-03-16.md`](/home/xcshuan/work/owlia/ais/docs/ais-agent-design/acceptance-proof-matrix-ais-agent-final-goal-2026-03-16.md)
+- Solana package/product proof remains explicitly deferred:
+  - current Solana status is planner/runtime skeleton parity, not closeout-level protocol coverage
+
 ## Goal
 
 `ais-agent` is not a general-purpose primary agent.
@@ -27,8 +36,23 @@ The target property is:
 Current launch-contract direction:
 - `LaunchSpecSubmission::ExecutionArtifact` is now part of the transport-neutral contract and is the intended product path
 - `ExecutionArtifact` branch/value expression surfaces are aligned around `literal | ref | cel` and are expected to reuse `ais-agent-expr` rather than grow a second artifact-only expression DSL
-- `ais-agent-runtime` now has an initial `ExecutionArtifact` planner slice for simple EVM candidates; branch/export/continuation semantics are still being cut over and remain explicitly fail-closed
+- `ais-agent-runtime` now dispatches `ExecutionArtifact` planning by chain family into family-owned crates instead of hosting one monolithic planner
 - protocol-specific Rust binder modules are no longer part of the product launch path
+- protocol-specific Rust public DTO/effect-template modules are also no longer part of the public crate boundary
+
+## Family Planner Matrix
+
+| Family | Planner crate | Entry point | `observe` stage | `transaction` stage | Expected effects |
+| --- | --- | --- | --- | --- | --- |
+| EVM | `ais-agent-evm` | `artifact_planner::plan_execution_artifact` | yes | yes | yes |
+| Solana | `ais-agent-solana` | `artifact_planner::plan_execution_artifact` | yes | yes | skeleton parity only |
+
+Notes:
+- branch and continuation semantics remain runtime-generic and are not family-owned
+- Solana planner parity currently means typed observe/simulate/actuate/verify graph assembly, not full protocol/package breadth
+- current closeout status is therefore:
+  - EVM-first proof set archived
+  - Solana deferred, not implicitly complete
 
 ## Control Model
 

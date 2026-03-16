@@ -10,7 +10,9 @@ use ais_agent_control::{
     },
 };
 
-use crate::inspect::{PendingConfirmationView, PendingContinuationView, PendingSignerRequestView};
+use crate::inspect::{
+    BranchTraceView, PendingConfirmationView, PendingContinuationView, PendingSignerRequestView,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -58,6 +60,8 @@ pub struct PauseBundle {
     pub pending_confirmations: Vec<PendingConfirmationView>,
     #[serde(default)]
     pub pending_continuations: Vec<PendingContinuationView>,
+    #[serde(default)]
+    pub branch_trace: Vec<BranchTraceView>,
     #[serde(default)]
     pub notes: Vec<String>,
 }

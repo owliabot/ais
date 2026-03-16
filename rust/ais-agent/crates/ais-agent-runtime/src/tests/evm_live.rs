@@ -4,9 +4,9 @@ use ais_agent_control::{
     commands::SubmitExecutionArtifactContinuationCommand,
     execution_artifact::{
         BranchStage, BranchTarget, ContinuationStage, EffectSpec, EvmTransactionCandidate,
-        ExecutionArtifactActor, ExecutionArtifactLaunchSpec, ExecutionChainFamily,
-        ExecutionStage, ExecutionTransactionCandidate, ObservationSpec, OutputExportSpec,
-        PredicateSpec, TransactionStage, ValueRef,
+        ExecutionArtifactActor, ExecutionArtifactLaunchSpec, ExecutionChainFamily, ExecutionStage,
+        ExecutionTransactionCandidate, ObservationSpec, OutputExportSpec, PredicateSpec,
+        TransactionStage, ValueRef,
     },
     ids::CommandId,
     ids::RunId,
@@ -817,6 +817,161 @@ async fn native_transfer_launch_spec_can_complete_via_signer_submission_and_live
         runtime.checkpoint.lifecycle.status,
         ais_agent_core::runtime::RunStatus::Completed
     );
+}
+
+#[tokio::test]
+async fn query_first_native_transfer_artifact_can_branch_into_write_path() {
+    let tx_hash = b256!("1212121212121212121212121212121212121212121212121212121212121212");
+    let mission = sample_native_transfer_mission();
+    let mut checkpoint = checkpoint_with_nodes(Vec::new());
+    let launch_spec =
+        LaunchSpecSubmission::ExecutionArtifact(sample_query_first_native_transfer_launch_spec());
+    seed_launch_spec_checkpoint(
+        &mut checkpoint,
+        &RuntimeExecutionWiring {
+            evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
+            solana_rpc_url: None,
+            allowed_protocol_packages: vec!["owliabot.transfer".to_owned()],
+        },
+        &launch_spec,
+    )
+    .expect("query-first native transfer should seed");
+    let mut runtime = ActiveRun::new(mission, checkpoint);
+
+    let asserter = Asserter::new();
+    let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
+    asserter.push_success(&777u64);
+    asserter.push_success(&U256::from(90u64));
+    asserter.push_success(&Bytes::default());
+    asserter.push_success(&sample_receipt(tx_hash, 100));
+    asserter.push_success(&104u64);
+    asserter.push_success(&U256::from(120u64));
+    asserter.push_success(&U256::from(120u64));
+
+    let query_observe = apply_live_evm_observe_with_provider(&mut runtime, &provider)
+        .await
+        .expect("query observe transition");
+    assert_eq!(
+        query_observe.node_id.as_deref(),
+        Some("artifact.stage.query_block.observe")
+    );
+
+    let export_query = StepOnce::apply(&mut runtime).await;
+    assert_eq!(
+        export_query.applied_transition.as_ref().map(|t| t.kind),
+        Some(StepTransitionKind::Artifact)
+    );
+    assert_eq!(
+        runtime
+            .checkpoint
+            .execution_artifact
+            .as_ref()
+            .and_then(|snapshot| snapshot.exported_outputs.get(&"query.block_number".into()))
+            .and_then(|value| value.as_u64()),
+        Some(777)
+    );
+    assert_eq!(
+        runtime
+            .checkpoint
+            .execution_artifact
+            .as_ref()
+            .and_then(|snapshot| snapshot.active_stage_id.as_ref())
+            .map(|stage| stage.as_str()),
+        Some("stage.transfer_gate")
+    );
+
+    let branch = StepOnce::apply(&mut runtime).await;
+    assert_eq!(
+        branch.applied_transition.as_ref().map(|t| t.kind),
+        Some(StepTransitionKind::Artifact)
+    );
+    assert_eq!(
+        runtime
+            .checkpoint
+            .execution_artifact
+            .as_ref()
+            .and_then(|snapshot| snapshot.active_stage_id.as_ref())
+            .map(|stage| stage.as_str()),
+        Some("stage.transfer")
+    );
+
+    let observe = apply_live_evm_observe_with_provider(&mut runtime, &provider)
+        .await
+        .expect("pre observe transition");
+    assert_eq!(
+        observe.node_id.as_deref(),
+        Some("artifact.stage.transfer.pre_observe.state.pre.recipient_balance")
+    );
+
+    let simulate = apply_live_evm_simulate_with_provider(&mut runtime, &provider)
+        .await
+        .expect("simulate transition");
+    assert_eq!(
+        simulate.node_id.as_deref(),
+        Some("artifact.stage.transfer.simulate")
+    );
+
+    let govern = StepOnce::apply(&mut runtime).await;
+    assert_eq!(
+        govern.applied_transition.as_ref().map(|t| t.kind),
+        Some(StepTransitionKind::Govern)
+    );
+    assert_eq!(
+        runtime.checkpoint.lifecycle.status,
+        RunStatus::AwaitingSigner
+    );
+
+    let request_id = runtime
+        .checkpoint
+        .pending_requests
+        .pending_signer_request_id
+        .clone()
+        .expect("pending signer request");
+    runtime
+        .pending_signer_state
+        .as_mut()
+        .expect("pending signer")
+        .apply_decision(ais_agent_core::runtime::SignerDecision {
+            request_id: ais_agent_control::ids::SignerRequestId(request_id),
+            kind: ais_agent_core::runtime::SignerDecisionKind::Submitted,
+            decision_at_ms: None,
+            tx_hash: Some(format!("{tx_hash:#x}")),
+        });
+
+    let signer = StepOnce::apply(&mut runtime).await;
+    assert_eq!(
+        signer.applied_transition.as_ref().map(|t| t.kind),
+        Some(StepTransitionKind::Signer)
+    );
+
+    let verify = apply_live_evm_verify_with_provider(&mut runtime, &provider)
+        .await
+        .expect("verify transition");
+    assert_eq!(
+        verify.node_id.as_deref(),
+        Some("artifact.stage.transfer.verify")
+    );
+
+    let post_observe = apply_live_evm_observe_with_provider(&mut runtime, &provider)
+        .await
+        .expect("post observe transition");
+    assert_eq!(
+        post_observe.node_id.as_deref(),
+        Some("artifact.stage.transfer.post_observe.state.post.recipient_balance")
+    );
+
+    let export = StepOnce::apply(&mut runtime).await;
+    assert_eq!(
+        export.applied_transition.as_ref().map(|t| t.kind),
+        Some(StepTransitionKind::Artifact)
+    );
+
+    let complete = StepOnce::apply(&mut runtime).await;
+    assert_eq!(
+        complete.applied_transition.as_ref().map(|t| t.kind),
+        Some(StepTransitionKind::Complete)
+    );
+    assert_eq!(runtime.checkpoint.lifecycle.status, RunStatus::Completed);
 }
 
 #[tokio::test]
@@ -2310,6 +2465,7 @@ fn sample_native_transfer_launch_spec() -> LaunchSpecSubmission {
             exports: Vec::new(),
             next_stage_id: None,
         })],
+        observations: Vec::new(),
         preconditions: vec![ObservationSpec {
             observation_id: "state.pre.recipient_balance".to_owned(),
             kind: "evm.native_balance".to_owned(),
@@ -2351,6 +2507,58 @@ fn sample_native_transfer_launch_spec() -> LaunchSpecSubmission {
     })
 }
 
+fn sample_query_first_native_transfer_launch_spec() -> ExecutionArtifactLaunchSpec {
+    let LaunchSpecSubmission::ExecutionArtifact(mut spec) = sample_native_transfer_launch_spec()
+    else {
+        unreachable!("native transfer launch spec should be an execution artifact");
+    };
+
+    spec.entry_stage_id = "stage.query_block".into();
+    spec.observations = vec![ObservationSpec {
+        observation_id: "query.block_number".to_owned(),
+        kind: "evm.block_number".to_owned(),
+        params: BTreeMap::new(),
+    }];
+    spec.stages = vec![
+        ExecutionStage::Observe(ais_agent_control::execution_artifact::ObserveStage {
+            stage_id: "stage.query_block".into(),
+            observation_ref: "query.block_number".to_owned(),
+            exports: vec![OutputExportSpec {
+                output_key: "query.block_number".into(),
+                source: ValueRef::Ref {
+                    reference: "refs.evidence.query.block_number.block_number".to_owned(),
+                },
+            }],
+            next_stage_id: Some("stage.transfer_gate".into()),
+        }),
+        ExecutionStage::Branch(BranchStage {
+            stage_id: "stage.transfer_gate".into(),
+            predicate: PredicateSpec::Comparison {
+                left: ValueRef::Ref {
+                    reference: "refs.outputs.query.block_number".to_owned(),
+                },
+                op: ais_agent_control::execution_artifact::ComparisonOperator::Gt,
+                right: ValueRef::Literal { value: json!(0) },
+            },
+            if_true: BranchTarget::GotoStage {
+                stage_id: "stage.transfer".into(),
+            },
+            if_false: BranchTarget::Assert {
+                failure_code: "missing_chain_head".to_owned(),
+                message: "query-first transfer requires a positive block number".to_owned(),
+            },
+        }),
+        ExecutionStage::Transaction(TransactionStage {
+            stage_id: "stage.transfer".into(),
+            candidate_ref: "transfer.call".into(),
+            exports: Vec::new(),
+            next_stage_id: None,
+        }),
+    ];
+
+    spec
+}
+
 fn sample_erc20_transfer_launch_spec() -> LaunchSpecSubmission {
     LaunchSpecSubmission::ExecutionArtifact(ExecutionArtifactLaunchSpec {
         protocol_package_id: "owliabot.transfer".to_owned(),
@@ -2378,6 +2586,7 @@ fn sample_erc20_transfer_launch_spec() -> LaunchSpecSubmission {
             exports: Vec::new(),
             next_stage_id: None,
         })],
+        observations: Vec::new(),
         preconditions: vec![ObservationSpec {
             observation_id: "state.pre.recipient_token_balance".to_owned(),
             kind: "evm.erc20_balance_of".to_owned(),
@@ -2521,6 +2730,7 @@ fn sample_uniswap_v3_lp_launch_spec() -> LaunchSpecSubmission {
             exports: Vec::new(),
             next_stage_id: None,
         })],
+        observations: Vec::new(),
         preconditions: vec![ObservationSpec {
             observation_id: "state.pre.uniswap_v3_lp.position_count".to_owned(),
             kind: "evm.contract_state_read".to_owned(),
@@ -2831,6 +3041,7 @@ fn sample_uniswap_exact_in_execution_artifact(
                 next_stage_id: None,
             }),
         ],
+        observations: Vec::new(),
         preconditions: Vec::new(),
         postconditions: Vec::new(),
         expected_effects: Vec::new(),
@@ -2928,6 +3139,7 @@ fn sample_uniswap_trading_api_execution_artifact() -> ExecutionArtifactLaunchSpe
                 next_stage_id: None,
             }),
         ],
+        observations: Vec::new(),
         preconditions: Vec::new(),
         postconditions: Vec::new(),
         expected_effects: Vec::new(),
@@ -3025,6 +3237,7 @@ fn sample_uniswap_swap_to_aave_execution_artifact() -> ExecutionArtifactLaunchSp
                 next_stage_id: None,
             }),
         ],
+        observations: Vec::new(),
         preconditions: vec![ObservationSpec {
             observation_id: "state.pre.swap.recipient_out_balance".to_owned(),
             kind: "evm.erc20_balance_of".to_owned(),
@@ -3098,6 +3311,7 @@ fn sample_uniswap_v3_lp_execution_artifact() -> ExecutionArtifactLaunchSpec {
             exports: Vec::new(),
             next_stage_id: None,
         })],
+        observations: Vec::new(),
         preconditions: vec![ObservationSpec {
             observation_id: "state.pre.uniswap_v3_lp.position_count".to_owned(),
             kind: "evm.contract_state_read".to_owned(),
@@ -3279,6 +3493,7 @@ fn build_aave_supply_continuation_artifact(
             exports: Vec::new(),
             next_stage_id: None,
         })],
+        observations: Vec::new(),
         preconditions: Vec::new(),
         postconditions: Vec::new(),
         expected_effects: Vec::new(),
