@@ -10,6 +10,7 @@ use ais_agent_control::launch_spec::{
 };
 use ais_agent_core::{action::ActionGraph, effect::EffectContract, evidence::EvidenceGraph};
 use ais_agent_expr::cel::{CelExpressionKind, CelTypeChecker};
+use serde_json::Value as JsonValue;
 
 use super::launch_binding;
 
@@ -131,6 +132,92 @@ fn validate_execution_artifact(spec: &ExecutionArtifactLaunchSpec) -> Result<(),
             &exported_output_keys,
             "execution_artifact.stages",
         )?;
+    }
+
+    validate_semantic_contract(spec, &candidate_ids)?;
+
+    Ok(())
+}
+
+fn validate_semantic_contract(
+    spec: &ExecutionArtifactLaunchSpec,
+    candidate_ids: &[&str],
+) -> Result<(), String> {
+    if !spec.semantic_contract_active() {
+        return Ok(());
+    }
+
+    let Some(risk_class) = spec.risk_class.as_deref() else {
+        return Err(
+            "execution_artifact.risk_class is required when semantic artifact fields are present"
+                .to_owned(),
+        );
+    };
+    if risk_class.trim().is_empty() {
+        return Err(
+            "execution_artifact.risk_class must not be blank when present".to_owned(),
+        );
+    }
+
+    if spec.decoded_intent.is_none() {
+        return Err(
+            "execution_artifact.decoded_intent is required when semantic artifact fields are present"
+                .to_owned(),
+        );
+    }
+
+    if spec.candidate_envelopes.is_empty() {
+        return Err(
+            "execution_artifact.candidate_envelopes must include at least one envelope when semantic artifact fields are present"
+                .to_owned(),
+        );
+    }
+
+    if spec.validation_plan.is_none() {
+        return Err(
+            "execution_artifact.validation_plan is required when semantic artifact fields are present"
+                .to_owned(),
+        );
+    }
+
+    for (index, envelope) in spec.candidate_envelopes.iter().enumerate() {
+        validate_candidate_envelope(envelope, index, candidate_ids)?;
+    }
+
+    Ok(())
+}
+
+fn validate_candidate_envelope(
+    envelope: &JsonValue,
+    index: usize,
+    candidate_ids: &[&str],
+) -> Result<(), String> {
+    let Some(candidate_ref) = envelope
+        .as_object()
+        .ok_or_else(|| {
+            format!(
+                "execution_artifact.candidate_envelopes[{index}] must be a JSON object"
+            )
+        })?
+        .get("candidate_ref")
+    else {
+        return Ok(());
+    };
+
+    let candidate_ref = candidate_ref.as_str().ok_or_else(|| {
+        format!(
+            "execution_artifact.candidate_envelopes[{index}].candidate_ref must be a string"
+        )
+    })?;
+    if candidate_ref.trim().is_empty() {
+        return Err(format!(
+            "execution_artifact.candidate_envelopes[{index}].candidate_ref must not be blank"
+        ));
+    }
+    if !candidate_ids.iter().any(|known| known == &candidate_ref) {
+        return Err(format!(
+            "execution_artifact.candidate_envelopes[{index}].candidate_ref references unknown candidate `{candidate_ref}`"
+        ));
     }
 
     Ok(())
@@ -796,6 +883,12 @@ mod tests {
             postconditions: Vec::new(),
             expected_effects: Vec::new(),
             execution_policy: None,
+            risk_class: None,
+            risk_tags: Vec::new(),
+            decoded_intent: None,
+            candidate_envelopes: Vec::new(),
+            decode_spec: None,
+            validation_plan: None,
             evidence: json!({ "quote": { "quotedAtMs": 1 } }),
             metadata: BTreeMap::new(),
         }
@@ -844,6 +937,12 @@ mod tests {
             postconditions: Vec::new(),
             expected_effects: Vec::new(),
             execution_policy: None,
+            risk_class: None,
+            risk_tags: Vec::new(),
+            decoded_intent: None,
+            candidate_envelopes: Vec::new(),
+            decode_spec: None,
+            validation_plan: None,
             evidence: json!({}),
             metadata: BTreeMap::new(),
         }
@@ -1113,5 +1212,67 @@ mod tests {
 
         let error = validate_execution_artifact(&artifact).expect_err("invalid effect CEL");
         assert!(error.contains("is not valid CEL"), "{error}");
+    }
+
+    #[test]
+    fn execution_artifact_validation_accepts_complete_semantic_contract() {
+        let mut artifact = sample_execution_artifact();
+        artifact.risk_class = Some("bounded_swap".to_owned());
+        artifact.risk_tags = vec!["external_quote".to_owned()];
+        artifact.decoded_intent = Some(json!({
+            "kind": "swap_exact_in",
+            "token_in": "0x2222222222222222222222222222222222222222",
+            "token_out": "0x1111111111111111111111111111111111111111",
+        }));
+        artifact.candidate_envelopes = vec![json!({
+            "candidate_ref": "tx.swap",
+            "kind": "evm_transaction",
+        })];
+        artifact.decode_spec = Some(json!({
+            "kind": "abi",
+            "entrypoint": "swapExactTokensForTokens",
+        }));
+        artifact.validation_plan = Some(json!({
+            "checks": ["target", "selector", "intent"],
+        }));
+
+        validate_execution_artifact(&artifact).expect("valid semantic artifact");
+    }
+
+    #[test]
+    fn execution_artifact_validation_rejects_semantic_contract_missing_risk_class() {
+        let mut artifact = sample_execution_artifact();
+        artifact.decoded_intent = Some(json!({ "kind": "swap_exact_in" }));
+        artifact.candidate_envelopes = vec![json!({ "candidate_ref": "tx.swap" })];
+        artifact.validation_plan = Some(json!({ "checks": [] }));
+
+        let error =
+            validate_execution_artifact(&artifact).expect_err("semantic artifact missing risk");
+        assert!(error.contains("risk_class is required"), "{error}");
+    }
+
+    #[test]
+    fn execution_artifact_validation_rejects_semantic_contract_without_candidate_envelopes() {
+        let mut artifact = sample_execution_artifact();
+        artifact.risk_class = Some("bounded_swap".to_owned());
+        artifact.decoded_intent = Some(json!({ "kind": "swap_exact_in" }));
+        artifact.validation_plan = Some(json!({ "checks": [] }));
+
+        let error = validate_execution_artifact(&artifact)
+            .expect_err("semantic artifact without candidate envelopes");
+        assert!(error.contains("candidate_envelopes must include at least one envelope"), "{error}");
+    }
+
+    #[test]
+    fn execution_artifact_validation_rejects_semantic_contract_with_unknown_candidate_ref() {
+        let mut artifact = sample_execution_artifact();
+        artifact.risk_class = Some("bounded_swap".to_owned());
+        artifact.decoded_intent = Some(json!({ "kind": "swap_exact_in" }));
+        artifact.candidate_envelopes = vec![json!({ "candidate_ref": "tx.missing" })];
+        artifact.validation_plan = Some(json!({ "checks": [] }));
+
+        let error =
+            validate_execution_artifact(&artifact).expect_err("unknown semantic candidate ref");
+        assert!(error.contains("references unknown candidate `tx.missing`"), "{error}");
     }
 }

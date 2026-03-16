@@ -25,6 +25,13 @@ Current implementation status:
   - `prebuilt_fragment`
   - `reflection_request`
   - `execution_artifact`
+- `ExecutionArtifactLaunchSpec` now also preserves optional TS semantic-artifact compatibility fields:
+  - `risk_class`
+  - `risk_tags`
+  - `decoded_intent`
+  - `candidate_envelopes`
+  - `decode_spec`
+  - `validation_plan`
 - mutable commands now carry optional `expected_version` preconditions:
   - `checkpoint_seq`
   - `plan_epoch`
@@ -95,3 +102,4 @@ Known gaps:
 - protocol-specific transfer / Uniswap DTOs are no longer part of this crate's public API:
   - package-owned protocol shapes now live on the Owliabot/package side
   - runtime ingress stays centered on `launch_spec` and `execution_artifact`
+- Rust currently preserves and minimally validates semantic-artifact completeness at ingress, but does not execute TS-side decode/validation semantics yet

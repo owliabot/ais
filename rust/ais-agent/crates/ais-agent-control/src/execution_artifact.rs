@@ -301,6 +301,18 @@ pub struct ExecutionArtifactLaunchSpec {
     #[serde(default)]
     pub execution_policy: Option<ExecutionPolicy>,
     #[serde(default)]
+    pub risk_class: Option<String>,
+    #[serde(default)]
+    pub risk_tags: Vec<String>,
+    #[serde(default)]
+    pub decoded_intent: Option<Value>,
+    #[serde(default)]
+    pub candidate_envelopes: Vec<Value>,
+    #[serde(default)]
+    pub decode_spec: Option<Value>,
+    #[serde(default)]
+    pub validation_plan: Option<Value>,
+    #[serde(default)]
     pub evidence: Value,
     #[serde(default)]
     pub metadata: BTreeMap<String, Value>,
@@ -456,6 +468,16 @@ impl ExecutionArtifactLaunchSpec {
             .iter()
             .find(|candidate| candidate.candidate_id().as_str() == candidate_id)
     }
+
+    #[must_use]
+    pub fn semantic_contract_active(&self) -> bool {
+        self.risk_class.is_some()
+            || !self.risk_tags.is_empty()
+            || self.decoded_intent.is_some()
+            || !self.candidate_envelopes.is_empty()
+            || self.decode_spec.is_some()
+            || self.validation_plan.is_some()
+    }
 }
 
 #[cfg(test)]
@@ -512,6 +534,12 @@ mod tests {
             postconditions: Vec::new(),
             expected_effects: Vec::new(),
             execution_policy: None,
+            risk_class: None,
+            risk_tags: Vec::new(),
+            decoded_intent: None,
+            candidate_envelopes: Vec::new(),
+            decode_spec: None,
+            validation_plan: None,
             evidence: Value::Null,
             metadata: BTreeMap::new(),
         };
@@ -548,6 +576,12 @@ mod tests {
             postconditions: Vec::new(),
             expected_effects: Vec::new(),
             execution_policy: None,
+            risk_class: None,
+            risk_tags: Vec::new(),
+            decoded_intent: None,
+            candidate_envelopes: Vec::new(),
+            decode_spec: None,
+            validation_plan: None,
             evidence: Value::Null,
             metadata: BTreeMap::new(),
         };
@@ -559,5 +593,14 @@ mod tests {
 
         artifact.allowed_chains = vec!["eip155:1".to_owned(), "eip155:8453".to_owned()];
         assert_eq!(artifact.chain_scope(), None);
+    }
+
+    #[test]
+    fn execution_artifact_semantic_contract_helper_tracks_presence_of_semantic_fields() {
+        let mut artifact = ExecutionArtifactLaunchSpec::default();
+        assert!(!artifact.semantic_contract_active());
+
+        artifact.validation_plan = Some(json!({ "kind": "static" }));
+        assert!(artifact.semantic_contract_active());
     }
 }

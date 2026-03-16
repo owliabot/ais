@@ -305,6 +305,12 @@ async fn runtime_host_service_begin_run_seeds_execution_artifact_runtime_state_f
                         postconditions: Vec::new(),
                         expected_effects: Vec::new(),
                         execution_policy: None,
+                        risk_class: None,
+                        risk_tags: Vec::new(),
+                        decoded_intent: None,
+                        candidate_envelopes: Vec::new(),
+                        decode_spec: None,
+                        validation_plan: None,
                         evidence: json!({}),
                         metadata: BTreeMap::new(),
                     },
@@ -405,6 +411,12 @@ async fn runtime_host_service_begin_run_seeds_simple_execution_artifact_checkpoi
                         postconditions: Vec::new(),
                         expected_effects: Vec::new(),
                         execution_policy: None,
+                        risk_class: None,
+                        risk_tags: Vec::new(),
+                        decoded_intent: None,
+                        candidate_envelopes: Vec::new(),
+                        decode_spec: None,
+                        validation_plan: None,
                         evidence: json!({}),
                         metadata: BTreeMap::new(),
                     },
@@ -534,6 +546,12 @@ async fn runtime_host_service_accepts_generic_execution_artifact_for_new_protoco
                         postconditions: Vec::new(),
                         expected_effects: Vec::new(),
                         execution_policy: None,
+                        risk_class: None,
+                        risk_tags: Vec::new(),
+                        decoded_intent: None,
+                        candidate_envelopes: Vec::new(),
+                        decode_spec: None,
+                        validation_plan: None,
                         evidence: json!({ "shape": "generic" }),
                         metadata: BTreeMap::from([("builder".to_owned(), json!("test.generic"))]),
                     },
@@ -655,6 +673,12 @@ async fn runtime_host_service_begin_run_accepts_observe_only_execution_artifact(
                         postconditions: Vec::new(),
                         expected_effects: Vec::new(),
                         execution_policy: None,
+                        risk_class: None,
+                        risk_tags: Vec::new(),
+                        decoded_intent: None,
+                        candidate_envelopes: Vec::new(),
+                        decode_spec: None,
+                        validation_plan: None,
                         evidence: json!({}),
                         metadata: BTreeMap::new(),
                     },
@@ -838,6 +862,12 @@ async fn runtime_host_service_submits_execution_artifact_continuation_and_reseed
                         postconditions: Vec::new(),
                         expected_effects: Vec::new(),
                         execution_policy: None,
+                        risk_class: None,
+                        risk_tags: Vec::new(),
+                        decoded_intent: None,
+                        candidate_envelopes: Vec::new(),
+                        decode_spec: None,
+                        validation_plan: None,
                         evidence: json!({}),
                         metadata: BTreeMap::new(),
                     },
@@ -971,6 +1001,12 @@ async fn runtime_host_service_begin_run_accepts_branching_execution_artifact_ent
                         postconditions: Vec::new(),
                         expected_effects: Vec::new(),
                         execution_policy: None,
+                        risk_class: None,
+                        risk_tags: Vec::new(),
+                        decoded_intent: None,
+                        candidate_envelopes: Vec::new(),
+                        decode_spec: None,
+                        validation_plan: None,
                         evidence: json!({}),
                         metadata: BTreeMap::new(),
                     },
@@ -1535,6 +1571,12 @@ async fn runtime_host_service_begin_run_accepts_owliabot_uniswap_v3_swap_executi
         .expect("execution artifact state");
     assert_eq!(execution_artifact.launch_spec.action_key, "uniswap_v3_swap");
     assert_eq!(
+        execution_artifact.launch_spec.risk_class.as_deref(),
+        Some("bounded_swap")
+    );
+    assert_eq!(execution_artifact.launch_spec.risk_tags, vec!["router_call"]);
+    assert_eq!(execution_artifact.launch_spec.candidate_envelopes.len(), 1);
+    assert_eq!(
         execution_artifact
             .active_stage_id
             .as_ref()
@@ -1593,6 +1635,13 @@ async fn runtime_host_service_begin_run_accepts_owliabot_uniswap_v3_swap_executi
             .map(|stage_id| stage_id.as_str())
             == Some("stage.swap")
     }));
+    assert_eq!(
+        latest
+            .execution_artifact
+            .as_ref()
+            .and_then(|artifact| artifact.launch_spec.risk_class.as_deref()),
+        Some("bounded_swap")
+    );
     assert!(latest
         .action_graph
         .nodes
@@ -4260,6 +4309,12 @@ fn preloaded_continuation_wait_runtime() -> (
             postconditions: Vec::new(),
             expected_effects: Vec::new(),
             execution_policy: None,
+            risk_class: None,
+            risk_tags: Vec::new(),
+            decoded_intent: None,
+            candidate_envelopes: Vec::new(),
+            decode_spec: None,
+            validation_plan: None,
             evidence: json!({}),
             metadata: BTreeMap::new(),
         },
@@ -5049,6 +5104,36 @@ fn sample_uniswap_v3_swap_execution_artifact() -> ExecutionArtifactLaunchSpec {
         postconditions: Vec::new(),
         expected_effects: Vec::new(),
         execution_policy: None,
+        risk_class: Some("bounded_swap".to_owned()),
+        risk_tags: vec!["router_call".to_owned()],
+        decoded_intent: Some(json!({
+            "kind": "swap_exact_in",
+            "candidate_ref": "swap.direct",
+            "token_in": "0x4444444444444444444444444444444444444444",
+            "token_out": "0x1111111111111111111111111111111111111111",
+            "amount_in_atomic": "25000000",
+            "min_amount_out_atomic": "9900000000000000",
+        })),
+        candidate_envelopes: vec![json!({
+            "candidate_ref": "swap.direct",
+            "kind": "evm_transaction",
+            "source": {
+                "kind": "package"
+            }
+        })],
+        decode_spec: Some(json!({
+            "kind": "abi",
+            "allow": [{
+                "candidate_ref": "swap.direct",
+                "selector": "0x414bf389"
+            }]
+        })),
+        validation_plan: Some(json!({
+            "checks": [{
+                "kind": "target_selector_match",
+                "candidate_ref": "swap.direct"
+            }]
+        })),
         evidence: json!({
             "clock": {
                 "now_ms": 1710000015000u64,
@@ -5134,6 +5219,12 @@ fn sample_uniswap_v3_lp_execution_artifact() -> ExecutionArtifactLaunchSpec {
         }],
         expected_effects: Vec::new(),
         execution_policy: None,
+        risk_class: None,
+        risk_tags: Vec::new(),
+        decoded_intent: None,
+        candidate_envelopes: Vec::new(),
+        decode_spec: None,
+        validation_plan: None,
         evidence: json!({
             "token0": {
                 "token_address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
@@ -5265,6 +5356,12 @@ fn sample_native_transfer_execution_artifact() -> ExecutionArtifactLaunchSpec {
         }],
         expected_effects: vec![sample_native_transfer_expected_effect()],
         execution_policy: None,
+        risk_class: None,
+        risk_tags: Vec::new(),
+        decoded_intent: None,
+        candidate_envelopes: Vec::new(),
+        decode_spec: None,
+        validation_plan: None,
         evidence: json!({
             "recipient": {
                 "user_input": "0x1111111111111111111111111111111111111111",
@@ -5349,6 +5446,12 @@ fn sample_erc20_transfer_execution_artifact() -> ExecutionArtifactLaunchSpec {
         }],
         expected_effects: vec![sample_erc20_transfer_expected_effect()],
         execution_policy: None,
+        risk_class: None,
+        risk_tags: Vec::new(),
+        decoded_intent: None,
+        candidate_envelopes: Vec::new(),
+        decode_spec: None,
+        validation_plan: None,
         evidence: json!({
             "recipient": {
                 "user_input": "0x1111111111111111111111111111111111111111",

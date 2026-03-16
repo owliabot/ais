@@ -535,6 +535,12 @@ async fn step_once_execution_artifact_branch_activates_transaction_stage() {
             postconditions: Vec::new(),
             expected_effects: Vec::new(),
             execution_policy: None,
+            risk_class: None,
+            risk_tags: Vec::new(),
+            decoded_intent: None,
+            candidate_envelopes: Vec::new(),
+            decode_spec: None,
+            validation_plan: None,
             evidence: json!({
                 "quote": {
                     "quoted_at_ms": 1
@@ -675,6 +681,12 @@ async fn step_once_execution_artifact_exports_and_pauses_for_continuation() {
             postconditions: Vec::new(),
             expected_effects: Vec::new(),
             execution_policy: None,
+            risk_class: None,
+            risk_tags: Vec::new(),
+            decoded_intent: None,
+            candidate_envelopes: Vec::new(),
+            decode_spec: None,
+            validation_plan: None,
             evidence: json!({}),
             metadata: BTreeMap::new(),
         },

@@ -2484,6 +2484,12 @@ fn sample_native_transfer_launch_spec() -> LaunchSpecSubmission {
         }],
         expected_effects: vec![sample_native_transfer_expected_effect()],
         execution_policy: None,
+        risk_class: None,
+        risk_tags: Vec::new(),
+        decoded_intent: None,
+        candidate_envelopes: Vec::new(),
+        decode_spec: None,
+        validation_plan: None,
         evidence: json!({
             "recipient": {
                 "user_input": "0x1111111111111111111111111111111111111111",
@@ -2617,6 +2623,12 @@ fn sample_erc20_transfer_launch_spec() -> LaunchSpecSubmission {
         }],
         expected_effects: vec![sample_erc20_transfer_expected_effect()],
         execution_policy: None,
+        risk_class: None,
+        risk_tags: Vec::new(),
+        decoded_intent: None,
+        candidate_envelopes: Vec::new(),
+        decode_spec: None,
+        validation_plan: None,
         evidence: json!({
             "recipient": {
                 "user_input": "0x1111111111111111111111111111111111111111",
@@ -2761,6 +2773,12 @@ fn sample_uniswap_v3_lp_launch_spec() -> LaunchSpecSubmission {
         }],
         expected_effects: Vec::new(),
         execution_policy: None,
+        risk_class: None,
+        risk_tags: Vec::new(),
+        decoded_intent: None,
+        candidate_envelopes: Vec::new(),
+        decode_spec: None,
+        validation_plan: None,
         evidence: json!({
             "token0": {
                 "token_address": "0x3333333333333333333333333333333333333333",
@@ -3046,6 +3064,40 @@ fn sample_uniswap_exact_in_execution_artifact(
         postconditions: Vec::new(),
         expected_effects: Vec::new(),
         execution_policy: None,
+        risk_class: Some("bounded_swap".to_owned()),
+        risk_tags: vec![
+            "external_quote".to_owned(),
+            "uniswap_trading_api".to_owned(),
+        ],
+        decoded_intent: Some(json!({
+            "kind": "swap_exact_in",
+            "candidate_ref": "swap.direct",
+            "token_in": "0x833589fCD6edB6E08f4c7C32D4f71b54bdA02913",
+            "token_out": "0x4200000000000000000000000000000000000006",
+            "amount_in_atomic": "25000000",
+            "min_amount_out_atomic": "9900000000000000",
+        })),
+        candidate_envelopes: vec![json!({
+            "candidate_ref": "swap.direct",
+            "kind": "evm_transaction",
+            "source": {
+                "kind": "http_api",
+                "provider": "uniswap_trading_api"
+            }
+        })],
+        decode_spec: Some(json!({
+            "kind": "abi",
+            "allow": [{
+                "candidate_ref": "swap.direct",
+                "selector": "0x414bf389"
+            }]
+        })),
+        validation_plan: Some(json!({
+            "checks": [{
+                "kind": "target_selector_match",
+                "candidate_ref": "swap.direct"
+            }]
+        })),
         evidence: json!({
             "clock": {
                 "now_ms": now_ms,
@@ -3144,6 +3196,40 @@ fn sample_uniswap_trading_api_execution_artifact() -> ExecutionArtifactLaunchSpe
         postconditions: Vec::new(),
         expected_effects: Vec::new(),
         execution_policy: None,
+        risk_class: Some("bounded_swap".to_owned()),
+        risk_tags: vec![
+            "external_quote".to_owned(),
+            "uniswap_trading_api".to_owned(),
+        ],
+        decoded_intent: Some(json!({
+            "kind": "swap_exact_in",
+            "candidate_ref": "swap.direct",
+            "token_in": "0x833589fCD6edB6E08f4c7C32D4f71b54bdA02913",
+            "token_out": "0x4200000000000000000000000000000000000006",
+            "amount_in_atomic": "25000000",
+            "min_amount_out_atomic": "9900000000000000",
+        })),
+        candidate_envelopes: vec![json!({
+            "candidate_ref": "swap.direct",
+            "kind": "evm_transaction",
+            "source": {
+                "kind": "http_api",
+                "provider": "uniswap_trading_api"
+            }
+        })],
+        decode_spec: Some(json!({
+            "kind": "abi",
+            "allow": [{
+                "candidate_ref": "swap.direct",
+                "selector": "0x414bf389"
+            }]
+        })),
+        validation_plan: Some(json!({
+            "checks": [{
+                "kind": "target_selector_match",
+                "candidate_ref": "swap.direct"
+            }]
+        })),
         evidence: json!({
             "clock": {
                 "now_ms": now_ms,
@@ -3268,6 +3354,12 @@ fn sample_uniswap_swap_to_aave_execution_artifact() -> ExecutionArtifactLaunchSp
         }],
         expected_effects: Vec::new(),
         execution_policy: None,
+        risk_class: None,
+        risk_tags: Vec::new(),
+        decoded_intent: None,
+        candidate_envelopes: Vec::new(),
+        decode_spec: None,
+        validation_plan: None,
         evidence: json!({
             "quote": {
                 "source": "uniswap.quote",
@@ -3358,6 +3450,12 @@ fn sample_uniswap_v3_lp_execution_artifact() -> ExecutionArtifactLaunchSpec {
         }],
         expected_effects: Vec::new(),
         execution_policy: None,
+        risk_class: None,
+        risk_tags: Vec::new(),
+        decoded_intent: None,
+        candidate_envelopes: Vec::new(),
+        decode_spec: None,
+        validation_plan: None,
         evidence: json!({
             "token0": {
                 "token_address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
@@ -3498,6 +3596,12 @@ fn build_aave_supply_continuation_artifact(
         postconditions: Vec::new(),
         expected_effects: Vec::new(),
         execution_policy: None,
+        risk_class: None,
+        risk_tags: Vec::new(),
+        decoded_intent: None,
+        candidate_envelopes: Vec::new(),
+        decode_spec: None,
+        validation_plan: None,
         evidence: json!({
             "upstream": {
                 "swap_received_atomic": received_atomic

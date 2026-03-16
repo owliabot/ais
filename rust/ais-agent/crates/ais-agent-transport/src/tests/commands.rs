@@ -135,6 +135,59 @@ pub fn sample_execution_artifact_begin_command() -> HostedRunCommand {
             postconditions: Vec::new(),
             expected_effects: Vec::new(),
             execution_policy: None,
+            risk_class: Some("bounded_swap".to_owned()),
+            risk_tags: vec!["router_call".to_owned(), "transport_test".to_owned()],
+            decoded_intent: Some(json!({
+                "kind": "bounded_swap",
+                "token_in": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "token_out": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "recipient": "0xcccccccccccccccccccccccccccccccccccccccc",
+                "amount_in_exact": "1000",
+                "amount_out_min": "900"
+            })),
+            candidate_envelopes: vec![json!({
+                "candidate_ref": "swap.direct",
+                "candidate_kind": "evm_transaction",
+                "risk_class": "bounded_swap",
+                "source": {
+                    "kind": "http_api",
+                    "source_id": "transport-test"
+                },
+                "intent": {
+                    "kind": "bounded_swap",
+                    "token_in": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "token_out": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "recipient": "0xcccccccccccccccccccccccccccccccccccccccc",
+                    "amount_in_exact": "1000",
+                    "amount_out_min": "900"
+                },
+                "validation_plan": {
+                    "static_constraints": [{
+                        "chain": "8453",
+                        "target_allowlist": ["0x1111111111111111111111111111111111111111"],
+                        "selector_allowlist": ["0xdeadbeef"]
+                    }],
+                    "failure_mode": "reject"
+                }
+            })],
+            decode_spec: Some(json!({
+                "target_allowlist": ["0x1111111111111111111111111111111111111111"],
+                "entrypoints": [{
+                    "selector": "0xdeadbeef",
+                    "abi_fragment": "function exactInputSingle(bytes data)",
+                    "intent_kind": "bounded_swap"
+                }],
+                "fallback_mode": "reject"
+            })),
+            validation_plan: Some(json!({
+                "static_constraints": [{
+                    "chain": "8453",
+                    "target_allowlist": ["0x1111111111111111111111111111111111111111"],
+                    "selector_allowlist": ["0xdeadbeef"]
+                }],
+                "require_simulation": true,
+                "failure_mode": "reject"
+            })),
             evidence: json!({
                 "quote": {
                     "quotedAtMs": 1710000000000u64
@@ -335,6 +388,12 @@ pub fn sample_owliabot_uniswap_swap_begin_command() -> HostedRunCommand {
                     postconditions: Vec::new(),
                     expected_effects: Vec::new(),
                     execution_policy: None,
+                    risk_class: None,
+                    risk_tags: Vec::new(),
+                    decoded_intent: None,
+                    candidate_envelopes: Vec::new(),
+                    decode_spec: None,
+                    validation_plan: None,
                     evidence: json!({
                         "quote": {
                             "quotedAtMs": 1710000000000u64
@@ -615,6 +674,23 @@ fn hosted_command_round_trips_execution_artifact_launch_spec() {
             assert_eq!(spec.allowed_chains, vec!["8453".to_owned()]);
             assert_eq!(spec.transactions.len(), 2);
             assert_eq!(spec.stages.len(), 4);
+            assert_eq!(spec.risk_class.as_deref(), Some("bounded_swap"));
+            assert_eq!(spec.risk_tags, vec!["router_call".to_owned(), "transport_test".to_owned()]);
+            assert_eq!(spec.candidate_envelopes.len(), 1);
+            assert_eq!(
+                spec.candidate_envelopes[0]["candidate_kind"],
+                json!("evm_transaction")
+            );
+            assert_eq!(
+                spec.decode_spec.as_ref().and_then(|spec| spec.get("fallback_mode")),
+                Some(&json!("reject"))
+            );
+            assert_eq!(
+                spec.validation_plan
+                    .as_ref()
+                    .and_then(|plan| plan.get("require_simulation")),
+                Some(&json!(true))
+            );
             let export_stage = spec.stage("stage.swap").expect("swap stage");
             let tx_stage = export_stage.as_transaction().expect("transaction stage");
             assert_eq!(
