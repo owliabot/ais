@@ -5,6 +5,7 @@ use ais_agent_control::{
 use ais_agent_core::{
     action::ActionNodeStatus, checkpoint::ArtifactContinuationSnapshot, runtime::RunPhase,
 };
+use tracing::{info, warn};
 
 use crate::{
     runtime::ActiveRun,
@@ -56,6 +57,14 @@ pub(crate) fn apply_execution_artifact_transition(
                         snapshot.active_stage_id = Some(stage_id.clone());
                         snapshot.awaiting_continuation = None;
                     }
+                    info!(
+                        parent: None,
+                        run_id = %runtime.run_id.0,
+                        stage = %active_stage_id,
+                        next_stage = %stage_id,
+                        predicate = predicate,
+                        "run.artifact.branch_selected"
+                    );
                     if let Err(error) = activate_execution_artifact_stage(&mut runtime.checkpoint) {
                         return fail_artifact(runtime, active_stage_id.as_str(), error);
                     }
@@ -92,6 +101,15 @@ pub(crate) fn apply_execution_artifact_transition(
                         RunFailureCode::VerifyMismatch,
                         format!("artifact assertion `{failure_code}` failed: {message}"),
                     );
+                    warn!(
+                        parent: None,
+                        run_id = %runtime.run_id.0,
+                        stage = %active_stage_id,
+                        failure_code = %failure_code,
+                        message = %message,
+                        predicate_value = predicate,
+                        "run.artifact.assert_failed"
+                    );
                     runtime.touch_transition();
                     Some(StepTransition {
                         kind: StepTransitionKind::Artifact,
@@ -121,6 +139,14 @@ pub(crate) fn apply_execution_artifact_transition(
                 if let Err(error) = activate_execution_artifact_stage(&mut runtime.checkpoint) {
                     return fail_artifact(runtime, active_stage_id.as_str(), error);
                 }
+                info!(
+                    parent: None,
+                    run_id = %runtime.run_id.0,
+                    stage = %active_stage_id,
+                    next_stage = %next_stage_id,
+                    exported_output_count = exported.len(),
+                    "run.artifact.stage_advanced"
+                );
                 runtime
                     .checkpoint
                     .lifecycle
@@ -143,6 +169,13 @@ pub(crate) fn apply_execution_artifact_transition(
                     },
                 })
             } else {
+                info!(
+                    parent: None,
+                    run_id = %runtime.run_id.0,
+                    stage = %active_stage_id,
+                    exported_output_count = exported.len(),
+                    "run.artifact.stage_completed"
+                );
                 runtime.touch_transition();
                 Some(StepTransition {
                     kind: StepTransitionKind::Artifact,
@@ -177,6 +210,14 @@ pub(crate) fn apply_execution_artifact_transition(
                 if let Err(error) = activate_execution_artifact_stage(&mut runtime.checkpoint) {
                     return fail_artifact(runtime, active_stage_id.as_str(), error);
                 }
+                info!(
+                    parent: None,
+                    run_id = %runtime.run_id.0,
+                    stage = %active_stage_id,
+                    next_stage = %next_stage_id,
+                    exported_output_count = exported.len(),
+                    "run.artifact.stage_advanced"
+                );
                 runtime
                     .checkpoint
                     .lifecycle
@@ -199,6 +240,13 @@ pub(crate) fn apply_execution_artifact_transition(
                     },
                 })
             } else {
+                info!(
+                    parent: None,
+                    run_id = %runtime.run_id.0,
+                    stage = %active_stage_id,
+                    exported_output_count = exported.len(),
+                    "run.artifact.stage_completed"
+                );
                 runtime.touch_transition();
                 Some(StepTransition {
                     kind: StepTransitionKind::Artifact,
@@ -235,6 +283,13 @@ pub(crate) fn apply_execution_artifact_transition(
                     stage.package_entry, stage.stage_id
                 ),
                 blocking_refs,
+            );
+            info!(
+                run_id = %runtime.run_id.0,
+                stage = %stage.stage_id,
+                package_entry = %stage.package_entry,
+                required_output_count = stage.required_outputs.len(),
+                "run.artifact.awaiting_continuation"
             );
             runtime.touch_transition();
             Some(StepTransition {
@@ -303,9 +358,9 @@ mod tests {
 
     use ais_agent_control::{
         execution_artifact::{
-            EvmTransactionCandidate, ExecutionArtifactLaunchSpec, ExecutionChainFamily,
-            ExecutionStage, ExecutionTransactionCandidate, ObserveStage, OutputExportSpec,
-            TransactionStage, ValueRef,
+            ComparisonOperator, EvmTransactionCandidate, ExecutionArtifactLaunchSpec,
+            ExecutionChainFamily, ExecutionStage, ExecutionTransactionCandidate, ObserveStage,
+            OutputExportSpec, PredicateSpec, TransactionStage, ValueRef,
         },
         ids::RunId,
     };
@@ -325,7 +380,7 @@ mod tests {
     };
     use serde_json::json;
 
-    use crate::runtime::ActiveRun;
+    use crate::{runtime::ActiveRun, tests::tracing_capture::capture_tracing_output_at_level};
 
     use super::apply_execution_artifact_transition;
 
@@ -443,8 +498,9 @@ mod tests {
             },
         );
 
-        let transition =
-            apply_execution_artifact_transition(&mut runtime).expect("artifact transition");
+        let (output, transition) = capture_tracing_output_at_level(tracing::Level::INFO, || {
+            apply_execution_artifact_transition(&mut runtime).expect("artifact transition")
+        });
 
         assert_eq!(
             transition.summary,
@@ -467,6 +523,9 @@ mod tests {
             .expect("artifact snapshot")
             .active_stage_id
             .is_none());
+        assert!(output.contains("run.artifact.stage_completed"));
+        assert!(output.contains("stage=stage.swap"));
+        assert!(output.contains("exported_output_count=1"));
     }
 
     #[test]
@@ -579,8 +638,9 @@ mod tests {
             awaiting_continuation: None,
         });
 
-        let transition =
-            apply_execution_artifact_transition(&mut runtime).expect("artifact transition");
+        let (output, transition) = capture_tracing_output_at_level(tracing::Level::INFO, || {
+            apply_execution_artifact_transition(&mut runtime).expect("artifact transition")
+        });
 
         assert!(transition.summary.contains("exported 1 output(s)"));
         assert_eq!(
@@ -601,6 +661,98 @@ mod tests {
             .expect("artifact state")
             .active_stage_id
             .is_none());
+        assert!(output.contains("run.artifact.stage_completed"));
+        assert!(output.contains("stage=stage.quote"));
+        assert!(output.contains("exported_output_count=1"));
+    }
+
+    #[test]
+    fn branch_stage_logs_selected_target() {
+        let branch_stage = ais_agent_control::execution_artifact::BranchStage {
+            stage_id: "stage.branch".into(),
+            predicate: PredicateSpec::Comparison {
+                left: ValueRef::Literal { value: json!(1) },
+                op: ComparisonOperator::Eq,
+                right: ValueRef::Literal { value: json!(1) },
+            },
+            if_true: ais_agent_control::execution_artifact::BranchTarget::GotoStage {
+                stage_id: "stage.next".into(),
+            },
+            if_false: ais_agent_control::execution_artifact::BranchTarget::Assert {
+                failure_code: "unexpected_false".to_owned(),
+                message: "predicate was false".to_owned(),
+            },
+        };
+        let next_stage = ObserveStage {
+            stage_id: "stage.next".into(),
+            observation_ref: "query.quote".to_owned(),
+            exports: Vec::new(),
+            next_stage_id: None,
+        };
+        let mut runtime = ActiveRun::new(
+            sample_mission(),
+            CheckpointSnapshot {
+                run_id: "run-branch".to_owned(),
+                mission_id: "mission-1".to_owned(),
+                checkpoint_seq: 0,
+                plan_epoch: 0,
+                lifecycle: RunLifecycleState::new(RunId("run-branch".to_owned()), "mission-1"),
+                action_graph: ActionGraph::default(),
+                evidence_graph: EvidenceGraph::default(),
+                effect_contracts: BTreeMap::new(),
+                pending_requests: PendingRequestsSnapshot::default(),
+                last_completed_node_id: None,
+                actuation_records: Vec::new(),
+                execution_artifact: Some(ExecutionArtifactRuntimeSnapshot {
+                    launch_spec: ExecutionArtifactLaunchSpec {
+                        protocol_package_id: "owliabot.uniswap_v3".to_owned(),
+                        action_key: "quote_exact_in_single".to_owned(),
+                        chain_family: ExecutionChainFamily::Evm,
+                        allowed_chains: vec!["eip155:1".to_owned()],
+                        entry_stage_id: "stage.branch".into(),
+                        actor: None,
+                        transactions: Vec::new(),
+                        stages: vec![
+                            ExecutionStage::Branch(branch_stage),
+                            ExecutionStage::Observe(next_stage),
+                        ],
+                        observations: vec![
+                            ais_agent_control::execution_artifact::ObservationSpec {
+                                observation_id: "query.quote".to_owned(),
+                                kind: "evm.contract_state_read".to_owned(),
+                                params: BTreeMap::new(),
+                            },
+                        ],
+                        preconditions: Vec::new(),
+                        postconditions: Vec::new(),
+                        expected_effects: Vec::new(),
+                        execution_policy: None,
+                        risk_class: None,
+                        risk_tags: Vec::new(),
+                        decoded_intent: None,
+                        candidate_envelopes: Vec::new(),
+                        decode_spec: None,
+                        validation_plan: None,
+                        evidence: serde_json::Value::Null,
+                        metadata: BTreeMap::new(),
+                    },
+                    active_stage_id: Some("stage.branch".into()),
+                    planned_stage_graphs: BTreeMap::new(),
+                    exported_outputs: BTreeMap::new(),
+                    branch_trace: Vec::new(),
+                    awaiting_continuation: None,
+                }),
+            },
+        );
+
+        let (output, transition) = capture_tracing_output_at_level(tracing::Level::INFO, || {
+            apply_execution_artifact_transition(&mut runtime).expect("artifact transition")
+        });
+
+        assert!(transition.summary.contains("stage `stage.branch` failed"));
+        assert!(output.contains("run.artifact.branch_selected"));
+        assert!(output.contains("stage=stage.branch"));
+        assert!(output.contains("next_stage=stage.next"));
     }
 
     fn sample_mission() -> Mission {

@@ -67,6 +67,54 @@ use crate::{
     },
 };
 
+fn exact_evm_execution_wiring() -> RuntimeExecutionWiring {
+    RuntimeExecutionWiring {
+        providers: crate::service::RuntimeProviderRegistry {
+            chains: BTreeMap::from([
+                (
+                    "eip155:1".to_owned(),
+                    crate::service::RuntimeChainProviderEntry {
+                        chain: "eip155:1".to_owned(),
+                        labels: vec!["ethereum".to_owned(), "mainnet".to_owned()],
+                        connection: crate::service::RuntimeChainConnection::Evm(
+                            EvmConnectionSpec {
+                                http_url: "http://127.0.0.1:8545".to_owned(),
+                                ws_url: None,
+                            },
+                        ),
+                    },
+                ),
+                (
+                    "eip155:8453".to_owned(),
+                    crate::service::RuntimeChainProviderEntry {
+                        chain: "eip155:8453".to_owned(),
+                        labels: vec!["base".to_owned(), "base-mainnet".to_owned()],
+                        connection: crate::service::RuntimeChainConnection::Evm(
+                            EvmConnectionSpec {
+                                http_url: "http://127.0.0.1:8545".to_owned(),
+                                ws_url: None,
+                            },
+                        ),
+                    },
+                ),
+                (
+                    "eip155:11155111".to_owned(),
+                    crate::service::RuntimeChainProviderEntry {
+                        chain: "eip155:11155111".to_owned(),
+                        labels: vec!["sepolia".to_owned()],
+                        connection: crate::service::RuntimeChainConnection::Evm(
+                            EvmConnectionSpec {
+                                http_url: "http://127.0.0.1:8545".to_owned(),
+                                ws_url: None,
+                            },
+                        ),
+                    },
+                ),
+            ]),
+        },
+    }
+}
+
 #[tokio::test]
 async fn runtime_observe_node_can_emit_machine_readable_evidence_via_alloy_provider() {
     let asserter = Asserter::new();
@@ -819,10 +867,7 @@ async fn native_transfer_launch_spec_can_complete_via_signer_submission_and_live
     let mut checkpoint = checkpoint_with_nodes(Vec::new());
     seed_launch_spec_checkpoint(
         &mut checkpoint,
-        &RuntimeExecutionWiring {
-            evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
-            solana_rpc_url: None,
-        },
+        &exact_evm_execution_wiring(),
         &sample_native_transfer_launch_spec(),
     )
     .expect("native transfer should seed");
@@ -959,10 +1004,7 @@ async fn native_transfer_launch_spec_signed_payload_can_broadcast_and_complete_v
     let mut checkpoint = checkpoint_with_nodes(Vec::new());
     seed_launch_spec_checkpoint(
         &mut checkpoint,
-        &RuntimeExecutionWiring {
-            evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
-            solana_rpc_url: None,
-        },
+        &exact_evm_execution_wiring(),
         &sample_native_transfer_launch_spec(),
     )
     .expect("native transfer should seed");
@@ -1098,10 +1140,7 @@ async fn native_transfer_launch_spec_signed_payload_can_broadcast_and_complete_v
 async fn execution_artifact_uniswap_v3_lp_mint_can_complete_via_signed_payload_and_live_broadcast_verify(
 ) {
     let tx_hash = b256!("1212121212121212121212121212121212121212121212121212121212121212");
-    let wiring = RuntimeExecutionWiring {
-        evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
-        solana_rpc_url: None,
-    };
+    let wiring = exact_evm_execution_wiring();
     let mut checkpoint = checkpoint_with_nodes(Vec::new());
     seed_launch_spec_checkpoint(
         &mut checkpoint,
@@ -1233,15 +1272,8 @@ async fn query_first_native_transfer_artifact_can_branch_into_write_path() {
     let mut checkpoint = checkpoint_with_nodes(Vec::new());
     let launch_spec =
         LaunchSpecSubmission::ExecutionArtifact(sample_query_first_native_transfer_launch_spec());
-    seed_launch_spec_checkpoint(
-        &mut checkpoint,
-        &RuntimeExecutionWiring {
-            evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
-            solana_rpc_url: None,
-        },
-        &launch_spec,
-    )
-    .expect("query-first native transfer should seed");
+    seed_launch_spec_checkpoint(&mut checkpoint, &exact_evm_execution_wiring(), &launch_spec)
+        .expect("query-first native transfer should seed");
     let mut runtime = ActiveRun::new(mission, checkpoint);
 
     let asserter = Asserter::new();
@@ -1388,10 +1420,7 @@ async fn native_transfer_launch_spec_can_restart_from_signer_submitted_side_effe
     let mut checkpoint = checkpoint_with_nodes(Vec::new());
     seed_launch_spec_checkpoint(
         &mut checkpoint,
-        &RuntimeExecutionWiring {
-            evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
-            solana_rpc_url: None,
-        },
+        &exact_evm_execution_wiring(),
         &sample_native_transfer_launch_spec(),
     )
     .expect("native transfer should seed");
@@ -1491,10 +1520,7 @@ async fn erc20_transfer_launch_spec_fail_closes_on_undecodable_token_observe() {
     let mut checkpoint = checkpoint_with_nodes(Vec::new());
     seed_launch_spec_checkpoint(
         &mut checkpoint,
-        &RuntimeExecutionWiring {
-            evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
-            solana_rpc_url: None,
-        },
+        &exact_evm_execution_wiring(),
         &sample_erc20_transfer_launch_spec(),
     )
     .expect("erc20 transfer should seed");
@@ -1534,10 +1560,7 @@ async fn erc20_transfer_launch_spec_can_complete_via_signer_submission_and_live_
     let mut checkpoint = checkpoint_with_nodes(Vec::new());
     seed_launch_spec_checkpoint(
         &mut checkpoint,
-        &RuntimeExecutionWiring {
-            evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
-            solana_rpc_url: None,
-        },
+        &exact_evm_execution_wiring(),
         &sample_erc20_transfer_launch_spec(),
     )
     .expect("erc20 transfer should seed");
@@ -1674,10 +1697,7 @@ async fn erc20_transfer_launch_spec_signed_payload_can_broadcast_and_complete_vi
     let mut checkpoint = checkpoint_with_nodes(Vec::new());
     seed_launch_spec_checkpoint(
         &mut checkpoint,
-        &RuntimeExecutionWiring {
-            evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
-            solana_rpc_url: None,
-        },
+        &exact_evm_execution_wiring(),
         &sample_erc20_transfer_launch_spec(),
     )
     .expect("erc20 transfer should seed");
@@ -1816,10 +1836,7 @@ async fn erc20_transfer_launch_spec_can_restart_from_signer_submitted_side_effec
     let mut checkpoint = checkpoint_with_nodes(Vec::new());
     seed_launch_spec_checkpoint(
         &mut checkpoint,
-        &RuntimeExecutionWiring {
-            evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
-            solana_rpc_url: None,
-        },
+        &exact_evm_execution_wiring(),
         &sample_erc20_transfer_launch_spec(),
     )
     .expect("erc20 transfer should seed");
@@ -1916,10 +1933,7 @@ async fn erc20_transfer_launch_spec_can_restart_from_signer_submitted_side_effec
 #[tokio::test]
 async fn execution_artifact_uniswap_exact_in_can_complete_via_generic_branching_and_live_verify() {
     let tx_hash = b256!("9191919191919191919191919191919191919191919191919191919191919191");
-    let wiring = RuntimeExecutionWiring {
-        evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
-        solana_rpc_url: None,
-    };
+    let wiring = exact_evm_execution_wiring();
     let mut checkpoint = checkpoint_with_nodes(Vec::new());
     seed_launch_spec_checkpoint(
         &mut checkpoint,
@@ -2004,10 +2018,7 @@ async fn execution_artifact_uniswap_exact_in_can_complete_via_generic_branching_
 async fn execution_artifact_uniswap_exact_in_signed_payload_can_broadcast_and_complete_via_live_runtime(
 ) {
     let tx_hash = b256!("9494949494949494949494949494949494949494949494949494949494949494");
-    let wiring = RuntimeExecutionWiring {
-        evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
-        solana_rpc_url: None,
-    };
+    let wiring = exact_evm_execution_wiring();
     let mut checkpoint = checkpoint_with_nodes(Vec::new());
     seed_launch_spec_checkpoint(
         &mut checkpoint,
@@ -2135,10 +2146,7 @@ async fn execution_artifact_uniswap_exact_in_with_approval_branch_can_complete_v
     let approval_tx_hash =
         b256!("9292929292929292929292929292929292929292929292929292929292929292");
     let swap_tx_hash = b256!("9393939393939393939393939393939393939393939393939393939393939393");
-    let wiring = RuntimeExecutionWiring {
-        evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
-        solana_rpc_url: None,
-    };
+    let wiring = exact_evm_execution_wiring();
     let mut checkpoint = checkpoint_with_nodes(Vec::new());
     seed_launch_spec_checkpoint(
         &mut checkpoint,
@@ -2235,10 +2243,7 @@ async fn execution_artifact_uniswap_exact_in_with_approval_branch_can_complete_v
 
 #[tokio::test]
 async fn execution_artifact_uniswap_exact_in_stale_quote_fails_closed_on_branch_assert() {
-    let wiring = RuntimeExecutionWiring {
-        evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
-        solana_rpc_url: None,
-    };
+    let wiring = exact_evm_execution_wiring();
     let mut checkpoint = checkpoint_with_nodes(Vec::new());
     seed_launch_spec_checkpoint(
         &mut checkpoint,
@@ -2276,10 +2281,7 @@ async fn execution_artifact_uniswap_exact_in_stale_quote_fails_closed_on_branch_
 #[tokio::test]
 async fn execution_artifact_uniswap_trading_api_swap_can_complete_without_protocol_binder() {
     let tx_hash = b256!("9494949494949494949494949494949494949494949494949494949494949494");
-    let wiring = RuntimeExecutionWiring {
-        evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
-        solana_rpc_url: None,
-    };
+    let wiring = exact_evm_execution_wiring();
     let artifact = sample_uniswap_trading_api_execution_artifact();
     let expected_swap_calldata = artifact
         .transactions
@@ -2373,10 +2375,7 @@ async fn execution_artifact_uniswap_trading_api_swap_can_complete_without_protoc
 async fn execution_artifact_uniswap_swap_can_continue_into_aave_supply_from_exported_output() {
     let swap_tx_hash = b256!("1212121212121212121212121212121212121212121212121212121212121212");
     let supply_tx_hash = b256!("3434343434343434343434343434343434343434343434343434343434343434");
-    let wiring = RuntimeExecutionWiring {
-        evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
-        solana_rpc_url: None,
-    };
+    let wiring = exact_evm_execution_wiring();
 
     let mut checkpoint = checkpoint_with_nodes(Vec::new());
     seed_launch_spec_checkpoint(
@@ -2571,7 +2570,7 @@ async fn execution_artifact_uniswap_swap_can_continue_into_aave_supply_from_expo
             else {
                 panic!("expected evm actuate binding");
             };
-            assert_eq!(action.chain.as_deref(), Some("8453"));
+            assert_eq!(action.chain.as_deref(), Some("eip155:8453"));
         }
         other => panic!("unexpected supply actuate payload: {other:?}"),
     }
@@ -2656,10 +2655,7 @@ async fn execution_artifact_uniswap_swap_can_continue_into_aave_supply_from_expo
 #[tokio::test]
 async fn execution_artifact_uniswap_v3_lp_mint_can_complete_via_generic_runtime() {
     let tx_hash = b256!("8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a");
-    let wiring = RuntimeExecutionWiring {
-        evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
-        solana_rpc_url: None,
-    };
+    let wiring = exact_evm_execution_wiring();
     let mut checkpoint = checkpoint_with_nodes(Vec::new());
     seed_launch_spec_checkpoint(
         &mut checkpoint,
@@ -2795,10 +2791,7 @@ async fn uniswap_v3_lp_launch_spec_mint_can_complete_via_owliabot_boundary_signe
     let mut checkpoint = checkpoint_with_nodes(Vec::new());
     seed_launch_spec_checkpoint(
         &mut checkpoint,
-        &RuntimeExecutionWiring {
-            evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
-            solana_rpc_url: None,
-        },
+        &exact_evm_execution_wiring(),
         &sample_uniswap_v3_lp_launch_spec(),
     )
     .expect("uniswap lp should seed");
@@ -2921,10 +2914,7 @@ async fn uniswap_v3_lp_launch_spec_mint_can_restart_from_owliabot_boundary_signe
     let mut checkpoint = checkpoint_with_nodes(Vec::new());
     seed_launch_spec_checkpoint(
         &mut checkpoint,
-        &RuntimeExecutionWiring {
-            evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
-            solana_rpc_url: None,
-        },
+        &exact_evm_execution_wiring(),
         &sample_uniswap_v3_lp_launch_spec(),
     )
     .expect("uniswap lp should seed");
@@ -4548,7 +4538,8 @@ fn broadcast_swap_node(node_id: &str) -> ActionNode {
             requires_effect_contract: true,
             live: Some(ActuateLiveBinding::Evm(EvmActuateLiveBinding {
                 connection: Some(EvmConnectionSpec {
-                    rpc_url: "http://localhost:8545".to_owned(),
+                    http_url: "http://localhost:8545".to_owned(),
+                    ws_url: None,
                 }),
                 binding: EvmActuateBinding::BroadcastRawTransaction,
             })),
@@ -4587,7 +4578,8 @@ fn verify_receipt_node(node_id: &str, depends_on: Vec<&str>) -> ActionNode {
             post_observation_ref: None,
             live: Some(VerifyLiveBinding::Evm(EvmVerifyLiveBinding {
                 connection: Some(EvmConnectionSpec {
-                    rpc_url: "http://localhost:8545".to_owned(),
+                    http_url: "http://localhost:8545".to_owned(),
+                    ws_url: None,
                 }),
                 binding: EvmVerifyBinding::ReceiptStatus,
                 post_request: None,
@@ -4618,7 +4610,8 @@ fn verify_effect_node(
             post_observation_ref: Some(format!("post.{node_id}")),
             live: Some(VerifyLiveBinding::Evm(EvmVerifyLiveBinding {
                 connection: Some(EvmConnectionSpec {
-                    rpc_url: "http://localhost:8545".to_owned(),
+                    http_url: "http://localhost:8545".to_owned(),
+                    ws_url: None,
                 }),
                 binding: EvmVerifyBinding::EffectContractFromReceiptAndPostState,
                 post_request: Some(EvmObserveRequest::Erc20BalanceOf {

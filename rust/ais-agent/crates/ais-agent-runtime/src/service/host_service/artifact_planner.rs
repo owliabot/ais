@@ -16,7 +16,7 @@ use ais_agent_solana::artifact_planner::{
     plan_execution_artifact as plan_solana_execution_artifact, PlannedSolanaExecutionArtifact,
 };
 
-use super::api_native_evm_common::RuntimeExecutionWiring;
+use super::api_native_evm_common::{RuntimeChainConnectionRef, RuntimeExecutionWiring};
 
 #[cfg(test)]
 use ais_agent_control::execution_artifact::{
@@ -33,9 +33,7 @@ pub(crate) fn seed_execution_artifact_checkpoint(
     wiring: &RuntimeExecutionWiring,
     spec: &ExecutionArtifactLaunchSpec,
 ) -> Result<(), String> {
-    let chain_scope = spec.chain_scope().map(str::to_owned).ok_or_else(|| {
-        "execution_artifact.allowed_chains must contain exactly one chain scope".to_owned()
-    })?;
+    let chain_scope = normalize_execution_artifact_chain_scope(spec)?;
     let planned = plan_family_execution_artifact(spec, wiring, chain_scope.as_str())?;
 
     checkpoint.execution_artifact = Some(ExecutionArtifactRuntimeSnapshot {
@@ -50,6 +48,23 @@ pub(crate) fn seed_execution_artifact_checkpoint(
     checkpoint.evidence_graph = EvidenceGraph::default();
     checkpoint.effect_contracts = planned.effect_contracts;
     Ok(())
+}
+
+fn normalize_execution_artifact_chain_scope(
+    spec: &ExecutionArtifactLaunchSpec,
+) -> Result<String, String> {
+    let chain_scope = spec.chain_scope().ok_or_else(|| {
+        "execution_artifact.allowed_chains must contain exactly one chain scope".to_owned()
+    })?;
+    Ok(match spec.chain_family {
+        ExecutionChainFamily::Evm if !chain_scope.contains(':') => {
+            format!("eip155:{}", chain_scope.trim())
+        }
+        ExecutionChainFamily::Solana if !chain_scope.contains(':') => {
+            format!("solana:{}", chain_scope.trim().to_ascii_lowercase())
+        }
+        _ => chain_scope.trim().to_ascii_lowercase(),
+    })
 }
 
 pub(crate) fn activate_execution_artifact_stage(
@@ -133,16 +148,57 @@ fn plan_family_execution_artifact(
     wiring: &RuntimeExecutionWiring,
     chain_scope: &str,
 ) -> Result<PlannedExecutionArtifact, String> {
+    let resolved = wiring.resolve_chain_connection(chain_scope)?;
     match spec.chain_family {
-        ExecutionChainFamily::Evm => {
-            plan_evm_execution_artifact(spec, wiring.evm_rpc_url.as_deref(), chain_scope)
-                .map(Into::into)
-        }
-        ExecutionChainFamily::Solana => {
-            plan_solana_execution_artifact(spec, wiring.solana_rpc_url.as_deref(), chain_scope)
-                .map(Into::into)
-        }
+        ExecutionChainFamily::Evm => match resolved {
+            Some(resolved) => {
+                let connection = match resolved {
+                    RuntimeChainConnectionRef::Evm(connection) => Some(connection),
+                    RuntimeChainConnectionRef::Solana(_) => {
+                        return Err(provider_family_mismatch_message(
+                            chain_scope,
+                            "evm",
+                            "solana",
+                        ));
+                    }
+                };
+                plan_evm_execution_artifact(spec, connection, chain_scope).map(Into::into)
+            }
+            None => Err(provider_not_configured_message(chain_scope, "evm")),
+        },
+        ExecutionChainFamily::Solana => match resolved {
+            Some(resolved) => {
+                let connection = match resolved {
+                    RuntimeChainConnectionRef::Solana(connection) => Some(connection),
+                    RuntimeChainConnectionRef::Evm(_) => {
+                        return Err(provider_family_mismatch_message(
+                            chain_scope,
+                            "solana",
+                            "evm",
+                        ));
+                    }
+                };
+                plan_solana_execution_artifact(spec, connection, chain_scope).map(Into::into)
+            }
+            None => Err(provider_not_configured_message(chain_scope, "solana")),
+        },
     }
+}
+
+fn provider_not_configured_message(chain_scope: &str, family: &str) -> String {
+    format!(
+        "provider_not_configured: no provider entry resolved for chain `{chain_scope}` (family `{family}`)"
+    )
+}
+
+fn provider_family_mismatch_message(
+    chain_scope: &str,
+    expected_family: &str,
+    actual_family: &str,
+) -> String {
+    format!(
+        "provider_family_mismatch: chain `{chain_scope}` expected family `{expected_family}` but found `{actual_family}`"
+    )
 }
 
 #[cfg(test)]
@@ -213,8 +269,21 @@ mod tests {
             metadata: BTreeMap::new(),
         };
         let wiring = RuntimeExecutionWiring {
-            evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
-            solana_rpc_url: None,
+            providers: crate::service::host_service::RuntimeProviderRegistry {
+                chains: BTreeMap::from([(
+                    "eip155:8453".to_owned(),
+                    crate::service::host_service::RuntimeChainProviderEntry {
+                        chain: "eip155:8453".to_owned(),
+                        labels: vec!["base".to_owned()],
+                        connection: crate::service::host_service::RuntimeChainConnection::Evm(
+                            ais_agent_core::binding::evm::EvmConnectionSpec {
+                                http_url: "http://127.0.0.1:8545".to_owned(),
+                                ws_url: None,
+                            },
+                        ),
+                    },
+                )]),
+            },
         };
 
         seed_execution_artifact_checkpoint(&mut checkpoint, &wiring, &spec)
@@ -286,8 +355,21 @@ mod tests {
             metadata: BTreeMap::new(),
         };
         let wiring = RuntimeExecutionWiring {
-            evm_rpc_url: None,
-            solana_rpc_url: Some("http://127.0.0.1:8899".to_owned()),
+            providers: crate::service::host_service::RuntimeProviderRegistry {
+                chains: BTreeMap::from([(
+                    "solana:mainnet".to_owned(),
+                    crate::service::host_service::RuntimeChainProviderEntry {
+                        chain: "solana:mainnet".to_owned(),
+                        labels: vec!["mainnet".to_owned()],
+                        connection: crate::service::host_service::RuntimeChainConnection::Solana(
+                            ais_agent_core::binding::solana::SolanaConnectionSpec {
+                                http_url: "http://127.0.0.1:8899".to_owned(),
+                                ws_url: None,
+                            },
+                        ),
+                    },
+                )]),
+            },
         };
 
         seed_execution_artifact_checkpoint(&mut checkpoint, &wiring, &spec)
@@ -328,5 +410,193 @@ mod tests {
             actuation_records: Vec::new(),
             execution_artifact: None,
         }
+    }
+
+    #[test]
+    fn seed_execution_artifact_checkpoint_rejects_missing_provider_for_chain_scope() {
+        let mut checkpoint = sample_checkpoint();
+        let spec = ExecutionArtifactLaunchSpec {
+            protocol_package_id: "owliabot.transfer".to_owned(),
+            action_key: "native_transfer".to_owned(),
+            chain_family: ExecutionChainFamily::Evm,
+            allowed_chains: vec!["eip155:8453".to_owned()],
+            entry_stage_id: "stage.transfer".into(),
+            actor: None,
+            transactions: vec![ais_agent_control::execution_artifact::ExecutionTransactionCandidate::EvmTransaction(
+                EvmTransactionCandidate {
+                    candidate_id: "tx.transfer".into(),
+                    to: "0x1111111111111111111111111111111111111111".to_owned(),
+                    value: Some("1".to_owned()),
+                    calldata: None,
+                },
+            )],
+            stages: vec![ExecutionStage::Transaction(TransactionStage {
+                stage_id: "stage.transfer".into(),
+                candidate_ref: "tx.transfer".into(),
+                exports: Vec::new(),
+                next_stage_id: None,
+            })],
+            observations: Vec::new(),
+            preconditions: Vec::new(),
+            postconditions: Vec::new(),
+            expected_effects: Vec::new(),
+            execution_policy: None,
+            risk_class: None,
+            risk_tags: Vec::new(),
+            decoded_intent: None,
+            candidate_envelopes: Vec::new(),
+            decode_spec: None,
+            validation_plan: None,
+            evidence: json!({}),
+            metadata: BTreeMap::new(),
+        };
+
+        let error = seed_execution_artifact_checkpoint(
+            &mut checkpoint,
+            &RuntimeExecutionWiring::default(),
+            &spec,
+        )
+        .expect_err("missing provider");
+        assert!(error.contains("provider_not_configured"));
+    }
+
+    #[test]
+    fn seed_execution_artifact_checkpoint_uses_exact_chain_provider_entry() {
+        let mut checkpoint = sample_checkpoint();
+        let spec = ExecutionArtifactLaunchSpec {
+            protocol_package_id: "owliabot.transfer".to_owned(),
+            action_key: "native_transfer".to_owned(),
+            chain_family: ExecutionChainFamily::Evm,
+            allowed_chains: vec!["eip155:8453".to_owned()],
+            entry_stage_id: "stage.transfer".into(),
+            actor: None,
+            transactions: vec![ais_agent_control::execution_artifact::ExecutionTransactionCandidate::EvmTransaction(
+                EvmTransactionCandidate {
+                    candidate_id: "tx.transfer".into(),
+                    to: "0x1111111111111111111111111111111111111111".to_owned(),
+                    value: Some("1".to_owned()),
+                    calldata: None,
+                },
+            )],
+            stages: vec![ExecutionStage::Transaction(TransactionStage {
+                stage_id: "stage.transfer".into(),
+                candidate_ref: "tx.transfer".into(),
+                exports: Vec::new(),
+                next_stage_id: None,
+            })],
+            observations: Vec::new(),
+            preconditions: Vec::new(),
+            postconditions: Vec::new(),
+            expected_effects: Vec::new(),
+            execution_policy: None,
+            risk_class: None,
+            risk_tags: Vec::new(),
+            decoded_intent: None,
+            candidate_envelopes: Vec::new(),
+            decode_spec: None,
+            validation_plan: None,
+            evidence: json!({}),
+            metadata: BTreeMap::new(),
+        };
+        let mut wiring = RuntimeExecutionWiring::default();
+        wiring.providers.chains.insert(
+            "eip155:8453".to_owned(),
+            crate::service::host_service::RuntimeChainProviderEntry {
+                chain: "eip155:8453".to_owned(),
+                labels: vec!["base".to_owned()],
+                connection: crate::service::host_service::RuntimeChainConnection::Evm(
+                    ais_agent_core::binding::evm::EvmConnectionSpec {
+                        http_url: "http://127.0.0.1:8545".to_owned(),
+                        ws_url: Some("ws://127.0.0.1:8546".to_owned()),
+                    },
+                ),
+            },
+        );
+
+        seed_execution_artifact_checkpoint(&mut checkpoint, &wiring, &spec)
+            .expect("seed artifact checkpoint");
+
+        let simulate = checkpoint
+            .action_graph
+            .nodes
+            .get("artifact.stage.transfer.simulate")
+            .expect("simulate node");
+        let ActionPayload::Simulate(simulate_payload) = &simulate.payload else {
+            panic!("expected simulate payload");
+        };
+        let live = simulate_payload.live.as_ref().expect("live binding");
+        let ais_agent_core::action::kinds::simulate::SimulateLiveBinding::Evm(live) = live else {
+            panic!("expected evm live binding");
+        };
+        let connection = live.connection.as_ref().expect("connection");
+        assert_eq!(connection.http_url, "http://127.0.0.1:8545");
+        assert_eq!(connection.ws_url.as_deref(), Some("ws://127.0.0.1:8546"));
+    }
+
+    #[test]
+    fn seed_execution_artifact_checkpoint_normalizes_legacy_evm_chain_id_for_provider_lookup() {
+        let mut checkpoint = sample_checkpoint();
+        let spec = ExecutionArtifactLaunchSpec {
+            protocol_package_id: "owliabot.transfer".to_owned(),
+            action_key: "native_transfer".to_owned(),
+            chain_family: ExecutionChainFamily::Evm,
+            allowed_chains: vec!["8453".to_owned()],
+            entry_stage_id: "stage.transfer".into(),
+            actor: None,
+            transactions: vec![ais_agent_control::execution_artifact::ExecutionTransactionCandidate::EvmTransaction(
+                EvmTransactionCandidate {
+                    candidate_id: "tx.transfer".into(),
+                    to: "0x1111111111111111111111111111111111111111".to_owned(),
+                    value: Some("1".to_owned()),
+                    calldata: None,
+                },
+            )],
+            stages: vec![ExecutionStage::Transaction(TransactionStage {
+                stage_id: "stage.transfer".into(),
+                candidate_ref: "tx.transfer".into(),
+                exports: Vec::new(),
+                next_stage_id: None,
+            })],
+            observations: Vec::new(),
+            preconditions: Vec::new(),
+            postconditions: Vec::new(),
+            expected_effects: Vec::new(),
+            execution_policy: None,
+            risk_class: None,
+            risk_tags: Vec::new(),
+            decoded_intent: None,
+            candidate_envelopes: Vec::new(),
+            decode_spec: None,
+            validation_plan: None,
+            evidence: json!({}),
+            metadata: BTreeMap::new(),
+        };
+        let mut wiring = RuntimeExecutionWiring::default();
+        wiring.providers.chains.insert(
+            "eip155:8453".to_owned(),
+            crate::service::host_service::RuntimeChainProviderEntry {
+                chain: "eip155:8453".to_owned(),
+                labels: vec!["base".to_owned()],
+                connection: crate::service::host_service::RuntimeChainConnection::Evm(
+                    ais_agent_core::binding::evm::EvmConnectionSpec {
+                        http_url: "http://127.0.0.1:8545".to_owned(),
+                        ws_url: None,
+                    },
+                ),
+            },
+        );
+
+        seed_execution_artifact_checkpoint(&mut checkpoint, &wiring, &spec)
+            .expect("seed artifact checkpoint");
+
+        let actuate = checkpoint
+            .action_graph
+            .nodes
+            .get("artifact.stage.transfer.actuate")
+            .expect("actuate node");
+        let ActionPayload::Actuate(actuate_payload) = &actuate.payload else {
+            panic!("expected actuate payload");
+        };
+        assert_eq!(actuate_payload.chain.as_deref(), Some("eip155:8453"));
     }
 }

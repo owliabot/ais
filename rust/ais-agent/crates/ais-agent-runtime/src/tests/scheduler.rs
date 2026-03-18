@@ -25,7 +25,7 @@ use crate::{
     persistence::{CheckpointArchiveKind, CheckpointRepository, InMemoryCheckpointRepository},
     runtime::ActiveRun,
     stepper::{StepBudget, StepScheduler, StepStopReason, StepUntilBoundary},
-    tests::tracing_capture::capture_tracing_output,
+    tests::tracing_capture::{capture_tracing_output, capture_tracing_output_at_level},
 };
 
 #[tokio::test]
@@ -377,13 +377,45 @@ fn scheduler_emits_tracing_for_transition_and_stop() {
     });
 
     assert_eq!(result.stop_reason, StepStopReason::StableBoundary);
-    assert!(output.contains("runtime.step"));
-    assert!(output.contains("runtime.scheduler.transition_applied"));
-    assert!(output.contains("runtime.scheduler.stop"));
-    assert!(output.contains("command_id"));
-    assert!(output.contains("cmd-scheduler-trace"));
-    assert!(output.contains("checkpoint_seq="));
-    assert!(output.contains("plan_epoch="));
+    assert!(!output.trim().is_empty());
+    assert!(output.contains("run.awaiting_signer"));
+}
+
+#[test]
+fn scheduler_info_logs_prefer_operator_events_over_scheduler_plumbing() {
+    let (output, result) = capture_tracing_output_at_level(tracing::Level::INFO, || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                let mission = sample_mission();
+                let checkpoint = checkpoint_with_nodes(vec![
+                    simulate_succeeded_node("simulate-swap"),
+                    actuate_node("swap", vec!["simulate-swap"]),
+                ]);
+                let mut runtime = ActiveRun::new(mission, checkpoint);
+                runtime.record_command(CommandId("cmd-scheduler-info".to_owned()), None);
+                let mut repo = InMemoryCheckpointRepository::default();
+
+                StepScheduler::step_until_boundary(
+                    &mut runtime,
+                    &mut repo,
+                    StepUntilBoundary::NextBoundary,
+                    StepBudget {
+                        max_transitions: Some(8),
+                        max_wall_clock_ms: None,
+                    },
+                )
+                .await
+                .expect("scheduler should succeed")
+            })
+    });
+
+    assert_eq!(result.stop_reason, StepStopReason::StableBoundary);
+    assert!(!output.contains("runtime.scheduler.stop"));
+    assert!(!output.contains("runtime.scheduler.side_effect_cut_persisted"));
+    assert!(output.contains("run.awaiting_signer"));
 }
 
 fn sample_mission() -> Mission {

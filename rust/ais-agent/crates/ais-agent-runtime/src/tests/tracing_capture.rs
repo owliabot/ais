@@ -6,11 +6,18 @@ use std::{
 use tracing_subscriber::fmt::MakeWriter;
 
 pub fn capture_tracing_output<T>(f: impl FnOnce() -> T) -> (String, T) {
+    capture_tracing_output_at_level(tracing::Level::DEBUG, f)
+}
+
+pub fn capture_tracing_output_at_level<T>(
+    level: tracing::Level,
+    f: impl FnOnce() -> T,
+) -> (String, T) {
     let _guard = tracing_capture_lock().lock().expect("capture lock");
     let buffer = Arc::new(Mutex::new(Vec::new()));
     let subscriber = tracing_subscriber::fmt()
         .with_ansi(false)
-        .with_max_level(tracing::Level::DEBUG)
+        .with_max_level(level)
         .without_time()
         .with_writer(SharedBuffer(buffer.clone()))
         .finish();

@@ -49,12 +49,11 @@ struct PlannedExecutionEffect {
 
 pub fn plan_execution_artifact(
     spec: &ExecutionArtifactLaunchSpec,
-    solana_rpc_url: Option<&str>,
+    connection: Option<&SolanaConnectionSpec>,
     chain_scope: &str,
 ) -> Result<PlannedSolanaExecutionArtifact, String> {
     let planned_effects = plan_solana_effects(spec)?;
-    let planned_stage_graphs =
-        plan_stage_graphs(spec, chain_scope, solana_rpc_url, &planned_effects)?;
+    let planned_stage_graphs = plan_stage_graphs(spec, chain_scope, connection, &planned_effects)?;
     let effect_contracts = planned_effects
         .values()
         .map(|effect| {
@@ -73,7 +72,7 @@ pub fn plan_execution_artifact(
 fn plan_stage_graphs(
     spec: &ExecutionArtifactLaunchSpec,
     chain_scope: &str,
-    solana_rpc_url: Option<&str>,
+    connection: Option<&SolanaConnectionSpec>,
     planned_effects: &BTreeMap<
         ais_agent_control::execution_artifact::ExecutionStageId,
         PlannedExecutionEffect,
@@ -102,7 +101,7 @@ fn plan_stage_graphs(
                     spec.actor
                         .as_ref()
                         .and_then(|actor| actor.sender_address_hint.as_deref()),
-                    solana_rpc_url,
+                    connection,
                     chain_scope,
                     planned_effects.get(&stage.stage_id),
                 )?;
@@ -114,7 +113,7 @@ fn plan_stage_graphs(
                     spec.action_key.as_str(),
                     stage,
                     spec.observations.as_slice(),
-                    solana_rpc_url,
+                    connection,
                     chain_scope,
                 )?;
                 planned.insert(stage.stage_id.clone(), graph);
@@ -130,7 +129,7 @@ fn plan_single_solana_observe_stage(
     action_key: &str,
     stage: &ObserveStage,
     observations: &[ObservationSpec],
-    solana_rpc_url: Option<&str>,
+    connection: Option<&SolanaConnectionSpec>,
     chain_scope: &str,
 ) -> Result<ActionGraph, String> {
     let observation = observations
@@ -142,10 +141,7 @@ fn plan_single_solana_observe_stage(
                 stage.stage_id, stage.observation_ref
             )
         })?;
-    let live_connection = solana_rpc_url.map(|rpc_url| SolanaConnectionSpec {
-        rpc_url: rpc_url.to_owned(),
-        ws_url: None,
-    });
+    let live_connection = connection.cloned();
     let graph_id = format!("artifact.{protocol_package_id}.{action_key}");
     let node_prefix = format!("artifact.{}", stage.stage_id);
     let observe_node = observation_node(
@@ -171,17 +167,14 @@ fn plan_single_solana_transaction_stage(
     preconditions: &[ObservationSpec],
     postconditions: &[ObservationSpec],
     sender_address_hint: Option<&str>,
-    solana_rpc_url: Option<&str>,
+    connection: Option<&SolanaConnectionSpec>,
     chain_scope: &str,
     expected_effect: Option<&PlannedExecutionEffect>,
 ) -> Result<ActionGraph, String> {
     let sender = sender_address_hint
         .map(|value| parse_pubkey(value, "execution_artifact.actor.sender_address_hint"))
         .transpose()?;
-    let live_connection = solana_rpc_url.map(|rpc_url| SolanaConnectionSpec {
-        rpc_url: rpc_url.to_owned(),
-        ws_url: None,
-    });
+    let live_connection = connection.cloned();
     let graph_id = format!("artifact.{protocol_package_id}.{action_key}");
     let node_prefix = format!("artifact.{}", stage.stage_id);
 
@@ -715,7 +708,10 @@ mod tests {
                 kind: "solana.slot".to_owned(),
                 params: BTreeMap::new(),
             }],
-            Some("http://127.0.0.1:8899"),
+            Some(&SolanaConnectionSpec {
+                http_url: "http://127.0.0.1:8899".to_owned(),
+                ws_url: None,
+            }),
             "solana:mainnet",
         )
         .expect("planned graph");
@@ -774,7 +770,10 @@ mod tests {
                 )]),
             }],
             Some("11111111111111111111111111111111"),
-            Some("http://127.0.0.1:8899"),
+            Some(&SolanaConnectionSpec {
+                http_url: "http://127.0.0.1:8899".to_owned(),
+                ws_url: None,
+            }),
             "solana:mainnet",
             Some(&PlannedExecutionEffect {
                 effect_contract: EffectContract {

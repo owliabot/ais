@@ -48,7 +48,7 @@ mod serde_address_lookup_table_accounts {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SolanaConnectionSpec {
-    pub rpc_url: String,
+    pub http_url: String,
     #[serde(default)]
     pub ws_url: Option<String>,
 }

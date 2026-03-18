@@ -64,8 +64,56 @@ use crate::{
     },
     runtime::{ActiveRun, InMemoryRunRepository, RunRepository},
     service::{RuntimeExecutionWiring, RuntimeHostService},
-    tests::tracing_capture::capture_tracing_output,
+    tests::tracing_capture::{capture_tracing_output, capture_tracing_output_at_level},
 };
+
+fn exact_evm_execution_wiring() -> RuntimeExecutionWiring {
+    RuntimeExecutionWiring {
+        providers: crate::service::RuntimeProviderRegistry {
+            chains: BTreeMap::from([
+                (
+                    "eip155:1".to_owned(),
+                    crate::service::RuntimeChainProviderEntry {
+                        chain: "eip155:1".to_owned(),
+                        labels: vec!["ethereum".to_owned(), "mainnet".to_owned()],
+                        connection: crate::service::RuntimeChainConnection::Evm(
+                            ais_agent_core::binding::evm::EvmConnectionSpec {
+                                http_url: "http://127.0.0.1:8545".to_owned(),
+                                ws_url: None,
+                            },
+                        ),
+                    },
+                ),
+                (
+                    "eip155:8453".to_owned(),
+                    crate::service::RuntimeChainProviderEntry {
+                        chain: "eip155:8453".to_owned(),
+                        labels: vec!["base".to_owned(), "base-mainnet".to_owned()],
+                        connection: crate::service::RuntimeChainConnection::Evm(
+                            ais_agent_core::binding::evm::EvmConnectionSpec {
+                                http_url: "http://127.0.0.1:8545".to_owned(),
+                                ws_url: None,
+                            },
+                        ),
+                    },
+                ),
+                (
+                    "eip155:11155111".to_owned(),
+                    crate::service::RuntimeChainProviderEntry {
+                        chain: "eip155:11155111".to_owned(),
+                        labels: vec!["sepolia".to_owned()],
+                        connection: crate::service::RuntimeChainConnection::Evm(
+                            ais_agent_core::binding::evm::EvmConnectionSpec {
+                                http_url: "http://127.0.0.1:8545".to_owned(),
+                                ws_url: None,
+                            },
+                        ),
+                    },
+                ),
+            ]),
+        },
+    }
+}
 
 #[tokio::test]
 async fn runtime_host_service_handles_begin_inspect_and_cancel() {
@@ -337,10 +385,7 @@ async fn runtime_host_service_begin_run_seeds_execution_artifact_runtime_state_f
         InMemoryEventArchive::default(),
         InMemoryHostSessionStore::default(),
     )
-    .with_execution_wiring(RuntimeExecutionWiring {
-        evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
-        solana_rpc_url: None,
-    });
+    .with_execution_wiring(exact_evm_execution_wiring());
 
     let begin = service
         .handle(HostCommandEnvelope {
@@ -455,10 +500,7 @@ async fn runtime_host_service_begin_run_seeds_simple_execution_artifact_checkpoi
         InMemoryEventArchive::default(),
         InMemoryHostSessionStore::default(),
     )
-    .with_execution_wiring(RuntimeExecutionWiring {
-        evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
-        solana_rpc_url: None,
-    });
+    .with_execution_wiring(exact_evm_execution_wiring());
 
     let begin = service
         .handle(HostCommandEnvelope {
@@ -580,10 +622,7 @@ async fn runtime_host_service_accepts_generic_execution_artifact_for_new_protoco
         InMemoryEventArchive::default(),
         InMemoryHostSessionStore::default(),
     )
-    .with_execution_wiring(RuntimeExecutionWiring {
-        evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
-        solana_rpc_url: None,
-    });
+    .with_execution_wiring(exact_evm_execution_wiring());
 
     let begin = service
         .handle(HostCommandEnvelope {
@@ -703,10 +742,7 @@ async fn runtime_host_service_begin_run_accepts_observe_only_execution_artifact(
         InMemoryEventArchive::default(),
         InMemoryHostSessionStore::default(),
     )
-    .with_execution_wiring(RuntimeExecutionWiring {
-        evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
-        solana_rpc_url: None,
-    });
+    .with_execution_wiring(exact_evm_execution_wiring());
 
     let begin = service
         .handle(HostCommandEnvelope {
@@ -829,10 +865,7 @@ async fn runtime_host_service_submits_execution_artifact_continuation_and_reseed
         event_archive,
         session_store,
     )
-    .with_execution_wiring(RuntimeExecutionWiring {
-        evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
-        solana_rpc_url: None,
-    });
+    .with_execution_wiring(exact_evm_execution_wiring());
 
     let inspect = service
         .handle(HostCommandEnvelope {
@@ -1024,10 +1057,7 @@ async fn runtime_host_service_begin_run_accepts_branching_execution_artifact_ent
         InMemoryEventArchive::default(),
         InMemoryHostSessionStore::default(),
     )
-    .with_execution_wiring(RuntimeExecutionWiring {
-        evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
-        solana_rpc_url: None,
-    });
+    .with_execution_wiring(exact_evm_execution_wiring());
 
     let begin = service
         .handle(HostCommandEnvelope {
@@ -1244,10 +1274,7 @@ async fn runtime_host_service_begin_run_accepts_native_transfer_execution_artifa
         InMemoryEventArchive::default(),
         InMemoryHostSessionStore::default(),
     )
-    .with_execution_wiring(RuntimeExecutionWiring {
-        evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
-        solana_rpc_url: None,
-    });
+    .with_execution_wiring(exact_evm_execution_wiring());
 
     let begin = service
         .handle(HostCommandEnvelope {
@@ -1405,10 +1432,7 @@ async fn runtime_host_service_begin_run_accepts_erc20_transfer_execution_artifac
         InMemoryEventArchive::default(),
         InMemoryHostSessionStore::default(),
     )
-    .with_execution_wiring(RuntimeExecutionWiring {
-        evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
-        solana_rpc_url: None,
-    });
+    .with_execution_wiring(exact_evm_execution_wiring());
 
     let begin = service
         .handle(HostCommandEnvelope {
@@ -1570,10 +1594,7 @@ async fn runtime_host_service_begin_run_accepts_owliabot_uniswap_v3_swap_executi
         InMemoryEventArchive::default(),
         InMemoryHostSessionStore::default(),
     )
-    .with_execution_wiring(RuntimeExecutionWiring {
-        evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
-        solana_rpc_url: None,
-    });
+    .with_execution_wiring(exact_evm_execution_wiring());
 
     let begin = service
         .handle(HostCommandEnvelope {
@@ -1750,10 +1771,7 @@ async fn runtime_host_service_begin_run_accepts_owliabot_uniswap_v3_lp_execution
         InMemoryEventArchive::default(),
         InMemoryHostSessionStore::default(),
     )
-    .with_execution_wiring(RuntimeExecutionWiring {
-        evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
-        solana_rpc_url: None,
-    });
+    .with_execution_wiring(exact_evm_execution_wiring());
 
     let begin = service
         .handle(HostCommandEnvelope {
@@ -4268,6 +4286,61 @@ fn runtime_host_service_emits_tracing_for_restore_and_commit_paths() {
     assert_eq!(catalog.run_id.0, "run-1");
     assert!(catalog.latest_checkpoint_seq > 0);
     assert!(catalog.latest_revision > 0);
+    assert!(output.contains("runtime.host.command_accepted"));
+    assert!(output.contains("command_id=cmd-tracing-step"));
+}
+
+#[test]
+fn runtime_host_service_info_logs_hide_accept_and_commit_plumbing() {
+    let (output, response) = capture_tracing_output_at_level(tracing::Level::INFO, || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                let (
+                    _run_repo,
+                    checkpoint_repo,
+                    mission_repo,
+                    run_catalog_repo,
+                    event_archive,
+                    session_store,
+                    run_id,
+                    host_session_id,
+                ) = preloaded_evidence_wait_runtime();
+                let mut service = RuntimeHostService::new(
+                    InMemoryRunRepository::default(),
+                    checkpoint_repo,
+                    mission_repo,
+                    run_catalog_repo,
+                    event_archive,
+                    session_store,
+                );
+
+                service
+                    .handle(HostCommandEnvelope {
+                        host_session_id,
+                        host_request_id: Some("request-tracing-step-info".into()),
+                        command: RunCommand::StepRun(StepRunCommand {
+                            command_id: CommandId("cmd-tracing-step-info".to_owned()),
+                            run_id,
+                            until: StepUntil::NextBoundary,
+                            budget: Some(StepBudget {
+                                max_nodes: Some(4),
+                                max_wall_clock_ms: None,
+                            }),
+                            expected_version: None,
+                        }),
+                    })
+                    .await
+                    .response
+            })
+    });
+
+    assert!(matches!(response, HostCommandResponse::Pause(_)));
+    assert!(!output.contains("runtime.host.command_accepted"));
+    assert!(!output.contains("runtime.host.grouped_commit_succeeded"));
+    assert!(!output.contains("runtime.host.claim_acquired"));
 }
 
 #[tokio::test]
@@ -5316,7 +5389,7 @@ fn actuate_solana_blocked_node(node_id: &str, depends_on: Vec<&str>) -> ActionNo
             requires_effect_contract: true,
             live: Some(ActuateLiveBinding::Solana(SolanaActuateLiveBinding {
                 connection: Some(SolanaConnectionSpec {
-                    rpc_url: "http://localhost:8899".to_owned(),
+                    http_url: "http://localhost:8899".to_owned(),
                     ws_url: None,
                 }),
                 binding: SolanaActuateBinding::BroadcastSignedTransaction,
@@ -5343,7 +5416,7 @@ fn verify_solana_terminal_node(node_id: &str, depends_on: Vec<&str>) -> ActionNo
             post_observation_ref: None,
             live: Some(VerifyLiveBinding::Solana(SolanaVerifyLiveBinding {
                 connection: Some(SolanaConnectionSpec {
-                    rpc_url: "http://localhost:8899".to_owned(),
+                    http_url: "http://localhost:8899".to_owned(),
                     ws_url: None,
                 }),
                 binding: SolanaVerifyBinding::EffectContractFromSignatureStatus,

@@ -388,7 +388,7 @@ where
             .claim_repo
             .acquire(claim)
             .map_err(|error| Self::map_claim_error(host_session_id, &run_id, error))?;
-        info!(
+        debug!(
             run_id = %claim.run_id.0,
             host_session_id = %host_session_id.0,
             claim_id = %claim.claim_id.0,

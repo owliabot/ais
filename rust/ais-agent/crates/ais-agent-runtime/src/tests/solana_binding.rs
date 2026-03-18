@@ -43,7 +43,7 @@ fn runtime_resolves_typed_solana_bindings_without_protocol_specific_dispatch() {
             output_key: Some("solana.account".to_owned()),
             live: Some(ObserveLiveBinding::Solana(SolanaObserveLiveBinding {
                 connection: Some(SolanaConnectionSpec {
-                    rpc_url: "http://localhost:8899".to_owned(),
+                    http_url: "http://localhost:8899".to_owned(),
                     ws_url: Some("ws://localhost:8900".to_owned()),
                 }),
                 binding: SolanaObserveBinding::AccountLamports,
@@ -69,7 +69,7 @@ fn runtime_resolves_typed_solana_bindings_without_protocol_specific_dispatch() {
             simulator_hint: "solana simulate transaction".to_owned(),
             live: Some(SimulateLiveBinding::Solana(SolanaSimulateLiveBinding {
                 connection: Some(SolanaConnectionSpec {
-                    rpc_url: "http://localhost:8899".to_owned(),
+                    http_url: "http://localhost:8899".to_owned(),
                     ws_url: None,
                 }),
                 binding: SolanaSimulateBinding::SimulateTransaction,
@@ -104,7 +104,7 @@ fn runtime_resolves_typed_solana_bindings_without_protocol_specific_dispatch() {
             requires_effect_contract: true,
             live: Some(ActuateLiveBinding::Solana(SolanaActuateLiveBinding {
                 connection: Some(SolanaConnectionSpec {
-                    rpc_url: "http://localhost:8899".to_owned(),
+                    http_url: "http://localhost:8899".to_owned(),
                     ws_url: None,
                 }),
                 binding: SolanaActuateBinding::BroadcastSignedTransaction,
@@ -129,7 +129,7 @@ fn runtime_resolves_typed_solana_bindings_without_protocol_specific_dispatch() {
             post_observation_ref: None,
             live: Some(VerifyLiveBinding::Solana(SolanaVerifyLiveBinding {
                 connection: Some(SolanaConnectionSpec {
-                    rpc_url: "http://localhost:8899".to_owned(),
+                    http_url: "http://localhost:8899".to_owned(),
                     ws_url: Some("ws://localhost:8900".to_owned()),
                 }),
                 binding: SolanaVerifyBinding::EffectContractFromSignatureStatus,
@@ -177,7 +177,7 @@ fn runtime_never_resolves_wrong_solana_binding_for_wrong_node_kind() {
             post_observation_ref: None,
             live: Some(VerifyLiveBinding::Solana(SolanaVerifyLiveBinding {
                 connection: Some(SolanaConnectionSpec {
-                    rpc_url: "http://localhost:8899".to_owned(),
+                    http_url: "http://localhost:8899".to_owned(),
                     ws_url: None,
                 }),
                 binding: SolanaVerifyBinding::SignatureStatus,
@@ -209,7 +209,7 @@ fn runtime_accepts_v0_solana_transaction_request_with_lookup_tables() {
             simulator_hint: "solana simulate v0 transaction".to_owned(),
             live: Some(SimulateLiveBinding::Solana(SolanaSimulateLiveBinding {
                 connection: Some(SolanaConnectionSpec {
-                    rpc_url: "http://localhost:8899".to_owned(),
+                    http_url: "http://localhost:8899".to_owned(),
                     ws_url: None,
                 }),
                 binding: SolanaSimulateBinding::SimulateTransaction,

@@ -86,7 +86,7 @@ impl SolanaLiveSimulatePort {
         &self,
         request: &SolanaTransactionRequest,
     ) -> Result<SolanaTransactionSimulationReport, SolanaLiveSimulateError> {
-        let client = RpcClient::new(self.connection.rpc_url.clone());
+        let client = RpcClient::new(self.connection.http_url.clone());
         Self::simulate_with_client(&client, request).await
     }
 

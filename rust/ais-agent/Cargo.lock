@@ -105,6 +105,7 @@ name = "ais-agent-cli"
 version = "0.1.0"
 dependencies = [
  "ais-agent-control",
+ "ais-agent-core",
  "ais-agent-host",
  "ais-agent-observability-files",
  "ais-agent-runtime",

@@ -6,4 +6,7 @@ pub(crate) mod host_service;
 pub use command_router::RuntimeCommandRouter;
 #[cfg(test)]
 pub(crate) use host_service::seed_launch_spec_checkpoint;
-pub use host_service::{RuntimeExecutionWiring, RuntimeHostService};
+pub use host_service::{
+    RuntimeChainConnection, RuntimeChainConnectionRef, RuntimeChainProviderEntry,
+    RuntimeExecutionWiring, RuntimeHostService, RuntimeProviderRegistry,
+};

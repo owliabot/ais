@@ -13,8 +13,8 @@ use serde::Serialize;
 - `inspect` reads config, JSONL frames, logs, or SQLite durable state without mutating it.
 - `maintenance` executes explicit SQLite prune, purge, and vacuum operations.
 
-Global flags let you override the service config file for storage, provider RPC URLs,
-lease timing, and file-based observability paths."#,
+Global flags let you override the service config file for storage, lease timing,
+and file-based observability paths."#,
     after_long_help = r#"Examples:
   ais-agent local jsonl
   ais-agent daemon http --bind 127.0.0.1:8080
@@ -35,18 +35,6 @@ pub struct Args {
         long_help = "Override `storage.sqlite.path` from config. Use this when you want inspect or maintenance commands to point at a specific ais-agent durable store file."
     )]
     pub sqlite_path: Option<String>,
-    #[arg(
-        long,
-        help = "Override the EVM RPC URL used by runtime execution",
-        long_help = "Override the configured EVM RPC URL. This affects runtime-backed commands such as `local jsonl` and `daemon http`, not read-only SQLite inspection."
-    )]
-    pub evm_rpc_url: Option<String>,
-    #[arg(
-        long,
-        help = "Override the Solana RPC URL used by runtime execution",
-        long_help = "Override the configured Solana RPC URL. This affects runtime-backed commands such as `local jsonl` and `daemon http`, not read-only SQLite inspection."
-    )]
-    pub solana_rpc_url: Option<String>,
     #[arg(
         long,
         help = "Override host-session claim lease duration in seconds",
@@ -480,10 +468,6 @@ mod tests {
             "./ais-agent.yaml",
             "--sqlite-path",
             "./var/ais-agent.db",
-            "--evm-rpc-url",
-            "https://rpc.example/evm",
-            "--solana-rpc-url",
-            "https://rpc.example/solana",
             "--claim-lease-seconds",
             "90",
             "--log-level",
@@ -503,14 +487,6 @@ mod tests {
 
         assert_eq!(parsed.config.as_deref(), Some("./ais-agent.yaml"));
         assert_eq!(parsed.sqlite_path.as_deref(), Some("./var/ais-agent.db"));
-        assert_eq!(
-            parsed.evm_rpc_url.as_deref(),
-            Some("https://rpc.example/evm")
-        );
-        assert_eq!(
-            parsed.solana_rpc_url.as_deref(),
-            Some("https://rpc.example/solana")
-        );
         assert_eq!(parsed.claim_lease_seconds, Some(90));
         assert_eq!(parsed.log_level, Some(LogLevelArg::Debug));
         assert_eq!(parsed.log_dir.as_deref(), Some("./var/log/ais-agent"));

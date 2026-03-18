@@ -63,7 +63,7 @@ impl SolanaLiveBroadcastPort {
         &self,
         transaction: &VersionedTransaction,
     ) -> Result<SolanaBroadcastSubmission, SolanaLiveBroadcastError> {
-        let client = RpcClient::new(self.connection.rpc_url.clone());
+        let client = RpcClient::new(self.connection.http_url.clone());
         Self::send_with_client(&client, transaction).await
     }
 

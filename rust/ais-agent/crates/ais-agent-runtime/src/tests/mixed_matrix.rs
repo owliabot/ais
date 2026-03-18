@@ -390,7 +390,8 @@ fn raw_simulate_node(node_id: &str) -> ActionNode {
             simulator_hint: "raw matrix simulate".to_owned(),
             live: Some(SimulateLiveBinding::Evm(EvmSimulateLiveBinding {
                 connection: Some(EvmConnectionSpec {
-                    rpc_url: "http://example.invalid".to_owned(),
+                    http_url: "http://example.invalid".to_owned(),
+                    ws_url: None,
                 }),
                 binding: EvmSimulateBinding::EthCall,
                 request: EvmCallRequest {
@@ -410,7 +411,8 @@ fn binding_ctx() -> DriverBindingContext {
     DriverBindingContext::default().with_evm_connection(
         "eip155:1",
         EvmConnectionSpec {
-            rpc_url: "http://example.invalid".to_owned(),
+            http_url: "http://example.invalid".to_owned(),
+            ws_url: None,
         },
     )
 }

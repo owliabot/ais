@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvmConnectionSpec {
-    pub rpc_url: String,
+    pub http_url: String,
+    #[serde(default)]
+    pub ws_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

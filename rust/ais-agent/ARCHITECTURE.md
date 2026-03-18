@@ -267,6 +267,24 @@ Current implementation note:
 - the current service config still carries per-family feature toggles such as transfer enablement
 - treat those toggles as bounded rollout guards, not as the long-term capability model
 
+Provider wiring is now modeled by canonical chain scope first:
+
+- runtime config should prefer provider entries keyed by canonical chain scope such as:
+  - `eip155:8453`
+  - `eip155:1`
+  - `solana:mainnet`
+- each chain entry owns its connection contract:
+  - EVM: `http_url`, optional `ws_url`
+  - Solana: `http_url`, optional `ws_url`
+- live binding resolution requires exact chain entry lookup
+
+Implication:
+
+- launch-spec chain scope remains the source of truth for which chain a run targets
+- runtime wiring resolves that chain scope into a concrete provider binding
+- if no exact entry exists, runtime fails closed
+- if the resolved provider family does not match the artifact chain family, runtime fails closed
+
 Forward-looking constraint:
 - do not keep expanding `ais-agent` by adding one hard-coded feature flag or action-family-specific branch per new capability
 - new execution slices should prefer:

@@ -125,7 +125,7 @@ impl SolanaLiveReadPort {
         &self,
         request: &SolanaObserveRequest,
     ) -> Result<serde_json::Value, SolanaLiveReadError> {
-        let client = RpcClient::new(self.connection.rpc_url.clone());
+        let client = RpcClient::new(self.connection.http_url.clone());
         Self::observe_with_client(&client, request).await
     }
 

@@ -108,12 +108,6 @@ fn apply_env_overrides(config: &mut AisAgentServiceConfig) {
                 .vacuum_freelist_threshold_pages = pages;
         }
     }
-    if let Ok(url) = env::var("AIS_AGENT_EVM_RPC_URL") {
-        config.providers.evm_rpc_url = Some(url);
-    }
-    if let Ok(url) = env::var("AIS_AGENT_SOLANA_RPC_URL") {
-        config.providers.solana_rpc_url = Some(url);
-    }
     if let Ok(value) = env::var("AIS_AGENT_CLAIM_LEASE_SECONDS") {
         if let Ok(seconds) = value.parse::<u64>() {
             config.runtime_defaults.claim_lease_seconds = seconds;
@@ -149,12 +143,6 @@ fn apply_cli_overrides(config: &mut AisAgentServiceConfig, args: &Args) {
         let mut sqlite = sqlite_storage_config(config);
         sqlite.path = PathBuf::from(path);
         config.storage = AisAgentStorageConfig::Sqlite(sqlite);
-    }
-    if let Some(url) = args.evm_rpc_url.as_ref() {
-        config.providers.evm_rpc_url = Some(url.clone());
-    }
-    if let Some(url) = args.solana_rpc_url.as_ref() {
-        config.providers.solana_rpc_url = Some(url.clone());
     }
     if let Some(seconds) = args.claim_lease_seconds {
         config.runtime_defaults.claim_lease_seconds = seconds;
@@ -259,6 +247,108 @@ fn validate_config(config: &AisAgentServiceConfig) -> Result<(), ServiceConfigEr
             ));
         }
     }
+    validate_provider_config(config)?;
+    Ok(())
+}
+
+fn validate_provider_config(config: &AisAgentServiceConfig) -> Result<(), ServiceConfigError> {
+    let mut seen_chains = std::collections::BTreeSet::new();
+    let mut seen_labels = std::collections::BTreeSet::new();
+    for entry in &config.providers.chains {
+        let chain = entry.chain.trim();
+        if chain.is_empty() {
+            return Err(ServiceConfigError::Invalid(
+                "providers.chains[*].chain must be non-empty".to_owned(),
+            ));
+        }
+        let family_prefix = parse_chain_scope_family(chain).ok_or_else(|| {
+            ServiceConfigError::Invalid(format!(
+                "providers.chains[{chain}].chain must use a supported canonical scope such as `eip155:8453` or `solana:mainnet`"
+            ))
+        })?;
+        if !seen_chains.insert(chain.to_ascii_lowercase()) {
+            return Err(ServiceConfigError::Invalid(format!(
+                "providers.chains contains duplicate chain entry `{chain}`"
+            )));
+        }
+        if !matches!(family_prefix, "eip155" | "solana") {
+            return Err(ServiceConfigError::Invalid(format!(
+                "providers.chains[{chain}].chain must use a supported canonical scope such as `eip155:8453` or `solana:mainnet`"
+            )));
+        }
+        validate_http_url(
+            &entry.connection.http_url,
+            &format!("providers.chains[{chain}].connection.http_url"),
+        )?;
+        validate_ws_url(
+            entry.connection.ws_url.as_deref(),
+            &format!("providers.chains[{chain}].connection.ws_url"),
+        )?;
+        for label in &entry.labels {
+            let normalized = label.trim().to_ascii_lowercase();
+            if normalized.is_empty() {
+                return Err(ServiceConfigError::Invalid(format!(
+                    "providers.chains[{chain}].labels entries must be non-empty"
+                )));
+            }
+            if !seen_labels.insert(normalized.clone()) {
+                return Err(ServiceConfigError::Invalid(format!(
+                    "providers.chains contains duplicate label `{}`",
+                    label.trim()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn parse_chain_scope_family(value: &str) -> Option<&str> {
+    let (prefix, suffix) = value.split_once(':')?;
+    if prefix.is_empty() || suffix.trim().is_empty() {
+        return None;
+    }
+    match prefix {
+        "eip155" | "solana" => Some(prefix),
+        _ => None,
+    }
+}
+
+fn validate_http_url(value: &str, label: &str) -> Result<(), ServiceConfigError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(ServiceConfigError::Invalid(format!(
+            "{label} must be non-empty"
+        )));
+    }
+    if !matches!(
+        trimmed.split_once("://"),
+        Some(("http", _)) | Some(("https", _))
+    ) {
+        return Err(ServiceConfigError::Invalid(format!(
+            "{label} must start with http:// or https://"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_ws_url(value: Option<&str>, label: &str) -> Result<(), ServiceConfigError> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(ServiceConfigError::Invalid(format!(
+            "{label} must be non-empty when provided"
+        )));
+    }
+    if !matches!(
+        trimmed.split_once("://"),
+        Some(("ws", _)) | Some(("wss", _))
+    ) {
+        return Err(ServiceConfigError::Invalid(format!(
+            "{label} must start with ws:// or wss://"
+        )));
+    }
     Ok(())
 }
 
@@ -329,8 +419,6 @@ mod tests {
         env::remove_var("AIS_AGENT_SQLITE_PURGE_REQUIRE_CONFIRMATION");
         env::remove_var("AIS_AGENT_SQLITE_AUTO_PRUNE_CADENCE_MINUTES");
         env::remove_var("AIS_AGENT_SQLITE_VACUUM_FREELIST_THRESHOLD_PAGES");
-        env::remove_var("AIS_AGENT_EVM_RPC_URL");
-        env::remove_var("AIS_AGENT_SOLANA_RPC_URL");
         env::remove_var("AIS_AGENT_CLAIM_LEASE_SECONDS");
         env::remove_var("AIS_AGENT_LOG_LEVEL");
         env::remove_var("AIS_AGENT_LOG_DIR");
@@ -570,6 +658,183 @@ storage:
         assert!(error
             .to_string()
             .contains("storage.retention.checkpoint_full_window_days"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn loads_chain_scoped_provider_registry_from_yaml() {
+        let _guard = env_lock().lock().expect("lock");
+        reset_env();
+        let path = std::env::temp_dir().join("ais-agent-cli-provider-registry.yaml");
+        fs::write(
+            &path,
+            r#"
+providers:
+  chains:
+    - chain: eip155:8453
+      labels: [base, 8453]
+      connection:
+        http_url: https://base.example
+        ws_url: wss://base.example/ws
+    - chain: solana:mainnet
+      labels: [solana-mainnet]
+      connection:
+        http_url: https://solana.example
+"#,
+        )
+        .expect("write");
+
+        let args = Args::try_parse_from([
+            "ais-agent",
+            "--config",
+            path.to_str().expect("path"),
+            "inspect",
+            "config",
+        ])
+        .expect("args");
+        let config = load_service_config(&args).expect("config");
+
+        assert_eq!(config.providers.chains.len(), 2);
+        assert_eq!(config.providers.chains[0].chain, "eip155:8453");
+        assert_eq!(config.providers.chains[0].labels, vec!["base", "8453"]);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn rejects_duplicate_provider_chains() {
+        let _guard = env_lock().lock().expect("lock");
+        reset_env();
+        let path = std::env::temp_dir().join("ais-agent-cli-provider-dup-chain.yaml");
+        fs::write(
+            &path,
+            r#"
+providers:
+  chains:
+    - chain: eip155:8453
+      connection:
+        http_url: https://base-a.example
+    - chain: eip155:8453
+      connection:
+        http_url: https://base-b.example
+"#,
+        )
+        .expect("write");
+
+        let args = Args::try_parse_from([
+            "ais-agent",
+            "--config",
+            path.to_str().expect("path"),
+            "inspect",
+            "config",
+        ])
+        .expect("args");
+        let error = load_service_config(&args).expect_err("invalid config");
+        assert!(error.to_string().contains("duplicate chain entry"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn rejects_duplicate_provider_labels() {
+        let _guard = env_lock().lock().expect("lock");
+        reset_env();
+        let path = std::env::temp_dir().join("ais-agent-cli-provider-dup-label.yaml");
+        fs::write(
+            &path,
+            r#"
+providers:
+  chains:
+    - chain: eip155:8453
+      labels: [base]
+      connection:
+        http_url: https://base.example
+    - chain: eip155:1
+      labels: [Base]
+      connection:
+        http_url: https://eth.example
+"#,
+        )
+        .expect("write");
+
+        let args = Args::try_parse_from([
+            "ais-agent",
+            "--config",
+            path.to_str().expect("path"),
+            "inspect",
+            "config",
+        ])
+        .expect("args");
+        let error = load_service_config(&args).expect_err("invalid config");
+        assert!(error.to_string().contains("duplicate label"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn rejects_unsupported_provider_chain_scope() {
+        let _guard = env_lock().lock().expect("lock");
+        reset_env();
+        let path = std::env::temp_dir().join("ais-agent-cli-provider-family-mismatch.yaml");
+        fs::write(
+            &path,
+            r#"
+providers:
+  chains:
+    - chain: cosmos:osmosis
+      connection:
+        http_url: https://base.example
+"#,
+        )
+        .expect("write");
+
+        let args = Args::try_parse_from([
+            "ais-agent",
+            "--config",
+            path.to_str().expect("path"),
+            "inspect",
+            "config",
+        ])
+        .expect("args");
+        let error = load_service_config(&args).expect_err("invalid config");
+        assert!(error
+            .to_string()
+            .contains("must use a supported canonical scope"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn rejects_invalid_provider_ws_url() {
+        let _guard = env_lock().lock().expect("lock");
+        reset_env();
+        let path = std::env::temp_dir().join("ais-agent-cli-provider-invalid-ws.yaml");
+        fs::write(
+            &path,
+            r#"
+providers:
+  chains:
+    - chain: eip155:8453
+      connection:
+        http_url: https://base.example
+        ws_url: https://base.example/ws
+"#,
+        )
+        .expect("write");
+
+        let args = Args::try_parse_from([
+            "ais-agent",
+            "--config",
+            path.to_str().expect("path"),
+            "inspect",
+            "config",
+        ])
+        .expect("args");
+        let error = load_service_config(&args).expect_err("invalid config");
+        assert!(error
+            .to_string()
+            .contains("must start with ws:// or wss://"));
 
         let _ = fs::remove_file(path);
     }

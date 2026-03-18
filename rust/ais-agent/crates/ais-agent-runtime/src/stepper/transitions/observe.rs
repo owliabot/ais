@@ -59,7 +59,7 @@ pub(crate) async fn apply_observe_transition(runtime: &mut ActiveRun) -> Option<
             return fail_observe(runtime, &node_id, "evm observe binding missing connection");
         };
 
-        let payload = match EvmAlloyReadPort::new(connection.rpc_url.clone())
+        let payload = match EvmAlloyReadPort::new(connection.http_url.clone())
             .observe(&live.request)
             .await
         {

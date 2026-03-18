@@ -75,7 +75,8 @@ async fn standard_like_driver_output_binds_into_runtime_and_executes_live_path()
             .with_evm_connection(
                 "eip155:1",
                 EvmConnectionSpec {
-                    rpc_url: "http://example.invalid".to_owned(),
+                    http_url: "http://example.invalid".to_owned(),
+                    ws_url: None,
                 },
             )
             .with_envelope_ref("driver.actuate.swap", "env.swap"),
@@ -221,7 +222,8 @@ async fn reflection_output_binds_into_runtime_and_executes_same_actuate_verify_p
             .with_evm_connection(
                 "eip155:1",
                 EvmConnectionSpec {
-                    rpc_url: "http://example.invalid".to_owned(),
+                    http_url: "http://example.invalid".to_owned(),
+                    ws_url: None,
                 },
             )
             .with_envelope_ref("reflect.evm.swapExactIn", "env.reflect.swap"),
@@ -362,7 +364,8 @@ async fn api_native_direct_envelope_output_binds_into_same_guarded_path() {
         &DriverBindingContext::default().with_evm_connection(
             "eip155:1",
             EvmConnectionSpec {
-                rpc_url: "http://example.invalid".to_owned(),
+                http_url: "http://example.invalid".to_owned(),
+                ws_url: None,
             },
         ),
     )
@@ -501,7 +504,8 @@ fn raw_envelope_binding_requires_effect_contract() {
         &DriverBindingContext::default().with_evm_connection(
             "eip155:1",
             EvmConnectionSpec {
-                rpc_url: "http://example.invalid".to_owned(),
+                http_url: "http://example.invalid".to_owned(),
+                ws_url: None,
             },
         ),
     )
@@ -562,7 +566,8 @@ async fn raw_envelope_binding_executes_under_same_guarded_contract() {
         &DriverBindingContext::default().with_evm_connection(
             "eip155:1",
             EvmConnectionSpec {
-                rpc_url: "http://example.invalid".to_owned(),
+                http_url: "http://example.invalid".to_owned(),
+                ws_url: None,
             },
         ),
     )
@@ -820,7 +825,8 @@ fn raw_simulate_eth_call_node(node_id: &str) -> ActionNode {
             simulator_hint: "raw envelope preflight".to_owned(),
             live: Some(SimulateLiveBinding::Evm(EvmSimulateLiveBinding {
                 connection: Some(EvmConnectionSpec {
-                    rpc_url: "http://example.invalid".to_owned(),
+                    http_url: "http://example.invalid".to_owned(),
+                    ws_url: None,
                 }),
                 binding: EvmSimulateBinding::EthCall,
                 request: EvmCallRequest {

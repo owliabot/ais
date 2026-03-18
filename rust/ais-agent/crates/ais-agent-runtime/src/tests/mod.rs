@@ -18,4 +18,4 @@ mod scheduler;
 mod solana_binding;
 mod solana_live;
 mod step_once;
-mod tracing_capture;
+pub(crate) mod tracing_capture;

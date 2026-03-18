@@ -177,11 +177,31 @@ impl Default for AisAgentSqliteStorageConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AisAgentProviderConfig {
-    pub evm_rpc_url: Option<String>,
-    pub solana_rpc_url: Option<String>,
+    pub chains: Vec<AisAgentChainProviderEntry>,
+}
+
+impl Default for AisAgentProviderConfig {
+    fn default() -> Self {
+        Self { chains: Vec::new() }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct AisAgentChainProviderEntry {
+    pub chain: String,
+    pub labels: Vec<String>,
+    pub connection: AisAgentChainConnectionConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct AisAgentChainConnectionConfig {
+    pub http_url: String,
+    pub ws_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

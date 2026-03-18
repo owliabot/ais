@@ -19,7 +19,7 @@ use ais_agent_host::{
     events::{HostEventServiceError, HostRunEventBatch, HostRunEventQuery, HostRunEventService},
     session::{HostSessionStore, HostedRunCommand},
 };
-use tracing::{debug, info, info_span, Instrument};
+use tracing::{debug, info_span, warn, Instrument};
 
 use crate::{
     persistence::{
@@ -30,7 +30,11 @@ use crate::{
     service::RuntimeCommandRouter,
 };
 
-pub use api_native_evm_common::RuntimeExecutionWiring;
+#[allow(unused_imports)]
+pub use api_native_evm_common::{
+    RuntimeChainConnection, RuntimeChainConnectionRef, RuntimeChainProviderEntry,
+    RuntimeExecutionWiring, RuntimeProviderRegistry,
+};
 pub use error::RuntimeHostServiceError;
 #[cfg(test)]
 pub(crate) use launch_spec::seed_launch_spec_checkpoint;
@@ -400,7 +404,7 @@ fn log_command_outcome(
 
     match &result.response {
         HostCommandResponse::Error(error) => {
-            info!(
+            warn!(
                 command_kind = command_kind,
                 response_kind,
                 run_id = ?run_id,
@@ -411,7 +415,7 @@ fn log_command_outcome(
             );
         }
         _ => {
-            info!(
+            debug!(
                 command_kind = command_kind,
                 response_kind,
                 run_id = ?run_id,
@@ -468,7 +472,12 @@ where
 
 #[cfg(test)]
 mod tests {
-    use ais_agent_host::control::{HostAcceptedResponse, HostCommandError, HostCommandResponse};
+    use ais_agent_control::ids::RunId;
+    use ais_agent_host::control::{
+        HostAcceptedResponse, HostCommandError, HostCommandOutcome, HostCommandResponse,
+    };
+
+    use crate::tests::tracing_capture::capture_tracing_output_at_level;
 
     #[test]
     fn response_kind_classifies_host_responses() {
@@ -499,5 +508,51 @@ mod tests {
             })),
             None
         );
+    }
+
+    #[test]
+    fn log_command_outcome_demotes_success_to_debug() {
+        let outcome = HostCommandOutcome {
+            response: HostCommandResponse::Accepted(HostAcceptedResponse {
+                run_id: Some(RunId("run-accepted".to_owned())),
+                message: None,
+                session: None,
+            }),
+            events: Vec::new(),
+        };
+
+        let (info_output, ()) = capture_tracing_output_at_level(tracing::Level::INFO, || {
+            super::log_command_outcome("step_run", &outcome, None);
+        });
+        let (debug_output, ()) = capture_tracing_output_at_level(tracing::Level::DEBUG, || {
+            super::log_command_outcome("step_run", &outcome, None);
+        });
+
+        assert!(!info_output.contains("runtime.host.command_accepted"));
+        assert!(debug_output.contains("runtime.host.command_accepted"));
+        assert!(debug_output.contains("run-accepted"));
+    }
+
+    #[test]
+    fn log_command_outcome_keeps_rejection_visible() {
+        let outcome = HostCommandOutcome {
+            response: HostCommandResponse::Error(HostCommandError {
+                code: "claim_conflict".to_owned(),
+                message: "run claimed elsewhere".to_owned(),
+            }),
+            events: Vec::new(),
+        };
+
+        let (output, ()) = capture_tracing_output_at_level(tracing::Level::INFO, || {
+            super::log_command_outcome(
+                "step_run",
+                &outcome,
+                Some(&RunId("run-rejected".to_owned())),
+            );
+        });
+
+        assert!(output.contains("runtime.host.command_rejected"));
+        assert!(output.contains("error_code=claim_conflict"));
+        assert!(output.contains("run_id=Some(\"run-rejected\")"));
     }
 }

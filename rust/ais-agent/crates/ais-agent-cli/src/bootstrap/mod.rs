@@ -1,18 +1,25 @@
 use std::{fs, path::Path};
 
+use ais_agent_core::binding::{evm::EvmConnectionSpec, solana::SolanaConnectionSpec};
 use ais_agent_runtime::{
     persistence::{
         InMemoryCheckpointRepository, InMemoryEventArchive, InMemoryMissionRepository,
         InMemoryRunCatalogRepository,
     },
     runtime::InMemoryRunRepository,
-    service::{RuntimeExecutionWiring, RuntimeHostService},
+    service::{
+        RuntimeChainConnection, RuntimeChainProviderEntry, RuntimeExecutionWiring,
+        RuntimeHostService, RuntimeProviderRegistry,
+    },
 };
 use ais_agent_store_sqlite::SqliteStore;
 use tracing::{info, warn};
 
 use crate::{
-    config::{AisAgentServiceConfig, AisAgentStorageConfig},
+    config::{
+        AisAgentChainProviderEntry as ConfigChainProviderEntry, AisAgentProviderConfig,
+        AisAgentServiceConfig, AisAgentStorageConfig,
+    },
     service::{CliHostService, SqliteCliRuntimeHostService},
     storage_maintenance::{current_time_ms, maybe_auto_prune_sqlite},
 };
@@ -22,10 +29,7 @@ pub fn build_host_service(config: &AisAgentServiceConfig) -> CliHostService {
 }
 
 fn build_host_service_with_now(config: &AisAgentServiceConfig, now_ms: i64) -> CliHostService {
-    let execution_wiring = RuntimeExecutionWiring {
-        evm_rpc_url: config.providers.evm_rpc_url.clone(),
-        solana_rpc_url: config.providers.solana_rpc_url.clone(),
-    };
+    let execution_wiring = build_execution_wiring(&config.providers);
 
     match &config.storage {
         AisAgentStorageConfig::InMemory => CliHostService::RuntimeInMemory(
@@ -64,6 +68,52 @@ fn build_host_service_with_now(config: &AisAgentServiceConfig, now_ms: i64) -> C
                 Err(message) => CliHostService::unavailable("runtime_bootstrap_failed", message),
             }
         }
+    }
+}
+
+fn build_execution_wiring(config: &AisAgentProviderConfig) -> RuntimeExecutionWiring {
+    let chains = config
+        .chains
+        .iter()
+        .map(map_chain_provider_entry)
+        .map(|entry| (entry.chain.to_ascii_lowercase(), entry))
+        .collect();
+
+    RuntimeExecutionWiring {
+        providers: RuntimeProviderRegistry { chains },
+    }
+}
+
+fn map_chain_provider_entry(entry: &ConfigChainProviderEntry) -> RuntimeChainProviderEntry {
+    let connection = match chain_scope_family(&entry.chain) {
+        Some("eip155") => RuntimeChainConnection::Evm(EvmConnectionSpec {
+            http_url: entry.connection.http_url.clone(),
+            ws_url: entry.connection.ws_url.clone(),
+        }),
+        Some("solana") => RuntimeChainConnection::Solana(SolanaConnectionSpec {
+            http_url: entry.connection.http_url.clone(),
+            ws_url: entry.connection.ws_url.clone(),
+        }),
+        other => panic!(
+            "unsupported provider chain scope `{}` in bootstrap mapping: {other:?}",
+            entry.chain
+        ),
+    };
+    RuntimeChainProviderEntry {
+        chain: entry.chain.clone(),
+        labels: entry.labels.clone(),
+        connection,
+    }
+}
+
+fn chain_scope_family(value: &str) -> Option<&str> {
+    let (prefix, suffix) = value.split_once(':')?;
+    if prefix.is_empty() || suffix.trim().is_empty() {
+        return None;
+    }
+    match prefix {
+        "eip155" | "solana" => Some(prefix),
+        _ => None,
     }
 }
 
@@ -165,10 +215,33 @@ mod tests {
 
     use crate::{
         config::types::AisAgentSqliteStorageConfig,
-        config::{AisAgentServiceConfig, AisAgentStorageConfig},
+        config::{
+            AisAgentChainConnectionConfig, AisAgentChainProviderEntry, AisAgentProviderConfig,
+            AisAgentServiceConfig, AisAgentStorageConfig,
+        },
     };
 
-    use super::build_host_service;
+    use super::{build_execution_wiring, build_host_service};
+
+    fn service_config_with_exact_evm_provider(
+        storage: AisAgentStorageConfig,
+    ) -> AisAgentServiceConfig {
+        AisAgentServiceConfig {
+            storage,
+            providers: AisAgentProviderConfig {
+                chains: vec![AisAgentChainProviderEntry {
+                    chain: "eip155:1".to_owned(),
+                    labels: vec!["ethereum".to_owned(), "mainnet".to_owned()],
+                    connection: AisAgentChainConnectionConfig {
+                        http_url: "http://127.0.0.1:8545".to_owned(),
+                        ws_url: None,
+                    },
+                }],
+                ..AisAgentProviderConfig::default()
+            },
+            ..AisAgentServiceConfig::default()
+        }
+    }
 
     fn begin_run_command() -> ais_agent_host::session::HostedRunCommand {
         HostCommandEnvelope {
@@ -227,10 +300,9 @@ mod tests {
 
     #[tokio::test]
     async fn in_memory_bootstrap_builds_runtime_service() {
-        let mut service = build_host_service(&AisAgentServiceConfig {
-            storage: AisAgentStorageConfig::InMemory,
-            ..AisAgentServiceConfig::default()
-        });
+        let mut service = build_host_service(&service_config_with_exact_evm_provider(
+            AisAgentStorageConfig::InMemory,
+        ));
         let outcome = service.handle(begin_run_command()).await;
 
         match outcome.response {
@@ -245,14 +317,13 @@ mod tests {
     async fn sqlite_bootstrap_builds_runtime_service() {
         let sqlite_path = std::env::temp_dir().join("ais-agent-cli-bootstrap.sqlite");
         let _ = fs::remove_file(&sqlite_path);
-        let mut service = build_host_service(&AisAgentServiceConfig {
-            storage: AisAgentStorageConfig::Sqlite(AisAgentSqliteStorageConfig {
+        let mut service = build_host_service(&service_config_with_exact_evm_provider(
+            AisAgentStorageConfig::Sqlite(AisAgentSqliteStorageConfig {
                 path: sqlite_path.clone(),
                 create_if_missing: true,
                 ..AisAgentSqliteStorageConfig::default()
             }),
-            ..AisAgentServiceConfig::default()
-        });
+        ));
         let outcome = service.handle(begin_run_command()).await;
 
         match outcome.response {
@@ -263,6 +334,53 @@ mod tests {
         }
 
         let _ = fs::remove_file(sqlite_path);
+    }
+
+    #[test]
+    fn build_execution_wiring_maps_chain_registry_entries() {
+        let wiring = build_execution_wiring(&AisAgentProviderConfig {
+            chains: vec![AisAgentChainProviderEntry {
+                chain: "eip155:8453".to_owned(),
+                labels: vec!["base".to_owned(), "base-mainnet".to_owned()],
+                connection: AisAgentChainConnectionConfig {
+                    http_url: "https://base.example".to_owned(),
+                    ws_url: Some("wss://base.example/ws".to_owned()),
+                },
+            }],
+            ..AisAgentProviderConfig::default()
+        });
+
+        let resolved = wiring
+            .resolve_chain_connection("eip155:8453")
+            .expect("resolve")
+            .expect("provider");
+        let ais_agent_runtime::service::RuntimeChainConnectionRef::Evm(connection) = resolved
+        else {
+            panic!("expected evm connection");
+        };
+        assert_eq!(connection.http_url, "https://base.example");
+        assert_eq!(connection.ws_url.as_deref(), Some("wss://base.example/ws"));
+    }
+
+    #[test]
+    fn build_execution_wiring_requires_exact_chain_match() {
+        let wiring = build_execution_wiring(&AisAgentProviderConfig {
+            chains: vec![AisAgentChainProviderEntry {
+                chain: "eip155:8453".to_owned(),
+                labels: vec!["base".to_owned()],
+                connection: AisAgentChainConnectionConfig {
+                    http_url: "https://base.example".to_owned(),
+                    ws_url: None,
+                },
+            }],
+        });
+
+        assert_eq!(
+            wiring
+                .resolve_chain_connection("eip155:1")
+                .expect("resolve evm"),
+            None
+        );
     }
 
     #[test]

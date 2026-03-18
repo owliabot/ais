@@ -214,7 +214,7 @@ where
             );
             RuntimeHostServiceError::DurableCommit(error)
         })?;
-        info!(
+        debug!(
             run_id = %runtime.run_id.0,
             mutation_kind = ?mutation_kind,
             checkpoint_seq = receipt.checkpoint_seq,

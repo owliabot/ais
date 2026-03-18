@@ -14,6 +14,7 @@ use ais_agent_control::{
 };
 use ais_agent_core::runtime::{BoundaryKind, RunStatus};
 use ais_agent_core::{action::ActionNodeStatus, actuation::ActuationKind};
+use tracing::{debug, info, warn};
 
 use crate::{
     runtime::{classify_recovery_view, ActiveRun},
@@ -42,6 +43,7 @@ impl RuntimeEventEmitter {
         runtime: &mut ActiveRun,
         transition: &StepTransition,
     ) -> Vec<RunEventEnvelope> {
+        log_operator_transition(runtime, transition);
         let mut events = vec![envelope(
             runtime,
             RunEvent::Progress(RunProgress {
@@ -493,8 +495,173 @@ fn envelope(runtime: &mut ActiveRun, event: RunEvent) -> RunEventEnvelope {
         trace_context: trace_context_for_event(runtime, &event, event_seq),
         event,
     };
+    log_operator_event(&envelope);
     runtime.record_event(envelope.clone());
     envelope
+}
+
+fn log_operator_transition(runtime: &ActiveRun, transition: &StepTransition) {
+    match transition.kind {
+        StepTransitionKind::Observe | StepTransitionKind::Simulate => {
+            info!(
+                parent: None,
+                run_id = %runtime.run_id.0,
+                transition_kind = ?transition.kind,
+                node_id = ?transition.node_id.as_deref(),
+                phase = %format!("{:?}", runtime.checkpoint.lifecycle.phase).to_lowercase(),
+                summary = %transition.summary,
+                "run.progress"
+            );
+        }
+        _ => {}
+    }
+}
+
+fn log_operator_event(envelope: &RunEventEnvelope) {
+    match &envelope.event {
+        RunEvent::Started(event) => {
+            info!(
+                parent: None,
+                run_id = %event.run_id.0,
+                phase = %event.phase,
+                "run.started"
+            );
+        }
+        RunEvent::Progress(event) => {
+            debug!(
+                parent: None,
+                run_id = %event.run_id.0,
+                phase = %event.phase,
+                summary = %event.summary,
+                "run.progress"
+            );
+        }
+        RunEvent::GovernorDecision(event) => {
+            debug!(
+                parent: None,
+                run_id = %event.run_id.0,
+                node_id = ?event.node_id,
+                decision = ?event.decision,
+                reason = %event.reason,
+                signer_request_id = ?event.signer_request_id.as_ref().map(|id| id.0.as_str()),
+                "run.governor_decision"
+            );
+        }
+        RunEvent::PlanPatchAudit(event) => {
+            debug!(
+                parent: None,
+                run_id = %event.run_id.0,
+                patch_id = %event.patch_id,
+                status = ?event.status,
+                message = ?event.message.as_deref(),
+                "run.plan_patch_audit"
+            );
+        }
+        RunEvent::RecoveryAudit(event) => {
+            debug!(
+                parent: None,
+                run_id = %event.run_id.0,
+                recovery_disposition = ?event.recovery_disposition,
+                failure_context = ?event.failure_context,
+                "run.recovery_audit"
+            );
+        }
+        RunEvent::Paused(event) => {
+            info!(
+                parent: None,
+                run_id = %event.run_id.0,
+                reason = %event.reason,
+                "run.paused"
+            );
+        }
+        RunEvent::AwaitingEvidence(event) => {
+            info!(
+                parent: None,
+                run_id = %event.run_id.0,
+                reason = %event.reason,
+                missing_refs = ?event.missing_refs,
+                "run.awaiting_evidence"
+            );
+        }
+        RunEvent::AwaitingSigner(event) => {
+            info!(
+                parent: None,
+                run_id = %event.run_id.0,
+                request_id = %event.request_id.0,
+                reason = %event.reason,
+                "run.awaiting_signer"
+            );
+        }
+        RunEvent::AwaitingContinuation(event) => {
+            info!(
+                parent: None,
+                run_id = %event.run_id.0,
+                stage_id = ?event.stage_id.as_ref().map(|stage| stage.as_str()),
+                package_entry = ?event.package_entry.as_ref().map(|entry| entry.as_str()),
+                required_outputs = ?event.required_outputs,
+                "run.awaiting_continuation"
+            );
+        }
+        RunEvent::BroadcastSubmitted(event) => {
+            info!(
+                parent: None,
+                run_id = %event.run_id.0,
+                node_id = %event.node_id,
+                chain = ?event.chain.as_deref(),
+                tx_hash = ?event.tx_hash.as_deref(),
+                summary = %event.summary,
+                "run.broadcast_submitted"
+            );
+        }
+        RunEvent::AwaitingConfirm(event) => {
+            info!(
+                parent: None,
+                run_id = %event.run_id.0,
+                confirmation_id = ?event.confirmation_id.as_deref(),
+                reason = %event.reason,
+                "run.awaiting_receipt"
+            );
+        }
+        RunEvent::VerifyPassed(event) => {
+            info!(
+                parent: None,
+                run_id = %event.run_id.0,
+                node_id = %event.node_id,
+                tx_hash = ?event.tx_hash.as_deref(),
+                summary = %event.summary,
+                "run.verify_passed"
+            );
+        }
+        RunEvent::VerifyFailed(event) => {
+            warn!(
+                parent: None,
+                run_id = %event.run_id.0,
+                node_id = %event.node_id,
+                tx_hash = ?event.tx_hash.as_deref(),
+                code = ?event.code,
+                message = %event.message,
+                "run.verify_failed"
+            );
+        }
+        RunEvent::Completed(event) => {
+            info!(
+                parent: None,
+                run_id = %event.run_id.0,
+                summary = %event.summary,
+                "run.completed"
+            );
+        }
+        RunEvent::Failed(event) => {
+            warn!(
+                parent: None,
+                run_id = %event.run_id.0,
+                phase = %event.phase,
+                code = ?event.code,
+                message = %event.message,
+                "run.failed"
+            );
+        }
+    }
 }
 
 fn latest_broadcast_tx_hash_for_node(runtime: &ActiveRun, node_id: &str) -> Option<String> {
@@ -583,6 +750,7 @@ mod tests {
     use crate::{
         runtime::ActiveRun,
         stepper::{StepTransition, StepTransitionKind},
+        tests::tracing_capture::capture_tracing_output_at_level,
     };
 
     use super::RuntimeEventEmitter;
@@ -706,14 +874,16 @@ mod tests {
         };
         let mut runtime = ActiveRun::new(mission, checkpoint);
 
-        let events = RuntimeEventEmitter::emit_after_step(
-            &mut runtime,
-            &StepTransition {
-                kind: StepTransitionKind::Complete,
-                node_id: None,
-                summary: "observe-only artifact completed".to_owned(),
-            },
-        );
+        let (output, events) = capture_tracing_output_at_level(tracing::Level::INFO, || {
+            RuntimeEventEmitter::emit_after_step(
+                &mut runtime,
+                &StepTransition {
+                    kind: StepTransitionKind::Complete,
+                    node_id: None,
+                    summary: "observe-only artifact completed".to_owned(),
+                },
+            )
+        });
 
         assert!(matches!(events[0].event, RunEvent::Progress(_)));
         assert!(events
@@ -726,6 +896,8 @@ mod tests {
         assert!(!events
             .iter()
             .any(|event| matches!(event.event, RunEvent::Paused(_))));
+        assert!(output.contains("run.completed"));
+        assert!(output.contains("summary=observe-only artifact completed"));
     }
 
     #[test]
@@ -747,16 +919,21 @@ mod tests {
             constraints: BTreeMap::new(),
             metadata: BTreeMap::new(),
         };
+        let mut lifecycle = RunLifecycleState::new(RunId("run-broadcast".to_owned()), "mission-1");
+        lifecycle.await_confirmation("waiting for chain receipt 0xabc");
         let checkpoint = CheckpointSnapshot {
             run_id: "run-broadcast".to_owned(),
             mission_id: "mission-1".to_owned(),
             checkpoint_seq: 1,
             plan_epoch: 0,
-            lifecycle: RunLifecycleState::new(RunId("run-broadcast".to_owned()), "mission-1"),
+            lifecycle,
             action_graph: ActionGraph::default(),
             evidence_graph: EvidenceGraph::default(),
             effect_contracts: Default::default(),
-            pending_requests: PendingRequestsSnapshot::default(),
+            pending_requests: PendingRequestsSnapshot {
+                pending_confirmation_id: Some("0xabc".to_owned()),
+                ..PendingRequestsSnapshot::default()
+            },
             last_completed_node_id: Some("broadcast.swap".to_owned()),
             actuation_records: vec![ActuationRecord {
                 record_id: "broadcast.swap:broadcast_submitted:1".to_owned(),
@@ -771,14 +948,17 @@ mod tests {
         };
         let mut runtime = ActiveRun::new(mission, checkpoint);
 
-        let events = RuntimeEventEmitter::emit_after_step(
-            &mut runtime,
-            &StepTransition {
-                kind: StepTransitionKind::Broadcast,
-                node_id: Some("broadcast.swap".to_owned()),
-                summary: "broadcast submitted for node broadcast.swap; awaiting receipt".to_owned(),
-            },
-        );
+        let (output, events) = capture_tracing_output_at_level(tracing::Level::INFO, || {
+            RuntimeEventEmitter::emit_after_step(
+                &mut runtime,
+                &StepTransition {
+                    kind: StepTransitionKind::Broadcast,
+                    node_id: Some("broadcast.swap".to_owned()),
+                    summary: "broadcast submitted for node broadcast.swap; awaiting receipt"
+                        .to_owned(),
+                },
+            )
+        });
 
         let event = events
             .iter()
@@ -802,6 +982,9 @@ mod tests {
         );
         assert_eq!(event.1.node_id, "broadcast.swap");
         assert_eq!(event.1.tx_hash.as_deref(), Some("0xabc"));
+        assert!(output.contains("run.broadcast_submitted"));
+        assert!(output.contains("run.awaiting_receipt"));
+        assert!(output.contains("confirmation_id=Some(\"0xabc\")"));
     }
 
     #[test]
@@ -874,14 +1057,17 @@ mod tests {
             execution_artifact: None,
         };
         let mut success_runtime = ActiveRun::new(mission.clone(), success_checkpoint);
-        let success_events = RuntimeEventEmitter::emit_after_step(
-            &mut success_runtime,
-            &StepTransition {
-                kind: StepTransitionKind::Verify,
-                node_id: Some("verify.swap".to_owned()),
-                summary: "verified live evm receipt for node verify.swap".to_owned(),
-            },
-        );
+        let (success_output, success_events) =
+            capture_tracing_output_at_level(tracing::Level::INFO, || {
+                RuntimeEventEmitter::emit_after_step(
+                    &mut success_runtime,
+                    &StepTransition {
+                        kind: StepTransitionKind::Verify,
+                        node_id: Some("verify.swap".to_owned()),
+                        summary: "verified live evm receipt for node verify.swap".to_owned(),
+                    },
+                )
+            });
         let success_event = success_events
             .iter()
             .find_map(|event| match &event.event {
@@ -902,6 +1088,8 @@ mod tests {
             Some("run.side_effect.verify_passed:verify.swap:2")
         );
         assert_eq!(success_event.1.tx_hash.as_deref(), Some("0xdef"));
+        assert!(success_output.contains("run.verify_passed"));
+        assert!(success_output.contains("tx_hash=Some(\"0xdef\")"));
 
         let mut failed_lifecycle =
             RunLifecycleState::new(RunId("run-verify-fail".to_owned()), "mission-1");
@@ -933,14 +1121,17 @@ mod tests {
             execution_artifact: None,
         };
         let mut failed_runtime = ActiveRun::new(mission, failed_checkpoint);
-        let failed_events = RuntimeEventEmitter::emit_after_step(
-            &mut failed_runtime,
-            &StepTransition {
-                kind: StepTransitionKind::Verify,
-                node_id: Some("verify.swap".to_owned()),
-                summary: "verification mismatch on node verify.swap".to_owned(),
-            },
-        );
+        let (failed_output, failed_events) =
+            capture_tracing_output_at_level(tracing::Level::INFO, || {
+                RuntimeEventEmitter::emit_after_step(
+                    &mut failed_runtime,
+                    &StepTransition {
+                        kind: StepTransitionKind::Verify,
+                        node_id: Some("verify.swap".to_owned()),
+                        summary: "verification mismatch on node verify.swap".to_owned(),
+                    },
+                )
+            });
         let failed_event = failed_events
             .iter()
             .find_map(|event| match &event.event {
@@ -965,6 +1156,8 @@ mod tests {
             Some(ais_agent_control::recovery::RunFailureCode::VerifyMismatch)
         );
         assert_eq!(failed_event.1.tx_hash.as_deref(), Some("0xbeef"));
+        assert!(failed_output.contains("run.verify_failed"));
+        assert!(failed_output.contains("verification mismatch"));
     }
 
     #[test]
@@ -1032,14 +1225,16 @@ mod tests {
             .with_node_id("govern.swap"),
         ));
 
-        let events = RuntimeEventEmitter::emit_after_step(
-            &mut runtime,
-            &StepTransition {
-                kind: StepTransitionKind::Govern,
-                node_id: Some("govern.swap".to_owned()),
-                summary: "governor allowed swap with signer".to_owned(),
-            },
-        );
+        let (output, events) = capture_tracing_output_at_level(tracing::Level::INFO, || {
+            RuntimeEventEmitter::emit_after_step(
+                &mut runtime,
+                &StepTransition {
+                    kind: StepTransitionKind::Govern,
+                    node_id: Some("govern.swap".to_owned()),
+                    summary: "governor allowed swap with signer".to_owned(),
+                },
+            )
+        });
 
         let signer_event = events
             .iter()
@@ -1059,5 +1254,98 @@ mod tests {
                 .map(|context| context.span_id.as_str()),
             Some("run.signer.request_created:signer-1:3")
         );
+        assert!(output.contains("run.awaiting_signer"));
+        assert!(output.contains("request_id=signer-1"));
+    }
+
+    #[test]
+    fn simulate_transition_logs_operator_progress() {
+        let mission = Mission {
+            mission_id: "mission-1".to_owned(),
+            goal: "swap".to_owned(),
+            allowed_chains: vec!["eip155:8453".to_owned()],
+            budget: MissionBudget {
+                max_steps: Some(4),
+                max_signer_requests: Some(1),
+                max_wall_clock_ms: Some(5_000),
+            },
+            policy: MissionPolicy {
+                policy_mode: Some("guarded".to_owned()),
+                allow_raw_envelopes: false,
+                require_effect_contract_for_writes: true,
+            },
+            constraints: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+        };
+        let mut lifecycle = RunLifecycleState::new(RunId("run-simulate".to_owned()), "mission-1");
+        lifecycle.mark_running(RunPhase::Simulating);
+        let checkpoint = CheckpointSnapshot {
+            run_id: "run-simulate".to_owned(),
+            mission_id: "mission-1".to_owned(),
+            checkpoint_seq: 1,
+            plan_epoch: 0,
+            lifecycle,
+            action_graph: ActionGraph::default(),
+            evidence_graph: EvidenceGraph::default(),
+            effect_contracts: Default::default(),
+            pending_requests: PendingRequestsSnapshot::default(),
+            last_completed_node_id: Some("simulate.swap".to_owned()),
+            actuation_records: Vec::new(),
+            execution_artifact: None,
+        };
+        let mut runtime = ActiveRun::new(mission, checkpoint);
+
+        let (output, events) = capture_tracing_output_at_level(tracing::Level::INFO, || {
+            RuntimeEventEmitter::emit_after_step(
+                &mut runtime,
+                &StepTransition {
+                    kind: StepTransitionKind::Simulate,
+                    node_id: Some("simulate.swap".to_owned()),
+                    summary: "completed live evm simulate node simulate.swap".to_owned(),
+                },
+            )
+        });
+
+        assert!(matches!(events[0].event, RunEvent::Progress(_)));
+        assert!(output.contains("run.progress"));
+        assert!(output.contains("transition_kind=Simulate"));
+        assert!(output.contains("summary=completed live evm simulate node simulate.swap"));
+    }
+
+    #[test]
+    fn started_event_logs_operator_start_message() {
+        let mission = Mission {
+            mission_id: "mission-1".to_owned(),
+            goal: "swap".to_owned(),
+            allowed_chains: vec!["eip155:8453".to_owned()],
+            budget: MissionBudget::default(),
+            policy: MissionPolicy::default(),
+            constraints: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+        };
+        let checkpoint = CheckpointSnapshot {
+            run_id: "run-start".to_owned(),
+            mission_id: "mission-1".to_owned(),
+            checkpoint_seq: 0,
+            plan_epoch: 0,
+            lifecycle: RunLifecycleState::new(RunId("run-start".to_owned()), "mission-1"),
+            action_graph: ActionGraph::default(),
+            evidence_graph: EvidenceGraph::default(),
+            effect_contracts: Default::default(),
+            pending_requests: PendingRequestsSnapshot::default(),
+            last_completed_node_id: None,
+            actuation_records: Vec::new(),
+            execution_artifact: None,
+        };
+        let mut runtime = ActiveRun::new(mission, checkpoint);
+
+        let (output, events) = capture_tracing_output_at_level(tracing::Level::INFO, || {
+            RuntimeEventEmitter::emit_started(&mut runtime, "mission_accepted")
+        });
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0].event, RunEvent::Started(_)));
+        assert!(output.contains("run.started"));
+        assert!(output.contains("phase=mission_accepted"));
     }
 }

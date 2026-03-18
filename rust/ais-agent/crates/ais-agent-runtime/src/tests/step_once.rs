@@ -1021,7 +1021,8 @@ fn actuate_evm_broadcast_node(node_id: &str, depends_on: Vec<&str>) -> ActionNod
             requires_effect_contract: true,
             live: Some(ActuateLiveBinding::Evm(EvmActuateLiveBinding {
                 connection: Some(ais_agent_core::binding::evm::EvmConnectionSpec {
-                    rpc_url: "http://localhost:8545".to_owned(),
+                    http_url: "http://localhost:8545".to_owned(),
+                    ws_url: None,
                 }),
                 binding: EvmActuateBinding::BroadcastRawTransaction,
             })),

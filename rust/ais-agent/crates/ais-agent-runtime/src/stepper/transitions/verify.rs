@@ -72,7 +72,7 @@ pub(crate) async fn apply_verify_transition(runtime: &mut ActiveRun) -> Option<S
             );
         };
 
-        let receipt = match EvmAlloyReceiptPort::new(connection.rpc_url.clone())
+        let receipt = match EvmAlloyReceiptPort::new(connection.http_url.clone())
             .get_transaction_receipt(&tx_hash)
             .await
         {
@@ -275,7 +275,7 @@ async fn apply_effect_contract_verification(
     };
 
     let post_payload = if let Some(request) = &live.post_request {
-        match EvmAlloyReadPort::new(connection.rpc_url.clone())
+        match EvmAlloyReadPort::new(connection.http_url.clone())
             .observe(request)
             .await
         {

@@ -713,7 +713,7 @@ fn observe_slot_node(node_id: &str) -> ActionNode {
             output_key: Some("observed.slot".to_owned()),
             live: Some(ObserveLiveBinding::Solana(SolanaObserveLiveBinding {
                 connection: Some(SolanaConnectionSpec {
-                    rpc_url: "http://localhost:8899".to_owned(),
+                    http_url: "http://localhost:8899".to_owned(),
                     ws_url: None,
                 }),
                 binding: SolanaObserveBinding::Slot,
@@ -739,7 +739,7 @@ fn simulate_legacy_transaction_node(node_id: &str) -> ActionNode {
             simulator_hint: "solana simulate tx".to_owned(),
             live: Some(SimulateLiveBinding::Solana(SolanaSimulateLiveBinding {
                 connection: Some(SolanaConnectionSpec {
-                    rpc_url: "http://localhost:8899".to_owned(),
+                    http_url: "http://localhost:8899".to_owned(),
                     ws_url: None,
                 }),
                 binding: SolanaSimulateBinding::SimulateTransaction,
@@ -776,7 +776,7 @@ fn broadcast_solana_node(node_id: &str) -> ActionNode {
             requires_effect_contract: true,
             live: Some(ActuateLiveBinding::Solana(SolanaActuateLiveBinding {
                 connection: Some(SolanaConnectionSpec {
-                    rpc_url: "http://localhost:8899".to_owned(),
+                    http_url: "http://localhost:8899".to_owned(),
                     ws_url: None,
                 }),
                 binding: SolanaActuateBinding::BroadcastSignedTransaction,
@@ -812,7 +812,7 @@ fn verify_solana_signature_node(node_id: &str, depends_on: Vec<&str>) -> ActionN
             post_observation_ref: None,
             live: Some(VerifyLiveBinding::Solana(SolanaVerifyLiveBinding {
                 connection: Some(SolanaConnectionSpec {
-                    rpc_url: "http://localhost:8899".to_owned(),
+                    http_url: "http://localhost:8899".to_owned(),
                     ws_url: None,
                 }),
                 binding: SolanaVerifyBinding::EffectContractFromSignatureStatus,

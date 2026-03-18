@@ -66,7 +66,7 @@ impl SolanaLiveReceiptPort {
         &self,
         signature: &str,
     ) -> Result<SolanaReceiptObservation, SolanaLiveReceiptError> {
-        let client = RpcClient::new(self.connection.rpc_url.clone());
+        let client = RpcClient::new(self.connection.http_url.clone());
         let signature = signature
             .parse::<Signature>()
             .map_err(|error| SolanaLiveReceiptError::InvalidSignature(error.to_string()))?;

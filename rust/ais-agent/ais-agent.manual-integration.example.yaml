@@ -22,7 +22,14 @@ storage:
     vacuum_freelist_threshold_pages: 1000
 
 providers:
-  evm_rpc_url: ${AIS_AGENT_EVM_RPC_URL}
+  chains:
+    - chain: eip155:8453
+      labels:
+        - base
+        - base-mainnet
+      connection:
+        http_url: https://YOUR_EVM_RPC
+        ws_url: wss://YOUR_EVM_WS
 
 runtime_defaults:
   claim_lease_seconds: 60

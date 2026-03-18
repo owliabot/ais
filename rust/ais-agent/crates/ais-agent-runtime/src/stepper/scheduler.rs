@@ -13,7 +13,7 @@ use ais_agent_core::{
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracing::{debug, debug_span, info, warn, Instrument};
+use tracing::{debug, debug_span, warn, Instrument};
 
 use crate::{
     events::RuntimeEventEmitter,
@@ -304,7 +304,7 @@ fn finish_step_result(
         return Err(error.into());
     }
 
-    info!(
+    debug!(
         run_id = %runtime.run_id.0,
         stop_reason = ?stop_reason,
         status = ?runtime.checkpoint.lifecycle.status,
@@ -361,7 +361,7 @@ fn persist_side_effect_durability_cut(
 
     match persist_side_effect_checkpoint(checkpoint_repo, runtime) {
         Ok(_) => {
-            info!(
+            debug!(
                 run_id = %runtime.run_id.0,
                 transition_kind = ?transition.kind,
                 confirmation_id = runtime.checkpoint.pending_requests.pending_confirmation_id.as_deref(),

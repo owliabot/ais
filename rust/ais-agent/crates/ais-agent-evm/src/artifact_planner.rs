@@ -16,6 +16,7 @@ use ais_agent_core::{
         },
         ActionGraph, ActionNode, ActionNodeKind, ActionNodeStatus, ActionOrigin, ActionPayload,
     },
+    binding::evm::EvmConnectionSpec,
     binding::evm::{
         EvmActuateBinding, EvmCallRequest, EvmObserveBinding, EvmObserveRequest,
         EvmSimulateBinding, EvmVerifyBinding,
@@ -42,11 +43,11 @@ struct PlannedExecutionEffect {
 
 pub fn plan_execution_artifact(
     spec: &ExecutionArtifactLaunchSpec,
-    evm_rpc_url: Option<&str>,
+    connection: Option<&EvmConnectionSpec>,
     chain_scope: &str,
 ) -> Result<PlannedEvmExecutionArtifact, String> {
     let planned_effects = plan_evm_effects(spec)?;
-    let planned_stage_graphs = plan_stage_graphs(spec, chain_scope, evm_rpc_url, &planned_effects)?;
+    let planned_stage_graphs = plan_stage_graphs(spec, chain_scope, connection, &planned_effects)?;
     let effect_contracts = planned_effects
         .values()
         .map(|effect| {
@@ -65,7 +66,7 @@ pub fn plan_execution_artifact(
 fn plan_stage_graphs(
     spec: &ExecutionArtifactLaunchSpec,
     chain_scope: &str,
-    evm_rpc_url: Option<&str>,
+    connection: Option<&EvmConnectionSpec>,
     planned_effects: &BTreeMap<
         ais_agent_control::execution_artifact::ExecutionStageId,
         PlannedExecutionEffect,
@@ -94,7 +95,7 @@ fn plan_stage_graphs(
                     spec.actor
                         .as_ref()
                         .and_then(|actor| actor.sender_address_hint.as_deref()),
-                    evm_rpc_url,
+                    connection,
                     chain_scope,
                     planned_effects.get(&stage.stage_id),
                 )?;
@@ -106,7 +107,7 @@ fn plan_stage_graphs(
                     spec.action_key.as_str(),
                     stage,
                     spec.observations.as_slice(),
-                    evm_rpc_url,
+                    connection,
                     chain_scope,
                 )?;
                 planned.insert(stage.stage_id.clone(), graph);
@@ -122,7 +123,7 @@ fn plan_single_evm_observe_stage(
     action_key: &str,
     stage: &ObserveStage,
     observations: &[ObservationSpec],
-    evm_rpc_url: Option<&str>,
+    connection: Option<&EvmConnectionSpec>,
     chain_scope: &str,
 ) -> Result<ActionGraph, String> {
     let observation = observations
@@ -134,10 +135,7 @@ fn plan_single_evm_observe_stage(
                 stage.stage_id, stage.observation_ref
             )
         })?;
-    let live_connection =
-        evm_rpc_url.map(|rpc_url| ais_agent_core::binding::evm::EvmConnectionSpec {
-            rpc_url: rpc_url.to_owned(),
-        });
+    let live_connection = connection.cloned();
     let graph_id = format!("artifact.{protocol_package_id}.{action_key}");
     let node_prefix = format!("artifact.{}", stage.stage_id);
     let observe_node = observation_node(
@@ -163,17 +161,14 @@ fn plan_single_evm_transaction_stage(
     preconditions: &[ObservationSpec],
     postconditions: &[ObservationSpec],
     sender_address_hint: Option<&str>,
-    evm_rpc_url: Option<&str>,
+    connection: Option<&EvmConnectionSpec>,
     chain_scope: &str,
     expected_effect: Option<&PlannedExecutionEffect>,
 ) -> Result<ActionGraph, String> {
     let sender = sender_address_hint
         .map(|value| parse_address(value, "execution_artifact.actor.sender_address_hint"))
         .transpose()?;
-    let live_connection =
-        evm_rpc_url.map(|rpc_url| ais_agent_core::binding::evm::EvmConnectionSpec {
-            rpc_url: rpc_url.to_owned(),
-        });
+    let live_connection = connection.cloned();
     let graph_id = format!("artifact.{protocol_package_id}.{action_key}");
     let node_prefix = format!("artifact.{}", stage.stage_id);
 
@@ -736,7 +731,10 @@ mod tests {
                 )]),
             }],
             None,
-            Some("http://127.0.0.1:8545"),
+            Some(&EvmConnectionSpec {
+                http_url: "http://127.0.0.1:8545".to_owned(),
+                ws_url: None,
+            }),
             "eip155:8453",
             None,
         )

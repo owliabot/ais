@@ -64,7 +64,7 @@ pub(crate) async fn apply_simulate_transition(runtime: &mut ActiveRun) -> Option
             return fail_simulate(runtime, &node_id, "evm simulate binding missing connection");
         };
 
-        let report = match EvmAlloySimulatePort::new(connection.rpc_url.clone())
+        let report = match EvmAlloySimulatePort::new(connection.http_url.clone())
             .eth_call(&live.request)
             .await
         {

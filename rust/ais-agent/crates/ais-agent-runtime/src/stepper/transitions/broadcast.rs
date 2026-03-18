@@ -134,7 +134,7 @@ pub(crate) async fn apply_broadcast_transition(runtime: &mut ActiveRun) -> Optio
             }
         };
 
-        let submission = match EvmAlloyBroadcastPort::new(connection.rpc_url.clone())
+        let submission = match EvmAlloyBroadcastPort::new(connection.http_url.clone())
             .send_raw_transaction_hex(&raw_tx)
             .await
         {

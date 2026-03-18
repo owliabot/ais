@@ -83,7 +83,14 @@ storage:
   create_if_missing: true
 
 providers:
-  evm_rpc_url: ${AIS_AGENT_EVM_RPC_URL}
+  chains:
+    - chain: eip155:8453
+      labels:
+        - base
+        - base-mainnet
+      connection:
+        http_url: https://YOUR_EVM_RPC
+        ws_url: wss://YOUR_EVM_WS
 
 runtime_defaults:
   claim_lease_seconds: 60
@@ -97,7 +104,7 @@ observability:
 这份配置的目标很收敛：
 
 - 只开 HTTP transport
-- 只开 EVM RPC
+- 只开一个面向 `eip155:8453` 的 EVM provider entry
 - 用 SQLite 保留 run / checkpoint / event
 
 注意：
@@ -138,9 +145,17 @@ observability:
 
 当前最重要的是：
 
-- `providers.evm_rpc_url`
+- `providers.chains[*].chain`
+- `providers.chains[*].connection.http_url`
 
-如果你要跑 Base 上的 transfer / Uniswap V3，这个 RPC 必须可用。
+如果你要跑 Base 上的 transfer / Uniswap V3，至少要有一条：
+
+- `chain: eip155:8453`
+- `connection.http_url: ...`
+
+如果你的确认/订阅链路以后要接 websocket，也可以同时配：
+
+- `connection.ws_url: ...`
 
 ### 5.4 `runtime_defaults`
 
@@ -177,16 +192,14 @@ observability:
 
 - `AIS_AGENT_HTTP_BIND`
 - `AIS_AGENT_SQLITE_PATH`
-- `AIS_AGENT_EVM_RPC_URL`
-- `AIS_AGENT_SOLANA_RPC_URL`
 - `AIS_AGENT_CLAIM_LEASE_SECONDS`
 - `AIS_AGENT_LOG_LEVEL`
 
-如果只是本地联调，最少通常只需要：
+说明：
 
-```bash
-export AIS_AGENT_EVM_RPC_URL="https://YOUR_EVM_RPC"
-```
+- provider 连接现在只能通过 YAML 里的 `providers.chains[*]` 提供
+- 不再支持通过全局 env 覆盖 EVM / Solana RPC URL
+- 如果需要 websocket，请直接写在 `providers.chains[*].connection.ws_url`
 
 ## 7. 启动命令
 
@@ -195,7 +208,6 @@ export AIS_AGENT_EVM_RPC_URL="https://YOUR_EVM_RPC"
 ```bash
 cd /home/xcshuan/work/owlia/ais/rust/ais-agent
 mkdir -p ./var
-export AIS_AGENT_EVM_RPC_URL="https://YOUR_EVM_RPC"
 cargo run -p ais-agent-cli -- --config ./ais-agent.manual-integration.yaml daemon http --bind 127.0.0.1:3200
 ```
 
@@ -204,13 +216,13 @@ cargo run -p ais-agent-cli -- --config ./ais-agent.manual-integration.yaml daemo
 - `--config` 会加载 YAML
 - `daemon http` 会进入 HTTP 服务模式
 - `--bind` 会覆盖配置文件中的 `transport.http.bind`
+- provider 连接必须已经写在 `./ais-agent.manual-integration.yaml`
 
 ### 7.2 先构建再启动
 
 ```bash
 cd /home/xcshuan/work/owlia/ais/rust/ais-agent
 cargo build -p ais-agent-cli
-export AIS_AGENT_EVM_RPC_URL="https://YOUR_EVM_RPC"
 ./target/debug/ais-agent --config ./ais-agent.manual-integration.yaml daemon http --bind 127.0.0.1:3200
 ```
 
