@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use ais_agent_control::ids::{RunId, SignerRequestId};
 
@@ -6,9 +7,9 @@ use ais_agent_control::ids::{RunId, SignerRequestId};
 #[serde(rename_all = "snake_case")]
 pub enum SignerRequestStatus {
     Pending,
-    Approved,
     Denied,
     Submitted,
+    Signed,
     Expired,
     TimedOut,
     Reconciled,
@@ -16,10 +17,10 @@ pub enum SignerRequestStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SignerDecisionKind {
-    Approved,
+pub enum SignerResolutionKind {
     Denied,
     Submitted,
+    Signed,
     Expired,
 }
 
@@ -30,11 +31,12 @@ pub struct SignerTimeout {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SignerDecision {
+pub struct SignerResolution {
     pub request_id: SignerRequestId,
-    pub kind: SignerDecisionKind,
-    pub decision_at_ms: Option<u64>,
+    pub kind: SignerResolutionKind,
+    pub resolved_at_ms: Option<u64>,
     pub tx_hash: Option<String>,
+    pub signed_payload: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,10 +46,14 @@ pub struct SignerRequestState {
     pub node_id: Option<String>,
     pub chain: String,
     pub summary: String,
+    #[serde(default)]
+    pub payload: Option<Value>,
     pub status: SignerRequestStatus,
     pub timeout: Option<SignerTimeout>,
-    pub last_decision: Option<SignerDecision>,
+    pub last_resolution: Option<SignerResolution>,
     pub submitted_tx_hash: Option<String>,
+    #[serde(default)]
+    pub signed_payload: Option<Value>,
     pub reconcile_required: bool,
 }
 
@@ -64,10 +70,12 @@ impl SignerRequestState {
             node_id: None,
             chain: chain.into(),
             summary: summary.into(),
+            payload: None,
             status: SignerRequestStatus::Pending,
             timeout: None,
-            last_decision: None,
+            last_resolution: None,
             submitted_tx_hash: None,
+            signed_payload: None,
             reconcile_required: false,
         }
     }
@@ -85,18 +93,26 @@ impl SignerRequestState {
         self
     }
 
-    pub fn apply_decision(&mut self, decision: SignerDecision) {
-        self.status = match decision.kind {
-            SignerDecisionKind::Approved => SignerRequestStatus::Approved,
-            SignerDecisionKind::Denied => SignerRequestStatus::Denied,
-            SignerDecisionKind::Submitted => SignerRequestStatus::Submitted,
-            SignerDecisionKind::Expired => SignerRequestStatus::Expired,
+    pub fn with_payload(mut self, payload: Value) -> Self {
+        self.payload = Some(payload);
+        self
+    }
+
+    pub fn apply_resolution(&mut self, resolution: SignerResolution) {
+        self.status = match resolution.kind {
+            SignerResolutionKind::Denied => SignerRequestStatus::Denied,
+            SignerResolutionKind::Submitted => SignerRequestStatus::Submitted,
+            SignerResolutionKind::Signed => SignerRequestStatus::Signed,
+            SignerResolutionKind::Expired => SignerRequestStatus::Expired,
         };
-        if matches!(decision.kind, SignerDecisionKind::Submitted) {
-            self.submitted_tx_hash = decision.tx_hash.clone();
+        if matches!(resolution.kind, SignerResolutionKind::Submitted) {
+            self.submitted_tx_hash = resolution.tx_hash.clone();
             self.reconcile_required = true;
         }
-        self.last_decision = Some(decision);
+        if matches!(resolution.kind, SignerResolutionKind::Signed) {
+            self.signed_payload = resolution.signed_payload.clone();
+        }
+        self.last_resolution = Some(resolution);
     }
 
     pub fn mark_timed_out(&mut self, now_ms: u64) -> bool {

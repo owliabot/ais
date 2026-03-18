@@ -53,7 +53,8 @@ fn status_for_event_service_error(code: &str) -> StatusCode {
             | "mission_error"
             | "event_archive_error"
             | "run_catalog_error"
-            | "signer_archive_error"
+            | "signer_state_store_error"
+            | "wait_state_store_error"
             | "restore_error"
     ) || code.ends_with("_error")
     {

@@ -8,8 +8,7 @@ use ais_agent_control::{
         ExecutionTransactionCandidate, ObservationSpec, OutputExportSpec, PredicateSpec,
         TransactionStage, ValueRef,
     },
-    ids::CommandId,
-    ids::RunId,
+    ids::{CommandId, RunId, SignerRequestId},
     launch_spec::LaunchSpecSubmission,
     recovery::RunFailureCode,
 };
@@ -37,7 +36,7 @@ use ais_agent_core::{
         EvidenceFreshness, EvidenceGraph, EvidenceKind, EvidenceProvenance, EvidenceRecord,
     },
     mission::{Mission, MissionBudget, MissionPolicy},
-    runtime::{RunLifecycleState, RunPhase, RunStatus},
+    runtime::{RunLifecycleState, RunPhase, RunStatus, SignerRequestState, SignerRequestStatus},
 };
 use ais_agent_host::{
     control::HostCommandResponse,
@@ -57,7 +56,7 @@ use crate::{
         persist_side_effect_checkpoint, restore_active_run, restore_active_run_from_parts,
         CheckpointArchiveEntry, CheckpointArchiveKind, CheckpointRepository,
         InMemoryCheckpointRepository, InMemoryEventArchive, InMemoryMissionRepository,
-        InMemoryRunCatalogRepository, InMemorySignerStateArchive, MissionRepository,
+        InMemoryRunCatalogRepository, InMemorySignerStateStore, MissionRepository,
     },
     runtime::{ActiveRun, InMemoryRunRepository, RunRepository},
     service::{seed_launch_spec_checkpoint, RuntimeExecutionWiring, RuntimeHostService},
@@ -189,6 +188,139 @@ async fn runtime_broadcast_node_can_submit_live_tx_hash_and_enter_confirmation_w
 }
 
 #[tokio::test]
+async fn runtime_broadcast_prefers_signed_signer_payload_over_envelope_payload() {
+    let asserter = Asserter::new();
+    let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
+    let tx_hash = b256!("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
+    asserter.push_success(&tx_hash);
+
+    let checkpoint = checkpoint_with_nodes(vec![broadcast_swap_node("broadcast-swap")]);
+    let mission = sample_mission();
+    let mut runtime = ActiveRun::new(mission, checkpoint);
+    runtime
+        .checkpoint
+        .lifecycle
+        .mark_running(RunPhase::Broadcasting);
+    runtime
+        .checkpoint
+        .pending_requests
+        .pending_signer_request_id = Some("signer-1".to_owned());
+    runtime.pending_signer_state = Some(
+        SignerRequestState::new_pending(
+            SignerRequestId("signer-1".to_owned()),
+            RunId("run-1".to_owned()),
+            "eip155:1",
+            "sign swap",
+        )
+        .with_node_id("broadcast-swap"),
+    );
+    runtime
+        .pending_signer_state
+        .as_mut()
+        .expect("signer state")
+        .status = SignerRequestStatus::Signed;
+    runtime
+        .pending_signer_state
+        .as_mut()
+        .expect("signer state")
+        .signed_payload = Some(json!({
+        "kind": "evm_signed_transaction",
+        "raw_tx": "0x0102"
+    }));
+    runtime.envelopes.insert(
+        "env.swap".to_owned(),
+        RuntimeEnvelope {
+            envelope_id: "env.swap".to_owned(),
+            kind: RuntimeEnvelopeKind::EvmEnvelope,
+            chain: "eip155:1".to_owned(),
+            payload: serde_json::json!({"raw_tx":"0xnot-used"}),
+            provenance: Some("test".to_owned()),
+        },
+    );
+
+    let transition = apply_live_evm_broadcast_with_provider(&mut runtime, &provider)
+        .await
+        .expect("broadcast transition");
+
+    assert_eq!(transition.node_id.as_deref(), Some("broadcast-swap"));
+    assert!(runtime.pending_signer_state.is_none());
+    assert_eq!(
+        runtime
+            .checkpoint
+            .pending_requests
+            .pending_confirmation_id
+            .as_deref(),
+        Some("0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+    );
+}
+
+#[tokio::test]
+async fn runtime_broadcast_fails_closed_when_signed_payload_is_invalid() {
+    let asserter = Asserter::new();
+    let provider = ProviderBuilder::new().connect_mocked_client(asserter);
+
+    let checkpoint = checkpoint_with_nodes(vec![broadcast_swap_node("broadcast-swap")]);
+    let mission = sample_mission();
+    let mut runtime = ActiveRun::new(mission, checkpoint);
+    runtime
+        .checkpoint
+        .lifecycle
+        .mark_running(RunPhase::Broadcasting);
+    runtime
+        .checkpoint
+        .pending_requests
+        .pending_signer_request_id = Some("signer-1".to_owned());
+    runtime.pending_signer_state = Some(
+        SignerRequestState::new_pending(
+            SignerRequestId("signer-1".to_owned()),
+            RunId("run-1".to_owned()),
+            "eip155:1",
+            "sign swap",
+        )
+        .with_node_id("broadcast-swap"),
+    );
+    runtime
+        .pending_signer_state
+        .as_mut()
+        .expect("signer state")
+        .status = SignerRequestStatus::Signed;
+    runtime
+        .pending_signer_state
+        .as_mut()
+        .expect("signer state")
+        .signed_payload = Some(json!({
+        "kind": "evm_signed_transaction"
+    }));
+    runtime.envelopes.insert(
+        "env.swap".to_owned(),
+        RuntimeEnvelope {
+            envelope_id: "env.swap".to_owned(),
+            kind: RuntimeEnvelopeKind::EvmEnvelope,
+            chain: "eip155:1".to_owned(),
+            payload: serde_json::json!({"raw_tx":"0x0102"}),
+            provenance: Some("test".to_owned()),
+        },
+    );
+
+    let transition = apply_live_evm_broadcast_with_provider(&mut runtime, &provider)
+        .await
+        .expect("broadcast failure transition");
+
+    assert_eq!(transition.kind, StepTransitionKind::Broadcast);
+    assert_eq!(runtime.checkpoint.lifecycle.status, RunStatus::Failed);
+    assert_eq!(
+        runtime
+            .checkpoint
+            .action_graph
+            .nodes
+            .get("broadcast-swap")
+            .map(|node| node.status.clone()),
+        Some(ActionNodeStatus::Failed)
+    );
+    assert!(runtime.pending_signer_state.is_some());
+}
+
+#[tokio::test]
 async fn runtime_can_resume_after_broadcast_and_observe_live_receipt() {
     let broadcast_asserter = Asserter::new();
     let broadcast_provider =
@@ -306,7 +438,7 @@ async fn runtime_can_restart_from_durable_side_effect_cut_after_evm_broadcast_su
         &run_id,
         &mission_repo,
         &checkpoint_repo,
-        &InMemorySignerStateArchive::default(),
+        &InMemorySignerStateStore::default(),
     )
     .expect("restore from durable side-effect cut");
 
@@ -598,7 +730,7 @@ async fn runtime_evm_guarded_execution_can_complete_end_to_end_with_live_ports()
         .pending_signer_state
         .as_mut()
         .expect("pending signer")
-        .apply_decision(ais_agent_core::runtime::SignerDecision {
+        .apply_resolution(ais_agent_core::runtime::SignerResolution {
             request_id: ais_agent_control::ids::SignerRequestId(
                 runtime
                     .checkpoint
@@ -607,9 +739,10 @@ async fn runtime_evm_guarded_execution_can_complete_end_to_end_with_live_ports()
                     .clone()
                     .expect("request id"),
             ),
-            kind: ais_agent_core::runtime::SignerDecisionKind::Approved,
-            decision_at_ms: None,
+            kind: ais_agent_core::runtime::SignerResolutionKind::Signed,
+            resolved_at_ms: None,
             tx_hash: None,
+            signed_payload: Some(serde_json::json!({"raw_tx":"0x0102"})),
         });
 
     let signer = StepOnce::apply(&mut runtime).await;
@@ -689,7 +822,6 @@ async fn native_transfer_launch_spec_can_complete_via_signer_submission_and_live
         &RuntimeExecutionWiring {
             evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
             solana_rpc_url: None,
-            allowed_protocol_packages: vec!["owliabot.transfer".to_owned()],
         },
         &sample_native_transfer_launch_spec(),
     )
@@ -741,11 +873,12 @@ async fn native_transfer_launch_spec_can_complete_via_signer_submission_and_live
         .pending_signer_state
         .as_mut()
         .expect("pending signer")
-        .apply_decision(ais_agent_core::runtime::SignerDecision {
+        .apply_resolution(ais_agent_core::runtime::SignerResolution {
             request_id: ais_agent_control::ids::SignerRequestId(request_id),
-            kind: ais_agent_core::runtime::SignerDecisionKind::Submitted,
-            decision_at_ms: None,
+            kind: ais_agent_core::runtime::SignerResolutionKind::Submitted,
+            resolved_at_ms: None,
             tx_hash: Some(format!("{tx_hash:#x}")),
+            signed_payload: None,
         });
 
     let signer = StepOnce::apply(&mut runtime).await;
@@ -820,6 +953,280 @@ async fn native_transfer_launch_spec_can_complete_via_signer_submission_and_live
 }
 
 #[tokio::test]
+async fn native_transfer_launch_spec_signed_payload_can_broadcast_and_complete_via_live_runtime() {
+    let tx_hash = b256!("2121212121212121212121212121212121212121212121212121212121212121");
+    let mission = sample_native_transfer_mission();
+    let mut checkpoint = checkpoint_with_nodes(Vec::new());
+    seed_launch_spec_checkpoint(
+        &mut checkpoint,
+        &RuntimeExecutionWiring {
+            evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
+            solana_rpc_url: None,
+        },
+        &sample_native_transfer_launch_spec(),
+    )
+    .expect("native transfer should seed");
+    let mut runtime = ActiveRun::new(mission, checkpoint);
+
+    let asserter = Asserter::new();
+    let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
+    asserter.push_success(&U256::from(90u64));
+    asserter.push_success(&Bytes::default());
+    asserter.push_success(&tx_hash);
+    asserter.push_success(&sample_receipt(tx_hash, 100));
+    asserter.push_success(&104u64);
+    asserter.push_success(&U256::from(120u64));
+    asserter.push_success(&U256::from(120u64));
+
+    let observe = apply_live_evm_observe_with_provider(&mut runtime, &provider)
+        .await
+        .expect("observe transition");
+    assert_eq!(
+        observe.node_id.as_deref(),
+        Some("artifact.stage.transfer.pre_observe.state.pre.recipient_balance")
+    );
+
+    let simulate = apply_live_evm_simulate_with_provider(&mut runtime, &provider)
+        .await
+        .expect("simulate transition");
+    assert_eq!(
+        simulate.node_id.as_deref(),
+        Some("artifact.stage.transfer.simulate")
+    );
+
+    let govern = StepOnce::apply(&mut runtime).await;
+    assert_eq!(
+        govern.applied_transition.as_ref().map(|t| t.kind),
+        Some(StepTransitionKind::Govern)
+    );
+    assert_eq!(
+        runtime.checkpoint.lifecycle.status,
+        RunStatus::AwaitingSigner
+    );
+
+    let request_id = runtime
+        .checkpoint
+        .pending_requests
+        .pending_signer_request_id
+        .clone()
+        .expect("pending signer request");
+    runtime
+        .pending_signer_state
+        .as_mut()
+        .expect("pending signer")
+        .apply_resolution(ais_agent_core::runtime::SignerResolution {
+            request_id: ais_agent_control::ids::SignerRequestId(request_id),
+            kind: ais_agent_core::runtime::SignerResolutionKind::Signed,
+            resolved_at_ms: None,
+            tx_hash: None,
+            signed_payload: Some(json!({
+                "kind": "evm_signed_transaction",
+                "raw_tx": "0x0102",
+            })),
+        });
+
+    let signer = StepOnce::apply(&mut runtime).await;
+    assert_eq!(
+        signer.applied_transition.as_ref().map(|t| t.kind),
+        Some(StepTransitionKind::Signer)
+    );
+    assert_eq!(runtime.checkpoint.lifecycle.status, RunStatus::Running);
+    assert_eq!(runtime.checkpoint.lifecycle.phase, RunPhase::Broadcasting);
+    assert_eq!(
+        runtime
+            .pending_signer_state
+            .as_ref()
+            .map(|state| state.status.clone()),
+        Some(SignerRequestStatus::Signed)
+    );
+    assert_eq!(
+        runtime.checkpoint.pending_requests.pending_confirmation_id,
+        None
+    );
+
+    let broadcast = apply_live_evm_broadcast_with_provider(&mut runtime, &provider)
+        .await
+        .expect("broadcast transition");
+    assert_eq!(
+        broadcast.node_id.as_deref(),
+        Some("artifact.stage.transfer.actuate")
+    );
+    assert_eq!(
+        runtime.checkpoint.lifecycle.status,
+        ais_agent_core::runtime::RunStatus::AwaitingConfirmation
+    );
+    assert_eq!(
+        runtime
+            .checkpoint
+            .pending_requests
+            .pending_confirmation_id
+            .as_deref(),
+        Some("0x2121212121212121212121212121212121212121212121212121212121212121")
+    );
+
+    let verify = apply_live_evm_verify_with_provider(&mut runtime, &provider)
+        .await
+        .expect("verify transition");
+    assert_eq!(
+        verify.node_id.as_deref(),
+        Some("artifact.stage.transfer.verify")
+    );
+
+    let post_observe = apply_live_evm_observe_with_provider(&mut runtime, &provider)
+        .await
+        .expect("post observe transition");
+    assert_eq!(
+        post_observe.node_id.as_deref(),
+        Some("artifact.stage.transfer.post_observe.state.post.recipient_balance")
+    );
+
+    let export = StepOnce::apply(&mut runtime).await;
+    assert_eq!(
+        export.applied_transition.as_ref().map(|t| t.kind),
+        Some(StepTransitionKind::Artifact)
+    );
+
+    let complete = StepOnce::apply(&mut runtime).await;
+    assert_eq!(
+        complete.applied_transition.as_ref().map(|t| t.kind),
+        Some(StepTransitionKind::Complete)
+    );
+    assert_eq!(runtime.checkpoint.lifecycle.status, RunStatus::Completed);
+}
+
+#[tokio::test]
+async fn execution_artifact_uniswap_v3_lp_mint_can_complete_via_signed_payload_and_live_broadcast_verify(
+) {
+    let tx_hash = b256!("1212121212121212121212121212121212121212121212121212121212121212");
+    let wiring = RuntimeExecutionWiring {
+        evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
+        solana_rpc_url: None,
+    };
+    let mut checkpoint = checkpoint_with_nodes(Vec::new());
+    seed_launch_spec_checkpoint(
+        &mut checkpoint,
+        &wiring,
+        &LaunchSpecSubmission::ExecutionArtifact(sample_uniswap_v3_lp_execution_artifact()),
+    )
+    .expect("generic uniswap lp artifact should seed");
+    let mut runtime = ActiveRun::new(sample_uniswap_lp_artifact_mission(1), checkpoint);
+
+    let asserter = Asserter::new();
+    let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
+    asserter.push_success(&encode_u256_return(0));
+    asserter.push_success(&Bytes::default());
+    asserter.push_success(&tx_hash);
+    asserter.push_success(&sample_receipt(tx_hash, 100));
+    asserter.push_success(&104u64);
+    asserter.push_success(&encode_u256_return(1));
+
+    let observe = apply_live_evm_observe_with_provider(&mut runtime, &provider)
+        .await
+        .expect("observe lp position count");
+    assert_eq!(
+        observe.node_id.as_deref(),
+        Some("artifact.stage.mint.pre_observe.state.pre.uniswap_v3_lp.position_count")
+    );
+
+    let simulate = apply_live_evm_simulate_with_provider(&mut runtime, &provider)
+        .await
+        .expect("simulate lp mint");
+    assert_eq!(
+        simulate.node_id.as_deref(),
+        Some("artifact.stage.mint.simulate")
+    );
+
+    let govern = StepOnce::apply(&mut runtime).await;
+    assert_eq!(
+        govern.applied_transition.as_ref().map(|t| t.kind),
+        Some(StepTransitionKind::Govern)
+    );
+    assert_eq!(
+        runtime.checkpoint.lifecycle.status,
+        RunStatus::AwaitingSigner
+    );
+
+    let request_id = runtime
+        .checkpoint
+        .pending_requests
+        .pending_signer_request_id
+        .clone()
+        .expect("lp signer request");
+    runtime
+        .pending_signer_state
+        .as_mut()
+        .expect("lp pending signer")
+        .apply_resolution(ais_agent_core::runtime::SignerResolution {
+            request_id: ais_agent_control::ids::SignerRequestId(request_id),
+            kind: ais_agent_core::runtime::SignerResolutionKind::Signed,
+            resolved_at_ms: None,
+            tx_hash: None,
+            signed_payload: Some(json!({
+                "kind": "evm_signed_transaction",
+                "raw_tx": "0x0102",
+            })),
+        });
+
+    let signer = StepOnce::apply(&mut runtime).await;
+    assert_eq!(
+        signer.applied_transition.as_ref().map(|t| t.kind),
+        Some(StepTransitionKind::Signer)
+    );
+
+    let broadcast = apply_live_evm_broadcast_with_provider(&mut runtime, &provider)
+        .await
+        .expect("broadcast lp mint");
+    assert_eq!(
+        broadcast.node_id.as_deref(),
+        Some("artifact.stage.mint.actuate")
+    );
+    assert_eq!(
+        runtime.checkpoint.lifecycle.status,
+        RunStatus::AwaitingConfirmation
+    );
+    assert!(runtime.checkpoint.actuation_records.iter().any(|record| {
+        matches!(record.kind, ActuationKind::BroadcastSubmitted)
+            && record.tx_hash.as_deref()
+                == Some("0x1212121212121212121212121212121212121212121212121212121212121212")
+    }));
+
+    let verify = apply_live_evm_verify_with_provider(&mut runtime, &provider)
+        .await
+        .expect("verify lp mint");
+    assert_eq!(
+        verify.node_id.as_deref(),
+        Some("artifact.stage.mint.verify")
+    );
+
+    let post_observe = apply_live_evm_observe_with_provider(&mut runtime, &provider)
+        .await
+        .expect("observe post lp position count");
+    assert_eq!(
+        post_observe.node_id.as_deref(),
+        Some("artifact.stage.mint.post_observe.state.post.uniswap_v3_lp.position_count")
+    );
+
+    let export = StepOnce::apply(&mut runtime).await;
+    assert_eq!(
+        export
+            .applied_transition
+            .as_ref()
+            .map(|transition| transition.kind),
+        Some(StepTransitionKind::Artifact)
+    );
+
+    let complete = StepOnce::apply(&mut runtime).await;
+    assert_eq!(
+        complete
+            .applied_transition
+            .as_ref()
+            .map(|transition| transition.kind),
+        Some(StepTransitionKind::Complete)
+    );
+    assert_eq!(runtime.checkpoint.lifecycle.status, RunStatus::Completed);
+}
+
+#[tokio::test]
 async fn query_first_native_transfer_artifact_can_branch_into_write_path() {
     let tx_hash = b256!("1212121212121212121212121212121212121212121212121212121212121212");
     let mission = sample_native_transfer_mission();
@@ -831,7 +1238,6 @@ async fn query_first_native_transfer_artifact_can_branch_into_write_path() {
         &RuntimeExecutionWiring {
             evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
             solana_rpc_url: None,
-            allowed_protocol_packages: vec!["owliabot.transfer".to_owned()],
         },
         &launch_spec,
     )
@@ -931,11 +1337,12 @@ async fn query_first_native_transfer_artifact_can_branch_into_write_path() {
         .pending_signer_state
         .as_mut()
         .expect("pending signer")
-        .apply_decision(ais_agent_core::runtime::SignerDecision {
+        .apply_resolution(ais_agent_core::runtime::SignerResolution {
             request_id: ais_agent_control::ids::SignerRequestId(request_id),
-            kind: ais_agent_core::runtime::SignerDecisionKind::Submitted,
-            decision_at_ms: None,
+            kind: ais_agent_core::runtime::SignerResolutionKind::Submitted,
+            resolved_at_ms: None,
             tx_hash: Some(format!("{tx_hash:#x}")),
+            signed_payload: None,
         });
 
     let signer = StepOnce::apply(&mut runtime).await;
@@ -984,7 +1391,6 @@ async fn native_transfer_launch_spec_can_restart_from_signer_submitted_side_effe
         &RuntimeExecutionWiring {
             evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
             solana_rpc_url: None,
-            allowed_protocol_packages: vec!["owliabot.transfer".to_owned()],
         },
         &sample_native_transfer_launch_spec(),
     )
@@ -1014,11 +1420,12 @@ async fn native_transfer_launch_spec_can_restart_from_signer_submitted_side_effe
         .pending_signer_state
         .as_mut()
         .expect("pending signer")
-        .apply_decision(ais_agent_core::runtime::SignerDecision {
+        .apply_resolution(ais_agent_core::runtime::SignerResolution {
             request_id: ais_agent_control::ids::SignerRequestId(request_id),
-            kind: ais_agent_core::runtime::SignerDecisionKind::Submitted,
-            decision_at_ms: None,
+            kind: ais_agent_core::runtime::SignerResolutionKind::Submitted,
+            resolved_at_ms: None,
             tx_hash: Some(format!("{tx_hash:#x}")),
+            signed_payload: None,
         });
     StepOnce::apply(&mut runtime).await;
 
@@ -1034,7 +1441,7 @@ async fn native_transfer_launch_spec_can_restart_from_signer_submitted_side_effe
         &runtime.run_id,
         &mission_repo,
         &checkpoint_repo,
-        &InMemorySignerStateArchive::default(),
+        &InMemorySignerStateStore::default(),
     )
     .expect("restore runtime after signer submission");
 
@@ -1087,7 +1494,6 @@ async fn erc20_transfer_launch_spec_fail_closes_on_undecodable_token_observe() {
         &RuntimeExecutionWiring {
             evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
             solana_rpc_url: None,
-            allowed_protocol_packages: vec!["owliabot.transfer".to_owned()],
         },
         &sample_erc20_transfer_launch_spec(),
     )
@@ -1131,7 +1537,6 @@ async fn erc20_transfer_launch_spec_can_complete_via_signer_submission_and_live_
         &RuntimeExecutionWiring {
             evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
             solana_rpc_url: None,
-            allowed_protocol_packages: vec!["owliabot.transfer".to_owned()],
         },
         &sample_erc20_transfer_launch_spec(),
     )
@@ -1183,11 +1588,12 @@ async fn erc20_transfer_launch_spec_can_complete_via_signer_submission_and_live_
         .pending_signer_state
         .as_mut()
         .expect("pending signer")
-        .apply_decision(ais_agent_core::runtime::SignerDecision {
+        .apply_resolution(ais_agent_core::runtime::SignerResolution {
             request_id: ais_agent_control::ids::SignerRequestId(request_id),
-            kind: ais_agent_core::runtime::SignerDecisionKind::Submitted,
-            decision_at_ms: None,
+            kind: ais_agent_core::runtime::SignerResolutionKind::Submitted,
+            resolved_at_ms: None,
             tx_hash: Some(format!("{tx_hash:#x}")),
+            signed_payload: None,
         });
 
     let signer = StepOnce::apply(&mut runtime).await;
@@ -1262,6 +1668,148 @@ async fn erc20_transfer_launch_spec_can_complete_via_signer_submission_and_live_
 }
 
 #[tokio::test]
+async fn erc20_transfer_launch_spec_signed_payload_can_broadcast_and_complete_via_live_runtime() {
+    let tx_hash = b256!("4343434343434343434343434343434343434343434343434343434343434343");
+    let mission = sample_erc20_transfer_mission();
+    let mut checkpoint = checkpoint_with_nodes(Vec::new());
+    seed_launch_spec_checkpoint(
+        &mut checkpoint,
+        &RuntimeExecutionWiring {
+            evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
+            solana_rpc_url: None,
+        },
+        &sample_erc20_transfer_launch_spec(),
+    )
+    .expect("erc20 transfer should seed");
+    let mut runtime = ActiveRun::new(mission, checkpoint);
+
+    let asserter = Asserter::new();
+    let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
+    asserter.push_success(&encode_u256_return(90));
+    asserter.push_success(&Bytes::default());
+    asserter.push_success(&tx_hash);
+    asserter.push_success(&sample_receipt(tx_hash, 100));
+    asserter.push_success(&104u64);
+    asserter.push_success(&encode_u256_return(120));
+    asserter.push_success(&encode_u256_return(120));
+
+    let observe = apply_live_evm_observe_with_provider(&mut runtime, &provider)
+        .await
+        .expect("observe transition");
+    assert_eq!(
+        observe.node_id.as_deref(),
+        Some("artifact.stage.transfer.pre_observe.state.pre.recipient_token_balance")
+    );
+
+    let simulate = apply_live_evm_simulate_with_provider(&mut runtime, &provider)
+        .await
+        .expect("simulate transition");
+    assert_eq!(
+        simulate.node_id.as_deref(),
+        Some("artifact.stage.transfer.simulate")
+    );
+
+    let govern = StepOnce::apply(&mut runtime).await;
+    assert_eq!(
+        govern.applied_transition.as_ref().map(|t| t.kind),
+        Some(StepTransitionKind::Govern)
+    );
+    assert_eq!(
+        runtime.checkpoint.lifecycle.status,
+        RunStatus::AwaitingSigner
+    );
+
+    let request_id = runtime
+        .checkpoint
+        .pending_requests
+        .pending_signer_request_id
+        .clone()
+        .expect("pending signer request");
+    runtime
+        .pending_signer_state
+        .as_mut()
+        .expect("pending signer")
+        .apply_resolution(ais_agent_core::runtime::SignerResolution {
+            request_id: ais_agent_control::ids::SignerRequestId(request_id),
+            kind: ais_agent_core::runtime::SignerResolutionKind::Signed,
+            resolved_at_ms: None,
+            tx_hash: None,
+            signed_payload: Some(json!({
+                "kind": "evm_signed_transaction",
+                "raw_tx": "0x0102",
+            })),
+        });
+
+    let signer = StepOnce::apply(&mut runtime).await;
+    assert_eq!(
+        signer.applied_transition.as_ref().map(|t| t.kind),
+        Some(StepTransitionKind::Signer)
+    );
+    assert_eq!(runtime.checkpoint.lifecycle.status, RunStatus::Running);
+    assert_eq!(runtime.checkpoint.lifecycle.phase, RunPhase::Broadcasting);
+    assert_eq!(
+        runtime
+            .pending_signer_state
+            .as_ref()
+            .map(|state| state.status.clone()),
+        Some(SignerRequestStatus::Signed)
+    );
+    assert_eq!(
+        runtime.checkpoint.pending_requests.pending_confirmation_id,
+        None
+    );
+
+    let broadcast = apply_live_evm_broadcast_with_provider(&mut runtime, &provider)
+        .await
+        .expect("broadcast transition");
+    assert_eq!(
+        broadcast.node_id.as_deref(),
+        Some("artifact.stage.transfer.actuate")
+    );
+    assert_eq!(
+        runtime.checkpoint.lifecycle.status,
+        ais_agent_core::runtime::RunStatus::AwaitingConfirmation
+    );
+    assert_eq!(
+        runtime
+            .checkpoint
+            .pending_requests
+            .pending_confirmation_id
+            .as_deref(),
+        Some("0x4343434343434343434343434343434343434343434343434343434343434343")
+    );
+
+    let verify = apply_live_evm_verify_with_provider(&mut runtime, &provider)
+        .await
+        .expect("verify transition");
+    assert_eq!(
+        verify.node_id.as_deref(),
+        Some("artifact.stage.transfer.verify")
+    );
+
+    let post_observe = apply_live_evm_observe_with_provider(&mut runtime, &provider)
+        .await
+        .expect("post observe transition");
+    assert_eq!(
+        post_observe.node_id.as_deref(),
+        Some("artifact.stage.transfer.post_observe.state.post.recipient_token_balance")
+    );
+
+    let export = StepOnce::apply(&mut runtime).await;
+    assert_eq!(
+        export.applied_transition.as_ref().map(|t| t.kind),
+        Some(StepTransitionKind::Artifact)
+    );
+
+    let complete = StepOnce::apply(&mut runtime).await;
+    assert_eq!(
+        complete.applied_transition.as_ref().map(|t| t.kind),
+        Some(StepTransitionKind::Complete)
+    );
+    assert_eq!(runtime.checkpoint.lifecycle.status, RunStatus::Completed);
+}
+
+#[tokio::test]
 async fn erc20_transfer_launch_spec_can_restart_from_signer_submitted_side_effect_cut() {
     let tx_hash = b256!("4444444444444444444444444444444444444444444444444444444444444444");
     let mission = sample_erc20_transfer_mission();
@@ -1271,7 +1819,6 @@ async fn erc20_transfer_launch_spec_can_restart_from_signer_submitted_side_effec
         &RuntimeExecutionWiring {
             evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
             solana_rpc_url: None,
-            allowed_protocol_packages: vec!["owliabot.transfer".to_owned()],
         },
         &sample_erc20_transfer_launch_spec(),
     )
@@ -1301,11 +1848,12 @@ async fn erc20_transfer_launch_spec_can_restart_from_signer_submitted_side_effec
         .pending_signer_state
         .as_mut()
         .expect("pending signer")
-        .apply_decision(ais_agent_core::runtime::SignerDecision {
+        .apply_resolution(ais_agent_core::runtime::SignerResolution {
             request_id: ais_agent_control::ids::SignerRequestId(request_id),
-            kind: ais_agent_core::runtime::SignerDecisionKind::Submitted,
-            decision_at_ms: None,
+            kind: ais_agent_core::runtime::SignerResolutionKind::Submitted,
+            resolved_at_ms: None,
             tx_hash: Some(format!("{tx_hash:#x}")),
+            signed_payload: None,
         });
     StepOnce::apply(&mut runtime).await;
 
@@ -1321,7 +1869,7 @@ async fn erc20_transfer_launch_spec_can_restart_from_signer_submitted_side_effec
         &runtime.run_id,
         &mission_repo,
         &checkpoint_repo,
-        &InMemorySignerStateArchive::default(),
+        &InMemorySignerStateStore::default(),
     )
     .expect("restore runtime after signer submission");
 
@@ -1371,7 +1919,6 @@ async fn execution_artifact_uniswap_exact_in_can_complete_via_generic_branching_
     let wiring = RuntimeExecutionWiring {
         evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
         solana_rpc_url: None,
-        allowed_protocol_packages: vec!["owliabot.uniswap_v3".to_owned()],
     };
     let mut checkpoint = checkpoint_with_nodes(Vec::new());
     seed_launch_spec_checkpoint(
@@ -1425,17 +1972,147 @@ async fn execution_artifact_uniswap_exact_in_can_complete_via_generic_branching_
         .pending_signer_state
         .as_mut()
         .expect("swap pending signer")
-        .apply_decision(ais_agent_core::runtime::SignerDecision {
+        .apply_resolution(ais_agent_core::runtime::SignerResolution {
             request_id: ais_agent_control::ids::SignerRequestId(request_id),
-            kind: ais_agent_core::runtime::SignerDecisionKind::Submitted,
-            decision_at_ms: None,
+            kind: ais_agent_core::runtime::SignerResolutionKind::Submitted,
+            resolved_at_ms: None,
             tx_hash: Some(format!("{tx_hash:#x}")),
+            signed_payload: None,
         });
 
     let signer = StepOnce::apply(&mut runtime).await;
     assert_eq!(
         signer.applied_transition.as_ref().map(|t| t.kind),
         Some(StepTransitionKind::Signer)
+    );
+
+    let verify = apply_live_evm_verify_with_provider(&mut runtime, &provider)
+        .await
+        .expect("verify swap");
+    assert_eq!(
+        verify.node_id.as_deref(),
+        Some("artifact.stage.swap.verify")
+    );
+
+    let follow_up = step_until_status(&mut runtime, RunStatus::Completed, 8).await;
+    assert_eq!(follow_up.last(), Some(&StepTransitionKind::Complete));
+    assert!(follow_up.contains(&StepTransitionKind::Artifact));
+    assert_eq!(runtime.checkpoint.lifecycle.status, RunStatus::Completed);
+}
+
+#[tokio::test]
+async fn execution_artifact_uniswap_exact_in_signed_payload_can_broadcast_and_complete_via_live_runtime(
+) {
+    let tx_hash = b256!("9494949494949494949494949494949494949494949494949494949494949494");
+    let wiring = RuntimeExecutionWiring {
+        evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
+        solana_rpc_url: None,
+    };
+    let mut checkpoint = checkpoint_with_nodes(Vec::new());
+    seed_launch_spec_checkpoint(
+        &mut checkpoint,
+        &wiring,
+        &LaunchSpecSubmission::ExecutionArtifact(sample_uniswap_exact_in_execution_artifact(
+            false, false,
+        )),
+    )
+    .expect("generic uniswap artifact should seed");
+    let mut runtime = ActiveRun::new(sample_uniswap_artifact_mission(1), checkpoint);
+
+    let quote_branch = StepOnce::apply(&mut runtime).await;
+    assert_eq!(
+        quote_branch.applied_transition.as_ref().map(|t| t.kind),
+        Some(StepTransitionKind::Artifact)
+    );
+    let approval_branch = StepOnce::apply(&mut runtime).await;
+    assert_eq!(
+        approval_branch.applied_transition.as_ref().map(|t| t.kind),
+        Some(StepTransitionKind::Artifact)
+    );
+
+    let asserter = Asserter::new();
+    let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
+    asserter.push_success(&Bytes::default());
+    asserter.push_success(&tx_hash);
+    asserter.push_success(&sample_receipt(tx_hash, 100));
+    asserter.push_success(&104u64);
+
+    let simulate = apply_live_evm_simulate_with_provider(&mut runtime, &provider)
+        .await
+        .expect("simulate swap");
+    assert_eq!(
+        simulate.node_id.as_deref(),
+        Some("artifact.stage.swap.simulate")
+    );
+
+    let govern = StepOnce::apply(&mut runtime).await;
+    assert_eq!(
+        govern.applied_transition.as_ref().map(|t| t.kind),
+        Some(StepTransitionKind::Govern)
+    );
+    assert_eq!(
+        runtime.checkpoint.lifecycle.status,
+        RunStatus::AwaitingSigner
+    );
+
+    let request_id = runtime
+        .checkpoint
+        .pending_requests
+        .pending_signer_request_id
+        .clone()
+        .expect("swap signer request");
+    runtime
+        .pending_signer_state
+        .as_mut()
+        .expect("swap pending signer")
+        .apply_resolution(ais_agent_core::runtime::SignerResolution {
+            request_id: ais_agent_control::ids::SignerRequestId(request_id),
+            kind: ais_agent_core::runtime::SignerResolutionKind::Signed,
+            resolved_at_ms: None,
+            tx_hash: None,
+            signed_payload: Some(json!({
+                "kind": "evm_signed_transaction",
+                "raw_tx": "0x0102",
+            })),
+        });
+
+    let signer = StepOnce::apply(&mut runtime).await;
+    assert_eq!(
+        signer.applied_transition.as_ref().map(|t| t.kind),
+        Some(StepTransitionKind::Signer)
+    );
+    assert_eq!(runtime.checkpoint.lifecycle.status, RunStatus::Running);
+    assert_eq!(runtime.checkpoint.lifecycle.phase, RunPhase::Broadcasting);
+    assert_eq!(
+        runtime
+            .pending_signer_state
+            .as_ref()
+            .map(|state| state.status.clone()),
+        Some(SignerRequestStatus::Signed)
+    );
+    assert_eq!(
+        runtime.checkpoint.pending_requests.pending_confirmation_id,
+        None
+    );
+
+    let broadcast = apply_live_evm_broadcast_with_provider(&mut runtime, &provider)
+        .await
+        .expect("broadcast swap");
+    assert_eq!(
+        broadcast.node_id.as_deref(),
+        Some("artifact.stage.swap.actuate")
+    );
+    assert_eq!(
+        runtime.checkpoint.lifecycle.status,
+        RunStatus::AwaitingConfirmation
+    );
+    assert_eq!(
+        runtime
+            .checkpoint
+            .pending_requests
+            .pending_confirmation_id
+            .as_deref(),
+        Some("0x9494949494949494949494949494949494949494949494949494949494949494")
     );
 
     let verify = apply_live_evm_verify_with_provider(&mut runtime, &provider)
@@ -1461,7 +2138,6 @@ async fn execution_artifact_uniswap_exact_in_with_approval_branch_can_complete_v
     let wiring = RuntimeExecutionWiring {
         evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
         solana_rpc_url: None,
-        allowed_protocol_packages: vec!["owliabot.uniswap_v3".to_owned()],
     };
     let mut checkpoint = checkpoint_with_nodes(Vec::new());
     seed_launch_spec_checkpoint(
@@ -1499,11 +2175,12 @@ async fn execution_artifact_uniswap_exact_in_with_approval_branch_can_complete_v
         .pending_signer_state
         .as_mut()
         .expect("approval pending signer")
-        .apply_decision(ais_agent_core::runtime::SignerDecision {
+        .apply_resolution(ais_agent_core::runtime::SignerResolution {
             request_id: ais_agent_control::ids::SignerRequestId(approval_request_id),
-            kind: ais_agent_core::runtime::SignerDecisionKind::Submitted,
-            decision_at_ms: None,
+            kind: ais_agent_core::runtime::SignerResolutionKind::Submitted,
+            resolved_at_ms: None,
             tx_hash: Some(format!("{approval_tx_hash:#x}")),
+            signed_payload: None,
         });
     StepOnce::apply(&mut runtime).await;
 
@@ -1534,11 +2211,12 @@ async fn execution_artifact_uniswap_exact_in_with_approval_branch_can_complete_v
         .pending_signer_state
         .as_mut()
         .expect("swap pending signer")
-        .apply_decision(ais_agent_core::runtime::SignerDecision {
+        .apply_resolution(ais_agent_core::runtime::SignerResolution {
             request_id: ais_agent_control::ids::SignerRequestId(swap_request_id),
-            kind: ais_agent_core::runtime::SignerDecisionKind::Submitted,
-            decision_at_ms: None,
+            kind: ais_agent_core::runtime::SignerResolutionKind::Submitted,
+            resolved_at_ms: None,
             tx_hash: Some(format!("{swap_tx_hash:#x}")),
+            signed_payload: None,
         });
     StepOnce::apply(&mut runtime).await;
 
@@ -1560,7 +2238,6 @@ async fn execution_artifact_uniswap_exact_in_stale_quote_fails_closed_on_branch_
     let wiring = RuntimeExecutionWiring {
         evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
         solana_rpc_url: None,
-        allowed_protocol_packages: vec!["owliabot.uniswap_v3".to_owned()],
     };
     let mut checkpoint = checkpoint_with_nodes(Vec::new());
     seed_launch_spec_checkpoint(
@@ -1602,7 +2279,6 @@ async fn execution_artifact_uniswap_trading_api_swap_can_complete_without_protoc
     let wiring = RuntimeExecutionWiring {
         evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
         solana_rpc_url: None,
-        allowed_protocol_packages: vec!["owliabot.uniswap_v3".to_owned()],
     };
     let artifact = sample_uniswap_trading_api_execution_artifact();
     let expected_swap_calldata = artifact
@@ -1677,11 +2353,12 @@ async fn execution_artifact_uniswap_trading_api_swap_can_complete_without_protoc
         .pending_signer_state
         .as_mut()
         .expect("swap pending signer")
-        .apply_decision(ais_agent_core::runtime::SignerDecision {
+        .apply_resolution(ais_agent_core::runtime::SignerResolution {
             request_id: ais_agent_control::ids::SignerRequestId(request_id),
-            kind: ais_agent_core::runtime::SignerDecisionKind::Submitted,
-            decision_at_ms: None,
+            kind: ais_agent_core::runtime::SignerResolutionKind::Submitted,
+            resolved_at_ms: None,
             tx_hash: Some(format!("{tx_hash:#x}")),
+            signed_payload: None,
         });
     StepOnce::apply(&mut runtime).await;
     apply_live_evm_verify_with_provider(&mut runtime, &provider)
@@ -1699,10 +2376,6 @@ async fn execution_artifact_uniswap_swap_can_continue_into_aave_supply_from_expo
     let wiring = RuntimeExecutionWiring {
         evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
         solana_rpc_url: None,
-        allowed_protocol_packages: vec![
-            "owliabot.uniswap_v3".to_owned(),
-            "owliabot.aave_v3".to_owned(),
-        ],
     };
 
     let mut checkpoint = checkpoint_with_nodes(Vec::new());
@@ -1758,11 +2431,12 @@ async fn execution_artifact_uniswap_swap_can_continue_into_aave_supply_from_expo
         .pending_signer_state
         .as_mut()
         .expect("swap pending signer")
-        .apply_decision(ais_agent_core::runtime::SignerDecision {
+        .apply_resolution(ais_agent_core::runtime::SignerResolution {
             request_id: ais_agent_control::ids::SignerRequestId(signer_request_id),
-            kind: ais_agent_core::runtime::SignerDecisionKind::Submitted,
-            decision_at_ms: None,
+            kind: ais_agent_core::runtime::SignerResolutionKind::Submitted,
+            resolved_at_ms: None,
             tx_hash: Some(format!("{swap_tx_hash:#x}")),
+            signed_payload: None,
         });
 
     let signer = StepOnce::apply(&mut runtime).await;
@@ -1882,47 +2556,42 @@ async fn execution_artifact_uniswap_swap_can_continue_into_aave_supply_from_expo
         &token_out_address,
         &recipient_address,
     );
-    let expected_supply_calldata =
-        aave_supply_calldata(&token_out_address, &received_atomic, &recipient_address);
     let mut resumed = submit_continuation_artifact(runtime, continuation_artifact, &wiring).await;
 
     match &resumed
         .checkpoint
         .action_graph
         .nodes
-        .get("artifact.stage.supply.simulate")
-        .expect("supply simulate node")
+        .get("artifact.stage.supply.actuate")
+        .expect("supply actuate node")
         .payload
     {
-        ActionPayload::Simulate(action) => {
-            let SimulateLiveBinding::Evm(live) = action.live.as_ref().expect("evm simulate live")
+        ActionPayload::Actuate(action) => {
+            let ActuateLiveBinding::Evm(_live) = action.live.as_ref().expect("evm actuate live")
             else {
-                panic!("expected evm simulate binding");
+                panic!("expected evm actuate binding");
             };
-            assert_eq!(live.request.data, expected_supply_calldata);
+            assert_eq!(action.chain.as_deref(), Some("8453"));
         }
-        other => panic!("unexpected supply simulate payload: {other:?}"),
+        other => panic!("unexpected supply actuate payload: {other:?}"),
     }
+    assert_eq!(
+        resumed.checkpoint.lifecycle.status,
+        ais_agent_core::runtime::RunStatus::AwaitingSigner
+    );
+    assert_eq!(
+        resumed
+            .checkpoint
+            .pending_requests
+            .pending_signer_request_id
+            .as_deref(),
+        Some("run-1:signer:2")
+    );
 
     let supply_asserter = Asserter::new();
     let supply_provider = ProviderBuilder::new().connect_mocked_client(supply_asserter.clone());
-    supply_asserter.push_success(&Bytes::default());
     supply_asserter.push_success(&sample_receipt(supply_tx_hash, 101));
     supply_asserter.push_success(&105u64);
-
-    let supply_simulate = apply_live_evm_simulate_with_provider(&mut resumed, &supply_provider)
-        .await
-        .expect("supply simulate transition");
-    assert_eq!(
-        supply_simulate.node_id.as_deref(),
-        Some("artifact.stage.supply.simulate")
-    );
-
-    let supply_govern = StepOnce::apply(&mut resumed).await;
-    assert_eq!(
-        supply_govern.applied_transition.as_ref().map(|t| t.kind),
-        Some(StepTransitionKind::Govern)
-    );
 
     let supply_signer_request_id = resumed
         .checkpoint
@@ -1934,11 +2603,12 @@ async fn execution_artifact_uniswap_swap_can_continue_into_aave_supply_from_expo
         .pending_signer_state
         .as_mut()
         .expect("supply pending signer")
-        .apply_decision(ais_agent_core::runtime::SignerDecision {
+        .apply_resolution(ais_agent_core::runtime::SignerResolution {
             request_id: ais_agent_control::ids::SignerRequestId(supply_signer_request_id),
-            kind: ais_agent_core::runtime::SignerDecisionKind::Submitted,
-            decision_at_ms: None,
+            kind: ais_agent_core::runtime::SignerResolutionKind::Submitted,
+            resolved_at_ms: None,
             tx_hash: Some(format!("{supply_tx_hash:#x}")),
+            signed_payload: None,
         });
 
     let supply_signer = StepOnce::apply(&mut resumed).await;
@@ -1989,7 +2659,6 @@ async fn execution_artifact_uniswap_v3_lp_mint_can_complete_via_generic_runtime(
     let wiring = RuntimeExecutionWiring {
         evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
         solana_rpc_url: None,
-        allowed_protocol_packages: vec!["owliabot.uniswap_v3".to_owned()],
     };
     let mut checkpoint = checkpoint_with_nodes(Vec::new());
     seed_launch_spec_checkpoint(
@@ -2040,11 +2709,12 @@ async fn execution_artifact_uniswap_v3_lp_mint_can_complete_via_generic_runtime(
         .pending_signer_state
         .as_mut()
         .expect("lp pending signer")
-        .apply_decision(ais_agent_core::runtime::SignerDecision {
+        .apply_resolution(ais_agent_core::runtime::SignerResolution {
             request_id: ais_agent_control::ids::SignerRequestId(request_id),
-            kind: ais_agent_core::runtime::SignerDecisionKind::Submitted,
-            decision_at_ms: None,
+            kind: ais_agent_core::runtime::SignerResolutionKind::Submitted,
+            resolved_at_ms: None,
             tx_hash: Some(format!("{tx_hash:#x}")),
+            signed_payload: None,
         });
 
     let signer = StepOnce::apply(&mut runtime).await;
@@ -2128,7 +2798,6 @@ async fn uniswap_v3_lp_launch_spec_mint_can_complete_via_owliabot_boundary_signe
         &RuntimeExecutionWiring {
             evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
             solana_rpc_url: None,
-            allowed_protocol_packages: vec!["owliabot.uniswap_v3".to_owned()],
         },
         &sample_uniswap_v3_lp_launch_spec(),
     )
@@ -2175,11 +2844,12 @@ async fn uniswap_v3_lp_launch_spec_mint_can_complete_via_owliabot_boundary_signe
         .pending_signer_state
         .as_mut()
         .expect("pending signer")
-        .apply_decision(ais_agent_core::runtime::SignerDecision {
+        .apply_resolution(ais_agent_core::runtime::SignerResolution {
             request_id: ais_agent_control::ids::SignerRequestId(request_id),
-            kind: ais_agent_core::runtime::SignerDecisionKind::Submitted,
-            decision_at_ms: None,
+            kind: ais_agent_core::runtime::SignerResolutionKind::Submitted,
+            resolved_at_ms: None,
             tx_hash: Some(format!("{tx_hash:#x}")),
+            signed_payload: None,
         });
 
     let signer = StepOnce::apply(&mut runtime).await;
@@ -2254,7 +2924,6 @@ async fn uniswap_v3_lp_launch_spec_mint_can_restart_from_owliabot_boundary_signe
         &RuntimeExecutionWiring {
             evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
             solana_rpc_url: None,
-            allowed_protocol_packages: vec!["owliabot.uniswap_v3".to_owned()],
         },
         &sample_uniswap_v3_lp_launch_spec(),
     )
@@ -2284,11 +2953,12 @@ async fn uniswap_v3_lp_launch_spec_mint_can_restart_from_owliabot_boundary_signe
         .pending_signer_state
         .as_mut()
         .expect("pending signer")
-        .apply_decision(ais_agent_core::runtime::SignerDecision {
+        .apply_resolution(ais_agent_core::runtime::SignerResolution {
             request_id: ais_agent_control::ids::SignerRequestId(request_id),
-            kind: ais_agent_core::runtime::SignerDecisionKind::Submitted,
-            decision_at_ms: None,
+            kind: ais_agent_core::runtime::SignerResolutionKind::Submitted,
+            resolved_at_ms: None,
             tx_hash: Some(format!("{tx_hash:#x}")),
+            signed_payload: None,
         });
     StepOnce::apply(&mut runtime).await;
     let tx_hash_string = format!("{tx_hash:#x}");
@@ -2317,7 +2987,7 @@ async fn uniswap_v3_lp_launch_spec_mint_can_restart_from_owliabot_boundary_signe
         &runtime.run_id,
         &mission_repo,
         &checkpoint_repo,
-        &InMemorySignerStateArchive::default(),
+        &InMemorySignerStateStore::default(),
     )
     .expect("restore runtime after signer submission");
 
@@ -3703,9 +4373,14 @@ async fn submit_continuation_artifact(
         .expect("submit continuation");
 
     match outcome.response {
-        HostCommandResponse::Inspect(snapshot) => {
-            assert_eq!(snapshot.run_id, run_id);
-            assert_eq!(snapshot.status, ais_agent_host::inspect::RunStatus::Running);
+        HostCommandResponse::Pause(pause) => {
+            assert_eq!(pause.run_id, run_id);
+            assert_eq!(pause.kind, ais_agent_host::inspect::PauseKind::NeedSigner);
+            assert_eq!(pause.pending_signer_requests.len(), 1);
+            assert_eq!(
+                pause.pending_signer_requests[0].node_id.as_deref(),
+                Some("artifact.stage.supply.actuate")
+            );
         }
         other => panic!("unexpected continuation response: {other:?}"),
     }

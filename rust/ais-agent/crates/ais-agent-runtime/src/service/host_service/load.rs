@@ -11,7 +11,7 @@ use ais_agent_host::{
     inspect::{InspectSnapshot, PauseBundle},
     session::{HostRunLink, HostSessionId},
 };
-use tracing::{debug, info};
+use tracing::{debug, debug_span, info};
 
 use crate::{
     persistence::{
@@ -30,7 +30,7 @@ where
     K: crate::persistence::RunCatalogRepository + Send,
     E: crate::persistence::EventArchive + Send,
     S: ais_agent_host::session::HostSessionStore + Send,
-    G: crate::persistence::SignerStateArchive + Send,
+    G: crate::persistence::SignerStateStore + Send,
     A: crate::persistence::RuntimeAuditArchive + Send,
     Q: crate::persistence::RunClaimRepository + Send,
 {
@@ -53,7 +53,7 @@ where
                     mission.goal.clone(),
                     mission.allowed_chains.clone(),
                 ));
-                info!(
+                debug!(
                     run_id = %run_id.0,
                     host_session_id = %host_session_id.0,
                     "runtime.host.session_relinked_on_inspect"
@@ -107,6 +107,11 @@ where
         &mut self,
         run_id: &RunId,
     ) -> Result<ActiveRun, RuntimeHostServiceError> {
+        let _span = debug_span!(
+            "runtime.host.load_or_restore",
+            run_id = %run_id.0,
+        )
+        .entered();
         let hot = self.load_hot_runtime(run_id)?;
         if let Some(runtime) = hot.as_ref() {
             if !self.durable_checkpoint_is_newer(run_id, &runtime.checkpoint)? {
@@ -120,14 +125,14 @@ where
                 );
                 return Ok(runtime.clone());
             }
-            info!(
+            debug!(
                 run_id = %run_id.0,
                 hot_checkpoint_seq = runtime.checkpoint.checkpoint_seq,
                 hot_plan_epoch = runtime.checkpoint.plan_epoch,
                 "runtime.host.durable_checkpoint_newer_than_hot"
             );
         } else {
-            info!(run_id = %run_id.0, "runtime.host.hot_runtime_miss");
+            debug!(run_id = %run_id.0, "runtime.host.hot_runtime_miss");
         }
 
         self.restore_and_cache_active_run(run_id, hot.is_some())
@@ -137,6 +142,11 @@ where
         &mut self,
         run_id: &RunId,
     ) -> Result<(Mission, CheckpointSnapshot), RuntimeHostServiceError> {
+        let _span = debug_span!(
+            "runtime.host.inspect_projection_input",
+            run_id = %run_id.0,
+        )
+        .entered();
         let hot = self.load_hot_runtime(run_id)?;
         if let Some(runtime) = hot {
             if !self.durable_checkpoint_is_newer(run_id, &runtime.checkpoint)? {
@@ -149,14 +159,14 @@ where
                 );
                 return Ok((runtime.mission, runtime.checkpoint));
             }
-            info!(
+            debug!(
                 run_id = %run_id.0,
                 hot_checkpoint_seq = runtime.checkpoint.checkpoint_seq,
                 hot_plan_epoch = runtime.checkpoint.plan_epoch,
                 "runtime.host.inspect_projection_input_durable"
             );
         } else {
-            info!(run_id = %run_id.0, "runtime.host.inspect_projection_input_hot_miss");
+            debug!(run_id = %run_id.0, "runtime.host.inspect_projection_input_hot_miss");
         }
 
         Ok((
@@ -224,11 +234,17 @@ where
         run_id: &RunId,
         replace_existing_hot: bool,
     ) -> Result<ActiveRun, RuntimeHostServiceError> {
+        let _span = debug_span!(
+            "runtime.host.restore_and_cache",
+            run_id = %run_id.0,
+            replace_existing_hot,
+        )
+        .entered();
         let mut restored = restore_active_run(
             run_id,
             &self.mission_repo,
             &self.checkpoint_repo,
-            &self.signer_state_archive,
+            &self.signer_state_store,
         )?;
         restored.event_seq = self.archived_latest_event_seq(run_id)?;
         if replace_existing_hot {
@@ -236,7 +252,7 @@ where
         } else {
             self.run_repo.insert(restored.clone())?;
         }
-        info!(
+        debug!(
             run_id = %run_id.0,
             checkpoint_seq = restored.checkpoint.checkpoint_seq,
             plan_epoch = restored.checkpoint.plan_epoch,
@@ -303,6 +319,26 @@ where
         }
     }
 
+    pub(super) fn load_recent_event_tail(
+        &self,
+        run_id: &RunId,
+        limit: usize,
+    ) -> Result<Vec<ais_agent_control::events::RunEventEnvelope>, RuntimeHostServiceError> {
+        match self.event_archive.read(EventArchiveQuery {
+            run_id: run_id.clone(),
+            after_event_seq: None,
+            limit: None,
+        }) {
+            Ok(slice) => {
+                let len = slice.events.len();
+                let start = len.saturating_sub(limit);
+                Ok(slice.events[start..].to_vec())
+            }
+            Err(EventArchiveError::NotFound { .. }) => Ok(Vec::new()),
+            Err(other) => Err(RuntimeHostServiceError::EventArchive(other)),
+        }
+    }
+
     pub(super) fn claim_now_ms() -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -348,9 +384,20 @@ where
         claim: RunClaim,
     ) -> Result<RunClaim, RuntimeHostServiceError> {
         let run_id = claim.run_id.0.clone();
-        self.claim_repo
+        let claim = self
+            .claim_repo
             .acquire(claim)
-            .map_err(|error| Self::map_claim_error(host_session_id, &run_id, error))
+            .map_err(|error| Self::map_claim_error(host_session_id, &run_id, error))?;
+        info!(
+            run_id = %claim.run_id.0,
+            host_session_id = %host_session_id.0,
+            claim_id = %claim.claim_id.0,
+            claim_epoch = claim.claim_epoch,
+            owner_instance_id = %claim.owner_instance_id,
+            mode = ?claim.mode,
+            "runtime.host.claim_acquired"
+        );
+        Ok(claim)
     }
 
     pub(super) fn next_claim_id(&self, run_id: &RunId, host_session_id: &HostSessionId) -> ClaimId {
@@ -403,12 +450,23 @@ where
         host_session_id: &HostSessionId,
         run_id: &RunId,
     ) -> Result<Option<RunClaim>, RuntimeHostServiceError> {
-        self.claim_repo
+        let expired = self
+            .claim_repo
             .expire_stale(crate::persistence::ClaimExpireRequest {
                 run_id: run_id.clone(),
                 now_ms: Self::claim_now_ms(),
             })
-            .map_err(|error| Self::map_claim_error(host_session_id, &run_id.0, error))
+            .map_err(|error| Self::map_claim_error(host_session_id, &run_id.0, error))?;
+        if let Some(claim) = expired.as_ref() {
+            info!(
+                run_id = %claim.run_id.0,
+                host_session_id = %host_session_id.0,
+                claim_id = %claim.claim_id.0,
+                claim_epoch = claim.claim_epoch,
+                "runtime.host.claim_expired"
+            );
+        }
+        Ok(expired)
     }
 
     fn map_claim_error(
@@ -621,7 +679,7 @@ where
             RunCommand::SubmitEnvelope(command) => Ok(self
                 .load_effective_claim(&command.run_id)?
                 .map(|claim| claim.claim_id)),
-            RunCommand::SubmitSignerDecision(command) => Ok(self
+            RunCommand::SubmitSignerResolution(command) => Ok(self
                 .load_effective_claim(&command.run_id)?
                 .map(|claim| claim.claim_id)),
             RunCommand::SubmitPlanPatch(command) => Ok(self

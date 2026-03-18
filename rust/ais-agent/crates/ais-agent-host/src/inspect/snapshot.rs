@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use ais_agent_control::{
+    events::{RunEventFamily, RunEventTraceContext},
     ids::RunId,
     ownership::RunOwnershipSnapshot,
     recovery::{
@@ -82,6 +83,18 @@ pub struct SideEffectView {
     pub tx_hash: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecentEventView {
+    pub event_seq: u64,
+    pub checkpoint_seq: u64,
+    pub plan_epoch: u64,
+    pub family: RunEventFamily,
+    pub event_type: String,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_context: Option<RunEventTraceContext>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EffectStatusView {
@@ -157,6 +170,8 @@ pub struct InspectSnapshot {
     pub pending_signer_requests: Vec<PendingSignerRequestView>,
     #[serde(default)]
     pub recent_side_effects: Vec<SideEffectView>,
+    #[serde(default)]
+    pub recent_events: Vec<RecentEventView>,
     pub effect_status: Option<EffectStatusView>,
     #[serde(default)]
     pub branch_trace: Vec<BranchTraceView>,

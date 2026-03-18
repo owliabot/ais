@@ -1,6 +1,10 @@
 use std::collections::BTreeMap;
 
-use ais_agent_control::{events::RunEvent, ids::RunId, recovery::InterruptionClass};
+use ais_agent_control::{
+    events::RunEvent,
+    ids::{CommandId, RunId},
+    recovery::InterruptionClass,
+};
 use ais_agent_core::{
     action::{
         kinds::{
@@ -355,6 +359,7 @@ fn scheduler_emits_tracing_for_transition_and_stop() {
                     actuate_node("swap", vec!["simulate-swap"]),
                 ]);
                 let mut runtime = ActiveRun::new(mission, checkpoint);
+                runtime.record_command(CommandId("cmd-scheduler-trace".to_owned()), None);
                 let mut repo = InMemoryCheckpointRepository::default();
 
                 StepScheduler::step_until_boundary(
@@ -372,8 +377,13 @@ fn scheduler_emits_tracing_for_transition_and_stop() {
     });
 
     assert_eq!(result.stop_reason, StepStopReason::StableBoundary);
+    assert!(output.contains("runtime.step"));
     assert!(output.contains("runtime.scheduler.transition_applied"));
     assert!(output.contains("runtime.scheduler.stop"));
+    assert!(output.contains("command_id"));
+    assert!(output.contains("cmd-scheduler-trace"));
+    assert!(output.contains("checkpoint_seq="));
+    assert!(output.contains("plan_epoch="));
 }
 
 fn sample_mission() -> Mission {

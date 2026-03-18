@@ -11,7 +11,6 @@ pub struct AisAgentServiceConfig {
     pub providers: AisAgentProviderConfig,
     pub runtime_defaults: AisAgentRuntimeDefaultsConfig,
     pub observability: AisAgentObservabilityConfig,
-    pub protocol_packages: AisAgentProtocolPackagesConfig,
 }
 
 impl Default for AisAgentServiceConfig {
@@ -23,7 +22,6 @@ impl Default for AisAgentServiceConfig {
             providers: AisAgentProviderConfig::default(),
             runtime_defaults: AisAgentRuntimeDefaultsConfig::default(),
             observability: AisAgentObservabilityConfig::default(),
-            protocol_packages: AisAgentProtocolPackagesConfig::default(),
         }
     }
 }
@@ -87,6 +85,42 @@ impl Default for AisAgentJsonlTransportConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AisAgentFileLoggingConfig {
+    pub enabled: bool,
+    pub dir: PathBuf,
+    pub retention_days: u16,
+}
+
+impl Default for AisAgentFileLoggingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            dir: PathBuf::from("./var/log/ais-agent"),
+            retention_days: 7,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AisAgentJsonlCaptureConfig {
+    pub enabled: bool,
+    pub dir: PathBuf,
+    pub retention_days: u16,
+}
+
+impl Default for AisAgentJsonlCaptureConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            dir: PathBuf::from("./var/captures/jsonl"),
+            retention_days: 7,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "backend", rename_all = "snake_case")]
 pub enum AisAgentStorageConfig {
     InMemory,
@@ -101,9 +135,36 @@ impl Default for AisAgentStorageConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
+pub struct AisAgentSqliteRetentionConfig {
+    pub checkpoint_full_window_days: u16,
+    pub checkpoint_boundary_only_window_days: u16,
+    pub wait_state_orphan_ttl_days: u16,
+    pub destructive_purge_enabled: bool,
+    pub require_purge_confirmation: bool,
+    pub auto_prune_cadence_minutes: u32,
+    pub vacuum_freelist_threshold_pages: u32,
+}
+
+impl Default for AisAgentSqliteRetentionConfig {
+    fn default() -> Self {
+        Self {
+            checkpoint_full_window_days: 7,
+            checkpoint_boundary_only_window_days: 30,
+            wait_state_orphan_ttl_days: 7,
+            destructive_purge_enabled: false,
+            require_purge_confirmation: true,
+            auto_prune_cadence_minutes: 24 * 60,
+            vacuum_freelist_threshold_pages: 1_000,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AisAgentSqliteStorageConfig {
     pub path: PathBuf,
     pub create_if_missing: bool,
+    pub retention: AisAgentSqliteRetentionConfig,
 }
 
 impl Default for AisAgentSqliteStorageConfig {
@@ -111,6 +172,7 @@ impl Default for AisAgentSqliteStorageConfig {
         Self {
             path: PathBuf::from("./var/ais-agent.db"),
             create_if_missing: true,
+            retention: AisAgentSqliteRetentionConfig::default(),
         }
     }
 }
@@ -160,25 +222,17 @@ impl Default for AisAgentLogLevel {
 #[serde(default)]
 pub struct AisAgentObservabilityConfig {
     pub log_level: AisAgentLogLevel,
+    pub file_logging: AisAgentFileLoggingConfig,
+    pub jsonl_capture: AisAgentJsonlCaptureConfig,
 }
 
 impl Default for AisAgentObservabilityConfig {
     fn default() -> Self {
         Self {
             log_level: AisAgentLogLevel::Info,
+            file_logging: AisAgentFileLoggingConfig::default(),
+            jsonl_capture: AisAgentJsonlCaptureConfig::default(),
         }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct AisAgentProtocolPackagesConfig {
-    pub allow: Vec<String>,
-}
-
-impl Default for AisAgentProtocolPackagesConfig {
-    fn default() -> Self {
-        Self { allow: Vec::new() }
     }
 }
 

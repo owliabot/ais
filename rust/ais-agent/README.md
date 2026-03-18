@@ -8,6 +8,12 @@ Purpose:
 Primary architecture reference:
 - [ARCHITECTURE.md](/home/xcshuan/work/owlia/ais/rust/ais-agent/ARCHITECTURE.md)
 
+Current SQLite observability / retention decision:
+- [decision-ais-agent-sqlite-schema-direction-2026-03-18.md](/home/xcshuan/work/owlia/ais/docs/ais-agent-design/decision-ais-agent-sqlite-schema-direction-2026-03-18.md)
+
+Operator setup guide:
+- [manual-config-and-start-guide.zh-CN.md](/home/xcshuan/work/owlia/ais/rust/ais-agent/manual-config-and-start-guide.zh-CN.md)
+
 Current final-goal closeout references:
 - [acceptance-proof-matrix-ais-agent-final-goal-2026-03-16.md](/home/xcshuan/work/owlia/ais/docs/ais-agent-design/acceptance-proof-matrix-ais-agent-final-goal-2026-03-16.md)
 - [closeout-ais-agent-final-goal-evm-first-2026-03-16.md](/home/xcshuan/work/owlia/ais/docs/ais-agent-design/closeout-ais-agent-final-goal-evm-first-2026-03-16.md)
@@ -33,6 +39,8 @@ Crate graph:
   - host-facing session, inspect, signer, and ingest surfaces
 - `ais-agent-transport`
   - JSONL and HTTP adapters over host/core contracts
+- `ais-agent-observability-files`
+  - file-backed logging, JSONL capture, retention, and offline file inspection helpers
 - `ais-agent-cli`
   - thin local and daemon entry points
 
@@ -43,6 +51,7 @@ Hard boundary rules:
 - chain-family reflection implementations live in their own chain crates, not in `ais-agent-drivers`.
 - `ais-agent-transport` may depend on `ais-agent-control` and `ais-agent-host`, but must stay adapter-only.
 - `ais-agent-cli` should stay thin and avoid embedding runtime business logic.
+- SQLite observability / retention rework has landed on the final table set; operator inspect and maintenance now target that durable schema directly.
 - no crate in this workspace should import modules from `rust/ais-rs`
 
 Current status:
@@ -104,7 +113,10 @@ Current status:
       - commands
       - inspect
       - event polling
-      - signer approval submission
+      - signer decision submission
+    - signer boundary semantics are now explicit:
+      - `submitted`: host already broadcast, runtime waits for confirmation
+      - `signed`: host only signed, runtime owns broadcast + verify
   - `AGL-1001` completed
     - driver fragments now carry typed fragment-level live-binding hints
     - standard-driver and EVM reflection output now prove the same binding shape

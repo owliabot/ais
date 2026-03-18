@@ -27,7 +27,7 @@ use ais_agent_core::{
     envelope::{RuntimeEnvelope, RuntimeEnvelopeKind},
     evidence::{EvidenceGraph, EvidenceRequirement},
     mission::{Mission, MissionBudget, MissionPolicy},
-    runtime::{RunLifecycleState, RunPhase, RunStatus, SignerDecision, SignerDecisionKind},
+    runtime::{RunLifecycleState, RunPhase, RunStatus, SignerResolution, SignerResolutionKind},
 };
 use ais_agent_drivers::api_native::{
     ApiNativeAdapter, ApiNativeProviderKind, ApiNativeRequest, DirectEnvelopeApiAdapter,
@@ -135,11 +135,12 @@ async fn standard_like_driver_output_binds_into_runtime_and_executes_live_path()
         .pending_signer_state
         .as_mut()
         .expect("pending signer")
-        .apply_decision(SignerDecision {
+        .apply_resolution(SignerResolution {
             request_id: ais_agent_control::ids::SignerRequestId(request_id),
-            kind: SignerDecisionKind::Approved,
-            decision_at_ms: None,
+            kind: SignerResolutionKind::Signed,
+            resolved_at_ms: None,
             tx_hash: None,
+            signed_payload: Some(json!({"raw_tx":"0x0102"})),
         });
 
     let signer = StepOnce::apply(&mut runtime).await;
@@ -274,11 +275,12 @@ async fn reflection_output_binds_into_runtime_and_executes_same_actuate_verify_p
         .pending_signer_state
         .as_mut()
         .expect("pending signer")
-        .apply_decision(SignerDecision {
+        .apply_resolution(SignerResolution {
             request_id: ais_agent_control::ids::SignerRequestId(request_id),
-            kind: SignerDecisionKind::Approved,
-            decision_at_ms: None,
+            kind: SignerResolutionKind::Signed,
+            resolved_at_ms: None,
             tx_hash: None,
+            signed_payload: Some(json!({"raw_tx":"0x0102"})),
         });
 
     let signer = StepOnce::apply(&mut runtime).await;
@@ -411,11 +413,12 @@ async fn api_native_direct_envelope_output_binds_into_same_guarded_path() {
         .pending_signer_state
         .as_mut()
         .expect("pending signer")
-        .apply_decision(SignerDecision {
+        .apply_resolution(SignerResolution {
             request_id: ais_agent_control::ids::SignerRequestId(request_id),
-            kind: SignerDecisionKind::Approved,
-            decision_at_ms: None,
+            kind: SignerResolutionKind::Signed,
+            resolved_at_ms: None,
             tx_hash: None,
+            signed_payload: Some(json!({"raw_tx":"0x0102"})),
         });
 
     let signer = StepOnce::apply(&mut runtime).await;
@@ -606,11 +609,12 @@ async fn raw_envelope_binding_executes_under_same_guarded_contract() {
         .pending_signer_state
         .as_mut()
         .expect("pending signer")
-        .apply_decision(SignerDecision {
+        .apply_resolution(SignerResolution {
             request_id: ais_agent_control::ids::SignerRequestId(request_id),
-            kind: SignerDecisionKind::Approved,
-            decision_at_ms: None,
+            kind: SignerResolutionKind::Signed,
+            resolved_at_ms: None,
             tx_hash: None,
+            signed_payload: Some(json!({"raw_tx":"0xfeedbeef"})),
         });
     StepOnce::apply(&mut runtime).await;
 

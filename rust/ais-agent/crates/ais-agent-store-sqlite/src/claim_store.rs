@@ -1,13 +1,13 @@
 use ais_agent_control::{
     ids::{ClaimId, RunId},
-    ownership::{RunClaim, RunClaimMode, RunClaimOwnerKind, RunClaimStatus},
+    ownership::{RunClaim, RunClaimStatus},
 };
 use ais_agent_runtime::persistence::{
     ClaimExpireRequest, ClaimReleaseRequest, ClaimRenewRequest, ClaimSupersedeRequest,
     ClaimSupersedeResult, RunClaimRepository, RunClaimRepositoryError,
 };
 
-use crate::SqliteStore;
+use crate::{run_projection, SqliteStore};
 
 impl RunClaimRepository for SqliteStore {
     fn acquire(&mut self, claim: RunClaim) -> Result<RunClaim, RunClaimRepositoryError> {
@@ -164,17 +164,17 @@ fn load_active_from_conn(
                 claim_id,
                 run_id,
                 host_session_id,
-                owner_kind_json,
+                owner_kind,
                 owner_instance_id,
                 lease_started_at_ms,
                 lease_expires_at_ms,
                 last_renewed_at_ms,
                 claim_epoch,
-                mode_json,
-                status_json
-            FROM run_claims
+                mode,
+                status
+            FROM run_claim_history
             WHERE run_id = ?1
-              AND status_json = '"active"'
+              AND status = 'active'
             ORDER BY claim_epoch DESC
             LIMIT 1
             "#,
@@ -199,17 +199,17 @@ fn load_active_from_tx(
                 claim_id,
                 run_id,
                 host_session_id,
-                owner_kind_json,
+                owner_kind,
                 owner_instance_id,
                 lease_started_at_ms,
                 lease_expires_at_ms,
                 last_renewed_at_ms,
                 claim_epoch,
-                mode_json,
-                status_json
-            FROM run_claims
+                mode,
+                status
+            FROM run_claim_history
             WHERE run_id = ?1
-              AND status_json = '"active"'
+              AND status = 'active'
             ORDER BY claim_epoch DESC
             LIMIT 1
             "#,
@@ -233,15 +233,15 @@ fn load_claim_from_conn(
             claim_id,
             run_id,
             host_session_id,
-            owner_kind_json,
+            owner_kind,
             owner_instance_id,
             lease_started_at_ms,
             lease_expires_at_ms,
             last_renewed_at_ms,
             claim_epoch,
-            mode_json,
-            status_json
-        FROM run_claims
+            mode,
+            status
+        FROM run_claim_history
         WHERE claim_id = ?1
         "#,
         [&claim_id.0],
@@ -266,15 +266,15 @@ fn load_latest_for_run_from_conn(
                 claim_id,
                 run_id,
                 host_session_id,
-                owner_kind_json,
+                owner_kind,
                 owner_instance_id,
                 lease_started_at_ms,
                 lease_expires_at_ms,
                 last_renewed_at_ms,
                 claim_epoch,
-                mode_json,
-                status_json
-            FROM run_claims
+                mode,
+                status
+            FROM run_claim_history
             WHERE run_id = ?1
             ORDER BY lease_started_at_ms DESC, claim_epoch DESC, claim_id DESC
             LIMIT 1
@@ -299,15 +299,15 @@ fn load_claim_from_tx(
             claim_id,
             run_id,
             host_session_id,
-            owner_kind_json,
+            owner_kind,
             owner_instance_id,
             lease_started_at_ms,
             lease_expires_at_ms,
             last_renewed_at_ms,
             claim_epoch,
-            mode_json,
-            status_json
-        FROM run_claims
+            mode,
+            status
+        FROM run_claim_history
         WHERE claim_id = ?1
         "#,
         [&claim_id.0],
@@ -351,43 +351,60 @@ fn insert_claim(
     tx: &rusqlite::Transaction<'_>,
     claim: &RunClaim,
 ) -> Result<(), RunClaimRepositoryError> {
-    let owner_kind_json = serde_json::to_string(&claim.owner_kind).map_err(storage_error)?;
-    let mode_json = serde_json::to_string(&claim.mode).map_err(storage_error)?;
-    let status_json = serde_json::to_string(&claim.status).map_err(storage_error)?;
+    let owner_kind = enum_as_string(&claim.owner_kind).map_err(storage_error)?;
+    let mode = enum_as_string(&claim.mode).map_err(storage_error)?;
+    let status = enum_as_string(&claim.status).map_err(storage_error)?;
     tx.execute(
         r#"
-        INSERT INTO run_claims (
+        INSERT INTO run_claim_history (
             claim_id,
             run_id,
             host_session_id,
-            owner_kind_json,
+            owner_kind,
             owner_instance_id,
             lease_started_at_ms,
             lease_expires_at_ms,
             last_renewed_at_ms,
             claim_epoch,
-            mode_json,
-            status_json
+            mode,
+            status
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+        ON CONFLICT(claim_id) DO UPDATE SET
+            run_id = excluded.run_id,
+            host_session_id = excluded.host_session_id,
+            owner_kind = excluded.owner_kind,
+            owner_instance_id = excluded.owner_instance_id,
+            lease_started_at_ms = excluded.lease_started_at_ms,
+            lease_expires_at_ms = excluded.lease_expires_at_ms,
+            last_renewed_at_ms = excluded.last_renewed_at_ms,
+            claim_epoch = excluded.claim_epoch,
+            mode = excluded.mode,
+            status = excluded.status
         "#,
         rusqlite::params![
             claim.claim_id.0,
             claim.run_id.0,
             claim.host_session_id,
-            owner_kind_json,
+            owner_kind,
             claim.owner_instance_id,
             claim.lease_started_at_ms,
             claim.lease_expires_at_ms,
             claim.last_renewed_at_ms,
             claim.claim_epoch,
-            mode_json,
-            status_json,
+            mode,
+            status,
         ],
     )
     .map_err(map_write_error(
         claim.run_id.0.clone(),
         claim.claim_id.0.clone(),
     ))?;
+    run_projection::update_run_latest_claim_epoch(
+        tx,
+        &claim.run_id.0,
+        i64::try_from(claim.claim_epoch).map_err(storage_error)?,
+    )
+    .map_err(storage_error)?;
     Ok(())
 }
 
@@ -395,37 +412,37 @@ fn update_claim(
     tx: &rusqlite::Transaction<'_>,
     claim: &RunClaim,
 ) -> Result<(), RunClaimRepositoryError> {
-    let owner_kind_json = serde_json::to_string(&claim.owner_kind).map_err(storage_error)?;
-    let mode_json = serde_json::to_string(&claim.mode).map_err(storage_error)?;
-    let status_json = serde_json::to_string(&claim.status).map_err(storage_error)?;
+    let owner_kind = enum_as_string(&claim.owner_kind).map_err(storage_error)?;
+    let mode = enum_as_string(&claim.mode).map_err(storage_error)?;
+    let status = enum_as_string(&claim.status).map_err(storage_error)?;
     let changed = tx
         .execute(
             r#"
-            UPDATE run_claims SET
+            UPDATE run_claim_history SET
                 run_id = ?2,
                 host_session_id = ?3,
-                owner_kind_json = ?4,
+                owner_kind = ?4,
                 owner_instance_id = ?5,
                 lease_started_at_ms = ?6,
                 lease_expires_at_ms = ?7,
                 last_renewed_at_ms = ?8,
                 claim_epoch = ?9,
-                mode_json = ?10,
-                status_json = ?11
+                mode = ?10,
+                status = ?11
             WHERE claim_id = ?1
             "#,
             rusqlite::params![
                 claim.claim_id.0,
                 claim.run_id.0,
                 claim.host_session_id,
-                owner_kind_json,
+                owner_kind,
                 claim.owner_instance_id,
                 claim.lease_started_at_ms,
                 claim.lease_expires_at_ms,
                 claim.last_renewed_at_ms,
                 claim.claim_epoch,
-                mode_json,
-                status_json,
+                mode,
+                status,
             ],
         )
         .map_err(storage_error)?;
@@ -434,7 +451,22 @@ fn update_claim(
             claim_id: claim.claim_id.0.clone(),
         });
     }
+    run_projection::update_run_latest_claim_epoch(
+        tx,
+        &claim.run_id.0,
+        i64::try_from(claim.claim_epoch).map_err(storage_error)?,
+    )
+    .map_err(storage_error)?;
     Ok(())
+}
+
+fn enum_as_string<T: serde::Serialize>(value: &T) -> Result<String, rusqlite::Error> {
+    match serde_json::to_value(value).map_err(deser_error)? {
+        serde_json::Value::String(value) => Ok(value),
+        other => Err(deser_error(format!(
+            "expected enum string representation, got {other}"
+        ))),
+    }
 }
 
 fn validate_active_claim(claim: &RunClaim) -> Result<(), RunClaimRepositoryError> {
@@ -451,22 +483,22 @@ fn validate_active_claim(claim: &RunClaim) -> Result<(), RunClaimRepositoryError
 }
 
 fn claim_from_row(row: &rusqlite::Row<'_>) -> Result<RunClaim, rusqlite::Error> {
-    let owner_kind_json = row.get::<_, String>(3)?;
-    let mode_json = row.get::<_, String>(9)?;
-    let status_json = row.get::<_, String>(10)?;
+    let owner_kind = row.get::<_, String>(3)?;
+    let mode = row.get::<_, String>(9)?;
+    let status = row.get::<_, String>(10)?;
     Ok(RunClaim {
         claim_id: ClaimId(row.get(0)?),
         run_id: RunId(row.get(1)?),
         host_session_id: row.get(2)?,
-        owner_kind: serde_json::from_str::<RunClaimOwnerKind>(&owner_kind_json)
+        owner_kind: serde_json::from_value(serde_json::Value::String(owner_kind))
             .map_err(deser_error)?,
         owner_instance_id: row.get(4)?,
         lease_started_at_ms: row.get(5)?,
         lease_expires_at_ms: row.get(6)?,
         last_renewed_at_ms: row.get(7)?,
         claim_epoch: row.get(8)?,
-        mode: serde_json::from_str::<RunClaimMode>(&mode_json).map_err(deser_error)?,
-        status: serde_json::from_str::<RunClaimStatus>(&status_json).map_err(deser_error)?,
+        mode: serde_json::from_value(serde_json::Value::String(mode)).map_err(deser_error)?,
+        status: serde_json::from_value(serde_json::Value::String(status)).map_err(deser_error)?,
     })
 }
 
@@ -476,7 +508,7 @@ fn map_write_error(
 ) -> impl Fn(rusqlite::Error) -> RunClaimRepositoryError {
     move |error| match &error {
         rusqlite::Error::SqliteFailure(_, Some(message))
-            if message.contains("idx_run_claims_active_by_run") =>
+            if message.contains("idx_run_claim_history_active_by_run") =>
         {
             RunClaimRepositoryError::ActiveClaimConflict {
                 run_id: run_id.clone(),

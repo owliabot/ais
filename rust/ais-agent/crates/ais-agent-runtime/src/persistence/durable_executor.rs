@@ -5,7 +5,7 @@ use thiserror::Error;
 use crate::persistence::{
     validate_durable_mutation_unit, CheckpointRepository, DurableMutationContractError,
     DurableMutationKind, DurableMutationUnit, EventArchive, MissionRepository, MissionWriteMode,
-    RunCatalogRepository, RuntimeAuditArchive, SignerStateArchive,
+    RunCatalogRepository, RunWaitStateStore, RuntimeAuditArchive,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -15,7 +15,7 @@ pub enum DurableMutationMember {
     Checkpoint,
     Event,
     Catalog,
-    Signer,
+    WaitState,
     Audit,
 }
 
@@ -60,7 +60,7 @@ pub struct LinearDurableMutationExecutor<M, C, E, K, G, A> {
     checkpoint_repo: C,
     event_archive: E,
     run_catalog_repo: K,
-    signer_archive: G,
+    wait_state_store: G,
     audit_archive: A,
 }
 
@@ -70,7 +70,7 @@ impl<M, C, E, K, G, A> LinearDurableMutationExecutor<M, C, E, K, G, A> {
         checkpoint_repo: C,
         event_archive: E,
         run_catalog_repo: K,
-        signer_archive: G,
+        wait_state_store: G,
         audit_archive: A,
     ) -> Self {
         Self {
@@ -78,7 +78,7 @@ impl<M, C, E, K, G, A> LinearDurableMutationExecutor<M, C, E, K, G, A> {
             checkpoint_repo,
             event_archive,
             run_catalog_repo,
-            signer_archive,
+            wait_state_store,
             audit_archive,
         }
     }
@@ -89,7 +89,7 @@ impl<M, C, E, K, G, A> LinearDurableMutationExecutor<M, C, E, K, G, A> {
             self.checkpoint_repo,
             self.event_archive,
             self.run_catalog_repo,
-            self.signer_archive,
+            self.wait_state_store,
             self.audit_archive,
         )
     }
@@ -101,7 +101,7 @@ where
     C: CheckpointRepository,
     E: EventArchive,
     K: RunCatalogRepository,
-    G: SignerStateArchive,
+    G: RunWaitStateStore,
     A: RuntimeAuditArchive,
 {
     fn commit(
@@ -152,18 +152,18 @@ where
                 message: error.to_string(),
             })?;
 
-        if let Some(write) = unit.signer_write.as_ref() {
+        if let Some(write) = unit.wait_state_write.as_ref() {
             let result = match write {
-                crate::persistence::SignerStateWrite::Upsert { signer_state } => {
-                    self.signer_archive.upsert(signer_state.clone())
+                crate::persistence::RunWaitStateWrite::Upsert { wait_state } => {
+                    self.wait_state_store.upsert_wait_state(wait_state.clone())
                 }
-                crate::persistence::SignerStateWrite::Clear { run_id } => {
-                    self.signer_archive.clear(run_id)
+                crate::persistence::RunWaitStateWrite::Clear { run_id } => {
+                    self.wait_state_store.clear_wait_state(run_id)
                 }
             };
             result.map_err(|error| DurableCommitError::MemberWrite {
                 run_id: unit.run_id.0.clone(),
-                member: DurableMutationMember::Signer,
+                member: DurableMutationMember::WaitState,
                 message: error.to_string(),
             })?;
         }

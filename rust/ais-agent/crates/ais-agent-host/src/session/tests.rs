@@ -242,6 +242,7 @@ fn inspect_projection_updates_run_link_cursor() {
         pending_confirmations: Vec::new(),
         pending_continuations: Vec::new(),
         pending_signer_requests: Vec::new(),
+        recent_events: Vec::new(),
         recent_side_effects: Vec::new(),
         effect_status: None,
         branch_trace: Vec::new(),

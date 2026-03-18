@@ -1,12 +1,16 @@
 use std::collections::BTreeMap;
 
 use ais_agent_control::{
+    events::{
+        RunAwaitingSigner, RunBroadcastSubmitted, RunEvent, RunEventEnvelope, RunEventFamily,
+        RunEventTraceContext,
+    },
     execution_artifact::{
         ContinuationStage, EvmTransactionCandidate, ExecutionArtifactLaunchSpec,
         ExecutionChainFamily, ExecutionStage, ExecutionTransactionCandidate, ObservationSpec,
         OutputExportSpec, TransactionStage, ValueRef,
     },
-    ids::{RunId, SignerRequestId},
+    ids::{EventId, RunId, SignerRequestId},
     recovery::{
         RecoveryActionKind, RecoveryDisposition, RunFailureCode, RunFailureContext,
         RunFailureStage, StableBoundaryKind,
@@ -33,6 +37,7 @@ use ais_agent_core::{
         EvidenceRequirement,
     },
     mission::{Mission, MissionBudget, MissionPolicy},
+    recovery::classify_recovery_view,
     runtime::{
         BoundaryKind, RunLifecycleState, RunPhase, RunStatus as CoreRunStatus, StableBoundary,
     },
@@ -40,7 +45,8 @@ use ais_agent_core::{
 use serde_json::json;
 
 use crate::inspect::{
-    project_inspect_snapshot, project_pause_bundle, EffectStatusView, PauseKind, RunStatus,
+    project_inspect_snapshot, project_inspect_snapshot_with_recovery_and_events,
+    project_pause_bundle, EffectStatusView, PauseKind, RunStatus,
 };
 
 #[test]
@@ -270,10 +276,7 @@ fn inspect_and_pause_project_runtime_branch_trace() {
         .expect("execution artifact")
         .branch_trace = vec![ArtifactBranchTraceSnapshot {
         branch_stage_id: "stage.guard".into(),
-        available_targets: vec![
-            "stage.swap".to_owned(),
-            "assert:quote_rejected".to_owned(),
-        ],
+        available_targets: vec!["stage.swap".to_owned(), "assert:quote_rejected".to_owned()],
         selected_target: "stage.swap".to_owned(),
         predicate_value: true,
     }];
@@ -291,6 +294,78 @@ fn inspect_and_pause_project_runtime_branch_trace() {
     assert_eq!(pause.branch_trace.len(), 1);
     assert_eq!(pause.branch_trace[0].branch_stage_id, "stage.guard");
     assert_eq!(pause.branch_trace[0].selected_target, "stage.swap");
+}
+
+#[test]
+fn inspect_snapshot_projects_recent_events_with_trace_context() {
+    let checkpoint = sample_checkpoint();
+    let recent_events = vec![
+        RunEventEnvelope {
+            run_id: RunId("run-1".to_owned()),
+            event_seq: 7,
+            checkpoint_seq: 2,
+            plan_epoch: 1,
+            trace_context: Some(RunEventTraceContext {
+                trace_id: "trace-run-1:signer".to_owned(),
+                span_id: "awaiting_signer:7".to_owned(),
+            }),
+            event: RunEvent::AwaitingSigner(RunAwaitingSigner {
+                event_id: EventId("event-7".to_owned()),
+                run_id: RunId("run-1".to_owned()),
+                request_id: SignerRequestId("signer-1".to_owned()),
+                reason: "waiting for signer approval".to_owned(),
+            }),
+        },
+        RunEventEnvelope {
+            run_id: RunId("run-1".to_owned()),
+            event_seq: 8,
+            checkpoint_seq: 3,
+            plan_epoch: 1,
+            trace_context: None,
+            event: RunEvent::BroadcastSubmitted(RunBroadcastSubmitted {
+                event_id: EventId("event-8".to_owned()),
+                run_id: RunId("run-1".to_owned()),
+                node_id: "artifact.stage.swap.broadcast".to_owned(),
+                chain: Some("eip155:1".to_owned()),
+                tx_hash: Some("0xabc".to_owned()),
+                summary: "submitted swap transaction".to_owned(),
+            }),
+        },
+    ];
+
+    let snapshot = project_inspect_snapshot_with_recovery_and_events(
+        &sample_mission(),
+        &checkpoint,
+        classify_recovery_view(&checkpoint).into(),
+        &recent_events,
+    );
+
+    assert_eq!(snapshot.recent_events.len(), 2);
+    assert_eq!(snapshot.recent_events[0].family, RunEventFamily::Signer);
+    assert_eq!(
+        snapshot.recent_events[0].event_type,
+        "run.signer.request_created"
+    );
+    assert_eq!(
+        snapshot.recent_events[0].summary,
+        "waiting for signer approval"
+    );
+    assert_eq!(
+        snapshot.recent_events[0]
+            .trace_context
+            .as_ref()
+            .map(|trace| trace.trace_id.as_str()),
+        Some("trace-run-1:signer")
+    );
+    assert_eq!(snapshot.recent_events[1].family, RunEventFamily::SideEffect);
+    assert_eq!(
+        snapshot.recent_events[1].event_type,
+        "run.side_effect.broadcast_submitted"
+    );
+    assert_eq!(
+        snapshot.recent_events[1].summary,
+        "submitted swap transaction"
+    );
 }
 
 #[test]
@@ -555,6 +630,7 @@ fn sample_checkpoint() -> CheckpointSnapshot {
         pending_requests: PendingRequestsSnapshot {
             pending_evidence_refs: vec!["evidence.quote".to_owned()],
             pending_envelope_refs: Vec::new(),
+            pending_signer_request: None,
             pending_signer_request_id: Some(SignerRequestId("signer-1".to_owned()).0),
             pending_confirmation_id: None,
         },

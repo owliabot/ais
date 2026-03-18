@@ -9,6 +9,7 @@ ais-agent-control = { path = "../ais-agent-control" }
 ais-agent-core = { path = "../ais-agent-core" }
 ais-agent-runtime = { path = "../ais-agent-runtime" }
 rusqlite.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 

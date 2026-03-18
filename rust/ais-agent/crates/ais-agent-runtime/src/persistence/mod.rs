@@ -11,7 +11,7 @@ mod mission_repo;
 mod persist;
 mod restore;
 mod run_catalog;
-mod signer_archive;
+mod wait_state_store;
 
 pub use audit_archive::{
     RuntimeAuditArchive, RuntimeAuditArchiveError, RuntimeAuditQuery, RuntimeAuditSlice,
@@ -31,13 +31,13 @@ pub use durable_executor::{
 pub use durable_mutation::{
     validate_durable_mutation_unit, AuditWriteBatch, CatalogWrite, CheckpointWrite,
     DurableMutationContractError, DurableMutationKind, DurableMutationUnit, EventWriteBatch,
-    MissionWrite, MissionWriteMode, SignerStateWrite,
+    MissionWrite, MissionWriteMode, RunWaitStateWrite, SignerStateWrite,
 };
 pub use event_archive::{EventArchive, EventArchiveError, EventArchiveQuery, EventArchiveSlice};
 pub use in_memory::{
     InMemoryCheckpointRepository, InMemoryEventArchive, InMemoryMissionRepository,
-    InMemoryRunCatalogRepository, InMemoryRunClaimRepository, InMemoryRuntimeAuditArchive,
-    InMemorySignerStateArchive,
+    InMemoryRunCatalogRepository, InMemoryRunClaimRepository, InMemoryRunWaitStateStore,
+    InMemoryRuntimeAuditArchive, InMemorySignerStateStore,
 };
 pub use mission_repo::{MissionRepository, MissionRepositoryError};
 pub use persist::{
@@ -45,4 +45,7 @@ pub use persist::{
 };
 pub use restore::{restore_active_run, restore_active_run_from_parts, RestoreRuntimeError};
 pub use run_catalog::{RunCatalogEntry, RunCatalogRepository, RunCatalogRepositoryError};
-pub use signer_archive::{SignerStateArchive, SignerStateArchiveError};
+pub use wait_state_store::{
+    signer_state_into_wait_state_record, wait_state_record_into_signer_state, RunWaitStateRecord,
+    RunWaitStateStore, RunWaitStateStoreError, SignerStateStore, SignerStateStoreError,
+};

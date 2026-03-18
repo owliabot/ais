@@ -8,7 +8,7 @@ use ais_agent_core::{
     actuation::ActuationKind,
     envelope::RuntimeEnvelopeKind,
     recovery::{classify_side_effect_phase, provider_interruption_class},
-    runtime::RunPhase,
+    runtime::{RunPhase, SignerRequestStatus},
 };
 use ais_agent_evm::broadcast::live::EvmAlloyBroadcastPort;
 #[cfg(test)]
@@ -30,7 +30,10 @@ use crate::{
 };
 
 pub(crate) async fn apply_broadcast_transition(runtime: &mut ActiveRun) -> Option<StepTransition> {
-    if runtime.pending_signer_state.is_some()
+    if runtime
+        .pending_signer_state
+        .as_ref()
+        .is_some_and(|state| state.status != SignerRequestStatus::Signed)
         || runtime
             .checkpoint
             .pending_requests
@@ -72,41 +75,63 @@ pub(crate) async fn apply_broadcast_transition(runtime: &mut ActiveRun) -> Optio
                 "evm broadcast binding missing connection",
             );
         };
-        let Some(envelope_ref) = &actuate.envelope_ref else {
-            return fail_envelope(
-                runtime,
-                &node_id,
-                None,
-                &node,
-                "evm broadcast binding missing envelope_ref",
-            );
+        let signed_raw_tx = match signed_evm_raw_tx_hex(runtime) {
+            Ok(value) => value,
+            Err(reason) => return fail_broadcast(runtime, &node_id, reason),
         };
-        let Some(envelope) = runtime.envelopes.get(envelope_ref) else {
-            return fail_envelope(
-                runtime,
-                &node_id,
-                Some(envelope_ref.as_str()),
-                &node,
-                format!("missing runtime envelope `{envelope_ref}` for broadcast"),
-            );
+        let envelope_ref = actuate.envelope_ref.as_deref();
+        let envelope = if let Some(envelope_ref) = envelope_ref {
+            let Some(envelope) = runtime.envelopes.get(envelope_ref) else {
+                return fail_envelope(
+                    runtime,
+                    &node_id,
+                    Some(envelope_ref),
+                    &node,
+                    format!("missing runtime envelope `{envelope_ref}` for broadcast"),
+                );
+            };
+            if envelope.kind != RuntimeEnvelopeKind::EvmEnvelope {
+                return fail_envelope(
+                    runtime,
+                    &node_id,
+                    Some(envelope_ref),
+                    &node,
+                    format!("envelope `{envelope_ref}` is not an evm envelope"),
+                );
+            }
+            Some(envelope)
+        } else {
+            None
         };
-        if envelope.kind != RuntimeEnvelopeKind::EvmEnvelope {
-            return fail_envelope(
-                runtime,
-                &node_id,
-                Some(envelope_ref.as_str()),
-                &node,
-                format!("envelope `{envelope_ref}` is not an evm envelope"),
-            );
-        }
-        let Some(raw_tx) = extract_raw_tx_hex(&envelope.payload) else {
-            return fail_envelope(
-                runtime,
-                &node_id,
-                Some(envelope_ref.as_str()),
-                &node,
-                format!("envelope `{envelope_ref}` missing `raw_tx` payload"),
-            );
+        let envelope_chain = envelope.map(|value| value.chain.clone());
+        let raw_tx = match signed_raw_tx {
+            Some(raw_tx) => raw_tx,
+            None => {
+                let Some(envelope_ref) = envelope_ref else {
+                    return fail_broadcast(
+                        runtime,
+                        &node_id,
+                        "evm broadcast binding requires envelope_ref when signed_payload is absent",
+                    );
+                };
+                let Some(envelope) = envelope else {
+                    return fail_broadcast(
+                        runtime,
+                        &node_id,
+                        format!("missing runtime envelope `{envelope_ref}` for broadcast"),
+                    );
+                };
+                let Some(raw_tx) = extract_raw_tx_hex(&envelope.payload) else {
+                    return fail_envelope(
+                        runtime,
+                        &node_id,
+                        Some(envelope_ref),
+                        &node,
+                        format!("envelope `{envelope_ref}` missing `raw_tx` payload"),
+                    );
+                };
+                raw_tx
+            }
         };
 
         let submission = match EvmAlloyBroadcastPort::new(connection.rpc_url.clone())
@@ -131,14 +156,17 @@ pub(crate) async fn apply_broadcast_transition(runtime: &mut ActiveRun) -> Optio
             runtime,
             node_id.as_str(),
             ActuationKind::BroadcastSubmitted,
-            actuate
-                .chain
-                .clone()
-                .or_else(|| Some(envelope.chain.clone())),
+            actuate.chain.clone().or_else(|| envelope_chain.clone()),
             Some(tx_hash.clone()),
             format!("broadcast submitted for {node_id}"),
         );
         mark_node_status(runtime, node_id.as_str(), ActionNodeStatus::Succeeded);
+        runtime.pending_signer_state = None;
+        runtime
+            .checkpoint
+            .pending_requests
+            .pending_signer_request_id = None;
+        runtime.checkpoint.pending_requests.pending_signer_request = None;
         runtime.checkpoint.pending_requests.pending_confirmation_id = Some(tx_hash.clone());
         runtime.checkpoint.lifecycle.await_confirmation(format!(
             "waiting for chain receipt after broadcast {tx_hash}"
@@ -420,6 +448,23 @@ fn extract_raw_tx_hex(payload: &serde_json::Value) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn signed_evm_raw_tx_hex(runtime: &ActiveRun) -> Result<Option<String>, String> {
+    let Some(signer_state) = runtime.pending_signer_state.as_ref() else {
+        return Ok(None);
+    };
+    if signer_state.status != SignerRequestStatus::Signed {
+        return Ok(None);
+    }
+
+    let payload = signer_state
+        .signed_payload
+        .as_ref()
+        .ok_or_else(|| "signed signer state is missing `signed_payload`".to_owned())?;
+    extract_raw_tx_hex(payload)
+        .ok_or_else(|| "signed signer payload is missing `raw_tx`".to_owned())
+        .map(Some)
+}
+
 fn classify_broadcast_failure(reason: &str) -> RunFailureCode {
     let reason = reason.to_ascii_lowercase();
     if [
@@ -479,7 +524,10 @@ pub(crate) async fn apply_live_evm_broadcast_with_provider<P>(
 where
     P: Provider,
 {
-    if runtime.pending_signer_state.is_some()
+    if runtime
+        .pending_signer_state
+        .as_ref()
+        .is_some_and(|state| state.status != SignerRequestStatus::Signed)
         || runtime
             .checkpoint
             .pending_requests
@@ -512,26 +560,39 @@ where
             "actuate payload missing evm live binding",
         );
     };
-    let Some(envelope_ref) = &actuate.envelope_ref else {
-        return fail_broadcast(
-            runtime,
-            &node_id,
-            "evm broadcast binding missing envelope_ref",
-        );
+    let signed_raw_tx = match signed_evm_raw_tx_hex(runtime) {
+        Ok(value) => value,
+        Err(reason) => return fail_broadcast(runtime, &node_id, reason),
     };
-    let Some(envelope) = runtime.envelopes.get(envelope_ref) else {
-        return fail_broadcast(
-            runtime,
-            &node_id,
-            format!("missing runtime envelope `{envelope_ref}` for broadcast"),
-        );
-    };
-    let Some(raw_tx) = extract_raw_tx_hex(&envelope.payload) else {
-        return fail_broadcast(
-            runtime,
-            &node_id,
-            format!("envelope `{envelope_ref}` missing `raw_tx` payload"),
-        );
+    let envelope_ref = actuate.envelope_ref.as_deref();
+    let envelope = envelope_ref.and_then(|reference| runtime.envelopes.get(reference));
+    let envelope_chain = envelope.map(|value| value.chain.clone());
+    let raw_tx = match signed_raw_tx {
+        Some(raw_tx) => raw_tx,
+        None => {
+            let Some(envelope_ref) = envelope_ref else {
+                return fail_broadcast(
+                    runtime,
+                    &node_id,
+                    "evm broadcast binding requires envelope_ref when signed_payload is absent",
+                );
+            };
+            let Some(envelope) = envelope else {
+                return fail_broadcast(
+                    runtime,
+                    &node_id,
+                    format!("missing runtime envelope `{envelope_ref}` for broadcast"),
+                );
+            };
+            let Some(raw_tx) = extract_raw_tx_hex(&envelope.payload) else {
+                return fail_broadcast(
+                    runtime,
+                    &node_id,
+                    format!("envelope `{envelope_ref}` missing `raw_tx` payload"),
+                );
+            };
+            raw_tx
+        }
     };
     let raw_tx = match ais_agent_evm::broadcast::live::parse_raw_transaction_hex(&raw_tx) {
         Ok(raw_tx) => raw_tx,
@@ -563,14 +624,17 @@ where
         runtime,
         node_id.as_str(),
         ActuationKind::BroadcastSubmitted,
-        actuate
-            .chain
-            .clone()
-            .or_else(|| Some(envelope.chain.clone())),
+        actuate.chain.clone().or_else(|| envelope_chain.clone()),
         Some(tx_hash.clone()),
         format!("broadcast submitted for {node_id}"),
     );
     mark_node_status(runtime, node_id.as_str(), ActionNodeStatus::Succeeded);
+    runtime.pending_signer_state = None;
+    runtime
+        .checkpoint
+        .pending_requests
+        .pending_signer_request_id = None;
+    runtime.checkpoint.pending_requests.pending_signer_request = None;
     runtime.checkpoint.pending_requests.pending_confirmation_id = Some(tx_hash.clone());
     runtime.checkpoint.lifecycle.await_confirmation(format!(
         "waiting for chain receipt after broadcast {tx_hash}"

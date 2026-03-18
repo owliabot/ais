@@ -15,7 +15,7 @@ use ais_agent_core::{
         EvidenceFreshness, EvidenceGraph, EvidenceKind, EvidenceProvenance, EvidenceRecord,
     },
     mission::{Mission, MissionBudget, MissionPolicy},
-    runtime::{RunLifecycleState, RunPhase, RunStatus, SignerRequestState},
+    runtime::{RunLifecycleState, RunPhase, RunStatus, SignerRequestState, SignerRequestStatus},
 };
 use serde_json::json;
 
@@ -224,6 +224,63 @@ fn runtime_state_machine_restores_none_when_checkpoint_has_no_pending_signer() {
 }
 
 #[test]
+fn progress_checkpoint_preserves_signed_signer_state_for_broadcast_resume() {
+    let mission = sample_mission();
+    let mut runtime = ActiveRun::new(mission.clone(), sample_running_checkpoint());
+    runtime
+        .checkpoint
+        .lifecycle
+        .mark_running(RunPhase::Broadcasting);
+    runtime.set_pending_signer_state(Some(sample_signer_state().with_payload(json!({
+        "kind": "evm_transaction_request",
+        "chain": "eip155:1",
+        "to": "0x2222222222222222222222222222222222222222",
+        "data": "0x01020304"
+    }))));
+    runtime
+        .pending_signer_state
+        .as_mut()
+        .expect("signer state")
+        .status = SignerRequestStatus::Signed;
+    runtime
+        .pending_signer_state
+        .as_mut()
+        .expect("signer state")
+        .signed_payload = Some(json!({
+        "kind": "evm_signed_transaction",
+        "raw_tx": "0x0102"
+    }));
+    runtime.touch_transition();
+
+    let mut checkpoint_repo = InMemoryCheckpointRepository::default();
+    let progress = persist_progress_checkpoint(&mut checkpoint_repo, &runtime)
+        .expect("persist progress checkpoint");
+
+    assert_eq!(progress.pending_requests.pending_signer_request_id, None);
+    assert!(progress.pending_requests.pending_signer_request.is_none());
+
+    let restored =
+        restore_active_run_from_parts(mission, progress, runtime.pending_signer_state.clone())
+            .expect("restore runtime");
+
+    assert_eq!(
+        restored
+            .pending_signer_state
+            .as_ref()
+            .map(|state| state.status.clone()),
+        Some(SignerRequestStatus::Signed)
+    );
+    assert_eq!(
+        restored
+            .pending_signer_state
+            .as_ref()
+            .and_then(|state| state.signed_payload.clone())
+            .unwrap_or_default()["raw_tx"],
+        "0x0102"
+    );
+}
+
+#[test]
 fn side_effect_checkpoint_preserves_confirmation_and_verify_resume_truth() {
     let mission = sample_mission();
     let mut runtime = ActiveRun::new(mission, sample_running_checkpoint());
@@ -398,6 +455,7 @@ fn sample_awaiting_signer_checkpoint(signer_state: &SignerRequestState) -> Check
         pending_requests: PendingRequestsSnapshot {
             pending_evidence_refs: Vec::new(),
             pending_envelope_refs: Vec::new(),
+            pending_signer_request: None,
             pending_signer_request_id: Some(signer_state.request_id.0.clone()),
             pending_confirmation_id: None,
         },

@@ -1,9 +1,9 @@
 use ais_agent_control::{audit::RuntimeAuditRecord, events::RunEventEnvelope, ids::RunId};
-use ais_agent_core::{mission::Mission, runtime::SignerRequestState};
+use ais_agent_core::mission::Mission;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::persistence::{CheckpointArchiveEntry, RunCatalogEntry};
+use crate::persistence::{CheckpointArchiveEntry, RunCatalogEntry, RunWaitStateRecord};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -46,10 +46,12 @@ pub struct CatalogWrite {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum SignerStateWrite {
-    Upsert { signer_state: SignerRequestState },
+pub enum RunWaitStateWrite {
+    Upsert { wait_state: RunWaitStateRecord },
     Clear { run_id: RunId },
 }
+
+pub type SignerStateWrite = RunWaitStateWrite;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditWriteBatch {
@@ -65,7 +67,7 @@ pub struct DurableMutationUnit {
     pub checkpoint_write: CheckpointWrite,
     pub event_write: EventWriteBatch,
     pub catalog_write: CatalogWrite,
-    pub signer_write: Option<SignerStateWrite>,
+    pub wait_state_write: Option<RunWaitStateWrite>,
     pub audit_write: AuditWriteBatch,
 }
 
@@ -108,10 +110,10 @@ pub enum DurableMutationContractError {
     },
     #[error("event batch is not strictly monotonic for run `{run_id}`")]
     EventBatchNotMonotonic { run_id: String },
-    #[error("signer write run `{signer_run_id}` does not match unit run `{unit_run_id}`")]
-    SignerRunIdMismatch {
+    #[error("wait-state write run `{wait_state_run_id}` does not match unit run `{unit_run_id}`")]
+    WaitStateRunIdMismatch {
         unit_run_id: String,
-        signer_run_id: String,
+        wait_state_run_id: String,
     },
     #[error("audit batch for run `{run_id}` contains run `{audit_run_id}` at seq `{audit_seq}`")]
     AuditRunIdMismatch {
@@ -197,15 +199,15 @@ pub fn validate_durable_mutation_unit(
         });
     }
 
-    if let Some(write) = unit.signer_write.as_ref() {
-        let signer_run_id = match write {
-            SignerStateWrite::Upsert { signer_state } => &signer_state.run_id,
+    if let Some(write) = unit.wait_state_write.as_ref() {
+        let wait_state_run_id = match write {
+            RunWaitStateWrite::Upsert { wait_state } => &wait_state.run_id,
             SignerStateWrite::Clear { run_id } => run_id,
         };
-        if signer_run_id != &unit.run_id {
-            return Err(DurableMutationContractError::SignerRunIdMismatch {
+        if wait_state_run_id != &unit.run_id {
+            return Err(DurableMutationContractError::WaitStateRunIdMismatch {
                 unit_run_id: unit.run_id.0.clone(),
-                signer_run_id: signer_run_id.0.clone(),
+                wait_state_run_id: wait_state_run_id.0.clone(),
             });
         }
     }

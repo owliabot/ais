@@ -11,8 +11,8 @@ use ais_agent_core::{
 
 use crate::{
     persistence::{
-        CheckpointRepository, CheckpointRepositoryError, MissionRepository, MissionRepositoryError,
-        SignerStateArchive, SignerStateArchiveError,
+        wait_state_record_into_signer_state, CheckpointRepository, CheckpointRepositoryError,
+        MissionRepository, MissionRepositoryError, RunWaitStateStore, RunWaitStateStoreError,
     },
     runtime::{ActiveRun, RuntimeStateMachine},
 };
@@ -23,8 +23,8 @@ pub enum RestoreRuntimeError {
     MissionRepository(#[from] MissionRepositoryError),
     #[error("checkpoint archive error: {0}")]
     CheckpointRepository(#[from] CheckpointRepositoryError),
-    #[error("signer state archive error: {0}")]
-    SignerStateArchive(#[from] SignerStateArchiveError),
+    #[error("wait-state store error: {0}")]
+    WaitStateStore(#[from] RunWaitStateStoreError),
     #[error("mission `{mission_id}` does not match checkpoint mission `{checkpoint_mission_id}`")]
     MissionMismatch {
         mission_id: String,
@@ -64,13 +64,13 @@ pub fn restore_active_run(
     run_id: &RunId,
     mission_repository: &impl MissionRepository,
     checkpoint_repository: &impl CheckpointRepository,
-    signer_state_archive: &impl SignerStateArchive,
+    wait_state_store: &impl RunWaitStateStore,
 ) -> Result<ActiveRun, RestoreRuntimeError> {
     let mission = mission_repository.load(run_id)?;
     let checkpoint = checkpoint_repository.latest(&run_id.0)?;
-    let pending_signer_state = match signer_state_archive.load(run_id) {
-        Ok(state) => Some(state),
-        Err(SignerStateArchiveError::NotFound { .. }) => None,
+    let pending_signer_state = match wait_state_store.load_wait_state(run_id) {
+        Ok(state) => Some(wait_state_record_into_signer_state(state)?),
+        Err(RunWaitStateStoreError::NotFound { .. }) => None,
         Err(error) => return Err(error.into()),
     };
     restore_active_run_from_parts(mission, checkpoint, pending_signer_state)

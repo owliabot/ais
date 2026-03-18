@@ -11,6 +11,7 @@ members = [
   "crates/ais-agent-drivers",
   "crates/ais-agent-host",
   "crates/ais-agent-transport",
+  "crates/ais-agent-observability-files",
   "crates/ais-agent-cli",
 ]
 resolver = "2"

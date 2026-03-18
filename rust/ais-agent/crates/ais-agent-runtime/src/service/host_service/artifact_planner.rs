@@ -1,12 +1,10 @@
 use std::collections::BTreeMap;
 
 use ais_agent_control::execution_artifact::{
-    EffectSpec, EvmTransactionCandidate, ExecutionArtifactLaunchSpec, ExecutionChainFamily,
-    ExecutionStage, ObservationSpec, SolanaInstructionAccount, SolanaInstructionCandidate,
-    SolanaTransactionCandidate, TransactionStage,
+    ExecutionArtifactLaunchSpec, ExecutionChainFamily, ExecutionStage,
 };
 use ais_agent_core::{
-    action::{ActionGraph, ActionPayload},
+    action::ActionGraph,
     checkpoint::{CheckpointSnapshot, ExecutionArtifactRuntimeSnapshot},
     effect::EffectContract,
     evidence::EvidenceGraph,
@@ -17,22 +15,24 @@ use ais_agent_evm::artifact_planner::{
 use ais_agent_solana::artifact_planner::{
     plan_execution_artifact as plan_solana_execution_artifact, PlannedSolanaExecutionArtifact,
 };
-use serde_json::json;
 
 use super::api_native_evm_common::RuntimeExecutionWiring;
+
+#[cfg(test)]
+use ais_agent_control::execution_artifact::{
+    EffectSpec, EvmTransactionCandidate, ObservationSpec, SolanaInstructionAccount,
+    SolanaInstructionCandidate, SolanaTransactionCandidate, TransactionStage,
+};
+#[cfg(test)]
+use ais_agent_core::action::ActionPayload;
+#[cfg(test)]
+use serde_json::json;
 
 pub(crate) fn seed_execution_artifact_checkpoint(
     checkpoint: &mut CheckpointSnapshot,
     wiring: &RuntimeExecutionWiring,
     spec: &ExecutionArtifactLaunchSpec,
 ) -> Result<(), String> {
-    if !wiring.allows_protocol_package(spec.protocol_package_id.as_str()) {
-        return Err(format!(
-            "execution_artifact protocol_package_id `{}` is not enabled",
-            spec.protocol_package_id
-        ));
-    }
-
     let chain_scope = spec.chain_scope().map(str::to_owned).ok_or_else(|| {
         "execution_artifact.allowed_chains must contain exactly one chain scope".to_owned()
     })?;
@@ -215,7 +215,6 @@ mod tests {
         let wiring = RuntimeExecutionWiring {
             evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
             solana_rpc_url: None,
-            allowed_protocol_packages: vec!["owliabot.transfer".to_owned()],
         };
 
         seed_execution_artifact_checkpoint(&mut checkpoint, &wiring, &spec)
@@ -289,7 +288,6 @@ mod tests {
         let wiring = RuntimeExecutionWiring {
             evm_rpc_url: None,
             solana_rpc_url: Some("http://127.0.0.1:8899".to_owned()),
-            allowed_protocol_packages: vec!["owliabot.solana".to_owned()],
         };
 
         seed_execution_artifact_checkpoint(&mut checkpoint, &wiring, &spec)

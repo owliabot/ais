@@ -1,0 +1,41 @@
+service:
+  instance_id: ais-agent-local
+
+transport:
+  http:
+    enabled: true
+    bind: 127.0.0.1:3200
+  jsonl:
+    enabled: false
+
+storage:
+  backend: sqlite
+  path: ./var/ais-agent.db
+  create_if_missing: true
+  retention:
+    checkpoint_full_window_days: 7
+    checkpoint_boundary_only_window_days: 30
+    wait_state_orphan_ttl_days: 7
+    destructive_purge_enabled: false
+    require_purge_confirmation: true
+    auto_prune_cadence_minutes: 1440
+    vacuum_freelist_threshold_pages: 1000
+
+providers:
+  evm_rpc_url: ${AIS_AGENT_EVM_RPC_URL}
+
+runtime_defaults:
+  claim_lease_seconds: 60
+  step_wall_clock_ms: 10000
+  confirmation_poll_ms: 2000
+
+observability:
+  log_level: info
+  file_logging:
+    enabled: true
+    dir: ./var/log/ais-agent
+    retention_days: 7
+  jsonl_capture:
+    enabled: true
+    dir: ./var/captures/jsonl
+    retention_days: 7

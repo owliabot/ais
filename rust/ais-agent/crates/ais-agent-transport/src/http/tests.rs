@@ -459,6 +459,7 @@ impl HostCommandService for MockHostService {
                     event_seq: 1,
                     checkpoint_seq: 0,
                     plan_epoch: 0,
+                    trace_context: None,
                     event: RunEvent::Started(RunStarted {
                         event_id: EventId("event-1".to_owned()),
                         run_id: RunId("run-1".to_owned()),
@@ -758,6 +759,7 @@ impl HostRunEventService for MockHostService {
                     event_seq: 1,
                     checkpoint_seq: 0,
                     plan_epoch: 0,
+                    trace_context: None,
                     event: RunEvent::Started(RunStarted {
                         event_id: EventId("event-1".to_owned()),
                         run_id: RunId("run-1".to_owned()),
@@ -990,6 +992,7 @@ fn sample_recovery_aware_inspect() -> InspectSnapshot {
         pending_continuations: Vec::new(),
         pending_confirmations: Vec::new(),
         pending_signer_requests: Vec::new(),
+        recent_events: Vec::new(),
         recent_side_effects: Vec::new(),
         effect_status: None,
         branch_trace: Vec::new(),
@@ -1116,6 +1119,7 @@ fn sample_retry_ready_inspect() -> InspectSnapshot {
             summary: "waiting for confirmation".to_owned(),
         }],
         pending_signer_requests: Vec::new(),
+        recent_events: Vec::new(),
         recent_side_effects: Vec::new(),
         effect_status: None,
         branch_trace: Vec::new(),

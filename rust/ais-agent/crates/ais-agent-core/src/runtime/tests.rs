@@ -1,6 +1,6 @@
 use crate::runtime::{
-    RunLifecycleState, RunPhase, RunStatus, SignerDecision, SignerDecisionKind, SignerRequestState,
-    SignerRequestStatus,
+    RunLifecycleState, RunPhase, RunStatus, SignerRequestState, SignerRequestStatus,
+    SignerResolution, SignerResolutionKind,
 };
 use ais_agent_control::{
     ids::{RunId, SignerRequestId},
@@ -17,11 +17,12 @@ fn signer_request_tracks_submitted_and_reconciled_states() {
     )
     .with_node_id("swap");
 
-    request.apply_decision(SignerDecision {
+    request.apply_resolution(SignerResolution {
         request_id: SignerRequestId("signer-1".to_owned()),
-        kind: SignerDecisionKind::Submitted,
-        decision_at_ms: Some(100),
+        kind: SignerResolutionKind::Submitted,
+        resolved_at_ms: Some(100),
         tx_hash: Some("0xabc".to_owned()),
+        signed_payload: None,
     });
 
     assert_eq!(request.status, SignerRequestStatus::Submitted);

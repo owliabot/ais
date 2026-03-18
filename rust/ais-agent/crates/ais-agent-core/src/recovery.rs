@@ -216,35 +216,46 @@ pub fn classify_recovery_disposition(
             _ => RecoveryDisposition::ContinueWait,
         }),
         RunStatus::AwaitingArtifactContinuation => Some(RecoveryDisposition::AwaitContinuation),
-        RunStatus::Paused => Some(match failure.map(|failure| &failure.code) {
-            Some(
-                RunFailureCode::SimulationRejected
-                | RunFailureCode::GovernorDenied
-                | RunFailureCode::SignerDenied
-                | RunFailureCode::SignerExpired
-                | RunFailureCode::VerifyMismatch,
-            ) => RecoveryDisposition::AwaitPatch,
-            Some(RunFailureCode::BroadcastUncertain) => RecoveryDisposition::AwaitUserInput,
-            Some(RunFailureCode::EnvelopeInvalid)
-                if !checkpoint.pending_requests.pending_envelope_refs.is_empty() =>
+        RunStatus::Paused => Some(
+            if matches!(
+                interruption.map(|interruption| &interruption.class),
+                Some(InterruptionClass::RecoveryRetryReady)
+            ) && failure.is_none()
             {
-                RecoveryDisposition::AwaitEnvelope
-            }
-            Some(RunFailureCode::EnvelopeInvalid) => RecoveryDisposition::AwaitPatch,
-            Some(
-                RunFailureCode::ConfirmationTimeout
-                | RunFailureCode::ProviderUnavailable
-                | RunFailureCode::BudgetExhausted,
-            ) => RecoveryDisposition::RetryReady,
-            Some(RunFailureCode::CancelRequested) => RecoveryDisposition::AbortOnly,
-            Some(RunFailureCode::RuntimeInvariantViolation | RunFailureCode::BroadcastRejected) => {
-                RecoveryDisposition::FailedClosed
-            }
-            Some(RunFailureCode::MissingEvidence | RunFailureCode::StaleEvidence) => {
-                RecoveryDisposition::AwaitEvidence
-            }
-            None => RecoveryDisposition::AwaitUserInput,
-        }),
+                RecoveryDisposition::RetryReady
+            } else {
+                match failure.map(|failure| &failure.code) {
+                    Some(
+                        RunFailureCode::SimulationRejected
+                        | RunFailureCode::GovernorDenied
+                        | RunFailureCode::SignerDenied
+                        | RunFailureCode::SignerExpired
+                        | RunFailureCode::VerifyMismatch,
+                    ) => RecoveryDisposition::AwaitPatch,
+                    Some(RunFailureCode::BroadcastUncertain) => RecoveryDisposition::AwaitUserInput,
+                    Some(RunFailureCode::EnvelopeInvalid)
+                        if !checkpoint.pending_requests.pending_envelope_refs.is_empty() =>
+                    {
+                        RecoveryDisposition::AwaitEnvelope
+                    }
+                    Some(RunFailureCode::EnvelopeInvalid) => RecoveryDisposition::AwaitPatch,
+                    Some(
+                        RunFailureCode::ConfirmationTimeout
+                        | RunFailureCode::ProviderUnavailable
+                        | RunFailureCode::BudgetExhausted,
+                    ) => RecoveryDisposition::RetryReady,
+                    Some(RunFailureCode::CancelRequested) => RecoveryDisposition::AbortOnly,
+                    Some(
+                        RunFailureCode::RuntimeInvariantViolation
+                        | RunFailureCode::BroadcastRejected,
+                    ) => RecoveryDisposition::FailedClosed,
+                    Some(RunFailureCode::MissingEvidence | RunFailureCode::StaleEvidence) => {
+                        RecoveryDisposition::AwaitEvidence
+                    }
+                    None => RecoveryDisposition::AwaitUserInput,
+                }
+            },
+        ),
         RunStatus::Failed => Some(RecoveryDisposition::FailedClosed),
         RunStatus::Cancelled => Some(RecoveryDisposition::AbortOnly),
         RunStatus::Created | RunStatus::Running | RunStatus::Completed => None,
@@ -265,7 +276,7 @@ pub fn classify_allowed_recovery_actions(
             RecoveryActionKind::CancelRun,
         ],
         Some(RecoveryDisposition::AwaitSigner) => vec![
-            RecoveryActionKind::SubmitSignerDecision,
+            RecoveryActionKind::SubmitSignerResolution,
             RecoveryActionKind::CancelRun,
         ],
         Some(RecoveryDisposition::AwaitContinuation) => vec![
@@ -426,10 +437,10 @@ pub fn classify_recovery_suggestions(checkpoint: &CheckpointSnapshot) -> Vec<Rec
             .into_iter()
             .map(|request_id| RecoverySuggestion {
                 suggestion_id: format!(
-                    "{}:recovery:{}:submit_signer_decision",
+                    "{}:recovery:{}:submit_signer_resolution",
                     checkpoint.run_id, basis_checkpoint_seq
                 ),
-                action_kind: RecoveryActionKind::SubmitSignerDecision,
+                action_kind: RecoveryActionKind::SubmitSignerResolution,
                 reason_code: failure
                     .map(|failure| failure.code.clone())
                     .unwrap_or(RunFailureCode::SignerDenied),

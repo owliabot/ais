@@ -1,14 +1,15 @@
 use ais_agent_control::{events::RunEventEnvelope, ids::RunId, patch::PlanPatchSubmission};
 use ais_agent_core::checkpoint::CheckpointSnapshot;
-use tracing::{debug, info, warn};
+use tracing::{debug, debug_span, info, warn};
 
 use crate::{
     events::RuntimeEventEmitter,
     persistence::{
-        persist_boundary_checkpoint, persist_progress_checkpoint, CheckpointArchiveEntry,
-        CheckpointArchiveKind, CheckpointRepository, DurableMutationExecutor, DurableMutationKind,
-        DurableMutationUnit, LinearDurableMutationExecutor, MissionWrite, MissionWriteMode,
-        RuntimeAuditQuery, SignerStateWrite,
+        persist_boundary_checkpoint, persist_progress_checkpoint,
+        signer_state_into_wait_state_record, CheckpointArchiveEntry, CheckpointArchiveKind,
+        CheckpointRepository, DurableMutationExecutor, DurableMutationKind, DurableMutationUnit,
+        LinearDurableMutationExecutor, MissionWrite, MissionWriteMode, RunWaitStateWrite,
+        RuntimeAuditQuery,
     },
     runtime::ActiveRun,
 };
@@ -80,7 +81,7 @@ where
     K: crate::persistence::RunCatalogRepository + Send,
     E: crate::persistence::EventArchive + Send,
     S: ais_agent_host::session::HostSessionStore + Send,
-    G: crate::persistence::SignerStateArchive + Send,
+    G: crate::persistence::SignerStateStore + Send,
     A: crate::persistence::RuntimeAuditArchive + Send,
     Q: crate::persistence::RunClaimRepository + Send,
 {
@@ -92,7 +93,7 @@ where
             &mut self.checkpoint_repo,
             &mut self.event_archive,
             &mut self.run_catalog_repo,
-            &mut self.signer_state_archive,
+            &mut self.signer_state_store,
             &mut self.audit_archive,
         )
     }
@@ -168,9 +169,11 @@ where
             catalog_write: crate::persistence::CatalogWrite {
                 entry: conversion::run_catalog_entry(runtime, latest_event_seq),
             },
-            signer_write: Some(match runtime.pending_signer_state.clone() {
-                Some(signer_state) => SignerStateWrite::Upsert { signer_state },
-                None => SignerStateWrite::Clear {
+            wait_state_write: Some(match runtime.pending_signer_state.clone() {
+                Some(signer_state) => RunWaitStateWrite::Upsert {
+                    wait_state: signer_state_into_wait_state_record(signer_state)?,
+                },
+                None => RunWaitStateWrite::Clear {
                     run_id: runtime.run_id.clone(),
                 },
             }),
@@ -185,9 +188,27 @@ where
         runtime: &ActiveRun,
         unit: DurableMutationUnit,
     ) -> Result<crate::persistence::DurableCommitReceipt, RuntimeHostServiceError> {
+        let _span = debug_span!(
+            "runtime.host.commit_grouped_run_state",
+            run_id = %runtime.run_id.0,
+            command_id = runtime
+                .last_command_id
+                .as_ref()
+                .map(|id| id.0.as_str())
+                .unwrap_or("<none>"),
+            checkpoint_seq = runtime.checkpoint.checkpoint_seq,
+            plan_epoch = runtime.checkpoint.plan_epoch,
+            revision = runtime.revision,
+        )
+        .entered();
+        let mutation_kind = unit.kind;
         let receipt = self.durable_executor().commit(unit).map_err(|error| {
             warn!(
                 run_id = %runtime.run_id.0,
+                mutation_kind = ?mutation_kind,
+                checkpoint_seq = runtime.checkpoint.checkpoint_seq,
+                plan_epoch = runtime.checkpoint.plan_epoch,
+                revision = runtime.revision,
                 error = %error,
                 "runtime.host.grouped_commit_failed"
             );
@@ -195,6 +216,7 @@ where
         })?;
         info!(
             run_id = %runtime.run_id.0,
+            mutation_kind = ?mutation_kind,
             checkpoint_seq = receipt.checkpoint_seq,
             plan_epoch = receipt.plan_epoch,
             latest_event_seq = ?receipt.latest_event_seq,
@@ -213,6 +235,19 @@ where
         runtime: &ActiveRun,
         events: &[RunEventEnvelope],
     ) -> Result<(), RuntimeHostServiceError> {
+        let _span = debug_span!(
+            "runtime.host.persist_new_run_scope",
+            run_id = %run_id.0,
+            command_id = runtime
+                .last_command_id
+                .as_ref()
+                .map(|id| id.0.as_str())
+                .unwrap_or("<none>"),
+            checkpoint_seq = runtime.checkpoint.checkpoint_seq,
+            plan_epoch = runtime.checkpoint.plan_epoch,
+            revision = runtime.revision,
+        )
+        .entered();
         debug!(
             run_id = %run_id.0,
             checkpoint_seq = runtime.checkpoint.checkpoint_seq,
@@ -245,6 +280,19 @@ where
         events: &[RunEventEnvelope],
         mission_write_mode: Option<MissionWriteMode>,
     ) -> Result<(), RuntimeHostServiceError> {
+        let _span = debug_span!(
+            "runtime.host.commit_existing_run_state_scope",
+            run_id = %runtime.run_id.0,
+            command_id = runtime
+                .last_command_id
+                .as_ref()
+                .map(|id| id.0.as_str())
+                .unwrap_or("<none>"),
+            checkpoint_seq = runtime.checkpoint.checkpoint_seq,
+            plan_epoch = runtime.checkpoint.plan_epoch,
+            revision = runtime.revision,
+        )
+        .entered();
         debug!(
             run_id = %runtime.run_id.0,
             mutation_kind = ?mutation_kind,
@@ -286,7 +334,7 @@ where
         for event in events.iter().cloned() {
             self.event_archive.append(event)?;
         }
-        self.sync_signer_state_archive(runtime)?;
+        self.sync_wait_state_archive(runtime)?;
         self.persist_run_catalog(
             runtime,
             if events.is_empty() {
@@ -325,16 +373,17 @@ where
         };
     }
 
-    pub(super) fn sync_signer_state_archive(
+    pub(super) fn sync_wait_state_archive(
         &mut self,
         runtime: &ActiveRun,
     ) -> Result<(), RuntimeHostServiceError> {
         match runtime.pending_signer_state.clone() {
             Some(state) => {
-                self.signer_state_archive.upsert(state)?;
+                self.signer_state_store
+                    .upsert_wait_state(signer_state_into_wait_state_record(state)?)?;
             }
             None => {
-                self.signer_state_archive.clear(&runtime.run_id)?;
+                self.signer_state_store.clear_wait_state(&runtime.run_id)?;
             }
         }
         Ok(())

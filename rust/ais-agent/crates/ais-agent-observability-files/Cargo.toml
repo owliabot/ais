@@ -1,0 +1,12 @@
+[package]
+name = "ais-agent-observability-files"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ais-agent-transport = { path = "../ais-agent-transport" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time = "0.3"

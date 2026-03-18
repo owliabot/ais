@@ -150,6 +150,7 @@ pub fn apply_plan_patch(
         .checkpoint
         .pending_requests
         .pending_signer_request_id = None;
+    runtime.checkpoint.pending_requests.pending_signer_request = None;
     runtime.checkpoint.lifecycle.bump_plan_epoch();
     runtime
         .checkpoint

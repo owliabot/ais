@@ -1,12 +1,13 @@
 use ais_agent_control::commands::{
     CancelRunCommand, RequestCancelRunCommand, StepRunCommand, SubmitEnvelopeCommand,
     SubmitEvidenceCommand, SubmitExecutionArtifactContinuationCommand, SubmitPlanPatchCommand,
-    SubmitSignerDecisionCommand,
+    SubmitSignerResolutionCommand,
 };
 use ais_agent_control::recovery::{CancelState, SideEffectPhase};
 use ais_agent_core::{
+    action::{ActionNodeKind, ActionNodeStatus, ActionPayload},
     checkpoint::PendingRequestsSnapshot,
-    recovery::{classify_cancel_request, CancelRequestResolution},
+    recovery::{classify_cancel_request, classify_side_effect_phase, CancelRequestResolution},
 };
 use ais_agent_host::{control::HostCommandOutcome, session::HostSessionId};
 
@@ -23,6 +24,11 @@ use super::super::{
     RuntimeHostServiceError, RuntimeHostServiceResult,
 };
 
+const ADVANCING_MUTATION_STEP_BUDGET: StepBudget = StepBudget {
+    max_transitions: Some(32),
+    max_wall_clock_ms: None,
+};
+
 impl<R, C, M, K, E, S, G, A, Q> RuntimeHostService<R, C, M, K, E, S, G, A, Q>
 where
     R: crate::runtime::RunRepository + Send,
@@ -31,10 +37,55 @@ where
     K: crate::persistence::RunCatalogRepository + Send,
     E: crate::persistence::EventArchive + Send,
     S: ais_agent_host::session::HostSessionStore + Send,
-    G: crate::persistence::SignerStateArchive + Send,
+    G: crate::persistence::SignerStateStore + Send,
     A: crate::persistence::RuntimeAuditArchive + Send,
     Q: crate::persistence::RunClaimRepository + Send,
 {
+    async fn advance_mutation_to_stable_boundary(
+        &mut self,
+        host_session_id: &HostSessionId,
+        runtime: &mut crate::runtime::ActiveRun,
+        base_revision: u64,
+        base_checkpoint: &ais_agent_core::checkpoint::CheckpointSnapshot,
+        mission_write_mode: Option<MissionWriteMode>,
+    ) -> RuntimeHostServiceResult {
+        let mut checkpoint_recorder = PendingCheckpointRecorder::default();
+        let result = StepScheduler::step_until_boundary(
+            runtime,
+            &mut checkpoint_recorder,
+            crate::stepper::StepUntilBoundary::CompleteOrBoundary,
+            ADVANCING_MUTATION_STEP_BUDGET,
+        )
+        .await?;
+        let checkpoint_entry = checkpoint_recorder.into_latest_entry().ok_or_else(|| {
+            RuntimeHostServiceError::Checkpoint(
+                crate::persistence::CheckpointRepositoryError::Storage {
+                    message: "step scheduler produced no checkpoint entry".to_owned(),
+                },
+            )
+        })?;
+
+        if let Err(error) = self.commit_existing_run_state(
+            runtime,
+            Some(base_revision),
+            durable_mutation_kind_for_checkpoint(runtime, &checkpoint_entry),
+            Some(checkpoint_entry),
+            &result.events,
+            mission_write_mode,
+        ) {
+            self.invalidate_hot_runtime_if_durable_checkpoint_advanced(
+                &runtime.run_id,
+                base_checkpoint,
+            );
+            return Err(error);
+        }
+
+        Ok(HostCommandOutcome {
+            response: self.inspect_or_pause_response(host_session_id, runtime)?,
+            events: result.events,
+        })
+    }
+
     pub async fn step_run(
         &mut self,
         host_session_id: HostSessionId,
@@ -74,26 +125,7 @@ where
         if let Err(error) = self.commit_existing_run_state(
             &runtime,
             Some(base_revision),
-            match checkpoint_entry.kind {
-                crate::persistence::CheckpointArchiveKind::SideEffect => {
-                    DurableMutationKind::SideEffect
-                }
-                crate::persistence::CheckpointArchiveKind::Boundary => {
-                    if matches!(
-                        runtime.checkpoint.lifecycle.status,
-                        ais_agent_core::runtime::RunStatus::Completed
-                            | ais_agent_core::runtime::RunStatus::Failed
-                            | ais_agent_core::runtime::RunStatus::Cancelled
-                    ) {
-                        DurableMutationKind::Terminal
-                    } else {
-                        DurableMutationKind::Progress
-                    }
-                }
-                crate::persistence::CheckpointArchiveKind::Progress => {
-                    DurableMutationKind::Progress
-                }
-            },
+            durable_mutation_kind_for_checkpoint(&runtime, &checkpoint_entry),
             Some(checkpoint_entry),
             &result.events,
             None,
@@ -138,22 +170,14 @@ where
             .insert(record.evidence_id.clone(), record);
         runtime.touch_transition();
 
-        if let Err(error) = self.commit_existing_run_state(
-            &runtime,
-            Some(base_revision),
-            DurableMutationKind::Progress,
-            Some(self.capture_checkpoint_entry(&runtime, DurableCheckpointWrite::Progress)?),
-            &[],
+        self.advance_mutation_to_stable_boundary(
+            &host_session_id,
+            &mut runtime,
+            base_revision,
+            &base_checkpoint,
             None,
-        ) {
-            self.invalidate_hot_runtime_if_durable_checkpoint_advanced(
-                &runtime.run_id,
-                &base_checkpoint,
-            );
-            return Err(error);
-        }
-
-        self.inspect_outcome(&host_session_id, &runtime, Vec::new())
+        )
+        .await
     }
 
     pub async fn submit_envelope(
@@ -205,36 +229,51 @@ where
             .envelopes
             .insert(runtime_envelope.envelope_id.clone(), runtime_envelope);
         conversion::resolve_pending_envelope_recovery(&mut runtime, &envelope_id);
+        let stabilized = stabilize_post_envelope_recovery(&mut runtime, &envelope_id);
         runtime.touch_transition();
 
-        if let Err(error) = self.commit_existing_run_state(
-            &runtime,
-            Some(base_revision),
-            DurableMutationKind::Progress,
-            Some(self.capture_checkpoint_entry(&runtime, DurableCheckpointWrite::Progress)?),
-            &[],
-            None,
-        ) {
-            self.invalidate_hot_runtime_if_durable_checkpoint_advanced(
-                &runtime.run_id,
-                &base_checkpoint,
-            );
-            return Err(error);
+        if stabilized {
+            if let Err(error) = self.commit_existing_run_state(
+                &runtime,
+                Some(base_revision),
+                DurableMutationKind::Progress,
+                Some(self.capture_checkpoint_entry(&runtime, DurableCheckpointWrite::Boundary)?),
+                &[],
+                None,
+            ) {
+                self.invalidate_hot_runtime_if_durable_checkpoint_advanced(
+                    &runtime.run_id,
+                    &base_checkpoint,
+                );
+                return Err(error);
+            }
+
+            return Ok(HostCommandOutcome {
+                response: self.inspect_or_pause_response(&host_session_id, &runtime)?,
+                events: Vec::new(),
+            });
         }
 
-        self.inspect_outcome(&host_session_id, &runtime, Vec::new())
+        self.advance_mutation_to_stable_boundary(
+            &host_session_id,
+            &mut runtime,
+            base_revision,
+            &base_checkpoint,
+            None,
+        )
+        .await
     }
 
-    pub async fn submit_signer_decision(
+    pub async fn submit_signer_resolution(
         &mut self,
         host_session_id: HostSessionId,
-        command: SubmitSignerDecisionCommand,
+        command: SubmitSignerResolutionCommand,
     ) -> RuntimeHostServiceResult {
         self.ensure_mutation_session_link(&host_session_id, &command.run_id)?;
         let _claim = self.ensure_mutation_claim(&host_session_id, &command.run_id)?;
         let mut runtime = self.load_or_restore_active_run(&command.run_id)?;
         guard_run_command_version(
-            &ais_agent_control::commands::RunCommand::SubmitSignerDecision(command.clone()),
+            &ais_agent_control::commands::RunCommand::SubmitSignerResolution(command.clone()),
             &runtime,
         )
         .map_err(RuntimeHostServiceError::VersionConflict)?;
@@ -242,34 +281,44 @@ where
         let base_checkpoint = runtime.checkpoint.clone();
         runtime.record_command(command.command_id, None);
 
-        let host_decision =
-            conversion::host_signer_decision(command.run_id.clone(), command.decision);
-        let decision = host_decision.clone().into_runtime_decision();
-        let Some(signer_state) = runtime.pending_signer_state.as_mut() else {
-            return Err(RuntimeHostServiceError::SignerDecisionMismatch);
-        };
-        if signer_state.request_id != host_decision.request_id {
-            return Err(RuntimeHostServiceError::SignerDecisionMismatch);
+        let host_resolution =
+            conversion::host_signer_resolution(command.run_id.clone(), command.resolution);
+        let resolution = host_resolution.clone().into_runtime_resolution();
+        if matches!(
+            resolution.kind,
+            ais_agent_core::runtime::SignerResolutionKind::Signed
+        ) && resolution.signed_payload.is_none()
+        {
+            return Err(RuntimeHostServiceError::invalid_command(
+                "signer resolution `signed` requires `signed_payload`",
+            ));
         }
-        signer_state.apply_decision(decision);
+        if matches!(
+            resolution.kind,
+            ais_agent_core::runtime::SignerResolutionKind::Submitted
+        ) && resolution.tx_hash.is_none()
+        {
+            return Err(RuntimeHostServiceError::invalid_command(
+                "signer resolution `submitted` requires `tx_hash`",
+            ));
+        }
+        let Some(signer_state) = runtime.pending_signer_state.as_mut() else {
+            return Err(RuntimeHostServiceError::SignerResolutionMismatch);
+        };
+        if signer_state.request_id != host_resolution.request_id {
+            return Err(RuntimeHostServiceError::SignerResolutionMismatch);
+        }
+        signer_state.apply_resolution(resolution);
         runtime.touch_transition();
 
-        if let Err(error) = self.commit_existing_run_state(
-            &runtime,
-            Some(base_revision),
-            DurableMutationKind::Progress,
-            Some(self.capture_checkpoint_entry(&runtime, DurableCheckpointWrite::Progress)?),
-            &[],
+        self.advance_mutation_to_stable_boundary(
+            &host_session_id,
+            &mut runtime,
+            base_revision,
+            &base_checkpoint,
             None,
-        ) {
-            self.invalidate_hot_runtime_if_durable_checkpoint_advanced(
-                &runtime.run_id,
-                &base_checkpoint,
-            );
-            return Err(error);
-        }
-
-        self.inspect_outcome(&host_session_id, &runtime, Vec::new())
+        )
+        .await
     }
 
     pub async fn submit_plan_patch(
@@ -423,22 +472,14 @@ where
             .mark_running(ais_agent_core::runtime::RunPhase::Planning);
         runtime.touch_transition();
 
-        if let Err(error) = self.commit_existing_run_state(
-            &runtime,
-            Some(base_revision),
-            DurableMutationKind::Progress,
-            Some(self.capture_checkpoint_entry(&runtime, DurableCheckpointWrite::Progress)?),
-            &[],
+        self.advance_mutation_to_stable_boundary(
+            &host_session_id,
+            &mut runtime,
+            base_revision,
+            &base_checkpoint,
             None,
-        ) {
-            self.invalidate_hot_runtime_if_durable_checkpoint_advanced(
-                &runtime.run_id,
-                &base_checkpoint,
-            );
-            return Err(error);
-        }
-
-        self.inspect_outcome(&host_session_id, &runtime, Vec::new())
+        )
+        .await
     }
 
     pub async fn cancel_run(
@@ -520,6 +561,74 @@ where
     }
 }
 
+fn durable_mutation_kind_for_checkpoint(
+    runtime: &crate::runtime::ActiveRun,
+    checkpoint_entry: &crate::persistence::CheckpointArchiveEntry,
+) -> DurableMutationKind {
+    match checkpoint_entry.kind {
+        crate::persistence::CheckpointArchiveKind::SideEffect => DurableMutationKind::SideEffect,
+        crate::persistence::CheckpointArchiveKind::Boundary => {
+            if matches!(
+                runtime.checkpoint.lifecycle.status,
+                ais_agent_core::runtime::RunStatus::Completed
+                    | ais_agent_core::runtime::RunStatus::Failed
+                    | ais_agent_core::runtime::RunStatus::Cancelled
+            ) {
+                DurableMutationKind::Terminal
+            } else {
+                DurableMutationKind::Progress
+            }
+        }
+        crate::persistence::CheckpointArchiveKind::Progress => DurableMutationKind::Progress,
+    }
+}
+
 fn cancel_side_effect_phase(runtime: &crate::runtime::ActiveRun) -> Option<SideEffectPhase> {
     crate::runtime::classify_recovery_view(&runtime.checkpoint).side_effect_phase
+}
+
+fn dependencies_satisfied(
+    graph: &ais_agent_core::action::ActionGraph,
+    node: &ais_agent_core::action::ActionNode,
+) -> bool {
+    node.depends_on.iter().all(|dependency_id| {
+        graph.nodes.get(dependency_id).is_some_and(|dependency| {
+            matches!(
+                dependency.status,
+                ActionNodeStatus::Succeeded | ActionNodeStatus::Skipped
+            )
+        })
+    })
+}
+
+fn stabilize_post_envelope_recovery(
+    runtime: &mut crate::runtime::ActiveRun,
+    envelope_id: &str,
+) -> bool {
+    let has_ready_actuation_without_live_binding =
+        runtime.checkpoint.action_graph.nodes.values().any(|node| {
+            node.kind == ActionNodeKind::Actuate
+                && node.status == ActionNodeStatus::Ready
+                && dependencies_satisfied(&runtime.checkpoint.action_graph, node)
+                && matches!(
+                    &node.payload,
+                    ActionPayload::Actuate(actuate) if actuate.live.is_none()
+                )
+        });
+
+    if has_ready_actuation_without_live_binding {
+        let summary = format!(
+            "replacement envelope `{envelope_id}` accepted; execution is ready for an explicit retry step"
+        );
+        runtime.checkpoint.lifecycle.pause(summary.clone());
+        runtime.checkpoint.lifecycle.record_interruption(
+            ais_agent_control::recovery::InterruptionClass::RecoveryRetryReady,
+            Some(ais_agent_control::recovery::RunFailureStage::Recover),
+            classify_side_effect_phase(&runtime.checkpoint),
+            summary,
+        );
+        return true;
+    }
+
+    false
 }

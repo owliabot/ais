@@ -154,6 +154,7 @@ fn sample_checkpoint() -> CheckpointSnapshot {
         pending_requests: PendingRequestsSnapshot {
             pending_evidence_refs: vec!["evidence.quote".to_owned()],
             pending_envelope_refs: Vec::new(),
+            pending_signer_request: None,
             pending_signer_request_id: None,
             pending_confirmation_id: None,
         },

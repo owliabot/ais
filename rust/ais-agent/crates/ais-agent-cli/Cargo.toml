@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 ais-agent-host = { path = "../ais-agent-host" }
+ais-agent-observability-files = { path = "../ais-agent-observability-files" }
 ais-agent-runtime = { path = "../ais-agent-runtime" }
 ais-agent-store-sqlite = { path = "../ais-agent-store-sqlite" }
 ais-agent-transport = { path = "../ais-agent-transport" }
@@ -16,6 +17,8 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9"
 thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
 
 [dev-dependencies]
 ais-agent-control = { path = "../ais-agent-control" }

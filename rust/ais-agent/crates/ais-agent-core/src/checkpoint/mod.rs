@@ -10,7 +10,8 @@ mod tests;
 pub use replay::ReplayCursor;
 pub use snapshot::{
     ArtifactBranchTraceSnapshot, ArtifactContinuationSnapshot, CheckpointSnapshot,
-    ExecutionArtifactRuntimeSnapshot, PendingRequestsSnapshot,
+    ExecutionArtifactRuntimeSnapshot, PendingRequestsSnapshot, PendingSignerRequestSnapshot,
+    PendingSignerTimeoutSnapshot,
 };
 pub use store::{
     CheckpointPointer, CheckpointStore, CheckpointStoreError, InMemoryCheckpointStore,

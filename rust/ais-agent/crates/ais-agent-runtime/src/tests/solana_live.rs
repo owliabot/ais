@@ -51,7 +51,7 @@ use ais_agent_solana::{
 use crate::{
     persistence::{
         persist_side_effect_checkpoint, restore_active_run, InMemoryCheckpointRepository,
-        InMemoryMissionRepository, InMemorySignerStateArchive, MissionRepository,
+        InMemoryMissionRepository, InMemorySignerStateStore, MissionRepository,
     },
     runtime::ActiveRun,
     stepper::{
@@ -557,7 +557,7 @@ async fn runtime_can_restart_from_durable_side_effect_cut_after_solana_broadcast
         &run_id,
         &mission_repo,
         &checkpoint_repo,
-        &InMemorySignerStateArchive::default(),
+        &InMemorySignerStateStore::default(),
     )
     .expect("restore from durable side-effect cut");
 

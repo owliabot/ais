@@ -55,10 +55,58 @@ fn apply_env_overrides(config: &mut AisAgentServiceConfig) {
         config.transport.http.bind = bind;
     }
     if let Ok(sqlite_path) = env::var("AIS_AGENT_SQLITE_PATH") {
-        config.storage = AisAgentStorageConfig::Sqlite(AisAgentSqliteStorageConfig {
-            path: PathBuf::from(sqlite_path),
-            create_if_missing: true,
-        });
+        let mut sqlite = sqlite_storage_config(config);
+        sqlite.path = PathBuf::from(sqlite_path);
+        config.storage = AisAgentStorageConfig::Sqlite(sqlite);
+    }
+    if let Ok(value) = env::var("AIS_AGENT_SQLITE_CHECKPOINT_FULL_WINDOW_DAYS") {
+        if let Ok(days) = value.parse::<u16>() {
+            sqlite_storage_config_mut(config)
+                .retention
+                .checkpoint_full_window_days = days;
+        }
+    }
+    if let Ok(value) = env::var("AIS_AGENT_SQLITE_CHECKPOINT_BOUNDARY_ONLY_WINDOW_DAYS") {
+        if let Ok(days) = value.parse::<u16>() {
+            sqlite_storage_config_mut(config)
+                .retention
+                .checkpoint_boundary_only_window_days = days;
+        }
+    }
+    if let Ok(value) = env::var("AIS_AGENT_SQLITE_WAIT_STATE_ORPHAN_TTL_DAYS") {
+        if let Ok(days) = value.parse::<u16>() {
+            sqlite_storage_config_mut(config)
+                .retention
+                .wait_state_orphan_ttl_days = days;
+        }
+    }
+    if let Ok(value) = env::var("AIS_AGENT_SQLITE_PURGE_ENABLED") {
+        if let Some(enabled) = parse_bool_flag(&value) {
+            sqlite_storage_config_mut(config)
+                .retention
+                .destructive_purge_enabled = enabled;
+        }
+    }
+    if let Ok(value) = env::var("AIS_AGENT_SQLITE_PURGE_REQUIRE_CONFIRMATION") {
+        if let Some(enabled) = parse_bool_flag(&value) {
+            sqlite_storage_config_mut(config)
+                .retention
+                .require_purge_confirmation = enabled;
+        }
+    }
+    if let Ok(value) = env::var("AIS_AGENT_SQLITE_AUTO_PRUNE_CADENCE_MINUTES") {
+        if let Ok(minutes) = value.parse::<u32>() {
+            sqlite_storage_config_mut(config)
+                .retention
+                .auto_prune_cadence_minutes = minutes;
+        }
+    }
+    if let Ok(value) = env::var("AIS_AGENT_SQLITE_VACUUM_FREELIST_THRESHOLD_PAGES") {
+        if let Ok(pages) = value.parse::<u32>() {
+            sqlite_storage_config_mut(config)
+                .retention
+                .vacuum_freelist_threshold_pages = pages;
+        }
     }
     if let Ok(url) = env::var("AIS_AGENT_EVM_RPC_URL") {
         config.providers.evm_rpc_url = Some(url);
@@ -76,14 +124,31 @@ fn apply_env_overrides(config: &mut AisAgentServiceConfig) {
             config.observability.log_level = parsed;
         }
     }
+    if let Ok(dir) = env::var("AIS_AGENT_LOG_DIR") {
+        config.observability.file_logging.enabled = true;
+        config.observability.file_logging.dir = PathBuf::from(dir);
+    }
+    if let Ok(value) = env::var("AIS_AGENT_LOG_RETENTION_DAYS") {
+        if let Ok(days) = value.parse::<u16>() {
+            config.observability.file_logging.retention_days = days;
+        }
+    }
+    if let Ok(dir) = env::var("AIS_AGENT_JSONL_CAPTURE_DIR") {
+        config.observability.jsonl_capture.enabled = true;
+        config.observability.jsonl_capture.dir = PathBuf::from(dir);
+    }
+    if let Ok(value) = env::var("AIS_AGENT_JSONL_CAPTURE_RETENTION_DAYS") {
+        if let Ok(days) = value.parse::<u16>() {
+            config.observability.jsonl_capture.retention_days = days;
+        }
+    }
 }
 
 fn apply_cli_overrides(config: &mut AisAgentServiceConfig, args: &Args) {
     if let Some(path) = args.sqlite_path.as_ref() {
-        config.storage = AisAgentStorageConfig::Sqlite(AisAgentSqliteStorageConfig {
-            path: PathBuf::from(path),
-            create_if_missing: true,
-        });
+        let mut sqlite = sqlite_storage_config(config);
+        sqlite.path = PathBuf::from(path);
+        config.storage = AisAgentStorageConfig::Sqlite(sqlite);
     }
     if let Some(url) = args.evm_rpc_url.as_ref() {
         config.providers.evm_rpc_url = Some(url.clone());
@@ -103,6 +168,20 @@ fn apply_cli_overrides(config: &mut AisAgentServiceConfig, args: &Args) {
             LogLevelArg::Error => AisAgentLogLevel::Error,
         };
     }
+    if let Some(dir) = args.log_dir.as_ref() {
+        config.observability.file_logging.enabled = true;
+        config.observability.file_logging.dir = PathBuf::from(dir);
+    }
+    if let Some(days) = args.log_retention_days {
+        config.observability.file_logging.retention_days = days;
+    }
+    if let Some(dir) = args.jsonl_capture_dir.as_ref() {
+        config.observability.jsonl_capture.enabled = true;
+        config.observability.jsonl_capture.dir = PathBuf::from(dir);
+    }
+    if let Some(days) = args.jsonl_capture_retention_days {
+        config.observability.jsonl_capture.retention_days = days;
+    }
 }
 
 fn apply_command_defaults(config: &mut AisAgentServiceConfig, command: &CliCommand) {
@@ -116,9 +195,12 @@ fn apply_command_defaults(config: &mut AisAgentServiceConfig, command: &CliComma
             command: DaemonCommand::Http { bind },
         } => {
             config.transport.http.enabled = true;
-            config.transport.http.bind = bind.clone();
+            if let Some(bind) = bind.as_ref() {
+                config.transport.http.bind = bind.clone();
+            }
         }
         CliCommand::Inspect { .. } => {}
+        CliCommand::Maintenance { .. } => {}
     }
 }
 
@@ -138,10 +220,44 @@ fn validate_config(config: &AisAgentServiceConfig) -> Result<(), ServiceConfigEr
             "runtime_defaults.confirmation_poll_ms must be greater than zero".to_owned(),
         ));
     }
+    if config.observability.file_logging.retention_days == 0 {
+        return Err(ServiceConfigError::Invalid(
+            "observability.file_logging.retention_days must be greater than zero".to_owned(),
+        ));
+    }
+    if config.observability.jsonl_capture.retention_days == 0 {
+        return Err(ServiceConfigError::Invalid(
+            "observability.jsonl_capture.retention_days must be greater than zero".to_owned(),
+        ));
+    }
     if config.transport.http.enabled && config.transport.http.bind.trim().is_empty() {
         return Err(ServiceConfigError::Invalid(
             "transport.http.bind must be non-empty when HTTP transport is enabled".to_owned(),
         ));
+    }
+    if let AisAgentStorageConfig::Sqlite(sqlite) = &config.storage {
+        if sqlite.retention.checkpoint_full_window_days == 0 {
+            return Err(ServiceConfigError::Invalid(
+                "storage.retention.checkpoint_full_window_days must be greater than zero"
+                    .to_owned(),
+            ));
+        }
+        if sqlite.retention.checkpoint_boundary_only_window_days == 0 {
+            return Err(ServiceConfigError::Invalid(
+                "storage.retention.checkpoint_boundary_only_window_days must be greater than zero"
+                    .to_owned(),
+            ));
+        }
+        if sqlite.retention.wait_state_orphan_ttl_days == 0 {
+            return Err(ServiceConfigError::Invalid(
+                "storage.retention.wait_state_orphan_ttl_days must be greater than zero".to_owned(),
+            ));
+        }
+        if sqlite.retention.auto_prune_cadence_minutes == 0 {
+            return Err(ServiceConfigError::Invalid(
+                "storage.retention.auto_prune_cadence_minutes must be greater than zero".to_owned(),
+            ));
+        }
     }
     Ok(())
 }
@@ -154,6 +270,33 @@ fn parse_log_level(value: &str) -> Option<AisAgentLogLevel> {
         "warn" => Some(AisAgentLogLevel::Warn),
         "error" => Some(AisAgentLogLevel::Error),
         _ => None,
+    }
+}
+
+fn parse_bool_flag(value: &str) -> Option<bool> {
+    match value {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn sqlite_storage_config(config: &AisAgentServiceConfig) -> AisAgentSqliteStorageConfig {
+    match &config.storage {
+        AisAgentStorageConfig::Sqlite(sqlite) => sqlite.clone(),
+        AisAgentStorageConfig::InMemory => AisAgentSqliteStorageConfig::default(),
+    }
+}
+
+fn sqlite_storage_config_mut(
+    config: &mut AisAgentServiceConfig,
+) -> &mut AisAgentSqliteStorageConfig {
+    if !matches!(config.storage, AisAgentStorageConfig::Sqlite(_)) {
+        config.storage = AisAgentStorageConfig::Sqlite(AisAgentSqliteStorageConfig::default());
+    }
+    match &mut config.storage {
+        AisAgentStorageConfig::Sqlite(sqlite) => sqlite,
+        AisAgentStorageConfig::InMemory => unreachable!("storage converted to sqlite"),
     }
 }
 
@@ -179,10 +322,21 @@ mod tests {
     fn reset_env() {
         env::remove_var("AIS_AGENT_HTTP_BIND");
         env::remove_var("AIS_AGENT_SQLITE_PATH");
+        env::remove_var("AIS_AGENT_SQLITE_CHECKPOINT_FULL_WINDOW_DAYS");
+        env::remove_var("AIS_AGENT_SQLITE_CHECKPOINT_BOUNDARY_ONLY_WINDOW_DAYS");
+        env::remove_var("AIS_AGENT_SQLITE_WAIT_STATE_ORPHAN_TTL_DAYS");
+        env::remove_var("AIS_AGENT_SQLITE_PURGE_ENABLED");
+        env::remove_var("AIS_AGENT_SQLITE_PURGE_REQUIRE_CONFIRMATION");
+        env::remove_var("AIS_AGENT_SQLITE_AUTO_PRUNE_CADENCE_MINUTES");
+        env::remove_var("AIS_AGENT_SQLITE_VACUUM_FREELIST_THRESHOLD_PAGES");
         env::remove_var("AIS_AGENT_EVM_RPC_URL");
         env::remove_var("AIS_AGENT_SOLANA_RPC_URL");
         env::remove_var("AIS_AGENT_CLAIM_LEASE_SECONDS");
         env::remove_var("AIS_AGENT_LOG_LEVEL");
+        env::remove_var("AIS_AGENT_LOG_DIR");
+        env::remove_var("AIS_AGENT_LOG_RETENTION_DAYS");
+        env::remove_var("AIS_AGENT_JSONL_CAPTURE_DIR");
+        env::remove_var("AIS_AGENT_JSONL_CAPTURE_RETENTION_DAYS");
     }
 
     #[test]
@@ -208,19 +362,32 @@ transport:
   http:
     enabled: true
     bind: 127.0.0.1:4100
+storage:
+  backend: sqlite
+  retention:
+    checkpoint_full_window_days: 9
 runtime_defaults:
   claim_lease_seconds: 45
+observability:
+  file_logging:
+    enabled: true
+    dir: ./var/yaml-logs
+    retention_days: 9
 "#,
         )
         .expect("write");
 
         env::set_var("AIS_AGENT_CLAIM_LEASE_SECONDS", "75");
+        env::set_var("AIS_AGENT_JSONL_CAPTURE_DIR", "./var/env-captures");
+        env::set_var("AIS_AGENT_SQLITE_PURGE_ENABLED", "true");
         let args = Args::try_parse_from([
             "ais-agent",
             "--config",
             path.to_str().expect("path"),
             "--sqlite-path",
             "./var/cli.db",
+            "--log-retention-days",
+            "14",
             "daemon",
             "http",
             "--bind",
@@ -233,9 +400,22 @@ runtime_defaults:
         assert!(config.transport.http.enabled);
         assert_eq!(config.transport.http.bind, "0.0.0.0:8081");
         assert_eq!(config.runtime_defaults.claim_lease_seconds, 75);
+        assert!(config.observability.file_logging.enabled);
+        assert_eq!(
+            config.observability.file_logging.dir,
+            PathBuf::from("./var/yaml-logs")
+        );
+        assert_eq!(config.observability.file_logging.retention_days, 14);
+        assert!(config.observability.jsonl_capture.enabled);
+        assert_eq!(
+            config.observability.jsonl_capture.dir,
+            PathBuf::from("./var/env-captures")
+        );
         match config.storage {
             super::super::types::AisAgentStorageConfig::Sqlite(ref sqlite) => {
                 assert_eq!(sqlite.path, PathBuf::from("./var/cli.db"));
+                assert_eq!(sqlite.retention.checkpoint_full_window_days, 9);
+                assert!(sqlite.retention.destructive_purge_enabled);
             }
             other => panic!("unexpected storage config: {other:?}"),
         }
@@ -259,15 +439,81 @@ runtime_defaults:
     }
 
     #[test]
+    fn daemon_http_preserves_yaml_bind_when_flag_is_omitted() {
+        let _guard = env_lock().lock().expect("lock");
+        reset_env();
+        let path = std::env::temp_dir().join("ais-agent-cli-daemon-bind-preserve.yaml");
+        fs::write(
+            &path,
+            r#"
+transport:
+  http:
+    enabled: true
+    bind: 127.0.0.1:3200
+"#,
+        )
+        .expect("write");
+
+        let args = Args::try_parse_from([
+            "ais-agent",
+            "--config",
+            path.to_str().expect("path"),
+            "daemon",
+            "http",
+        ])
+        .expect("args");
+
+        let config = load_service_config(&args).expect("config");
+
+        assert!(config.transport.http.enabled);
+        assert_eq!(config.transport.http.bind, "127.0.0.1:3200");
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn daemon_http_bind_flag_overrides_yaml_bind() {
+        let _guard = env_lock().lock().expect("lock");
+        reset_env();
+        let path = std::env::temp_dir().join("ais-agent-cli-daemon-bind-override.yaml");
+        fs::write(
+            &path,
+            r#"
+transport:
+  http:
+    enabled: true
+    bind: 127.0.0.1:3200
+"#,
+        )
+        .expect("write");
+
+        let args = Args::try_parse_from([
+            "ais-agent",
+            "--config",
+            path.to_str().expect("path"),
+            "daemon",
+            "http",
+            "--bind",
+            "127.0.0.1:3000",
+        ])
+        .expect("args");
+
+        let config = load_service_config(&args).expect("config");
+
+        assert!(config.transport.http.enabled);
+        assert_eq!(config.transport.http.bind, "127.0.0.1:3000");
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn preserve_command_parse_shapes() {
         let _guard = env_lock().lock().expect("lock");
         let args = Args::try_parse_from(["ais-agent", "daemon", "http"]).expect("args");
         assert_eq!(
             args.command,
             CliCommand::Daemon {
-                command: DaemonCommand::Http {
-                    bind: "127.0.0.1:3000".to_owned(),
-                },
+                command: DaemonCommand::Http { bind: None },
             }
         );
 
@@ -278,5 +524,53 @@ runtime_defaults:
                 command: LocalCommand::Jsonl,
             }
         );
+    }
+
+    #[test]
+    fn rejects_zero_observability_retention_windows() {
+        let _guard = env_lock().lock().expect("lock");
+        reset_env();
+        let args =
+            Args::try_parse_from(["ais-agent", "--log-retention-days", "0", "local", "jsonl"])
+                .expect("args");
+
+        let error = load_service_config(&args).expect_err("invalid config");
+        assert!(error
+            .to_string()
+            .contains("observability.file_logging.retention_days"));
+    }
+
+    #[test]
+    fn rejects_zero_sqlite_retention_windows() {
+        let _guard = env_lock().lock().expect("lock");
+        reset_env();
+        let path = std::env::temp_dir().join("ais-agent-cli-invalid-retention.yaml");
+        fs::write(
+            &path,
+            r#"
+storage:
+  backend: sqlite
+  path: ./var/ais-agent.db
+  retention:
+    checkpoint_full_window_days: 0
+"#,
+        )
+        .expect("write");
+
+        let args = Args::try_parse_from([
+            "ais-agent",
+            "--config",
+            path.to_str().expect("path"),
+            "inspect",
+            "config",
+        ])
+        .expect("args");
+
+        let error = load_service_config(&args).expect_err("invalid config");
+        assert!(error
+            .to_string()
+            .contains("storage.retention.checkpoint_full_window_days"));
+
+        let _ = fs::remove_file(path);
     }
 }

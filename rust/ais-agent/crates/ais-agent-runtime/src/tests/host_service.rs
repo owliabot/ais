@@ -5,18 +5,18 @@ use ais_agent_control::{
         BeginRunCommand, CancelRunCommand, ClaimRunCommand, EnvelopeKind, EnvelopeSubmission,
         EvidenceKind, EvidenceSubmission, ExpectedRuntimeVersion, MissionBudgetSubmission,
         MissionSubmission, ReleaseRunClaimCommand, RenewRunClaimCommand, RequestCancelRunCommand,
-        RunCommand, SignerDecisionKind, SignerDecisionSubmission, StepBudget, StepRunCommand,
+        RunCommand, SignerResolutionKind, SignerResolutionSubmission, StepBudget, StepRunCommand,
         StepUntil, SubmitEnvelopeCommand, SubmitEvidenceCommand,
-        SubmitExecutionArtifactContinuationCommand, SubmitSignerDecisionCommand,
+        SubmitExecutionArtifactContinuationCommand, SubmitSignerResolutionCommand,
     },
-    events::RunEvent,
+    events::{RunAwaitingSigner, RunEvent, RunEventEnvelope, RunEventTraceContext},
     execution_artifact::{
         BranchStage, BranchTarget, ComparisonOperator, ContinuationStage, EffectSpec,
         EvmTransactionCandidate, ExecutionArtifactActor, ExecutionArtifactLaunchSpec,
         ExecutionChainFamily, ExecutionStage, ExecutionTransactionCandidate, ObservationSpec,
         ObserveStage, OutputExportSpec, PredicateSpec, TransactionStage, ValueRef,
     },
-    ids::{CommandId, IdempotencyKey, RunId, SignerRequestId},
+    ids::{CommandId, EventId, IdempotencyKey, RunId, SignerRequestId},
     launch_spec::{LaunchSpecSubmission, PrebuiltFragmentLaunchSpec, ReflectionRequestLaunchSpec},
     ownership::{RunClaimMode, RunClaimOwnerKind},
     recovery::{
@@ -58,9 +58,9 @@ use crate::{
         CheckpointArchiveEntry, CheckpointArchiveKind, CheckpointRepository, EventArchive,
         EventArchiveError, EventArchiveQuery, InMemoryCheckpointRepository, InMemoryEventArchive,
         InMemoryMissionRepository, InMemoryRunCatalogRepository, InMemoryRunClaimRepository,
-        InMemorySignerStateArchive, MissionRepository, MissionRepositoryError, RunCatalogEntry,
-        RunCatalogRepository, RunCatalogRepositoryError, RunClaimRepository, SignerStateArchive,
-        SignerStateArchiveError,
+        InMemorySignerStateStore, MissionRepository, MissionRepositoryError, RunCatalogEntry,
+        RunCatalogRepository, RunCatalogRepositoryError, RunClaimRepository, RunWaitStateRecord,
+        RunWaitStateStore, SignerStateStoreError,
     },
     runtime::{ActiveRun, InMemoryRunRepository, RunRepository},
     service::{RuntimeExecutionWiring, RuntimeHostService},
@@ -126,6 +126,11 @@ async fn runtime_host_service_handles_begin_inspect_and_cancel() {
         HostCommandResponse::Inspect(snapshot) => {
             assert_eq!(snapshot.run_id, run_id);
             assert_eq!(snapshot.status, RunStatus::Running);
+            assert_eq!(snapshot.recent_events.len(), 1);
+            assert_eq!(
+                snapshot.recent_events[0].event_type,
+                "run.lifecycle.started"
+            );
         }
         other => panic!("unexpected response: {other:?}"),
     }
@@ -146,6 +151,93 @@ async fn runtime_host_service_handles_begin_inspect_and_cancel() {
         HostCommandResponse::Inspect(snapshot) => {
             assert_eq!(snapshot.status, RunStatus::Cancelled);
             assert_eq!(snapshot.cancel_state, Some(CancelState::Cancelled));
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn runtime_host_service_inspect_surfaces_recent_archived_events() {
+    let run_id = RunId("run-inspect-events".to_owned());
+    let host_session_id: HostSessionId = "session-inspect-events".into();
+    let mission = sample_mission();
+    let mut checkpoint = checkpoint_with_nodes(Vec::new(), Vec::new());
+    checkpoint.run_id = run_id.0.clone();
+    checkpoint.mission_id = mission.mission_id.clone();
+    checkpoint.lifecycle.run_id = run_id.clone();
+    let mission_repo = preloaded_mission_repo(run_id.clone(), mission.clone());
+    let mut checkpoint_repo = InMemoryCheckpointRepository::default();
+    checkpoint_repo
+        .append(CheckpointArchiveEntry {
+            snapshot: checkpoint,
+            kind: CheckpointArchiveKind::Boundary,
+        })
+        .expect("append checkpoint");
+    let mut event_archive = InMemoryEventArchive::default();
+    event_archive
+        .append(RunEventEnvelope {
+            run_id: run_id.clone(),
+            event_seq: 1,
+            checkpoint_seq: 4,
+            plan_epoch: 2,
+            trace_context: Some(RunEventTraceContext {
+                trace_id: "trace-run-inspect-events:signer".to_owned(),
+                span_id: "awaiting_signer:1".to_owned(),
+            }),
+            event: RunEvent::AwaitingSigner(RunAwaitingSigner {
+                event_id: EventId("event-awaiting-signer".to_owned()),
+                run_id: run_id.clone(),
+                request_id: SignerRequestId("signer-1".to_owned()),
+                reason: "waiting for signer approval".to_owned(),
+            }),
+        })
+        .expect("append event");
+    let mut session_store = InMemoryHostSessionStore::default();
+    session_store.link_run(HostRunLink::new(
+        host_session_id.clone(),
+        run_id.clone(),
+        mission.goal.clone(),
+        mission.allowed_chains.clone(),
+    ));
+
+    let mut service = RuntimeHostService::new(
+        InMemoryRunRepository::default(),
+        checkpoint_repo,
+        mission_repo,
+        InMemoryRunCatalogRepository::default(),
+        event_archive,
+        session_store,
+    );
+
+    let response = service
+        .handle(HostCommandEnvelope {
+            host_session_id,
+            host_request_id: None,
+            command: RunCommand::InspectRun(ais_agent_control::commands::InspectRunCommand {
+                command_id: CommandId("cmd-inspect-events".to_owned()),
+                run_id,
+            }),
+        })
+        .await;
+
+    match response.response {
+        HostCommandResponse::Inspect(snapshot) => {
+            assert_eq!(snapshot.recent_events.len(), 1);
+            assert_eq!(
+                snapshot.recent_events[0].event_type,
+                "run.signer.request_created"
+            );
+            assert_eq!(
+                snapshot.recent_events[0].summary,
+                "waiting for signer approval"
+            );
+            assert_eq!(
+                snapshot.recent_events[0]
+                    .trace_context
+                    .as_ref()
+                    .map(|trace| trace.trace_id.as_str()),
+                Some("trace-run-inspect-events:signer")
+            );
         }
         other => panic!("unexpected response: {other:?}"),
     }
@@ -248,7 +340,6 @@ async fn runtime_host_service_begin_run_seeds_execution_artifact_runtime_state_f
     .with_execution_wiring(RuntimeExecutionWiring {
         evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
         solana_rpc_url: None,
-        allowed_protocol_packages: vec!["owliabot.uniswap_v3".to_owned()],
     });
 
     let begin = service
@@ -367,7 +458,6 @@ async fn runtime_host_service_begin_run_seeds_simple_execution_artifact_checkpoi
     .with_execution_wiring(RuntimeExecutionWiring {
         evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
         solana_rpc_url: None,
-        allowed_protocol_packages: vec!["owliabot.transfer".to_owned()],
     });
 
     let begin = service
@@ -493,7 +583,6 @@ async fn runtime_host_service_accepts_generic_execution_artifact_for_new_protoco
     .with_execution_wiring(RuntimeExecutionWiring {
         evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
         solana_rpc_url: None,
-        allowed_protocol_packages: vec!["demo.protocol".to_owned()],
     });
 
     let begin = service
@@ -617,7 +706,6 @@ async fn runtime_host_service_begin_run_accepts_observe_only_execution_artifact(
     .with_execution_wiring(RuntimeExecutionWiring {
         evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
         solana_rpc_url: None,
-        allowed_protocol_packages: vec!["owliabot.uniswap_v3".to_owned()],
     });
 
     let begin = service
@@ -744,10 +832,6 @@ async fn runtime_host_service_submits_execution_artifact_continuation_and_reseed
     .with_execution_wiring(RuntimeExecutionWiring {
         evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
         solana_rpc_url: None,
-        allowed_protocol_packages: vec![
-            "owliabot.uniswap_v3".to_owned(),
-            "owliabot.aave_v3".to_owned(),
-        ],
     });
 
     let inspect = service
@@ -878,9 +962,16 @@ async fn runtime_host_service_submits_execution_artifact_continuation_and_reseed
         .await;
 
     match submit.response {
-        HostCommandResponse::Inspect(snapshot) => {
-            assert_eq!(snapshot.status, RunStatus::Running);
-            assert!(snapshot.pending_continuations.is_empty());
+        HostCommandResponse::Pause(pause) => {
+            assert_eq!(
+                pause.kind,
+                ais_agent_host::inspect::PauseKind::NeedUserInput
+            );
+            assert_eq!(
+                pause.recovery_disposition,
+                ais_agent_control::recovery::RecoveryDisposition::AwaitPatch
+            );
+            assert!(pause.pending_continuations.is_empty());
         }
         other => panic!("unexpected submit response: {other:?}"),
     }
@@ -914,7 +1005,7 @@ async fn runtime_host_service_submits_execution_artifact_continuation_and_reseed
         .expect("latest checkpoint");
     assert_eq!(
         latest.lifecycle.status,
-        ais_agent_core::runtime::RunStatus::Running
+        ais_agent_core::runtime::RunStatus::Paused
     );
     assert!(latest
         .execution_artifact
@@ -936,7 +1027,6 @@ async fn runtime_host_service_begin_run_accepts_branching_execution_artifact_ent
     .with_execution_wiring(RuntimeExecutionWiring {
         evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
         solana_rpc_url: None,
-        allowed_protocol_packages: vec!["owliabot.uniswap_v3".to_owned()],
     });
 
     let begin = service
@@ -1157,7 +1247,6 @@ async fn runtime_host_service_begin_run_accepts_native_transfer_execution_artifa
     .with_execution_wiring(RuntimeExecutionWiring {
         evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
         solana_rpc_url: None,
-        allowed_protocol_packages: vec!["owliabot.transfer".to_owned()],
     });
 
     let begin = service
@@ -1319,7 +1408,6 @@ async fn runtime_host_service_begin_run_accepts_erc20_transfer_execution_artifac
     .with_execution_wiring(RuntimeExecutionWiring {
         evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
         solana_rpc_url: None,
-        allowed_protocol_packages: vec!["owliabot.transfer".to_owned()],
     });
 
     let begin = service
@@ -1485,7 +1573,6 @@ async fn runtime_host_service_begin_run_accepts_owliabot_uniswap_v3_swap_executi
     .with_execution_wiring(RuntimeExecutionWiring {
         evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
         solana_rpc_url: None,
-        allowed_protocol_packages: vec!["owliabot.uniswap_v3".to_owned()],
     });
 
     let begin = service
@@ -1574,7 +1661,10 @@ async fn runtime_host_service_begin_run_accepts_owliabot_uniswap_v3_swap_executi
         execution_artifact.launch_spec.risk_class.as_deref(),
         Some("bounded_swap")
     );
-    assert_eq!(execution_artifact.launch_spec.risk_tags, vec!["router_call"]);
+    assert_eq!(
+        execution_artifact.launch_spec.risk_tags,
+        vec!["router_call"]
+    );
     assert_eq!(execution_artifact.launch_spec.candidate_envelopes.len(), 1);
     assert_eq!(
         execution_artifact
@@ -1663,7 +1753,6 @@ async fn runtime_host_service_begin_run_accepts_owliabot_uniswap_v3_lp_execution
     .with_execution_wiring(RuntimeExecutionWiring {
         evm_rpc_url: Some("http://127.0.0.1:8545".to_owned()),
         solana_rpc_url: None,
-        allowed_protocol_packages: vec!["owliabot.uniswap_v3".to_owned()],
     });
 
     let begin = service
@@ -1843,32 +1932,16 @@ async fn runtime_host_service_request_cancel_marks_confirmation_wait_as_pending(
         .handle(HostCommandEnvelope {
             host_session_id: host_session_id.clone(),
             host_request_id: None,
-            command: RunCommand::SubmitSignerDecision(SubmitSignerDecisionCommand {
+            command: RunCommand::SubmitSignerResolution(SubmitSignerResolutionCommand {
                 command_id: CommandId("cmd-signer-for-cancel".to_owned()),
                 run_id: run_id.clone(),
-                decision: SignerDecisionSubmission {
+                resolution: SignerResolutionSubmission {
                     request_id: SignerRequestId("signer-1".to_owned()),
-                    decision: SignerDecisionKind::Submitted,
+                    kind: SignerResolutionKind::Submitted,
                     tx_hash: Some("0xabc".to_owned()),
+                    signed_payload: None,
                     details: BTreeMap::new(),
                 },
-                expected_version: None,
-            }),
-        })
-        .await;
-
-    let _step = service
-        .handle(HostCommandEnvelope {
-            host_session_id: host_session_id.clone(),
-            host_request_id: None,
-            command: RunCommand::StepRun(StepRunCommand {
-                command_id: CommandId("cmd-step-for-cancel".to_owned()),
-                run_id: run_id.clone(),
-                until: StepUntil::CompleteOrBoundary,
-                budget: Some(StepBudget {
-                    max_nodes: Some(8),
-                    max_wall_clock_ms: None,
-                }),
                 expected_version: None,
             }),
         })
@@ -2140,7 +2213,7 @@ async fn runtime_host_service_claim_run_can_reacquire_after_expiry() {
         run_catalog_repo,
         event_archive,
         session_store,
-        InMemorySignerStateArchive::default(),
+        InMemorySignerStateStore::default(),
         crate::persistence::InMemoryRuntimeAuditArchive::default(),
         claim_repo,
     );
@@ -2201,7 +2274,7 @@ async fn runtime_host_service_claim_run_allows_pre_side_effect_supersede_but_not
         run_catalog_repo,
         event_archive,
         session_store,
-        InMemorySignerStateArchive::default(),
+        InMemorySignerStateStore::default(),
         crate::persistence::InMemoryRuntimeAuditArchive::default(),
         claim_repo,
     );
@@ -2276,7 +2349,7 @@ async fn runtime_host_service_claim_run_allows_pre_side_effect_supersede_but_not
         InMemoryRunCatalogRepository::default(),
         InMemoryEventArchive::default(),
         confirmation_session_store,
-        InMemorySignerStateArchive::default(),
+        InMemorySignerStateStore::default(),
         crate::persistence::InMemoryRuntimeAuditArchive::default(),
         confirmation_claim_repo,
     );
@@ -2765,13 +2838,14 @@ async fn runtime_host_service_accepts_signer_decision_then_steps_to_completion()
         .handle(HostCommandEnvelope {
             host_session_id: host_session_id.clone(),
             host_request_id: None,
-            command: RunCommand::SubmitSignerDecision(SubmitSignerDecisionCommand {
+            command: RunCommand::SubmitSignerResolution(SubmitSignerResolutionCommand {
                 command_id: CommandId("cmd-signer".to_owned()),
                 run_id: run_id.clone(),
-                decision: SignerDecisionSubmission {
+                resolution: SignerResolutionSubmission {
                     request_id: SignerRequestId("signer-1".to_owned()),
-                    decision: SignerDecisionKind::Submitted,
+                    kind: SignerResolutionKind::Submitted,
                     tx_hash: Some("0xabc".to_owned()),
+                    signed_payload: None,
                     details: BTreeMap::new(),
                 },
                 expected_version: None,
@@ -2779,19 +2853,45 @@ async fn runtime_host_service_accepts_signer_decision_then_steps_to_completion()
         })
         .await;
     match submit.response {
-        HostCommandResponse::Inspect(snapshot) => {
+        HostCommandResponse::Pause(snapshot) => {
             assert_eq!(snapshot.run_id, run_id);
+            assert_eq!(
+                snapshot.kind,
+                ais_agent_host::inspect::PauseKind::NeedConfirmation
+            );
         }
         other => panic!("unexpected response: {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn runtime_host_service_step_run_stops_at_awaiting_signer_without_advancing_consent() {
+    let (
+        run_repo,
+        checkpoint_repo,
+        mission_repo,
+        run_catalog_repo,
+        event_archive,
+        session_store,
+        run_id,
+        host_session_id,
+    ) = preloaded_signer_wait_runtime();
+    let mut service = RuntimeHostService::new(
+        run_repo,
+        checkpoint_repo,
+        mission_repo,
+        run_catalog_repo,
+        event_archive,
+        session_store,
+    );
 
     let stepped = service
         .handle(HostCommandEnvelope {
             host_session_id,
-            host_request_id: None,
+            host_request_id: Some("request-step-awaiting-signer".into()),
             command: RunCommand::StepRun(StepRunCommand {
-                command_id: CommandId("cmd-step".to_owned()),
-                run_id,
+                command_id: CommandId("cmd-step-awaiting-signer".to_owned()),
+                run_id: run_id.clone(),
                 until: StepUntil::CompleteOrBoundary,
                 budget: Some(StepBudget {
                     max_nodes: Some(8),
@@ -2801,20 +2901,160 @@ async fn runtime_host_service_accepts_signer_decision_then_steps_to_completion()
             }),
         })
         .await;
+
     match stepped.response {
         HostCommandResponse::Pause(pause) => {
+            assert_eq!(pause.run_id, run_id);
+            assert_eq!(pause.kind, ais_agent_host::inspect::PauseKind::NeedSigner);
+            assert_eq!(pause.pending_signer_requests.len(), 1);
             assert_eq!(
-                pause.kind,
-                ais_agent_host::inspect::PauseKind::NeedConfirmation
+                pause.pending_signer_requests[0].request_id.0.as_str(),
+                "signer-1"
             );
-            assert_eq!(pause.pending_confirmations.len(), 1);
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
+    assert!(stepped.events.is_empty());
+
+    let (
+        run_repo,
+        checkpoint_repo,
+        _mission_repo,
+        _run_catalog_repo,
+        _event_archive,
+        _session_store,
+        _signer_state_archive,
+    ) = service.into_parts();
+    let runtime = run_repo.load(&run_id).expect("runtime");
+    assert_eq!(
+        runtime.checkpoint.lifecycle.status,
+        ais_agent_core::runtime::RunStatus::AwaitingSigner
+    );
+    assert_eq!(
+        runtime
+            .pending_signer_state
+            .as_ref()
+            .map(|state| state.status.clone()),
+        Some(ais_agent_core::runtime::SignerRequestStatus::Pending)
+    );
+    let history = checkpoint_repo
+        .history(run_id.0.as_str())
+        .expect("checkpoint history");
+    assert!(!history.is_empty());
+    let latest = checkpoint_repo
+        .latest(run_id.0.as_str())
+        .expect("latest checkpoint");
+    assert_eq!(
+        latest.lifecycle.status,
+        ais_agent_core::runtime::RunStatus::AwaitingSigner
+    );
+    assert_eq!(
+        latest.pending_requests.pending_signer_request_id.as_deref(),
+        Some("signer-1")
+    );
+    assert!(latest.pending_requests.pending_confirmation_id.is_none());
+}
+
+#[tokio::test]
+async fn runtime_host_service_rejects_signed_signer_decision_without_payload() {
+    let (
+        run_repo,
+        checkpoint_repo,
+        mission_repo,
+        run_catalog_repo,
+        event_archive,
+        session_store,
+        run_id,
+        host_session_id,
+    ) = preloaded_signer_wait_runtime();
+    let mut service = RuntimeHostService::new(
+        run_repo,
+        checkpoint_repo,
+        mission_repo,
+        run_catalog_repo,
+        event_archive,
+        session_store,
+    );
+
+    let submit = service
+        .handle(HostCommandEnvelope {
+            host_session_id,
+            host_request_id: None,
+            command: RunCommand::SubmitSignerResolution(SubmitSignerResolutionCommand {
+                command_id: CommandId("cmd-signer-signed-missing-payload".to_owned()),
+                run_id,
+                resolution: SignerResolutionSubmission {
+                    request_id: SignerRequestId("signer-1".to_owned()),
+                    kind: SignerResolutionKind::Signed,
+                    tx_hash: None,
+                    signed_payload: None,
+                    details: BTreeMap::new(),
+                },
+                expected_version: None,
+            }),
+        })
+        .await;
+
+    match submit.response {
+        HostCommandResponse::Error(error) => {
+            assert_eq!(error.code, "invalid_command");
+            assert!(error.message.contains("signed_payload"));
         }
         other => panic!("unexpected response: {other:?}"),
     }
 }
 
 #[tokio::test]
-async fn runtime_host_service_accepts_replacement_envelope_and_resumes_recovering() {
+async fn runtime_host_service_rejects_submitted_signer_decision_without_tx_hash() {
+    let (
+        run_repo,
+        checkpoint_repo,
+        mission_repo,
+        run_catalog_repo,
+        event_archive,
+        session_store,
+        run_id,
+        host_session_id,
+    ) = preloaded_signer_wait_runtime();
+    let mut service = RuntimeHostService::new(
+        run_repo,
+        checkpoint_repo,
+        mission_repo,
+        run_catalog_repo,
+        event_archive,
+        session_store,
+    );
+
+    let submit = service
+        .handle(HostCommandEnvelope {
+            host_session_id,
+            host_request_id: None,
+            command: RunCommand::SubmitSignerResolution(SubmitSignerResolutionCommand {
+                command_id: CommandId("cmd-signer-submitted-missing-tx-hash".to_owned()),
+                run_id,
+                resolution: SignerResolutionSubmission {
+                    request_id: SignerRequestId("signer-1".to_owned()),
+                    kind: SignerResolutionKind::Submitted,
+                    tx_hash: None,
+                    signed_payload: None,
+                    details: BTreeMap::new(),
+                },
+                expected_version: None,
+            }),
+        })
+        .await;
+
+    match submit.response {
+        HostCommandResponse::Error(error) => {
+            assert_eq!(error.code, "invalid_command");
+            assert!(error.message.contains("tx_hash"));
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn runtime_host_service_accepts_replacement_envelope_and_stabilizes_retry_boundary() {
     let (
         run_repo,
         checkpoint_repo,
@@ -2848,14 +3088,25 @@ async fn runtime_host_service_accepts_replacement_envelope_and_resumes_recoverin
         .await;
 
     match submit.response {
-        HostCommandResponse::Inspect(snapshot) => {
-            assert_eq!(snapshot.run_id, run_id);
-            assert_eq!(snapshot.status, RunStatus::Running);
+        HostCommandResponse::Pause(bundle) => {
+            assert_eq!(bundle.run_id, run_id);
             assert_eq!(
-                snapshot.phase,
-                ais_agent_host::inspect::RunPhase::Recovering
+                bundle.kind,
+                ais_agent_host::inspect::PauseKind::NeedUserInput
             );
-            assert!(snapshot.failure_context.is_none());
+            assert_eq!(
+                bundle.interruption_class,
+                Some(ais_agent_control::recovery::InterruptionClass::RecoveryRetryReady)
+            );
+            assert_eq!(
+                bundle.recovery_disposition,
+                ais_agent_control::recovery::RecoveryDisposition::RetryReady
+            );
+            assert!(bundle.failure_context.is_none());
+            assert!(bundle
+                .required_actions
+                .iter()
+                .any(|action| action.action == "step_run"));
         }
         other => panic!("unexpected response: {other:?}"),
     }
@@ -2888,6 +3139,95 @@ async fn runtime_host_service_accepts_replacement_envelope_and_resumes_recoverin
         .latest(run_id.0.as_str())
         .expect("latest checkpoint");
     assert!(latest.pending_requests.pending_envelope_refs.is_empty());
+    assert_eq!(
+        latest.lifecycle.status,
+        ais_agent_core::runtime::RunStatus::Paused
+    );
+    assert_eq!(
+        latest
+            .lifecycle
+            .interruption
+            .as_ref()
+            .map(|interruption| interruption.class.clone()),
+        Some(ais_agent_control::recovery::InterruptionClass::RecoveryRetryReady)
+    );
+}
+
+#[tokio::test]
+async fn runtime_host_service_rejects_second_signer_resolution_for_same_request() {
+    let (
+        run_repo,
+        checkpoint_repo,
+        mission_repo,
+        run_catalog_repo,
+        event_archive,
+        session_store,
+        run_id,
+        host_session_id,
+    ) = preloaded_signer_wait_runtime();
+    let mut service = RuntimeHostService::new(
+        run_repo,
+        checkpoint_repo,
+        mission_repo,
+        run_catalog_repo,
+        event_archive,
+        session_store,
+    );
+
+    let first_submit = service
+        .handle(HostCommandEnvelope {
+            host_session_id: host_session_id.clone(),
+            host_request_id: None,
+            command: RunCommand::SubmitSignerResolution(SubmitSignerResolutionCommand {
+                command_id: CommandId("cmd-signer-first".to_owned()),
+                run_id: run_id.clone(),
+                resolution: SignerResolutionSubmission {
+                    request_id: SignerRequestId("signer-1".to_owned()),
+                    kind: SignerResolutionKind::Submitted,
+                    tx_hash: Some("0xabc".to_owned()),
+                    signed_payload: None,
+                    details: BTreeMap::new(),
+                },
+                expected_version: None,
+            }),
+        })
+        .await;
+
+    match first_submit.response {
+        HostCommandResponse::Pause(snapshot) => {
+            assert_eq!(
+                snapshot.kind,
+                ais_agent_host::inspect::PauseKind::NeedConfirmation
+            );
+        }
+        other => panic!("unexpected first response: {other:?}"),
+    }
+
+    let second_submit = service
+        .handle(HostCommandEnvelope {
+            host_session_id,
+            host_request_id: None,
+            command: RunCommand::SubmitSignerResolution(SubmitSignerResolutionCommand {
+                command_id: CommandId("cmd-signer-second".to_owned()),
+                run_id,
+                resolution: SignerResolutionSubmission {
+                    request_id: SignerRequestId("signer-1".to_owned()),
+                    kind: SignerResolutionKind::Submitted,
+                    tx_hash: Some("0xdef".to_owned()),
+                    signed_payload: None,
+                    details: BTreeMap::new(),
+                },
+                expected_version: None,
+            }),
+        })
+        .await;
+
+    match second_submit.response {
+        HostCommandResponse::Error(error) => {
+            assert_eq!(error.code, "signer_resolution_mismatch");
+        }
+        other => panic!("unexpected second response: {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -2957,38 +3297,21 @@ async fn runtime_host_service_persists_side_effect_cut_for_signer_submitted_conf
         .handle(HostCommandEnvelope {
             host_session_id: host_session_id.clone(),
             host_request_id: Some("request-side-effect-signer".into()),
-            command: RunCommand::SubmitSignerDecision(SubmitSignerDecisionCommand {
+            command: RunCommand::SubmitSignerResolution(SubmitSignerResolutionCommand {
                 command_id: CommandId("cmd-side-effect-signer".to_owned()),
                 run_id: run_id.clone(),
-                decision: SignerDecisionSubmission {
+                resolution: SignerResolutionSubmission {
                     request_id: SignerRequestId("signer-1".to_owned()),
-                    decision: SignerDecisionKind::Submitted,
+                    kind: SignerResolutionKind::Submitted,
                     tx_hash: Some("0xabc".to_owned()),
+                    signed_payload: None,
                     details: BTreeMap::new(),
                 },
                 expected_version: None,
             }),
         })
         .await;
-    assert!(matches!(submit.response, HostCommandResponse::Inspect(_)));
-
-    let stepped = service
-        .handle(HostCommandEnvelope {
-            host_session_id,
-            host_request_id: Some("request-side-effect-step".into()),
-            command: RunCommand::StepRun(StepRunCommand {
-                command_id: CommandId("cmd-side-effect-step".to_owned()),
-                run_id: run_id.clone(),
-                until: StepUntil::CompleteOrBoundary,
-                budget: Some(StepBudget {
-                    max_nodes: Some(8),
-                    max_wall_clock_ms: None,
-                }),
-                expected_version: None,
-            }),
-        })
-        .await;
-    assert!(matches!(stepped.response, HostCommandResponse::Pause(_)));
+    assert!(matches!(submit.response, HostCommandResponse::Pause(_)));
 
     let (
         _run_repo,
@@ -3425,7 +3748,7 @@ async fn runtime_host_service_supports_host_collaboration_loop_for_evidence_wait
         .await;
     match submit.response {
         HostCommandResponse::Inspect(snapshot) => {
-            assert_eq!(snapshot.status, RunStatus::AwaitingEvidence);
+            assert_eq!(snapshot.status, RunStatus::Completed);
             assert_eq!(
                 snapshot
                     .ownership
@@ -3527,13 +3850,14 @@ async fn runtime_host_service_supports_host_collaboration_loop_for_solana_signer
         .handle(HostCommandEnvelope {
             host_session_id: host_session_id.clone(),
             host_request_id: Some("request-sol-signer".into()),
-            command: RunCommand::SubmitSignerDecision(SubmitSignerDecisionCommand {
+            command: RunCommand::SubmitSignerResolution(SubmitSignerResolutionCommand {
                 command_id: CommandId("cmd-sol-signer".to_owned()),
                 run_id: run_id.clone(),
-                decision: SignerDecisionSubmission {
+                resolution: SignerResolutionSubmission {
                     request_id: SignerRequestId("solana-signer-1".to_owned()),
-                    decision: SignerDecisionKind::Submitted,
+                    kind: SignerResolutionKind::Submitted,
                     tx_hash: Some("solana-signature-1".to_owned()),
+                    signed_payload: None,
                     details: BTreeMap::new(),
                 },
                 expected_version: None,
@@ -3541,29 +3865,6 @@ async fn runtime_host_service_supports_host_collaboration_loop_for_solana_signer
         })
         .await;
     match submit.response {
-        HostCommandResponse::Inspect(snapshot) => {
-            assert_eq!(snapshot.status, RunStatus::AwaitingSigner);
-        }
-        other => panic!("unexpected signer response: {other:?}"),
-    }
-
-    let stepped = service
-        .handle(HostCommandEnvelope {
-            host_session_id,
-            host_request_id: Some("request-sol-step".into()),
-            command: RunCommand::StepRun(StepRunCommand {
-                command_id: CommandId("cmd-sol-step".to_owned()),
-                run_id: run_id.clone(),
-                until: StepUntil::CompleteOrBoundary,
-                budget: Some(StepBudget {
-                    max_nodes: Some(8),
-                    max_wall_clock_ms: None,
-                }),
-                expected_version: None,
-            }),
-        })
-        .await;
-    match stepped.response {
         HostCommandResponse::Pause(pause) => {
             assert_eq!(
                 pause.kind,
@@ -3571,7 +3872,7 @@ async fn runtime_host_service_supports_host_collaboration_loop_for_solana_signer
             );
             assert_eq!(pause.pending_confirmations.len(), 1);
         }
-        other => panic!("unexpected step response: {other:?}"),
+        other => panic!("unexpected signer response: {other:?}"),
     }
 
     let confirmation_batch = service
@@ -3711,7 +4012,12 @@ async fn runtime_host_service_keeps_catalog_pointers_consistent_with_durable_his
             }),
         })
         .await;
-    assert!(matches!(submit.response, HostCommandResponse::Inspect(_)));
+    match submit.response {
+        HostCommandResponse::Inspect(snapshot) => {
+            assert_eq!(snapshot.status, RunStatus::Completed);
+        }
+        other => panic!("unexpected submit response: {other:?}"),
+    }
 
     let stepped = service
         .handle(HostCommandEnvelope {
@@ -3802,7 +4108,12 @@ async fn runtime_host_service_prefers_durable_checkpoint_after_catalog_write_fai
             }),
         })
         .await;
-    assert!(matches!(submit.response, HostCommandResponse::Inspect(_)));
+    match submit.response {
+        HostCommandResponse::Inspect(snapshot) => {
+            assert_eq!(snapshot.status, RunStatus::Completed);
+        }
+        other => panic!("unexpected submit response: {other:?}"),
+    }
 
     let failed = service
         .handle(HostCommandEnvelope {
@@ -3971,27 +4282,28 @@ async fn runtime_host_service_fails_closed_when_durable_signer_state_lags_hot_ru
         run_id,
         host_session_id,
     ) = preloaded_signer_wait_runtime();
-    let mut service = RuntimeHostService::new_with_signer_archive(
+    let mut service = RuntimeHostService::new_with_signer_state_store(
         run_repo,
         checkpoint_repo,
         mission_repo,
         run_catalog_repo,
         event_archive,
         session_store,
-        FailingSignerStateArchive::fail_on_nth_write(1),
+        FailingSignerStateStore::fail_on_nth_write(1),
     );
 
     let failed = service
         .handle(HostCommandEnvelope {
             host_session_id: host_session_id.clone(),
             host_request_id: Some("request-fail-signer-archive".into()),
-            command: RunCommand::SubmitSignerDecision(SubmitSignerDecisionCommand {
+            command: RunCommand::SubmitSignerResolution(SubmitSignerResolutionCommand {
                 command_id: CommandId("cmd-fail-signer-archive".to_owned()),
                 run_id: run_id.clone(),
-                decision: SignerDecisionSubmission {
+                resolution: SignerResolutionSubmission {
                     request_id: SignerRequestId("signer-1".to_owned()),
-                    decision: SignerDecisionKind::Submitted,
+                    kind: SignerResolutionKind::Submitted,
                     tx_hash: Some("0xabc".to_owned()),
+                    signed_payload: None,
                     details: BTreeMap::new(),
                 },
                 expected_version: None,
@@ -4000,7 +4312,7 @@ async fn runtime_host_service_fails_closed_when_durable_signer_state_lags_hot_ru
         .await;
 
     match failed.response {
-        HostCommandResponse::Error(error) => assert_eq!(error.code, "signer_archive_error"),
+        HostCommandResponse::Error(error) => assert_eq!(error.code, "wait_state_store_error"),
         other => panic!("unexpected failure response: {other:?}"),
     }
 
@@ -4033,7 +4345,7 @@ async fn runtime_host_service_fails_closed_when_durable_signer_state_lags_hot_ru
         _event_archive,
         _session_store,
         _signer_state_archive,
-    ) = service.into_parts_with_signer_archive();
+    ) = service.into_parts_with_signer_state_store();
     let missing = run_repo
         .load(&run_id)
         .expect_err("hot runtime should be invalidated");
@@ -4051,7 +4363,14 @@ async fn runtime_host_service_fails_closed_when_durable_signer_state_lags_hot_ru
             .pending_requests
             .pending_signer_request_id
             .as_deref(),
-        Some("signer-1")
+        None
+    );
+    assert_eq!(
+        checkpoint
+            .pending_requests
+            .pending_confirmation_id
+            .as_deref(),
+        Some("0xabc")
     );
     let catalog = run_catalog_repo
         .load(&run_id)
@@ -4108,9 +4427,12 @@ async fn runtime_host_service_prefers_durable_checkpoint_after_event_archive_wri
             }),
         })
         .await;
-    assert!(matches!(submit.response, HostCommandResponse::Inspect(_)));
+    match submit.response {
+        HostCommandResponse::Error(error) => assert_eq!(error.code, "event_archive_error"),
+        other => panic!("unexpected submit response: {other:?}"),
+    }
 
-    let failed = service
+    let recovered = service
         .handle(HostCommandEnvelope {
             host_session_id: host_session_id.clone(),
             host_request_id: Some("request-event-archive-step".into()),
@@ -4127,9 +4449,14 @@ async fn runtime_host_service_prefers_durable_checkpoint_after_event_archive_wri
         })
         .await;
 
-    match failed.response {
-        HostCommandResponse::Error(error) => assert_eq!(error.code, "event_archive_error"),
-        other => panic!("unexpected failure response: {other:?}"),
+    match recovered.response {
+        HostCommandResponse::Inspect(snapshot) => {
+            assert_eq!(
+                snapshot.status,
+                ais_agent_host::inspect::RunStatus::Completed
+            );
+        }
+        other => panic!("unexpected recovery response: {other:?}"),
     }
 
     let replay = service
@@ -4531,16 +4858,16 @@ struct FailingCheckpointRepository {
 }
 
 #[derive(Debug, Default)]
-struct FailingSignerStateArchive {
-    inner: InMemorySignerStateArchive,
+struct FailingSignerStateStore {
+    inner: InMemorySignerStateStore,
     writes: usize,
     fail_on_nth_write: usize,
 }
 
-impl FailingSignerStateArchive {
+impl FailingSignerStateStore {
     fn fail_on_nth_write(fail_on_nth_write: usize) -> Self {
         Self {
-            inner: InMemorySignerStateArchive::default(),
+            inner: InMemorySignerStateStore::default(),
             writes: 0,
             fail_on_nth_write,
         }
@@ -4623,29 +4950,32 @@ impl CheckpointRepository for FailingCheckpointRepository {
     }
 }
 
-impl SignerStateArchive for FailingSignerStateArchive {
-    fn upsert(&mut self, signer_state: SignerRequestState) -> Result<(), SignerStateArchiveError> {
+impl RunWaitStateStore for FailingSignerStateStore {
+    fn upsert_wait_state(
+        &mut self,
+        wait_state: RunWaitStateRecord,
+    ) -> Result<(), SignerStateStoreError> {
         self.writes = self.writes.saturating_add(1);
         if self.writes == self.fail_on_nth_write {
-            return Err(SignerStateArchiveError::Storage {
-                message: "injected signer archive failure".to_owned(),
+            return Err(SignerStateStoreError::Storage {
+                message: "injected signer state store failure".to_owned(),
             });
         }
-        self.inner.upsert(signer_state)
+        self.inner.upsert_wait_state(wait_state)
     }
 
-    fn load(&self, run_id: &RunId) -> Result<SignerRequestState, SignerStateArchiveError> {
-        self.inner.load(run_id)
+    fn load_wait_state(&self, run_id: &RunId) -> Result<RunWaitStateRecord, SignerStateStoreError> {
+        self.inner.load_wait_state(run_id)
     }
 
-    fn clear(&mut self, run_id: &RunId) -> Result<(), SignerStateArchiveError> {
+    fn clear_wait_state(&mut self, run_id: &RunId) -> Result<(), SignerStateStoreError> {
         self.writes = self.writes.saturating_add(1);
         if self.writes == self.fail_on_nth_write {
-            return Err(SignerStateArchiveError::Storage {
-                message: "injected signer archive failure".to_owned(),
+            return Err(SignerStateStoreError::Storage {
+                message: "injected signer state store failure".to_owned(),
             });
         }
-        self.inner.clear(run_id)
+        self.inner.clear_wait_state(run_id)
     }
 }
 

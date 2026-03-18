@@ -38,6 +38,7 @@ Current implementation status:
   - `PauseBundle.required_actions[*].action_kind`
   - `PauseBundle.required_actions[*].retry_intent`
   - terminal `run_result`
+  - `InspectSnapshot.recent_events[*]` timeline summaries with optional `trace_context`
 - outbound transport events now carry sequenced runtime envelopes instead of raw `RunEvent`
 - JSONL and HTTP now consume the async `HostCommandService` directly; no sync adapter remains on the hot path
 - HTTP router organization now follows the local `ref/axum/examples` style more closely through:
@@ -87,7 +88,7 @@ Current implementation status:
       - `run_not_found -> 404`
       - conflict/state-mismatch -> `409`
       - backend/archive failure -> `503`
-    - preloaded `awaiting_signer -> submit_signer_decision -> step -> complete`
+    - preloaded `awaiting_signer -> submit_signer_resolution -> step -> complete`
     - preloaded `await_envelope -> submit_envelope -> step -> complete`
     - wrong replacement envelope rejection round-trip
     - recovery-aware inspect/pause round-trip for:
@@ -104,7 +105,7 @@ Current implementation status:
     - host collaboration loop through:
       - `inspect`
       - `GET /runs/{run_id}/events`
-      - `submit_signer_decision`
+      - `submit_signer_resolution`
       - `step`
       - final `inspect`
     - guarded EVM collaboration proof through:
@@ -124,3 +125,4 @@ Current implementation status:
 Known gaps:
 - no long-lived push stream yet; current event surface is polling-oriented
 - HTTP still does not expose richer run-management endpoints beyond commands and event polling
+- transport exposes bounded inspect timeline summaries, not a full inspect-side event history dump

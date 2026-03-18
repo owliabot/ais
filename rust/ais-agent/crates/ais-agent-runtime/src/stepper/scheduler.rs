@@ -13,7 +13,7 @@ use ais_agent_core::{
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracing::{debug, info, warn};
+use tracing::{debug, debug_span, info, warn, Instrument};
 
 use crate::{
     events::RuntimeEventEmitter,
@@ -77,48 +77,44 @@ impl StepScheduler {
         until: StepUntilBoundary,
         budget: StepBudget,
     ) -> Result<StepResult, StepSchedulerError> {
-        let started_at = Instant::now();
-        let mut transitions = Vec::new();
-        let mut events = Vec::new();
-        let max_transitions = budget.max_transitions.unwrap_or(64);
-        let mut persisted_side_effect_cut = false;
-        debug!(
+        let step_span = debug_span!(
+            "runtime.step",
             run_id = %runtime.run_id.0,
-            until = ?until,
-            max_transitions,
-            max_wall_clock_ms = budget.max_wall_clock_ms,
+            command_id = runtime
+                .last_command_id
+                .as_ref()
+                .map(|id| id.0.as_str())
+                .unwrap_or("<none>"),
             checkpoint_seq = runtime.checkpoint_seq(),
             plan_epoch = runtime.plan_epoch(),
             revision = runtime.revision,
-            "runtime.scheduler.start"
         );
+        async {
+            let started_at = Instant::now();
+            let mut transitions = Vec::new();
+            let mut events = Vec::new();
+            let max_transitions = budget.max_transitions.unwrap_or(64);
+            let mut persisted_side_effect_cut = false;
+            debug!(
+                run_id = %runtime.run_id.0,
+                until = ?until,
+                max_transitions,
+                max_wall_clock_ms = budget.max_wall_clock_ms,
+                checkpoint_seq = runtime.checkpoint_seq(),
+                plan_epoch = runtime.plan_epoch(),
+                revision = runtime.revision,
+                "runtime.scheduler.start"
+            );
 
-        loop {
-            if transitions.len() as u32 >= max_transitions {
-                record_budget_interruption(
-                    runtime,
-                    InterruptionClass::StepBudgetExhausted,
-                    format!(
-                        "step budget exhausted after {} transitions",
-                        transitions.len()
-                    ),
-                );
-                return finish_step_result(
-                    runtime,
-                    checkpoint_repo,
-                    persisted_side_effect_cut,
-                    StepStopReason::BudgetExhausted,
-                    transitions,
-                    events,
-                );
-            }
-
-            if let Some(max_wall_clock_ms) = budget.max_wall_clock_ms {
-                if started_at.elapsed().as_millis() as u64 >= max_wall_clock_ms {
+            loop {
+                if transitions.len() as u32 >= max_transitions {
                     record_budget_interruption(
                         runtime,
-                        InterruptionClass::WallClockBudgetExhausted,
-                        format!("wall clock budget exhausted after {max_wall_clock_ms} ms"),
+                        InterruptionClass::StepBudgetExhausted,
+                        format!(
+                            "step budget exhausted after {} transitions",
+                            transitions.len()
+                        ),
                     );
                     return finish_step_result(
                         runtime,
@@ -129,67 +125,123 @@ impl StepScheduler {
                         events,
                     );
                 }
-            }
 
-            let before_revision = runtime.revision;
-            let step = StepOnce::apply(runtime).await;
-
-            match step.applied_transition {
-                Some(transition) => {
-                    persisted_side_effect_cut =
-                        persist_side_effect_durability_cut(runtime, checkpoint_repo, &transition)?;
-                    debug!(
-                        run_id = %runtime.run_id.0,
-                        transition_kind = ?transition.kind,
-                        node_id = ?transition.node_id,
-                        summary = %transition.summary,
-                        checkpoint_seq = runtime.checkpoint_seq(),
-                        plan_epoch = runtime.plan_epoch(),
-                        revision = runtime.revision,
-                        persisted_side_effect_cut,
-                        "runtime.scheduler.transition_applied"
-                    );
-                    events.extend(RuntimeEventEmitter::emit_after_step(runtime, &transition));
-                    transitions.push(transition);
-                }
-                None => {
-                    if let Some(stop_reason) = stop_reason_for(runtime, until) {
+                if let Some(max_wall_clock_ms) = budget.max_wall_clock_ms {
+                    if started_at.elapsed().as_millis() as u64 >= max_wall_clock_ms {
+                        record_budget_interruption(
+                            runtime,
+                            InterruptionClass::WallClockBudgetExhausted,
+                            format!("wall clock budget exhausted after {max_wall_clock_ms} ms"),
+                        );
                         return finish_step_result(
                             runtime,
                             checkpoint_repo,
                             persisted_side_effect_cut,
-                            stop_reason,
+                            StepStopReason::BudgetExhausted,
                             transitions,
                             events,
                         );
                     }
+                }
 
+                let before_revision = runtime.revision;
+                let step = StepOnce::apply(runtime).await;
+
+                match step.applied_transition {
+                    Some(transition) => {
+                        persisted_side_effect_cut = persist_side_effect_durability_cut(
+                            runtime,
+                            checkpoint_repo,
+                            &transition,
+                        )?;
+                        debug!(
+                            run_id = %runtime.run_id.0,
+                            transition_kind = ?transition.kind,
+                            node_id = ?transition.node_id,
+                            summary = %transition.summary,
+                            checkpoint_seq = runtime.checkpoint_seq(),
+                            plan_epoch = runtime.plan_epoch(),
+                            revision = runtime.revision,
+                            persisted_side_effect_cut,
+                            "runtime.scheduler.transition_applied"
+                        );
+                        events.extend(RuntimeEventEmitter::emit_after_step(runtime, &transition));
+                        transitions.push(transition);
+                    }
+                    None => {
+                        if let Some(stop_reason) = stop_reason_for(runtime, until) {
+                            return finish_step_result(
+                                runtime,
+                                checkpoint_repo,
+                                persisted_side_effect_cut,
+                                stop_reason,
+                                transitions,
+                                events,
+                            );
+                        }
+
+                        warn!(
+                            run_id = %runtime.run_id.0,
+                            checkpoint_seq = runtime.checkpoint_seq(),
+                            plan_epoch = runtime.plan_epoch(),
+                            revision = runtime.revision,
+                            "runtime.scheduler.stall_detected"
+                        );
+                        runtime.checkpoint.lifecycle.fail(
+                            RunFailureStage::Recover,
+                            RunFailureCode::RuntimeInvariantViolation,
+                            "stepper could not make progress and no stable boundary was reached",
+                        );
+                        runtime.checkpoint.lifecycle.record_interruption(
+                            InterruptionClass::RuntimeStallDetected,
+                            Some(RunFailureStage::Recover),
+                            classify_side_effect_phase(&runtime.checkpoint),
+                            "stepper could not make progress and no stable boundary was reached",
+                        );
+                        runtime.touch_transition();
+                        let synthetic = StepTransition {
+                            kind: crate::stepper::StepTransitionKind::Recover,
+                            node_id: None,
+                            summary: "scheduler declared stalled runtime as failed".to_owned(),
+                        };
+                        events.extend(RuntimeEventEmitter::emit_after_step(runtime, &synthetic));
+                        transitions.push(synthetic);
+                        return finish_step_result(
+                            runtime,
+                            checkpoint_repo,
+                            persisted_side_effect_cut,
+                            StepStopReason::Failed,
+                            transitions,
+                            events,
+                        );
+                    }
+                }
+
+                if let Some(stop_reason) = stop_reason_for(runtime, until) {
+                    return finish_step_result(
+                        runtime,
+                        checkpoint_repo,
+                        persisted_side_effect_cut,
+                        stop_reason,
+                        transitions,
+                        events,
+                    );
+                }
+
+                if runtime.revision == before_revision {
                     warn!(
                         run_id = %runtime.run_id.0,
                         checkpoint_seq = runtime.checkpoint_seq(),
                         plan_epoch = runtime.plan_epoch(),
                         revision = runtime.revision,
-                        "runtime.scheduler.stall_detected"
+                        "runtime.scheduler.revision_invariant_failed"
                     );
                     runtime.checkpoint.lifecycle.fail(
                         RunFailureStage::Recover,
                         RunFailureCode::RuntimeInvariantViolation,
-                        "stepper could not make progress and no stable boundary was reached",
-                    );
-                    runtime.checkpoint.lifecycle.record_interruption(
-                        InterruptionClass::RuntimeStallDetected,
-                        Some(RunFailureStage::Recover),
-                        classify_side_effect_phase(&runtime.checkpoint),
-                        "stepper could not make progress and no stable boundary was reached",
+                        "stepper transition completed without mutating runtime revision",
                     );
                     runtime.touch_transition();
-                    let synthetic = StepTransition {
-                        kind: crate::stepper::StepTransitionKind::Recover,
-                        node_id: None,
-                        summary: "scheduler declared stalled runtime as failed".to_owned(),
-                    };
-                    events.extend(RuntimeEventEmitter::emit_after_step(runtime, &synthetic));
-                    transitions.push(synthetic);
                     return finish_step_result(
                         runtime,
                         checkpoint_repo,
@@ -200,42 +252,9 @@ impl StepScheduler {
                     );
                 }
             }
-
-            if let Some(stop_reason) = stop_reason_for(runtime, until) {
-                return finish_step_result(
-                    runtime,
-                    checkpoint_repo,
-                    persisted_side_effect_cut,
-                    stop_reason,
-                    transitions,
-                    events,
-                );
-            }
-
-            if runtime.revision == before_revision {
-                warn!(
-                    run_id = %runtime.run_id.0,
-                    checkpoint_seq = runtime.checkpoint_seq(),
-                    plan_epoch = runtime.plan_epoch(),
-                    revision = runtime.revision,
-                    "runtime.scheduler.revision_invariant_failed"
-                );
-                runtime.checkpoint.lifecycle.fail(
-                    RunFailureStage::Recover,
-                    RunFailureCode::RuntimeInvariantViolation,
-                    "stepper transition completed without mutating runtime revision",
-                );
-                runtime.touch_transition();
-                return finish_step_result(
-                    runtime,
-                    checkpoint_repo,
-                    persisted_side_effect_cut,
-                    StepStopReason::Failed,
-                    transitions,
-                    events,
-                );
-            }
         }
+        .instrument(step_span)
+        .await
     }
 }
 
@@ -348,6 +367,7 @@ fn persist_side_effect_durability_cut(
                 confirmation_id = runtime.checkpoint.pending_requests.pending_confirmation_id.as_deref(),
                 checkpoint_seq = runtime.checkpoint_seq(),
                 plan_epoch = runtime.plan_epoch(),
+                revision = runtime.revision,
                 "runtime.scheduler.side_effect_cut_persisted"
             );
             Ok(true)

@@ -30,8 +30,8 @@ pub enum RuntimeHostServiceError {
     EventArchive(#[from] crate::persistence::EventArchiveError),
     #[error("run catalog persistence failed: {0}")]
     RunCatalog(#[from] crate::persistence::RunCatalogRepositoryError),
-    #[error("signer state archive failed: {0}")]
-    SignerArchive(#[from] crate::persistence::SignerStateArchiveError),
+    #[error("signer state store failed: {0}")]
+    SignerStateStore(#[from] crate::persistence::SignerStateStoreError),
     #[error("runtime audit archive failed: {0}")]
     RuntimeAuditArchive(#[from] crate::persistence::RuntimeAuditArchiveError),
     #[error("durable grouped commit failed: {0}")]
@@ -42,8 +42,8 @@ pub enum RuntimeHostServiceError {
     Restore(#[from] crate::persistence::RestoreRuntimeError),
     #[error("stepper failed: {0}")]
     Stepper(#[from] crate::stepper::StepSchedulerError),
-    #[error("signer decision does not match pending signer state")]
-    SignerDecisionMismatch,
+    #[error("signer resolution does not match pending signer state")]
+    SignerResolutionMismatch,
     #[error("envelope submission rejected: {0}")]
     EnvelopeRejected(String),
     #[error("execution artifact continuation rejected: {0}")]
@@ -100,7 +100,7 @@ fn error_code(error: &RuntimeHostServiceError) -> String {
         RuntimeHostServiceError::Mission(_) => "mission_error".to_owned(),
         RuntimeHostServiceError::EventArchive(_) => "event_archive_error".to_owned(),
         RuntimeHostServiceError::RunCatalog(_) => "run_catalog_error".to_owned(),
-        RuntimeHostServiceError::SignerArchive(_) => "signer_archive_error".to_owned(),
+        RuntimeHostServiceError::SignerStateStore(_) => "signer_state_store_error".to_owned(),
         RuntimeHostServiceError::RuntimeAuditArchive(_) => "runtime_audit_archive_error".to_owned(),
         RuntimeHostServiceError::DurableCommit(error) => match error {
             crate::persistence::DurableCommitError::InvalidUnit(_) => {
@@ -120,8 +120,8 @@ fn error_code(error: &RuntimeHostServiceError) -> String {
                 crate::persistence::DurableMutationMember::Catalog => {
                     "run_catalog_error".to_owned()
                 }
-                crate::persistence::DurableMutationMember::Signer => {
-                    "signer_archive_error".to_owned()
+                crate::persistence::DurableMutationMember::WaitState => {
+                    "wait_state_store_error".to_owned()
                 }
                 crate::persistence::DurableMutationMember::Audit => {
                     "runtime_audit_archive_error".to_owned()
@@ -131,7 +131,9 @@ fn error_code(error: &RuntimeHostServiceError) -> String {
         RuntimeHostServiceError::Repository(_) => "repository_error".to_owned(),
         RuntimeHostServiceError::Restore(_) => "restore_error".to_owned(),
         RuntimeHostServiceError::Stepper(_) => "stepper_error".to_owned(),
-        RuntimeHostServiceError::SignerDecisionMismatch => "signer_decision_mismatch".to_owned(),
+        RuntimeHostServiceError::SignerResolutionMismatch => {
+            "signer_resolution_mismatch".to_owned()
+        }
         RuntimeHostServiceError::EnvelopeRejected(_) => "envelope_invalid".to_owned(),
         RuntimeHostServiceError::ContinuationRejected(_) => {
             "artifact_continuation_invalid".to_owned()

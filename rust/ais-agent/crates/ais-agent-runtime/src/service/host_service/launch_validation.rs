@@ -154,9 +154,7 @@ fn validate_semantic_contract(
         );
     };
     if risk_class.trim().is_empty() {
-        return Err(
-            "execution_artifact.risk_class must not be blank when present".to_owned(),
-        );
+        return Err("execution_artifact.risk_class must not be blank when present".to_owned());
     }
 
     if spec.decoded_intent.is_none() {
@@ -195,9 +193,7 @@ fn validate_candidate_envelope(
     let Some(candidate_ref) = envelope
         .as_object()
         .ok_or_else(|| {
-            format!(
-                "execution_artifact.candidate_envelopes[{index}] must be a JSON object"
-            )
+            format!("execution_artifact.candidate_envelopes[{index}] must be a JSON object")
         })?
         .get("candidate_ref")
     else {
@@ -205,9 +201,7 @@ fn validate_candidate_envelope(
     };
 
     let candidate_ref = candidate_ref.as_str().ok_or_else(|| {
-        format!(
-            "execution_artifact.candidate_envelopes[{index}].candidate_ref must be a string"
-        )
+        format!("execution_artifact.candidate_envelopes[{index}].candidate_ref must be a string")
     })?;
     if candidate_ref.trim().is_empty() {
         return Err(format!(
@@ -1260,7 +1254,10 @@ mod tests {
 
         let error = validate_execution_artifact(&artifact)
             .expect_err("semantic artifact without candidate envelopes");
-        assert!(error.contains("candidate_envelopes must include at least one envelope"), "{error}");
+        assert!(
+            error.contains("candidate_envelopes must include at least one envelope"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1273,6 +1270,9 @@ mod tests {
 
         let error =
             validate_execution_artifact(&artifact).expect_err("unknown semantic candidate ref");
-        assert!(error.contains("references unknown candidate `tx.missing`"), "{error}");
+        assert!(
+            error.contains("references unknown candidate `tx.missing`"),
+            "{error}"
+        );
     }
 }

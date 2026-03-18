@@ -106,6 +106,7 @@ version = "0.1.0"
 dependencies = [
  "ais-agent-control",
  "ais-agent-host",
+ "ais-agent-observability-files",
  "ais-agent-runtime",
  "ais-agent-store-sqlite",
  "ais-agent-transport",
@@ -116,6 +117,8 @@ dependencies = [
  "serde_yaml",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -195,6 +198,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ais-agent-observability-files"
+version = "0.1.0"
+dependencies = [
+ "ais-agent-transport",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "time",
+]
+
+[[package]]
 name = "ais-agent-runtime"
 version = "0.1.0"
 dependencies = [
@@ -245,6 +259,7 @@ dependencies = [
  "ais-agent-host",
  "ais-agent-runtime",
  "rusqlite",
+ "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",

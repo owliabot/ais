@@ -1,9 +1,18 @@
 use std::io::{self, BufRead, BufReader, Write};
 
 use ais_agent_host::{control::HostCommandService, events::HostRunEventService};
-use ais_agent_transport::jsonl::JsonlServer;
+use ais_agent_observability_files::JsonlCaptureFiles;
+use ais_agent_transport::jsonl::{
+    decode_inbound_line, encode_outbound_frame, JsonlInboundFrame, JsonlOutboundFrame,
+    JsonlResponseFrame, JsonlServerErrorFrame,
+};
 
-pub async fn local_jsonl<S>(service: &mut S) -> io::Result<()>
+use crate::config::AisAgentJsonlCaptureConfig;
+
+pub async fn local_jsonl<S>(
+    service: &mut S,
+    capture_config: Option<&AisAgentJsonlCaptureConfig>,
+) -> io::Result<()>
 where
     S: HostCommandService + HostRunEventService,
 {
@@ -11,10 +20,15 @@ where
     let stdout = io::stdout();
     let reader = BufReader::new(stdin.lock());
     let writer = stdout.lock();
+    let mut capture = capture_config
+        .filter(|config| config.enabled)
+        .map(|config| JsonlCaptureFiles::new(config.dir.clone(), config.retention_days))
+        .transpose()?;
 
-    serve_jsonl_with_service(reader, writer, service).await
+    serve_jsonl_with_service_and_capture(reader, writer, service, capture.as_mut()).await
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub async fn serve_jsonl_with_service<R, W, S>(
     reader: R,
     writer: W,
@@ -25,12 +39,113 @@ where
     W: Write,
     S: HostCommandService + HostRunEventService,
 {
-    JsonlServer.serve(reader, writer, service).await
+    serve_jsonl_with_service_and_capture(reader, writer, service, None).await
+}
+
+async fn serve_jsonl_with_service_and_capture<R, W, S>(
+    reader: R,
+    mut writer: W,
+    service: &mut S,
+    mut capture: Option<&mut JsonlCaptureFiles>,
+) -> io::Result<()>
+where
+    R: BufRead,
+    W: Write,
+    S: HostCommandService + HostRunEventService,
+{
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Some(capture) = capture.as_mut() {
+            capture.record_inbound(&line)?;
+        }
+
+        match decode_inbound_line(&line) {
+            Ok(JsonlInboundFrame::Command { command }) => {
+                let request_id = command.host_request_id.clone();
+                let outcome = service.handle(command).await;
+
+                write_frame(
+                    &mut writer,
+                    capture.as_deref_mut(),
+                    &JsonlOutboundFrame::Response(JsonlResponseFrame {
+                        request_id,
+                        response: outcome.response,
+                    }),
+                )?;
+
+                for event in outcome.events {
+                    write_frame(
+                        &mut writer,
+                        capture.as_deref_mut(),
+                        &JsonlOutboundFrame::Event { event },
+                    )?;
+                }
+            }
+            Ok(JsonlInboundFrame::PollEvents { query }) => match service.list_events(query).await {
+                Ok(batch) => {
+                    write_frame(
+                        &mut writer,
+                        capture.as_deref_mut(),
+                        &JsonlOutboundFrame::EventBatch { batch },
+                    )?;
+                }
+                Err(error) => {
+                    write_frame(
+                        &mut writer,
+                        capture.as_deref_mut(),
+                        &JsonlOutboundFrame::ServerError(JsonlServerErrorFrame {
+                            code: error.code,
+                            message: error.message,
+                        }),
+                    )?;
+                }
+            },
+            Err(error) => {
+                write_frame(
+                    &mut writer,
+                    capture.as_deref_mut(),
+                    &JsonlOutboundFrame::ServerError(JsonlServerErrorFrame {
+                        code: "jsonl_decode_error".to_owned(),
+                        message: error.to_string(),
+                    }),
+                )?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn write_frame<W>(
+    writer: &mut W,
+    capture: Option<&mut JsonlCaptureFiles>,
+    frame: &JsonlOutboundFrame,
+) -> io::Result<()>
+where
+    W: Write,
+{
+    let encoded = encode_outbound_frame(frame)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+    writer.write_all(encoded.as_bytes())?;
+    writer.write_all(b"\n")?;
+    writer.flush()?;
+    if let Some(capture) = capture {
+        capture.record_outbound(&encoded)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
+    use std::{
+        fs,
+        io::Cursor,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     use ais_agent_control::{
         commands::{BeginRunCommand, MissionSubmission, RunCommand},
@@ -57,7 +172,17 @@ mod tests {
     };
     use ais_agent_transport::jsonl::{JsonlInboundFrame, JsonlOutboundFrame};
 
-    use super::serve_jsonl_with_service;
+    use ais_agent_observability_files::JsonlCaptureFiles;
+
+    use super::{serve_jsonl_with_service, serve_jsonl_with_service_and_capture};
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        std::env::temp_dir().join(format!("ais-agent-cli-{name}-{unique}"))
+    }
 
     #[tokio::test]
     async fn local_jsonl_shell_can_delegate_to_an_injected_host_service() {
@@ -158,6 +283,73 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn local_jsonl_shell_persists_inbound_and_outbound_capture_files() {
+        let mut service = ShellHarnessHostService;
+        let capture_dir = temp_dir("jsonl-capture");
+        let mut capture = JsonlCaptureFiles::new(capture_dir.clone(), 7).expect("capture set");
+        let command = HostCommandEnvelope {
+            host_session_id: HostSessionId("session-1".to_owned()),
+            host_request_id: Some(HostRequestId("request-1".to_owned())),
+            command: RunCommand::BeginRun(BeginRunCommand {
+                command_id: CommandId("cmd-1".to_owned()),
+                idempotency_key: IdempotencyKey("idem-1".to_owned()),
+                mission: MissionSubmission {
+                    goal: "swap".to_owned(),
+                    allowed_chains: vec!["eip155:1".to_owned()],
+                    constraints: Default::default(),
+                    budget: None,
+                    metadata: Default::default(),
+                },
+                launch_spec: None,
+            }),
+        };
+        let input =
+            serde_json::to_string(&JsonlInboundFrame::Command { command }).expect("encode command");
+        let mut output = Vec::new();
+
+        serve_jsonl_with_service_and_capture(
+            Cursor::new(format!("{input}\n")),
+            &mut output,
+            &mut service,
+            Some(&mut capture),
+        )
+        .await
+        .expect("serve");
+
+        let files = fs::read_dir(&capture_dir)
+            .expect("read capture dir")
+            .map(|entry| entry.expect("entry").path())
+            .collect::<Vec<_>>();
+        assert_eq!(files.len(), 2);
+
+        let inbound_path = files
+            .iter()
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("")
+                    .starts_with("inbound-")
+            })
+            .expect("inbound file");
+        let outbound_path = files
+            .iter()
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("")
+                    .starts_with("outbound-")
+            })
+            .expect("outbound file");
+
+        let inbound = fs::read_to_string(inbound_path).expect("read inbound");
+        let outbound = fs::read_to_string(outbound_path).expect("read outbound");
+        assert!(inbound.contains("\"type\":\"command\""));
+        assert!(outbound.contains("\"type\":\"response\""));
+
+        let _ = fs::remove_dir_all(capture_dir);
+    }
+
     struct ShellHarnessHostService;
     struct RecoveryPauseShellHostService;
 
@@ -183,6 +375,7 @@ mod tests {
                         event_seq: 1,
                         checkpoint_seq: 0,
                         plan_epoch: 0,
+                        trace_context: None,
                         event: RunEvent::Started(RunStarted {
                             event_id: EventId("event-1".to_owned()),
                             run_id: RunId("run-1".to_owned()),
@@ -280,6 +473,8 @@ mod tests {
                         ],
                         pending_signer_requests: Vec::new(),
                         pending_confirmations: Vec::new(),
+                        pending_continuations: Vec::new(),
+                        branch_trace: Vec::new(),
                         notes: vec!["host review required".to_owned()],
                     }),
                     events: Vec::new(),

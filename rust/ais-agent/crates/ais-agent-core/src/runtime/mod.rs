@@ -9,7 +9,7 @@ pub use boundaries::{BoundaryKind, StableBoundary};
 pub use lifecycle::{RunLifecycleState, RunStatus, RuntimeFailure};
 pub use phases::RunPhase;
 pub use signer::{
-    SignerDecision, SignerDecisionKind, SignerRequestState, SignerRequestStatus, SignerTimeout,
+    SignerRequestState, SignerRequestStatus, SignerResolution, SignerResolutionKind, SignerTimeout,
 };
 
 #[cfg(test)]

@@ -24,7 +24,7 @@ use ais_agent_host::{
     events::{HostRunEventBatch, HostRunEventQuery},
     evidence::HostEvidenceSubmission,
     session::HostedRunCommand,
-    signer::HostSignerDecision,
+    signer::HostSignerResolution,
 };
 
 use crate::{
@@ -55,7 +55,7 @@ pub(super) fn replay_key(command: &HostedRunCommand) -> Option<IdempotencyKey> {
         | RunCommand::StepRun(_)
         | RunCommand::SubmitEvidence(_)
         | RunCommand::SubmitEnvelope(_)
-        | RunCommand::SubmitSignerDecision(_)
+        | RunCommand::SubmitSignerResolution(_)
         | RunCommand::SubmitPlanPatch(_)
         | RunCommand::SubmitExecutionArtifactContinuation(_)
         | RunCommand::RequestCancelRun(_)
@@ -76,7 +76,7 @@ pub(super) fn command_id(command: &RunCommand) -> &ais_agent_control::ids::Comma
         RunCommand::StepRun(command) => &command.command_id,
         RunCommand::SubmitEvidence(command) => &command.command_id,
         RunCommand::SubmitEnvelope(command) => &command.command_id,
-        RunCommand::SubmitSignerDecision(command) => &command.command_id,
+        RunCommand::SubmitSignerResolution(command) => &command.command_id,
         RunCommand::SubmitPlanPatch(command) => &command.command_id,
         RunCommand::SubmitExecutionArtifactContinuation(command) => &command.command_id,
         RunCommand::RequestCancelRun(command) => &command.command_id,
@@ -94,7 +94,7 @@ pub(super) fn command_run_id(command: &RunCommand) -> Option<RunId> {
         RunCommand::StepRun(command) => Some(command.run_id.clone()),
         RunCommand::SubmitEvidence(command) => Some(command.run_id.clone()),
         RunCommand::SubmitEnvelope(command) => Some(command.run_id.clone()),
-        RunCommand::SubmitSignerDecision(command) => Some(command.run_id.clone()),
+        RunCommand::SubmitSignerResolution(command) => Some(command.run_id.clone()),
         RunCommand::SubmitPlanPatch(command) => Some(command.run_id.clone()),
         RunCommand::SubmitExecutionArtifactContinuation(command) => Some(command.run_id.clone()),
         RunCommand::RequestCancelRun(command) => Some(command.run_id.clone()),
@@ -347,30 +347,31 @@ pub(super) fn resolve_pending_envelope_recovery(runtime: &mut ActiveRun, envelop
         .mark_running(RunPhase::Recovering);
 }
 
-pub(super) fn host_signer_decision(
+pub(super) fn host_signer_resolution(
     run_id: RunId,
-    decision: ais_agent_control::commands::SignerDecisionSubmission,
-) -> HostSignerDecision {
-    HostSignerDecision {
+    resolution: ais_agent_control::commands::SignerResolutionSubmission,
+) -> HostSignerResolution {
+    HostSignerResolution {
         run_id,
-        request_id: decision.request_id,
-        decision: match decision.decision {
-            ais_agent_control::commands::SignerDecisionKind::Approved => {
-                ais_agent_host::signer::HostSignerDecisionKind::Approved
+        request_id: resolution.request_id,
+        kind: match resolution.kind {
+            ais_agent_control::commands::SignerResolutionKind::Denied => {
+                ais_agent_host::signer::HostSignerResolutionKind::Denied
             }
-            ais_agent_control::commands::SignerDecisionKind::Denied => {
-                ais_agent_host::signer::HostSignerDecisionKind::Denied
+            ais_agent_control::commands::SignerResolutionKind::Submitted => {
+                ais_agent_host::signer::HostSignerResolutionKind::Submitted
             }
-            ais_agent_control::commands::SignerDecisionKind::Submitted => {
-                ais_agent_host::signer::HostSignerDecisionKind::Submitted
+            ais_agent_control::commands::SignerResolutionKind::Signed => {
+                ais_agent_host::signer::HostSignerResolutionKind::Signed
             }
-            ais_agent_control::commands::SignerDecisionKind::Expired => {
-                ais_agent_host::signer::HostSignerDecisionKind::Expired
+            ais_agent_control::commands::SignerResolutionKind::Expired => {
+                ais_agent_host::signer::HostSignerResolutionKind::Expired
             }
         },
-        decided_at_ms: None,
-        tx_hash: decision.tx_hash,
-        details: decision.details,
+        resolved_at_ms: None,
+        tx_hash: resolution.tx_hash,
+        signed_payload: resolution.signed_payload,
+        details: resolution.details,
     }
 }
 

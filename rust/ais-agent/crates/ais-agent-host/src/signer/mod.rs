@@ -1,10 +1,10 @@
-//! Host-facing signer request and decision contract.
+//! Host-facing signer request and resolution contract.
 
-mod decision;
 mod request;
+mod resolution;
 
-pub use decision::{HostSignerDecision, HostSignerDecisionKind};
 pub use request::{HostSignerRequest, HostSignerTimeoutPolicy};
+pub use resolution::{HostSignerResolution, HostSignerResolutionKind};
 
 #[cfg(test)]
 mod tests;

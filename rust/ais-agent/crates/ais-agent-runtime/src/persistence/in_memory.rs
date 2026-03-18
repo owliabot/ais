@@ -2,6 +2,15 @@
 
 use std::collections::BTreeMap;
 
+use crate::persistence::{
+    CheckpointArchive, CheckpointArchiveEntry, CheckpointArchiveError, ClaimExpireRequest,
+    ClaimReleaseRequest, ClaimRenewRequest, ClaimSupersedeRequest, ClaimSupersedeResult,
+    EventArchive, EventArchiveError, EventArchiveQuery, EventArchiveSlice, MissionRepository,
+    MissionRepositoryError, RunCatalogEntry, RunCatalogRepository, RunCatalogRepositoryError,
+    RunClaimRepository, RunClaimRepositoryError, RunWaitStateRecord, RunWaitStateStore,
+    RunWaitStateStoreError, RuntimeAuditArchive, RuntimeAuditArchiveError, RuntimeAuditQuery,
+    RuntimeAuditSlice,
+};
 use ais_agent_control::{
     audit::RuntimeAuditRecord,
     events::RunEventEnvelope,
@@ -10,16 +19,6 @@ use ais_agent_control::{
 };
 use ais_agent_core::checkpoint::CheckpointSnapshot;
 use ais_agent_core::mission::Mission;
-use ais_agent_core::runtime::SignerRequestState;
-
-use crate::persistence::{
-    CheckpointArchive, CheckpointArchiveEntry, CheckpointArchiveError, ClaimExpireRequest,
-    ClaimReleaseRequest, ClaimRenewRequest, ClaimSupersedeRequest, ClaimSupersedeResult,
-    EventArchive, EventArchiveError, EventArchiveQuery, EventArchiveSlice, MissionRepository,
-    MissionRepositoryError, RunCatalogEntry, RunCatalogRepository, RunCatalogRepositoryError,
-    RunClaimRepository, RunClaimRepositoryError, RuntimeAuditArchive, RuntimeAuditArchiveError,
-    RuntimeAuditQuery, RuntimeAuditSlice, SignerStateArchive, SignerStateArchiveError,
-};
 
 #[derive(Debug, Default)]
 pub struct InMemoryCheckpointRepository {
@@ -422,30 +421,39 @@ impl EventArchive for InMemoryEventArchive {
 }
 
 #[derive(Debug, Default)]
-pub struct InMemorySignerStateArchive {
-    signer_states: BTreeMap<String, SignerRequestState>,
+pub struct InMemoryRunWaitStateStore {
+    wait_states: BTreeMap<String, RunWaitStateRecord>,
 }
 
-impl SignerStateArchive for InMemorySignerStateArchive {
-    fn upsert(&mut self, signer_state: SignerRequestState) -> Result<(), SignerStateArchiveError> {
-        self.signer_states
-            .insert(signer_state.run_id.0.clone(), signer_state);
+impl RunWaitStateStore for InMemoryRunWaitStateStore {
+    fn upsert_wait_state(
+        &mut self,
+        wait_state: RunWaitStateRecord,
+    ) -> Result<(), RunWaitStateStoreError> {
+        self.wait_states
+            .insert(wait_state.run_id.0.clone(), wait_state);
         Ok(())
     }
 
-    fn load(&self, run_id: &RunId) -> Result<SignerRequestState, SignerStateArchiveError> {
-        self.signer_states.get(&run_id.0).cloned().ok_or_else(|| {
-            SignerStateArchiveError::NotFound {
+    fn load_wait_state(
+        &self,
+        run_id: &RunId,
+    ) -> Result<RunWaitStateRecord, RunWaitStateStoreError> {
+        self.wait_states
+            .get(&run_id.0)
+            .cloned()
+            .ok_or_else(|| RunWaitStateStoreError::NotFound {
                 run_id: run_id.0.clone(),
-            }
-        })
+            })
     }
 
-    fn clear(&mut self, run_id: &RunId) -> Result<(), SignerStateArchiveError> {
-        self.signer_states.remove(&run_id.0);
+    fn clear_wait_state(&mut self, run_id: &RunId) -> Result<(), RunWaitStateStoreError> {
+        self.wait_states.remove(&run_id.0);
         Ok(())
     }
 }
+
+pub type InMemorySignerStateStore = InMemoryRunWaitStateStore;
 
 #[derive(Debug, Default)]
 pub struct InMemoryRuntimeAuditArchive {

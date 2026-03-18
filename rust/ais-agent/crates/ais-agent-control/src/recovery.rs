@@ -21,6 +21,7 @@ pub enum StableBoundaryKind {
 pub enum InterruptionClass {
     StepBudgetExhausted,
     WallClockBudgetExhausted,
+    RecoveryRetryReady,
     ProviderTimeout,
     ProviderUnavailable,
     ConfirmationWaitTimeout,
@@ -183,7 +184,7 @@ pub enum RecoveryDisposition {
 pub enum RecoveryActionKind {
     SubmitEvidence,
     SubmitEnvelope,
-    SubmitSignerDecision,
+    SubmitSignerResolution,
     SubmitPlanPatch,
     SubmitExecutionArtifactContinuation,
     RetryStep,

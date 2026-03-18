@@ -8,10 +8,21 @@ use ais_agent_control::{
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingSignerTimeoutPolicyView {
+    pub requested_at_ms: u64,
+    pub expires_at_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingSignerRequestView {
     pub request_id: SignerRequestId,
+    pub node_id: Option<String>,
     pub chain: Option<String>,
     pub summary: String,
+    #[serde(default)]
+    pub payload: Option<Value>,
+    #[serde(default)]
+    pub timeout_policy: Option<PendingSignerTimeoutPolicyView>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

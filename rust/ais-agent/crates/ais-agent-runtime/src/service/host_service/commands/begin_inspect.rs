@@ -21,7 +21,7 @@ where
     K: crate::persistence::RunCatalogRepository + Send,
     E: crate::persistence::EventArchive + Send,
     S: ais_agent_host::session::HostSessionStore + Send,
-    G: crate::persistence::SignerStateArchive + Send,
+    G: crate::persistence::SignerStateStore + Send,
     A: crate::persistence::RuntimeAuditArchive + Send,
     Q: crate::persistence::RunClaimRepository + Send,
 {
@@ -74,13 +74,17 @@ where
         command: InspectRunCommand,
     ) -> RuntimeHostServiceResult {
         let (mission, checkpoint) = self.load_inspect_projection_input(&command.run_id)?;
+        let recent_events =
+            self.load_recent_event_tail(&command.run_id, Self::INSPECT_RECENT_EVENT_LIMIT)?;
         self.establish_inspect_session_link(&host_session_id, &command.run_id, &mission)?;
-        let mut inspect = ais_agent_host::inspect::project_inspect_snapshot_with_recovery(
-            &mission,
-            &checkpoint,
-            classify_validated_recovery_view(&checkpoint)
-                .map_err(RuntimeHostServiceError::InvalidRecoveryContract)?,
-        );
+        let mut inspect =
+            ais_agent_host::inspect::project_inspect_snapshot_with_recovery_and_events(
+                &mission,
+                &checkpoint,
+                classify_validated_recovery_view(&checkpoint)
+                    .map_err(RuntimeHostServiceError::InvalidRecoveryContract)?,
+                &recent_events,
+            );
         self.hydrate_inspect_ownership(&mut inspect)?;
         let _ = self.session_store.apply_inspect(&host_session_id, &inspect);
         Ok(HostCommandOutcome {

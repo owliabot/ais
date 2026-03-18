@@ -45,13 +45,14 @@ Current implementation status:
   - `RunCatalogRepository`
   - `CheckpointArchive`
   - `EventArchive`
-  - `SignerStateArchive`
+  - `RunWaitStateStore`
+  - signer compatibility shim via `SignerStateStore`
   - `RuntimeAuditArchive`
   - `RunClaimRepository`
 - grouped durable write-set contracts now frozen for:
   - `DurableMutationUnit`
   - `DurableMutationKind`
-  - mission/checkpoint/event/catalog/signer/audit write members
+  - mission/checkpoint/event/catalog/wait-state/audit write members
   - fail-closed `validate_durable_mutation_unit(...)`
 - runtime-owned executor seam now exists for those grouped units:
   - `DurableMutationExecutor`
@@ -63,7 +64,7 @@ Current implementation status:
   - run catalog
   - checkpoint archive
   - event archive
-  - signer-state archive
+  - wait-state store
   - runtime audit archive
   - run-claim archive/repository semantics
 - checkpoint archive now uses `append/latest` archive semantics instead of overwrite-style save/load
@@ -81,7 +82,7 @@ Current implementation status:
     - run catalog
     - checkpoint archive
     - event archive
-    - signer-state archive
+    - wait-state store
     - runtime audit archive
     - transaction-backed `DurableMutationExecutor`
 - runtime host service now also owns a durable audit archive dependency and commits grouped durable truth through the executor seam for:
@@ -89,13 +90,13 @@ Current implementation status:
   - `step_run`
   - `submit_evidence`
   - `submit_envelope`
-  - `submit_signer_decision`
+  - `submit_signer_resolution`
   - `submit_plan_patch`
   - `cancel_run`
 - durable restore path now reconstructs `ActiveRun` from:
   - `MissionRepository`
   - latest `CheckpointArchive` entry
-  - durable `SignerStateArchive`
+  - durable wait-state store
   instead of relying on a retained hot runtime copy
   and now rejects malformed confirmation-resume checkpoints that are missing:
     - `pending_confirmation_id`
@@ -126,7 +127,7 @@ Current implementation status:
   - `step_run`
   - `submit_evidence`
   - `submit_envelope`
-  - `submit_signer_decision`
+  - `submit_signer_resolution`
   - `submit_plan_patch`
   - `cancel_run`
   - all host-service entry points now execute through an async `HostCommandService` surface
@@ -158,6 +159,12 @@ Current implementation status:
     - recovery audit views
     - governor decision audit records
     - plan patch submitted / applied / rejected
+  - runtime-event envelopes now also expose:
+    - stable taxonomy descriptors via `RunEventDescriptor`
+    - optional `trace_context`
+  - host inspect responses now expose a bounded `recent_events` timeline summary sourced from:
+    - hot runtime event log for active runs
+    - durable event archive for cold inspect/restart paths
 - durable run-catalog tracking implemented through `RunCatalogRepository` for:
   - latest checkpoint seq
   - latest event seq
@@ -170,7 +177,7 @@ Current implementation status:
   - patch-required recovery can restart from durable truth and still complete through `submit_plan_patch -> step`
   - event polling after restart from durable event archive
   - awaiting-evidence resume through real `RuntimeHostService`
-  - awaiting-signer resume from durable signer-state archive
+  - awaiting-signer resume from durable wait-state store
   - signer denial / signer submission survive restart through real `RuntimeHostService`
 - typed EVM live-binding resolution helpers implemented for:
   - observe
@@ -243,9 +250,9 @@ Current implementation status:
     - signer-submitted LP mint completion via live verify
     - restart from signer-submitted side-effect cut
     - durable host-service seeding of the LP binder path
-  - current LP effect assertion strength is still bounded to:
-    - receipt success
-    - position-manager `balanceOf(owner)` change
+- current LP effect assertion strength is still bounded to:
+  - receipt success
+  - position-manager `balanceOf(owner)` change
   - richer `positions(tokenId)` decoding, approval-required LP paths, and broader LP lifecycle operations remain deferred within later Uniswap milestones
 - EVM live observe/simulate bindings now execute through real `alloy` ports for:
   - block-number observe
@@ -258,6 +265,11 @@ Current implementation status:
 - Solana live observe/simulate bindings now execute through real RPC-backed ports for:
   - slot observe
   - lamports observe
+
+Known observability gaps:
+- no OTLP/exporter integration yet
+- no full durable trace persistence
+- inspect exposes bounded recent event summaries, not full historical event dumps
   - SPL token-account balance observe
   - account-data observe
   - signature-status observe
@@ -324,13 +336,30 @@ Current implementation status:
 - runtime now validates recovery contracts at real boundaries:
   - checkpoint persistence rejects malformed recovery truth before archive append
   - host inspect/pause projection rejects malformed recovery truth with structured `recovery_contract_invalid`
-- runtime observability now includes `tracing` events for:
-  - scheduler start / transition / stop
-  - side-effect durability cut success / failure
-  - hot-vs-durable restore decisions
-  - archive-backed inspect source decisions
-  - durable commit stage failures
-  - hot cache invalidation after durable advancement
+- runtime observability now splits between:
+  - info-level operator milestones:
+    - host command accepted / rejected
+    - scheduler stop
+    - grouped durable commit success / failure
+    - side-effect durability cut persisted
+    - claim lifecycle:
+      - acquired
+      - renewed
+      - released
+      - expired
+      - superseded
+  - debug-level execution detail:
+    - scheduler start / transition
+    - hot-vs-durable restore decisions
+    - archive-backed inspect source decisions
+    - restore/cache spans and grouped-commit spans
+    - hot cache invalidation after durable advancement
+- runtime info-level tracing is intentionally not the durable audit baseline:
+  - operator history remains:
+    - `run_events`
+    - `run_audits`
+    - `run_checkpoints`
+    - `run_claim_history`
 - scheduler regressions now explicitly cover:
   - transition-count budget exhaustion
   - wall-clock budget exhaustion before any state advance
@@ -404,7 +433,7 @@ Current implementation status:
 - host-service regressions cover:
   - begin / inspect / cancel
   - evidence ingest + step
-  - signer decision + step
+  - signer resolution + step
   - plan-patch success / stale rejection / illegal rejection
   - replacement envelope recovery and wrong-envelope rejection
   - repeated stale host-side mutation rejection after checkpoint advancement
@@ -421,7 +450,7 @@ Current implementation status:
   - Solana guarded collaboration loop over:
     - `inspect_run`
     - event polling
-    - `submit_signer_decision`
+    - `submit_signer_resolution`
     - `step_run`
     - `NeedConfirmation` pause
   - stale mutable command rejection through real `RuntimeHostService`
@@ -452,7 +481,7 @@ Current implementation status:
     - `submit_evidence`
     - `submit_envelope`
     - `submit_plan_patch`
-    - `submit_signer_decision`
+    - `submit_signer_resolution`
     - `cancel_run`
 - restart / resume through real runtime service for:
   - grouped `begin_run` truth after restart via archive-backed inspect + durable started-event polling

@@ -4,7 +4,7 @@ use ais_agent_control::recovery::{RunFailureCode, RunFailureStage};
 use ais_agent_core::{
     action::ActionNodeStatus,
     actuation::ActuationKind,
-    runtime::{RunPhase, SignerRequestStatus},
+    runtime::{RunPhase, RunStatus, SignerRequestStatus},
 };
 
 use crate::{
@@ -21,25 +21,6 @@ pub(crate) fn apply_signer_transition(runtime: &mut ActiveRun) -> Option<StepTra
 
     let transition = match signer_state.status {
         SignerRequestStatus::Pending => return None,
-        SignerRequestStatus::Approved => {
-            if let Some(node_id) = node_id.as_deref() {
-                mark_node_status(runtime, node_id, ActionNodeStatus::Ready);
-            }
-            runtime.pending_signer_state = None;
-            runtime
-                .checkpoint
-                .pending_requests
-                .pending_signer_request_id = None;
-            runtime
-                .checkpoint
-                .lifecycle
-                .resolve_signer_wait(RunPhase::Broadcasting);
-            StepTransition {
-                kind: StepTransitionKind::Signer,
-                node_id,
-                summary: "signer approved pending action".to_owned(),
-            }
-        }
         SignerRequestStatus::Submitted | SignerRequestStatus::Reconciled => {
             if let Some(node_id) = node_id.as_deref() {
                 mark_node_status(runtime, node_id, ActionNodeStatus::Succeeded);
@@ -59,6 +40,7 @@ pub(crate) fn apply_signer_transition(runtime: &mut ActiveRun) -> Option<StepTra
                 .checkpoint
                 .pending_requests
                 .pending_signer_request_id = None;
+            runtime.checkpoint.pending_requests.pending_signer_request = None;
             runtime.checkpoint.lifecycle.await_confirmation(
                 signer_state
                     .submitted_tx_hash
@@ -74,6 +56,23 @@ pub(crate) fn apply_signer_transition(runtime: &mut ActiveRun) -> Option<StepTra
                 kind: StepTransitionKind::Signer,
                 node_id,
                 summary: "signer submission accepted and moved to confirmation wait".to_owned(),
+            }
+        }
+        SignerRequestStatus::Signed => {
+            if runtime.checkpoint.lifecycle.status != RunStatus::AwaitingSigner {
+                return None;
+            }
+            if let Some(node_id) = node_id.as_deref() {
+                mark_node_status(runtime, node_id, ActionNodeStatus::Ready);
+            }
+            runtime
+                .checkpoint
+                .lifecycle
+                .resolve_signer_wait(RunPhase::Broadcasting);
+            StepTransition {
+                kind: StepTransitionKind::Signer,
+                node_id,
+                summary: "signer provided a signed transaction for runtime broadcast".to_owned(),
             }
         }
         SignerRequestStatus::Denied
@@ -94,6 +93,7 @@ pub(crate) fn apply_signer_transition(runtime: &mut ActiveRun) -> Option<StepTra
                 .checkpoint
                 .pending_requests
                 .pending_signer_request_id = None;
+            runtime.checkpoint.pending_requests.pending_signer_request = None;
             runtime.checkpoint.lifecycle.pause_with_failure(
                 RunFailureStage::Signer,
                 failure_code,

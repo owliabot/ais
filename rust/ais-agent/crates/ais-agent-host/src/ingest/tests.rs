@@ -7,7 +7,7 @@ use crate::{
     envelope::{HostEnvelopeKind, HostEnvelopeSubmission},
     evidence::HostEvidenceSubmission,
     ingest::{HostIngestKind, HostIngestSubmission},
-    signer::{HostSignerDecision, HostSignerDecisionKind},
+    signer::{HostSignerResolution, HostSignerResolutionKind},
 };
 
 #[test]
@@ -41,14 +41,15 @@ fn unified_ingest_surface_reports_kind_and_run_id() {
     assert_eq!(envelope.kind(), HostIngestKind::Envelope);
     assert_eq!(envelope.run_id().0, "run-b");
 
-    let signer = HostIngestSubmission::SignerDecision(HostSignerDecision {
+    let signer = HostIngestSubmission::SignerResolution(HostSignerResolution {
         run_id: RunId("run-c".to_owned()),
         request_id: SignerRequestId("signer-1".to_owned()),
-        decision: HostSignerDecisionKind::Approved,
-        decided_at_ms: None,
-        tx_hash: None,
+        kind: HostSignerResolutionKind::Submitted,
+        resolved_at_ms: None,
+        tx_hash: Some("0xabc".to_owned()),
+        signed_payload: None,
         details: Default::default(),
     });
-    assert_eq!(signer.kind(), HostIngestKind::SignerDecision);
+    assert_eq!(signer.kind(), HostIngestKind::SignerResolution);
     assert_eq!(signer.run_id().0, "run-c");
 }

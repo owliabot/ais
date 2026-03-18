@@ -1,5 +1,6 @@
 use ais_agent_control::{
     commands::RetryIntent,
+    events::{RunEvent, RunEventEnvelope},
     ownership::{OwnershipVisibility, RunOwnershipSnapshot},
     recovery::{RecoveryActionKind, RecoveryDisposition},
 };
@@ -16,24 +17,38 @@ use ais_agent_core::{
 };
 
 use crate::inspect::{
-    progress::ActionStatusCountsView, ActiveBoundaryView, BranchTraceView, BoundaryKind,
-    EffectStatusView, InspectSnapshot, MissionSummaryView, PauseActionView, PauseBundle,
-    PauseKind, PendingConfirmationView, PendingContinuationView, PendingSignerRequestView,
-    ProgressView, RecoveryView, RequiredInputView, RunPhase, RunResultView, RunStatus,
-    SideEffectView,
+    progress::ActionStatusCountsView, ActiveBoundaryView, BoundaryKind, BranchTraceView,
+    EffectStatusView, InspectSnapshot, MissionSummaryView, PauseActionView, PauseBundle, PauseKind,
+    PendingConfirmationView, PendingContinuationView, PendingSignerRequestView,
+    PendingSignerTimeoutPolicyView, ProgressView, RecentEventView, RecoveryView, RequiredInputView,
+    RunPhase, RunResultView, RunStatus, SideEffectView,
 };
 
 pub fn project_inspect_snapshot(
     mission: &Mission,
     checkpoint: &CheckpointSnapshot,
 ) -> InspectSnapshot {
-    project_inspect_snapshot_with_recovery(mission, checkpoint, default_recovery_view(checkpoint))
+    project_inspect_snapshot_with_recovery_and_events(
+        mission,
+        checkpoint,
+        default_recovery_view(checkpoint),
+        &[],
+    )
 }
 
 pub fn project_inspect_snapshot_with_recovery(
     mission: &Mission,
     checkpoint: &CheckpointSnapshot,
     recovery: RecoveryView,
+) -> InspectSnapshot {
+    project_inspect_snapshot_with_recovery_and_events(mission, checkpoint, recovery, &[])
+}
+
+pub fn project_inspect_snapshot_with_recovery_and_events(
+    mission: &Mission,
+    checkpoint: &CheckpointSnapshot,
+    recovery: RecoveryView,
+    recent_events: &[RunEventEnvelope],
 ) -> InspectSnapshot {
     let lifecycle = &checkpoint.lifecycle;
     let pending_signer_requests = project_pending_signer_requests(checkpoint);
@@ -91,11 +106,63 @@ pub fn project_inspect_snapshot_with_recovery(
                 tx_hash: record.tx_hash.clone(),
             })
             .collect(),
+        recent_events: project_recent_events(recent_events),
         effect_status: Some(project_effect_status(checkpoint)),
         branch_trace: project_branch_trace(checkpoint),
         ownership: ownership.clone(),
         run_result: project_run_result(checkpoint, &recovery, ownership),
         progress: project_progress_view(checkpoint),
+    }
+}
+
+fn project_recent_events(events: &[RunEventEnvelope]) -> Vec<RecentEventView> {
+    events
+        .iter()
+        .map(|event| {
+            let descriptor = event.descriptor();
+            RecentEventView {
+                event_seq: event.event_seq,
+                checkpoint_seq: event.checkpoint_seq,
+                plan_epoch: event.plan_epoch,
+                family: descriptor.family,
+                event_type: descriptor.event_type.to_owned(),
+                summary: summarize_event(&event.event),
+                trace_context: event.trace_context.clone(),
+            }
+        })
+        .collect()
+}
+
+fn summarize_event(event: &RunEvent) -> String {
+    match event {
+        RunEvent::Started(started) => format!("run started in phase {}", started.phase),
+        RunEvent::Progress(progress) => progress.summary.clone(),
+        RunEvent::RecoveryAudit(recovery) => recovery
+            .failure_context
+            .as_ref()
+            .map(|failure| failure.summary.clone())
+            .or_else(|| {
+                recovery
+                    .recovery_disposition
+                    .as_ref()
+                    .map(|v| format!("{v:?}").to_lowercase())
+            })
+            .unwrap_or_else(|| "recovery state updated".to_owned()),
+        RunEvent::GovernorDecision(decision) => decision.reason.clone(),
+        RunEvent::PlanPatchAudit(audit) => audit
+            .message
+            .clone()
+            .unwrap_or_else(|| format!("plan patch {:?}: {}", audit.status, audit.patch_id)),
+        RunEvent::Paused(paused) => paused.reason.clone(),
+        RunEvent::AwaitingEvidence(awaiting) => awaiting.reason.clone(),
+        RunEvent::AwaitingConfirm(awaiting) => awaiting.reason.clone(),
+        RunEvent::AwaitingSigner(awaiting) => awaiting.reason.clone(),
+        RunEvent::AwaitingContinuation(awaiting) => awaiting.reason.clone(),
+        RunEvent::BroadcastSubmitted(event) => event.summary.clone(),
+        RunEvent::VerifyPassed(event) => event.summary.clone(),
+        RunEvent::VerifyFailed(event) => event.message.clone(),
+        RunEvent::Completed(completed) => completed.summary.clone(),
+        RunEvent::Failed(failed) => failed.message.clone(),
     }
 }
 
@@ -255,12 +322,25 @@ fn project_pending_signer_requests(
         return Vec::new();
     };
 
+    let pending_request = checkpoint.pending_requests.pending_signer_request.as_ref();
+
     vec![PendingSignerRequestView {
         request_id: request_id.into(),
-        chain: None,
-        summary: boundary
-            .map(|current| current.summary.clone())
-            .unwrap_or_else(|| "signer decision required".to_owned()),
+        node_id: pending_request.and_then(|request| request.node_id.clone()),
+        chain: pending_request
+            .and_then(|request| request.chain.clone())
+            .or_else(|| Some("unknown".to_owned())),
+        summary: pending_request
+            .map(|request| request.summary.clone())
+            .or_else(|| boundary.map(|current| current.summary.clone()))
+            .unwrap_or_else(|| "signer resolution required".to_owned()),
+        payload: pending_request.and_then(|request| request.payload.clone()),
+        timeout_policy: pending_request
+            .and_then(|request| request.timeout_policy.as_ref())
+            .map(|timeout| PendingSignerTimeoutPolicyView {
+                requested_at_ms: timeout.requested_at_ms,
+                expires_at_ms: timeout.expires_at_ms,
+            }),
     }]
 }
 
@@ -422,7 +502,7 @@ fn action_requires_mutation_claim(action: &RecoveryActionKind) -> bool {
         action,
         RecoveryActionKind::SubmitEvidence
             | RecoveryActionKind::SubmitEnvelope
-            | RecoveryActionKind::SubmitSignerDecision
+            | RecoveryActionKind::SubmitSignerResolution
             | RecoveryActionKind::SubmitExecutionArtifactContinuation
             | RecoveryActionKind::SubmitPlanPatch
             | RecoveryActionKind::RetryStep
@@ -443,7 +523,7 @@ fn map_recovery_action_command(action: &RecoveryActionKind) -> &'static str {
     match action {
         RecoveryActionKind::SubmitEvidence => "submit_evidence",
         RecoveryActionKind::SubmitEnvelope => "submit_envelope",
-        RecoveryActionKind::SubmitSignerDecision => "submit_signer_decision",
+        RecoveryActionKind::SubmitSignerResolution => "submit_signer_resolution",
         RecoveryActionKind::SubmitExecutionArtifactContinuation => {
             "submit_execution_artifact_continuation"
         }
@@ -463,7 +543,7 @@ fn map_recovery_action_description(action: &RecoveryActionKind) -> &'static str 
         RecoveryActionKind::SubmitEnvelope => {
             "Submit a replacement envelope that satisfies the current runtime constraints."
         }
-        RecoveryActionKind::SubmitSignerDecision => {
+        RecoveryActionKind::SubmitSignerResolution => {
             "Resolve the pending signer request so execution can continue."
         }
         RecoveryActionKind::SubmitExecutionArtifactContinuation => {

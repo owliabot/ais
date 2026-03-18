@@ -31,7 +31,7 @@ pub enum RunCommand {
     StepRun(StepRunCommand),
     SubmitEvidence(SubmitEvidenceCommand),
     SubmitEnvelope(SubmitEnvelopeCommand),
-    SubmitSignerDecision(SubmitSignerDecisionCommand),
+    SubmitSignerResolution(SubmitSignerResolutionCommand),
     SubmitPlanPatch(SubmitPlanPatchCommand),
     SubmitExecutionArtifactContinuation(SubmitExecutionArtifactContinuationCommand),
     RequestCancelRun(RequestCancelRunCommand),
@@ -49,7 +49,7 @@ impl RunCommand {
             Self::StepRun(_) => "step_run",
             Self::SubmitEvidence(_) => "submit_evidence",
             Self::SubmitEnvelope(_) => "submit_envelope",
-            Self::SubmitSignerDecision(_) => "submit_signer_decision",
+            Self::SubmitSignerResolution(_) => "submit_signer_resolution",
             Self::SubmitPlanPatch(_) => "submit_plan_patch",
             Self::SubmitExecutionArtifactContinuation(_) => {
                 "submit_execution_artifact_continuation"
@@ -68,7 +68,7 @@ impl RunCommand {
                 | Self::ReleaseRunClaim(_)
                 | Self::SubmitEvidence(_)
                 | Self::SubmitEnvelope(_)
-                | Self::SubmitSignerDecision(_)
+                | Self::SubmitSignerResolution(_)
                 | Self::SubmitPlanPatch(_)
                 | Self::SubmitExecutionArtifactContinuation(_)
                 | Self::RequestCancelRun(_)
@@ -81,7 +81,7 @@ impl RunCommand {
             Self::StepRun(command) => command.expected_version.as_ref(),
             Self::SubmitEvidence(command) => command.expected_version.as_ref(),
             Self::SubmitEnvelope(command) => command.expected_version.as_ref(),
-            Self::SubmitSignerDecision(command) => command.expected_version.as_ref(),
+            Self::SubmitSignerResolution(command) => command.expected_version.as_ref(),
             Self::SubmitPlanPatch(command) => command.expected_version.as_ref(),
             Self::SubmitExecutionArtifactContinuation(command) => command.expected_version.as_ref(),
             Self::RequestCancelRun(command) => command.expected_version.as_ref(),
@@ -190,10 +190,10 @@ pub struct SubmitEnvelopeCommand {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubmitSignerDecisionCommand {
+pub struct SubmitSignerResolutionCommand {
     pub command_id: CommandId,
     pub run_id: RunId,
-    pub decision: SignerDecisionSubmission,
+    pub resolution: SignerResolutionSubmission,
     #[serde(default)]
     pub expected_version: Option<ExpectedRuntimeVersion>,
 }
@@ -320,18 +320,21 @@ pub struct EnvelopeSubmission {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SignerDecisionKind {
-    Approved,
+pub enum SignerResolutionKind {
     Denied,
     Submitted,
+    Signed,
     Expired,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SignerDecisionSubmission {
+pub struct SignerResolutionSubmission {
     pub request_id: SignerRequestId,
-    pub decision: SignerDecisionKind,
+    pub kind: SignerResolutionKind,
+    #[serde(default)]
     pub tx_hash: Option<String>,
+    #[serde(default)]
+    pub signed_payload: Option<Value>,
     #[serde(default)]
     pub details: BTreeMap<String, Value>,
 }

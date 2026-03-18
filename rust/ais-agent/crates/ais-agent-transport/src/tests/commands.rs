@@ -6,9 +6,9 @@ use ais_agent_control::{
     commands::{
         BeginRunCommand, CancelRunCommand, ClaimRunCommand, EnvelopeKind, EnvelopeSubmission,
         ExpectedRuntimeVersion, InspectRunCommand, MissionSubmission, ReleaseRunClaimCommand,
-        RenewRunClaimCommand, RequestCancelRunCommand, RunCommand, SignerDecisionKind,
-        SignerDecisionSubmission, StepBudget, StepRunCommand, StepUntil, SubmitEnvelopeCommand,
-        SubmitEvidenceCommand, SubmitPlanPatchCommand, SubmitSignerDecisionCommand,
+        RenewRunClaimCommand, RequestCancelRunCommand, RunCommand, SignerResolutionKind,
+        SignerResolutionSubmission, StepBudget, StepRunCommand, StepUntil, SubmitEnvelopeCommand,
+        SubmitEvidenceCommand, SubmitPlanPatchCommand, SubmitSignerResolutionCommand,
     },
     execution_artifact::{
         BranchStage, BranchTarget, ComparisonOperator, ContinuationStage, EvmTransactionCandidate,
@@ -571,36 +571,30 @@ pub fn signer_command(run_id: &RunId, request_id: &SignerRequestId) -> HostedRun
     signer_decision_command(
         run_id,
         request_id,
-        SignerDecisionKind::Submitted,
+        SignerResolutionKind::Submitted,
         "request-signer",
-    )
-}
-
-pub fn signer_approved_command(run_id: &RunId, request_id: &SignerRequestId) -> HostedRunCommand {
-    signer_decision_command(
-        run_id,
-        request_id,
-        SignerDecisionKind::Approved,
-        "request-signer-approved",
     )
 }
 
 fn signer_decision_command(
     run_id: &RunId,
     request_id: &SignerRequestId,
-    decision: SignerDecisionKind,
+    decision: SignerResolutionKind,
     host_request_id: &str,
 ) -> HostedRunCommand {
+    let signed_payload = matches!(decision, SignerResolutionKind::Signed)
+        .then(|| serde_json::json!({"raw_tx":"0x0102"}));
     HostedRunCommand {
         host_session_id: HostSessionId("session-1".to_owned()),
         host_request_id: Some(host_request_id.into()),
-        command: RunCommand::SubmitSignerDecision(SubmitSignerDecisionCommand {
+        command: RunCommand::SubmitSignerResolution(SubmitSignerResolutionCommand {
             command_id: CommandId(format!("cmd-{host_request_id}")),
             run_id: run_id.clone(),
-            decision: SignerDecisionSubmission {
+            resolution: SignerResolutionSubmission {
                 request_id: request_id.clone(),
-                decision,
+                kind: decision,
                 tx_hash: Some("0xdeadbeef".to_owned()),
+                signed_payload,
                 details: BTreeMap::new(),
             },
             expected_version: None,
@@ -675,14 +669,19 @@ fn hosted_command_round_trips_execution_artifact_launch_spec() {
             assert_eq!(spec.transactions.len(), 2);
             assert_eq!(spec.stages.len(), 4);
             assert_eq!(spec.risk_class.as_deref(), Some("bounded_swap"));
-            assert_eq!(spec.risk_tags, vec!["router_call".to_owned(), "transport_test".to_owned()]);
+            assert_eq!(
+                spec.risk_tags,
+                vec!["router_call".to_owned(), "transport_test".to_owned()]
+            );
             assert_eq!(spec.candidate_envelopes.len(), 1);
             assert_eq!(
                 spec.candidate_envelopes[0]["candidate_kind"],
                 json!("evm_transaction")
             );
             assert_eq!(
-                spec.decode_spec.as_ref().and_then(|spec| spec.get("fallback_mode")),
+                spec.decode_spec
+                    .as_ref()
+                    .and_then(|spec| spec.get("fallback_mode")),
                 Some(&json!("reject"))
             );
             assert_eq!(

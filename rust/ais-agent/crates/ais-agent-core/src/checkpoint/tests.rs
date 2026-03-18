@@ -9,7 +9,7 @@ use crate::{
     actuation::{ActuationKind, ActuationRecord, ActuationStatus},
     checkpoint::{
         CheckpointSnapshot, CheckpointStore, InMemoryCheckpointStore, PendingRequestsSnapshot,
-        ReplayCursor,
+        PendingSignerRequestSnapshot, ReplayCursor,
     },
     evidence::{
         EvidenceFreshness, EvidenceGraph, EvidenceKind, EvidenceProvenance, EvidenceRecord,
@@ -157,6 +157,7 @@ fn sample_evidence_wait_checkpoint() -> CheckpointSnapshot {
         pending_requests: PendingRequestsSnapshot {
             pending_evidence_refs: vec!["evidence.quote".to_owned()],
             pending_envelope_refs: Vec::new(),
+            pending_signer_request: None,
             pending_signer_request_id: None,
             pending_confirmation_id: None,
         },
@@ -197,6 +198,14 @@ fn sample_signer_wait_checkpoint() -> CheckpointSnapshot {
         pending_requests: PendingRequestsSnapshot {
             pending_evidence_refs: Vec::new(),
             pending_envelope_refs: Vec::new(),
+            pending_signer_request: Some(PendingSignerRequestSnapshot {
+                request_id: request.request_id.0.clone(),
+                node_id: request.node_id.clone(),
+                chain: Some(request.chain.clone()),
+                summary: request.summary.clone(),
+                payload: request.payload.clone(),
+                timeout_policy: None,
+            }),
             pending_signer_request_id: Some("signer-1".to_owned()),
             pending_confirmation_id: None,
         },

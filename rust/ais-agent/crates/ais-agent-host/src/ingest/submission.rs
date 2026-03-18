@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 use ais_agent_control::ids::RunId;
 
 use crate::{
-    envelope::HostEnvelopeSubmission, evidence::HostEvidenceSubmission, signer::HostSignerDecision,
+    envelope::HostEnvelopeSubmission, evidence::HostEvidenceSubmission,
+    signer::HostSignerResolution,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -11,7 +12,7 @@ use crate::{
 pub enum HostIngestKind {
     Evidence,
     Envelope,
-    SignerDecision,
+    SignerResolution,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -19,7 +20,7 @@ pub enum HostIngestKind {
 pub enum HostIngestSubmission {
     Evidence(HostEvidenceSubmission),
     Envelope(HostEnvelopeSubmission),
-    SignerDecision(HostSignerDecision),
+    SignerResolution(HostSignerResolution),
 }
 
 impl HostIngestSubmission {
@@ -27,7 +28,7 @@ impl HostIngestSubmission {
         match self {
             Self::Evidence(_) => HostIngestKind::Evidence,
             Self::Envelope(_) => HostIngestKind::Envelope,
-            Self::SignerDecision(_) => HostIngestKind::SignerDecision,
+            Self::SignerResolution(_) => HostIngestKind::SignerResolution,
         }
     }
 
@@ -35,7 +36,7 @@ impl HostIngestSubmission {
         match self {
             Self::Evidence(value) => &value.run_id,
             Self::Envelope(value) => &value.run_id,
-            Self::SignerDecision(value) => &value.run_id,
+            Self::SignerResolution(value) => &value.run_id,
         }
     }
 }

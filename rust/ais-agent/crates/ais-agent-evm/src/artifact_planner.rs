@@ -7,7 +7,7 @@ use ais_agent_control::execution_artifact::{
 use ais_agent_core::{
     action::{
         kinds::{
-            actuate::{ActuateAction, ActuateMode},
+            actuate::{ActuateAction, ActuateLiveBinding, ActuateMode, EvmActuateLiveBinding},
             observe::{
                 EvmObserveLiveBinding, ObserveAction, ObserveLiveBinding, ObserveSourceKind,
             },
@@ -17,7 +17,8 @@ use ais_agent_core::{
         ActionGraph, ActionNode, ActionNodeKind, ActionNodeStatus, ActionOrigin, ActionPayload,
     },
     binding::evm::{
-        EvmCallRequest, EvmObserveBinding, EvmObserveRequest, EvmSimulateBinding, EvmVerifyBinding,
+        EvmActuateBinding, EvmCallRequest, EvmObserveBinding, EvmObserveRequest,
+        EvmSimulateBinding, EvmVerifyBinding,
     },
     effect::{EffectAssertion, EffectContract, EffectContractKind},
 };
@@ -297,7 +298,12 @@ fn single_call_graph(
                 chain: Some(chain_scope.to_owned()),
                 envelope_ref: None,
                 requires_effect_contract: expected_effect.is_some(),
-                live: None,
+                live: live_connection.clone().map(|connection| {
+                    ActuateLiveBinding::Evm(EvmActuateLiveBinding {
+                        connection: Some(connection),
+                        binding: EvmActuateBinding::BroadcastRawTransaction,
+                    })
+                }),
             }),
             implementation_hint: Some("execution_artifact".to_owned()),
             expected_effect_ref: effect_ref.clone(),

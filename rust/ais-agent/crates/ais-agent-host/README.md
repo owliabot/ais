@@ -41,12 +41,13 @@ Current implementation status:
 - host ingest surfaces implemented:
   - `HostEvidenceSubmission`
   - `HostEnvelopeSubmission`
-  - `HostSignerDecision`
+  - `HostSignerResolution`
   - `HostIngestSubmission`
 - inspect projection now includes:
   - `InspectSnapshot`
   - `PauseBundle`
   - `ProgressView`
+  - bounded `recent_events` timeline summaries
 - inspect/pause projection is now recovery-aware and includes:
   - `recovery_disposition`
   - `failure_context`
@@ -84,6 +85,11 @@ Current implementation status:
   - richer verify-mismatch recovery suggestions on the direct projector path
   - confirmation-wait projection with disambiguated step actions
   - ownership snapshots and mutation-claim requirements on inspect/pause/result views
+  - recent event projection preserving:
+    - `family`
+    - `event_type`
+    - `summary`
+    - optional `trace_context`
 - signer request / decision host contract implemented
 - raw envelope host contract implemented
 Known gaps:
@@ -91,3 +97,4 @@ Known gaps:
   - cross-process/shared durable session ownership is not implemented
   - restart operability is currently recovered through runtime-owned deterministic relink on `inspect_run`, not through durable session persistence
 - no push-style subscription surface over session/run events yet
+- inspect only exposes a bounded recent event summary, not a full event-history API

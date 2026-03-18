@@ -4,7 +4,9 @@ mod ownership;
 
 use ais_agent_host::{
     control::{HostCommandOutcome, HostCommandResponse},
-    inspect::{project_inspect_snapshot_with_recovery, project_pause_bundle_with_recovery},
+    inspect::{
+        project_inspect_snapshot_with_recovery_and_events, project_pause_bundle_with_recovery,
+    },
     session::HostSessionId,
 };
 
@@ -20,20 +22,24 @@ where
     K: crate::persistence::RunCatalogRepository + Send,
     E: crate::persistence::EventArchive + Send,
     S: ais_agent_host::session::HostSessionStore + Send,
-    G: crate::persistence::SignerStateArchive + Send,
+    G: crate::persistence::SignerStateStore + Send,
     A: crate::persistence::RuntimeAuditArchive + Send,
     Q: crate::persistence::RunClaimRepository + Send,
 {
+    const INSPECT_RECENT_EVENT_LIMIT: usize = 5;
+
     fn apply_runtime_inspect_to_session(
         &mut self,
         host_session_id: &HostSessionId,
         runtime: &ActiveRun,
     ) -> Result<ais_agent_host::inspect::InspectSnapshot, RuntimeHostServiceError> {
-        let mut inspect = project_inspect_snapshot_with_recovery(
+        let recent_events = self.recent_runtime_events(runtime, Self::INSPECT_RECENT_EVENT_LIMIT);
+        let mut inspect = project_inspect_snapshot_with_recovery_and_events(
             &runtime.mission,
             &runtime.checkpoint,
             classify_validated_recovery_view(&runtime.checkpoint)
                 .map_err(RuntimeHostServiceError::InvalidRecoveryContract)?,
+            &recent_events,
         );
         self.hydrate_inspect_ownership(&mut inspect)?;
         let _ = self.session_store.apply_inspect(host_session_id, &inspect);
@@ -47,10 +53,12 @@ where
     ) -> Result<HostCommandResponse, RuntimeHostServiceError> {
         let recovery = classify_validated_recovery_view(&runtime.checkpoint)
             .map_err(RuntimeHostServiceError::InvalidRecoveryContract)?;
-        let mut inspect = project_inspect_snapshot_with_recovery(
+        let recent_events = self.recent_runtime_events(runtime, Self::INSPECT_RECENT_EVENT_LIMIT);
+        let mut inspect = project_inspect_snapshot_with_recovery_and_events(
             &runtime.mission,
             &runtime.checkpoint,
             recovery.clone(),
+            &recent_events,
         );
         self.hydrate_inspect_ownership(&mut inspect)?;
         let _ = self.session_store.apply_inspect(host_session_id, &inspect);
@@ -78,5 +86,15 @@ where
             response: HostCommandResponse::Inspect(inspect),
             events,
         })
+    }
+
+    fn recent_runtime_events(
+        &self,
+        runtime: &ActiveRun,
+        limit: usize,
+    ) -> Vec<ais_agent_control::events::RunEventEnvelope> {
+        let len = runtime.event_log.len();
+        let start = len.saturating_sub(limit);
+        runtime.event_log[start..].to_vec()
     }
 }

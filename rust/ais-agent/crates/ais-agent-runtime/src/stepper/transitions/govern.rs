@@ -1,12 +1,18 @@
 //! Governor application transition.
 
+use alloy::hex;
+use serde_json::{json, Value};
+
 use ais_agent_control::{
+    execution_artifact::ExecutionChainFamily,
     ids::SignerRequestId,
     recovery::{RunFailureCode, RunFailureStage},
 };
 use ais_agent_core::{
     action::{kinds::actuate::ActuateMode, ActionNodeKind, ActionNodeStatus},
     actuation::ActuationKind,
+    binding::evm::EvmCallRequest,
+    checkpoint::{PendingSignerRequestSnapshot, PendingSignerTimeoutSnapshot},
     governor::{
         decide_governor_outcome, ActionGovernanceInput, EvidenceRequirementInput, GovernorDecision,
         GovernorInput, SignerBoundaryInput, SimulationAssessment, SimulationStatus,
@@ -112,6 +118,7 @@ pub(crate) fn apply_govern_transition(runtime: &mut ActiveRun) -> Option<StepTra
                 runtime.run_id.0,
                 runtime.event_seq.saturating_add(1)
             ));
+            let signer_payload = build_signer_request_payload(runtime, node);
             let request = SignerRequestState::new_pending(
                 request_id.clone(),
                 runtime.run_id.clone(),
@@ -119,11 +126,29 @@ pub(crate) fn apply_govern_transition(runtime: &mut ActiveRun) -> Option<StepTra
                 actuator_hint.unwrap_or_else(|| format!("sign action {node_id}")),
             )
             .with_node_id(node_id.clone());
+            let request = match signer_payload.clone() {
+                Some(payload) => request.with_payload(payload),
+                None => request,
+            };
 
             runtime
                 .checkpoint
                 .pending_requests
                 .pending_signer_request_id = Some(request_id.0.clone());
+            runtime.checkpoint.pending_requests.pending_signer_request =
+                Some(PendingSignerRequestSnapshot {
+                    request_id: request_id.0.clone(),
+                    node_id: Some(node_id.clone()),
+                    chain: Some(request.chain.clone()),
+                    summary: request.summary.clone(),
+                    payload: signer_payload,
+                    timeout_policy: request.timeout.as_ref().map(|timeout| {
+                        PendingSignerTimeoutSnapshot {
+                            requested_at_ms: timeout.requested_at_ms,
+                            expires_at_ms: timeout.expires_at_ms,
+                        }
+                    }),
+                });
             runtime.checkpoint.lifecycle.await_signer_request(&request);
             runtime.pending_signer_state = Some(request);
             mark_node_status(runtime, node_id.as_str(), ActionNodeStatus::Blocked);
@@ -201,6 +226,56 @@ pub(crate) fn apply_govern_transition(runtime: &mut ActiveRun) -> Option<StepTra
             })
         }
     }
+}
+
+fn build_signer_request_payload(
+    runtime: &ActiveRun,
+    node: &ais_agent_core::action::ActionNode,
+) -> Option<Value> {
+    let ais_agent_core::action::ActionPayload::Actuate(actuate) = &node.payload else {
+        return None;
+    };
+
+    if let Some(envelope_ref) = actuate.envelope_ref.as_ref() {
+        if let Some(envelope) = runtime.envelopes.get(envelope_ref) {
+            return Some(json!({
+                "kind": match envelope.kind {
+                    ais_agent_core::envelope::RuntimeEnvelopeKind::EvmEnvelope => "evm_envelope",
+                    ais_agent_core::envelope::RuntimeEnvelopeKind::SolanaEnvelope => "solana_envelope",
+                    ais_agent_core::envelope::RuntimeEnvelopeKind::ExternalJob => "external_job",
+                },
+                "chain": envelope.chain,
+                "envelope_ref": envelope.envelope_id,
+                "payload": envelope.payload,
+            }));
+        }
+    }
+
+    find_evm_simulate_request(runtime, node).map(|request| {
+        json!({
+            "kind": "evm_transaction_request",
+            "chain_family": ExecutionChainFamily::Evm,
+            "chain": actuate.chain,
+            "from": request.from.map(|from| format!("{from:#x}")),
+            "to": format!("{:#x}", request.to),
+            "data": format!("0x{}", hex::encode(request.data.as_ref())),
+            "value": request.value.map(|value| value.to_string()),
+        })
+    })
+}
+
+fn find_evm_simulate_request(
+    runtime: &ActiveRun,
+    node: &ais_agent_core::action::ActionNode,
+) -> Option<EvmCallRequest> {
+    node.depends_on.iter().find_map(|dependency_id| {
+        let dependency = runtime.checkpoint.action_graph.nodes.get(dependency_id)?;
+        let ais_agent_core::action::ActionPayload::Simulate(simulate) = &dependency.payload else {
+            return None;
+        };
+        let live = simulate.evm_live()?;
+        Some(live.request.clone())
+    })
 }
 
 fn map_governor_rejection_code(code: &str) -> RunFailureCode {

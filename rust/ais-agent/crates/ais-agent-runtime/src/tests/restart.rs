@@ -3,9 +3,9 @@ use std::collections::BTreeMap;
 use ais_agent_control::{
     commands::{
         ClaimRunCommand, EvidenceKind, EvidenceSubmission, InspectRunCommand,
-        RequestCancelRunCommand, RunCommand, SignerDecisionKind, SignerDecisionSubmission,
+        RequestCancelRunCommand, RunCommand, SignerResolutionKind, SignerResolutionSubmission,
         StepBudget, StepRunCommand, StepUntil, SubmitEvidenceCommand, SubmitPlanPatchCommand,
-        SubmitSignerDecisionCommand,
+        SubmitSignerResolutionCommand,
     },
     events::{RunEvent, RunStarted},
     ids::{ClaimId, CommandId, EventId, RunId, SignerRequestId},
@@ -42,8 +42,8 @@ use crate::{
         restore_active_run, CheckpointArchiveEntry, CheckpointArchiveKind, CheckpointRepository,
         EventArchive, InMemoryCheckpointRepository, InMemoryEventArchive,
         InMemoryMissionRepository, InMemoryRunCatalogRepository, InMemoryRunClaimRepository,
-        InMemoryRuntimeAuditArchive, InMemorySignerStateArchive, MissionRepository,
-        RunClaimRepository, SignerStateArchive,
+        InMemoryRuntimeAuditArchive, InMemorySignerStateStore, MissionRepository,
+        RunClaimRepository, SignerStateStore,
     },
     runtime::{ActiveRun, InMemoryRunRepository, RunRepository, RunRepositoryError},
     service::RuntimeHostService,
@@ -290,7 +290,7 @@ async fn restart_preserves_active_claim_truth_and_allows_same_owner_mutation_aft
         InMemoryRunCatalogRepository::default(),
         InMemoryEventArchive::default(),
         InMemoryHostSessionStore::default(),
-        InMemorySignerStateArchive::default(),
+        InMemorySignerStateStore::default(),
         InMemoryRuntimeAuditArchive::default(),
         claim_repo,
     );
@@ -377,7 +377,7 @@ async fn restart_requires_reacquire_for_expired_claim_and_blocks_released_claim_
         InMemoryRunCatalogRepository::default(),
         InMemoryEventArchive::default(),
         InMemoryHostSessionStore::default(),
-        InMemorySignerStateArchive::default(),
+        InMemorySignerStateStore::default(),
         InMemoryRuntimeAuditArchive::default(),
         claim_repo,
     );
@@ -685,7 +685,7 @@ async fn restart_restores_awaiting_evidence_and_completes_through_real_host_serv
         &run_id,
         &mission_repo,
         &checkpoint_repo,
-        &InMemorySignerStateArchive::default(),
+        &InMemorySignerStateStore::default(),
     )
     .expect("restore runtime");
 
@@ -884,18 +884,18 @@ async fn restart_restores_awaiting_signer_and_completes_through_real_host_servic
     mission_repo
         .insert(run_id.clone(), mission.clone())
         .expect("insert mission");
-    let mut signer_state_archive = InMemorySignerStateArchive::default();
-    signer_state_archive
+    let mut signer_state_store = InMemorySignerStateStore::default();
+    signer_state_store
         .upsert(signer_state)
         .expect("persist signer state");
-    let service = RuntimeHostService::new_with_signer_archive(
+    let service = RuntimeHostService::new_with_signer_state_store(
         run_repo,
         checkpoint_repo,
         mission_repo,
         InMemoryRunCatalogRepository::default(),
         InMemoryEventArchive::default(),
         session_store,
-        signer_state_archive,
+        signer_state_store,
     );
 
     let (
@@ -905,13 +905,13 @@ async fn restart_restores_awaiting_signer_and_completes_through_real_host_servic
         run_catalog_repo,
         event_archive,
         session_store,
-        signer_state_archive,
-    ) = service.into_parts_with_signer_archive();
+        signer_state_store,
+    ) = service.into_parts_with_signer_state_store();
     let restored = restore_active_run(
         &run_id,
         &mission_repo,
         &checkpoint_repo,
-        &signer_state_archive,
+        &signer_state_store,
     )
     .expect("restore runtime");
 
@@ -919,34 +919,44 @@ async fn restart_restores_awaiting_signer_and_completes_through_real_host_servic
     new_run_repo
         .insert(restored)
         .expect("insert restored runtime");
-    let mut service = RuntimeHostService::new_with_signer_archive(
+    let mut service = RuntimeHostService::new_with_signer_state_store(
         new_run_repo,
         checkpoint_repo,
         mission_repo,
         run_catalog_repo,
         event_archive,
         session_store,
-        signer_state_archive,
+        signer_state_store,
     );
 
     let signer = service
         .handle(HostCommandEnvelope {
             host_session_id: host_session_id.clone(),
             host_request_id: Some("request-restart-signer".into()),
-            command: RunCommand::SubmitSignerDecision(SubmitSignerDecisionCommand {
+            command: RunCommand::SubmitSignerResolution(SubmitSignerResolutionCommand {
                 command_id: CommandId("cmd-restart-signer".to_owned()),
                 run_id: run_id.clone(),
-                decision: SignerDecisionSubmission {
+                resolution: SignerResolutionSubmission {
                     request_id: SignerRequestId("signer-1".to_owned()),
-                    decision: SignerDecisionKind::Submitted,
+                    kind: SignerResolutionKind::Submitted,
                     tx_hash: Some("0xabc".to_owned()),
+                    signed_payload: None,
                     details: BTreeMap::new(),
                 },
                 expected_version: None,
             }),
         })
         .await;
-    assert!(matches!(signer.response, HostCommandResponse::Inspect(_)));
+    match signer.response {
+        HostCommandResponse::Pause(pause) => {
+            assert_eq!(
+                pause.kind,
+                ais_agent_host::inspect::PauseKind::NeedConfirmation
+            );
+            assert_eq!(pause.pending_confirmations.len(), 1);
+        }
+        other => panic!("unexpected signer response: {other:?}"),
+    }
 
     let stepped = service
         .handle(HostCommandEnvelope {
@@ -965,19 +975,22 @@ async fn restart_restores_awaiting_signer_and_completes_through_real_host_servic
         })
         .await;
     match stepped.response {
-        HostCommandResponse::Pause(pause) => {
+        HostCommandResponse::Inspect(snapshot) => {
             assert_eq!(
-                pause.kind,
-                ais_agent_host::inspect::PauseKind::NeedConfirmation
+                snapshot.status,
+                ais_agent_host::inspect::RunStatus::Completed
             );
-            assert_eq!(pause.pending_confirmations.len(), 1);
+            assert_eq!(
+                snapshot.effect_status,
+                Some(ais_agent_host::inspect::EffectStatusView::Satisfied)
+            );
         }
         other => panic!("unexpected response: {other:?}"),
     }
 }
 
 #[tokio::test]
-async fn restart_restores_denied_signer_state_and_clears_durable_signer_archive_after_step() {
+async fn restart_restores_denied_signer_state_and_clears_durable_signer_state_store_after_step() {
     let host_session_id: HostSessionId = "session-restart-signer-denied".into();
     let run_id = RunId("run-1".to_owned());
     let mission = sample_mission();
@@ -1006,18 +1019,18 @@ async fn restart_restores_denied_signer_state_and_clears_durable_signer_archive_
     mission_repo
         .insert(run_id.clone(), mission.clone())
         .expect("insert mission");
-    let mut signer_state_archive = InMemorySignerStateArchive::default();
-    signer_state_archive
+    let mut signer_state_store = InMemorySignerStateStore::default();
+    signer_state_store
         .upsert(signer_state)
         .expect("persist signer state");
-    let service = RuntimeHostService::new_with_signer_archive(
+    let service = RuntimeHostService::new_with_signer_state_store(
         run_repo,
         checkpoint_repo,
         mission_repo,
         InMemoryRunCatalogRepository::default(),
         InMemoryEventArchive::default(),
         session_store,
-        signer_state_archive,
+        signer_state_store,
     );
 
     let (
@@ -1027,13 +1040,13 @@ async fn restart_restores_denied_signer_state_and_clears_durable_signer_archive_
         run_catalog_repo,
         event_archive,
         session_store,
-        signer_state_archive,
-    ) = service.into_parts_with_signer_archive();
+        signer_state_store,
+    ) = service.into_parts_with_signer_state_store();
     let restored = restore_active_run(
         &run_id,
         &mission_repo,
         &checkpoint_repo,
-        &signer_state_archive,
+        &signer_state_store,
     )
     .expect("restore runtime");
 
@@ -1041,34 +1054,47 @@ async fn restart_restores_denied_signer_state_and_clears_durable_signer_archive_
     new_run_repo
         .insert(restored)
         .expect("insert restored runtime");
-    let mut service = RuntimeHostService::new_with_signer_archive(
+    let mut service = RuntimeHostService::new_with_signer_state_store(
         new_run_repo,
         checkpoint_repo,
         mission_repo,
         run_catalog_repo,
         event_archive,
         session_store,
-        signer_state_archive,
+        signer_state_store,
     );
 
     let denied = service
         .handle(HostCommandEnvelope {
             host_session_id: host_session_id.clone(),
             host_request_id: Some("request-restart-signer-denied".into()),
-            command: RunCommand::SubmitSignerDecision(SubmitSignerDecisionCommand {
+            command: RunCommand::SubmitSignerResolution(SubmitSignerResolutionCommand {
                 command_id: CommandId("cmd-restart-signer-denied".to_owned()),
                 run_id: run_id.clone(),
-                decision: SignerDecisionSubmission {
+                resolution: SignerResolutionSubmission {
                     request_id: SignerRequestId("signer-1".to_owned()),
-                    decision: SignerDecisionKind::Denied,
+                    kind: SignerResolutionKind::Denied,
                     tx_hash: None,
+                    signed_payload: None,
                     details: BTreeMap::new(),
                 },
                 expected_version: None,
             }),
         })
         .await;
-    assert!(matches!(denied.response, HostCommandResponse::Inspect(_)));
+    match denied.response {
+        HostCommandResponse::Pause(pause) => {
+            assert_eq!(
+                pause.kind,
+                ais_agent_host::inspect::PauseKind::NeedUserInput
+            );
+            assert_eq!(
+                pause.failure_context.as_ref().map(|failure| &failure.code),
+                Some(&ais_agent_control::recovery::RunFailureCode::SignerDenied)
+            );
+        }
+        other => panic!("unexpected denied response: {other:?}"),
+    }
 
     let (
         _old_run_repo,
@@ -1077,35 +1103,42 @@ async fn restart_restores_denied_signer_state_and_clears_durable_signer_archive_
         run_catalog_repo,
         event_archive,
         session_store,
-        signer_state_archive,
-    ) = service.into_parts_with_signer_archive();
+        signer_state_store,
+    ) = service.into_parts_with_signer_state_store();
     let restored = restore_active_run(
         &run_id,
         &mission_repo,
         &checkpoint_repo,
-        &signer_state_archive,
+        &signer_state_store,
     )
     .expect("restore denied signer state");
+    assert!(restored.pending_signer_state.is_none());
+    assert_eq!(
+        restored.checkpoint.lifecycle.status,
+        ais_agent_core::runtime::RunStatus::Paused
+    );
     assert_eq!(
         restored
-            .pending_signer_state
+            .checkpoint
+            .lifecycle
+            .failure
             .as_ref()
-            .map(|state| &state.status),
-        Some(&ais_agent_core::runtime::SignerRequestStatus::Denied)
+            .map(|failure| &failure.code),
+        Some(&ais_agent_control::recovery::RunFailureCode::SignerDenied)
     );
 
     let mut new_run_repo = InMemoryRunRepository::default();
     new_run_repo
         .insert(restored)
         .expect("insert restored denied runtime");
-    let mut service = RuntimeHostService::new_with_signer_archive(
+    let mut service = RuntimeHostService::new_with_signer_state_store(
         new_run_repo,
         checkpoint_repo,
         mission_repo,
         run_catalog_repo,
         event_archive,
         session_store,
-        signer_state_archive,
+        signer_state_store,
     );
 
     let stepped = service
@@ -1145,13 +1178,13 @@ async fn restart_restores_denied_signer_state_and_clears_durable_signer_archive_
         _run_catalog_repo,
         _event_archive,
         _session_store,
-        signer_state_archive,
-    ) = service.into_parts_with_signer_archive();
-    match signer_state_archive.load(&run_id) {
-        Err(crate::persistence::SignerStateArchiveError::NotFound { run_id }) => {
+        signer_state_store,
+    ) = service.into_parts_with_signer_state_store();
+    match signer_state_store.load(&run_id) {
+        Err(crate::persistence::SignerStateStoreError::NotFound { run_id }) => {
             assert_eq!(run_id, "run-1")
         }
-        other => panic!("unexpected signer archive state after step: {other:?}"),
+        other => panic!("unexpected signer state store after step: {other:?}"),
     }
 }
 
@@ -1206,7 +1239,7 @@ async fn restart_restores_verifying_after_broadcast_and_finishes_verification() 
         &run_id,
         &mission_repo,
         &checkpoint_repo,
-        &InMemorySignerStateArchive::default(),
+        &InMemorySignerStateStore::default(),
     )
     .expect("restore runtime");
 
@@ -1273,18 +1306,18 @@ async fn restart_preserves_cancel_pending_confirmation_wait_truth() {
     mission_repo
         .insert(run_id.clone(), mission.clone())
         .expect("insert mission");
-    let mut signer_state_archive = InMemorySignerStateArchive::default();
-    signer_state_archive
+    let mut signer_state_store = InMemorySignerStateStore::default();
+    signer_state_store
         .upsert(signer_state)
         .expect("persist signer state");
-    let mut service = RuntimeHostService::new_with_signer_archive(
+    let mut service = RuntimeHostService::new_with_signer_state_store(
         InMemoryRunRepository::default(),
         checkpoint_repo,
         mission_repo,
         InMemoryRunCatalogRepository::default(),
         InMemoryEventArchive::default(),
         InMemoryHostSessionStore::default(),
-        signer_state_archive,
+        signer_state_store,
     );
 
     let inspect = service
@@ -1303,38 +1336,30 @@ async fn restart_preserves_cancel_pending_confirmation_wait_truth() {
         .handle(HostCommandEnvelope {
             host_session_id: host_session_id.clone(),
             host_request_id: Some("request-restart-cancel-pending-signer".into()),
-            command: RunCommand::SubmitSignerDecision(SubmitSignerDecisionCommand {
+            command: RunCommand::SubmitSignerResolution(SubmitSignerResolutionCommand {
                 command_id: CommandId("cmd-restart-cancel-pending-signer".to_owned()),
                 run_id: run_id.clone(),
-                decision: SignerDecisionSubmission {
+                resolution: SignerResolutionSubmission {
                     request_id: SignerRequestId("signer-1".to_owned()),
-                    decision: SignerDecisionKind::Submitted,
+                    kind: SignerResolutionKind::Submitted,
                     tx_hash: Some("0xabc".to_owned()),
+                    signed_payload: None,
                     details: BTreeMap::new(),
                 },
                 expected_version: None,
             }),
         })
         .await;
-    assert!(matches!(signer.response, HostCommandResponse::Inspect(_)));
-
-    let stepped = service
-        .handle(HostCommandEnvelope {
-            host_session_id: host_session_id.clone(),
-            host_request_id: Some("request-restart-cancel-pending-step".into()),
-            command: RunCommand::StepRun(StepRunCommand {
-                command_id: CommandId("cmd-restart-cancel-pending-step".to_owned()),
-                run_id: run_id.clone(),
-                until: StepUntil::CompleteOrBoundary,
-                budget: Some(StepBudget {
-                    max_nodes: Some(8),
-                    max_wall_clock_ms: None,
-                }),
-                expected_version: None,
-            }),
-        })
-        .await;
-    assert!(matches!(stepped.response, HostCommandResponse::Pause(_)));
+    match signer.response {
+        HostCommandResponse::Pause(pause) => {
+            assert_eq!(
+                pause.kind,
+                ais_agent_host::inspect::PauseKind::NeedConfirmation
+            );
+            assert_eq!(pause.pending_confirmations.len(), 1);
+        }
+        other => panic!("unexpected signer response: {other:?}"),
+    }
 
     let cancel = service
         .handle(HostCommandEnvelope {
@@ -1357,16 +1382,16 @@ async fn restart_preserves_cancel_pending_confirmation_wait_truth() {
         run_catalog_repo,
         event_archive,
         _session_store,
-        signer_state_archive,
-    ) = service.into_parts_with_signer_archive();
-    let mut restarted = RuntimeHostService::new_with_signer_archive(
+        signer_state_store,
+    ) = service.into_parts_with_signer_state_store();
+    let mut restarted = RuntimeHostService::new_with_signer_state_store(
         InMemoryRunRepository::default(),
         checkpoint_repo,
         mission_repo,
         run_catalog_repo,
         event_archive,
         InMemoryHostSessionStore::default(),
-        signer_state_archive,
+        signer_state_store,
     );
 
     let inspect = restarted
@@ -1607,6 +1632,7 @@ fn archived_started_event(run_id: RunId) -> ais_agent_control::events::RunEventE
         event_seq: 1,
         checkpoint_seq: 0,
         plan_epoch: 0,
+        trace_context: None,
         event: RunEvent::Started(RunStarted {
             event_id: EventId(format!("{}:started:1", run_id.0)),
             run_id,

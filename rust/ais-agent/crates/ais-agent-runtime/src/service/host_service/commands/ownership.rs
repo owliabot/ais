@@ -3,6 +3,7 @@ use ais_agent_control::{
     ownership::{OwnershipErrorCode, RunClaimStatus},
 };
 use ais_agent_host::{control::HostCommandOutcome, session::HostSessionId};
+use tracing::info;
 
 use super::super::{RuntimeHostService, RuntimeHostServiceError, RuntimeHostServiceResult};
 
@@ -14,7 +15,7 @@ where
     K: crate::persistence::RunCatalogRepository + Send,
     E: crate::persistence::EventArchive + Send,
     S: ais_agent_host::session::HostSessionStore + Send,
-    G: crate::persistence::SignerStateArchive + Send,
+    G: crate::persistence::SignerStateStore + Send,
     A: crate::persistence::RuntimeAuditArchive + Send,
     Q: crate::persistence::RunClaimRepository + Send,
 {
@@ -45,35 +46,43 @@ where
             None => self.load_effective_claim(&command.run_id)?,
         };
 
-        let acquired = match current {
-            None => self.acquire_claim(
-                &host_session_id,
-                self.build_claim(
+        let (acquired, lifecycle_event, superseded_claim_id) = match current {
+            None => (
+                self.acquire_claim(
                     &host_session_id,
-                    &command.run_id,
-                    command.owner_kind,
-                    command.owner_instance_id,
-                    command.mode,
-                    command.requested_lease_ms,
-                ),
-            )?,
-            Some(current) if current.status == RunClaimStatus::Expired => self.acquire_claim(
-                &host_session_id,
-                self.build_claim(
+                    self.build_claim(
+                        &host_session_id,
+                        &command.run_id,
+                        command.owner_kind,
+                        command.owner_instance_id,
+                        command.mode,
+                        command.requested_lease_ms,
+                    ),
+                )?,
+                None,
+                None,
+            ),
+            Some(current) if current.status == RunClaimStatus::Expired => (
+                self.acquire_claim(
                     &host_session_id,
-                    &command.run_id,
-                    command.owner_kind,
-                    command.owner_instance_id,
-                    command.mode,
-                    command.requested_lease_ms,
-                ),
-            )?,
+                    self.build_claim(
+                        &host_session_id,
+                        &command.run_id,
+                        command.owner_kind,
+                        command.owner_instance_id,
+                        command.mode,
+                        command.requested_lease_ms,
+                    ),
+                )?,
+                None,
+                None,
+            ),
             Some(current)
                 if current.host_session_id == host_session_id.0
                     && current.owner_instance_id == command.owner_instance_id
                     && current.mode == command.mode =>
             {
-                current
+                (current, None, None)
             }
             Some(current) => {
                 if !command.allow_supersede {
@@ -133,28 +142,43 @@ where
                     });
                 }
 
-                self.claim_repo
-                    .supersede(crate::persistence::ClaimSupersedeRequest {
-                        run_id: command.run_id.clone(),
-                        predecessor_claim_id: current.claim_id.clone(),
-                        predecessor_claim_epoch: current.claim_epoch,
-                        successor_claim: self.build_claim(
-                            &host_session_id,
-                            &command.run_id,
-                            command.owner_kind,
-                            command.owner_instance_id,
-                            command.mode,
-                            command.requested_lease_ms,
-                        ),
-                    })
-                    .map(|result| result.successor)
-                    .map_err(|error| RuntimeHostServiceError::OwnershipViolation {
-                        code: OwnershipErrorCode::ClaimTransferRequired,
-                        run_id: command.run_id.0.clone(),
-                        message: error.to_string(),
-                    })?
+                let predecessor_claim_id = current.claim_id.0.clone();
+                (
+                    self.claim_repo
+                        .supersede(crate::persistence::ClaimSupersedeRequest {
+                            run_id: command.run_id.clone(),
+                            predecessor_claim_id: current.claim_id.clone(),
+                            predecessor_claim_epoch: current.claim_epoch,
+                            successor_claim: self.build_claim(
+                                &host_session_id,
+                                &command.run_id,
+                                command.owner_kind,
+                                command.owner_instance_id,
+                                command.mode,
+                                command.requested_lease_ms,
+                            ),
+                        })
+                        .map(|result| result.successor)
+                        .map_err(|error| RuntimeHostServiceError::OwnershipViolation {
+                            code: OwnershipErrorCode::ClaimTransferRequired,
+                            run_id: command.run_id.0.clone(),
+                            message: error.to_string(),
+                        })?,
+                    Some("runtime.host.claim_superseded"),
+                    Some(predecessor_claim_id),
+                )
             }
         };
+        if let Some(event) = lifecycle_event {
+            info!(
+                run_id = %acquired.run_id.0,
+                host_session_id = %host_session_id.0,
+                claim_id = %acquired.claim_id.0,
+                claim_epoch = acquired.claim_epoch,
+                superseded_claim_id = superseded_claim_id.as_deref(),
+                "{}", event
+            );
+        }
 
         self.force_session_link(&host_session_id, &command.run_id, &mission);
         let runtime = self.load_hot_runtime(&command.run_id)?;
@@ -230,7 +254,8 @@ where
             });
         }
 
-        self.claim_repo
+        let renewed = self
+            .claim_repo
             .renew(crate::persistence::ClaimRenewRequest {
                 run_id: command.run_id.clone(),
                 claim_id: command.claim_id,
@@ -258,6 +283,13 @@ where
                 run_id: command.run_id.0.clone(),
                 message: error.to_string(),
             })?;
+        info!(
+            run_id = %renewed.run_id.0,
+            host_session_id = %host_session_id.0,
+            claim_id = %renewed.claim_id.0,
+            claim_epoch = renewed.claim_epoch,
+            "runtime.host.claim_renewed"
+        );
 
         self.force_session_link(&host_session_id, &command.run_id, &mission);
         let runtime = self.load_hot_runtime(&command.run_id)?;
@@ -334,7 +366,8 @@ where
             });
         }
 
-        self.claim_repo
+        let released = self
+            .claim_repo
             .release(crate::persistence::ClaimReleaseRequest {
                 run_id: command.run_id.clone(),
                 claim_id: command.claim_id,
@@ -345,6 +378,13 @@ where
                 run_id: command.run_id.0.clone(),
                 message: error.to_string(),
             })?;
+        info!(
+            run_id = %released.run_id.0,
+            host_session_id = %host_session_id.0,
+            claim_id = %released.claim_id.0,
+            claim_epoch = released.claim_epoch,
+            "runtime.host.claim_released"
+        );
 
         self.force_session_link(&host_session_id, &command.run_id, &mission);
         let runtime = self.load_hot_runtime(&command.run_id)?;

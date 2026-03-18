@@ -33,7 +33,7 @@ use crate::{
         CheckpointArchiveEntry, CheckpointArchiveKind, CheckpointRepository, EventArchive,
         EventArchiveQuery, InMemoryCheckpointRepository, InMemoryEventArchive,
         InMemoryMissionRepository, InMemoryRunCatalogRepository, InMemoryRuntimeAuditArchive,
-        InMemorySignerStateArchive, MissionRepository, RunCatalogRepository, RuntimeAuditArchive,
+        InMemorySignerStateStore, MissionRepository, RunCatalogRepository, RuntimeAuditArchive,
         RuntimeAuditArchiveError, RuntimeAuditQuery,
     },
     runtime::{apply_plan_patch, ActiveRun, InMemoryRunRepository, RunRepository},
@@ -421,7 +421,7 @@ async fn runtime_host_service_fails_closed_when_grouped_plan_patch_audit_write_f
         run_catalog_repo,
         event_archive,
         session_store,
-        InMemorySignerStateArchive::default(),
+        InMemorySignerStateStore::default(),
         FailingRuntimeAuditArchive::fail_on_nth_append(1),
     );
 
@@ -456,7 +456,7 @@ async fn runtime_host_service_fails_closed_when_grouped_plan_patch_audit_write_f
         event_archive,
         _session_store,
         _signer_state_archive,
-    ) = service.into_parts_with_signer_archive();
+    ) = service.into_parts_with_signer_state_store();
     assert!(run_repo.load(&run_id).is_err());
     let latest = checkpoint_repo
         .latest(&run_id.0)

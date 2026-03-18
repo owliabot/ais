@@ -16,7 +16,7 @@ use crate::persistence::{
     DurableMutationExecutor, EventArchive, EventArchiveError, EventArchiveQuery,
     InMemoryCheckpointRepository, InMemoryEventArchive, InMemoryMissionRepository,
     InMemoryRunCatalogRepository, InMemoryRunClaimRepository, InMemoryRuntimeAuditArchive,
-    InMemorySignerStateArchive, LinearDurableMutationExecutor, MissionRepository,
+    InMemorySignerStateStore, LinearDurableMutationExecutor, MissionRepository,
     MissionRepositoryError, RunCatalogEntry, RunCatalogRepository, RunCatalogRepositoryError,
     RunClaimRepository, RunClaimRepositoryError, RuntimeAuditArchive,
 };
@@ -327,7 +327,7 @@ fn linear_durable_mutation_executor_commits_consistent_grouped_unit() {
         InMemoryCheckpointRepository::default(),
         InMemoryEventArchive::default(),
         InMemoryRunCatalogRepository::default(),
-        InMemorySignerStateArchive::default(),
+        InMemorySignerStateStore::default(),
         InMemoryRuntimeAuditArchive::default(),
     );
 
@@ -397,7 +397,7 @@ fn linear_durable_mutation_executor_rejects_invalid_unit_before_writing() {
         InMemoryCheckpointRepository::default(),
         InMemoryEventArchive::default(),
         InMemoryRunCatalogRepository::default(),
-        InMemorySignerStateArchive::default(),
+        InMemorySignerStateStore::default(),
         InMemoryRuntimeAuditArchive::default(),
     );
 
@@ -533,6 +533,7 @@ fn sample_event(run_id: RunId, event_seq: u64) -> RunEventEnvelope {
         event_seq,
         checkpoint_seq: event_seq,
         plan_epoch: 0,
+        trace_context: None,
         event: RunEvent::Progress(RunProgress {
             event_id: EventId(format!("event-{event_seq}")),
             run_id,

@@ -147,9 +147,25 @@ Grouped durable truth contract:
   - non-monotonic event or audit batches
   - catalog/checkpoint tail mismatch
   - malformed `run_begin` units without mission-insert semantics
-- backend-native grouped commit execution now exists in SQLite for mission/checkpoint/event/catalog/signer/audit writes through `DurableMutationExecutor`
+- backend-native grouped commit execution now exists in SQLite for mission/checkpoint/event/catalog/wait-state/audit writes through `DurableMutationExecutor`
 - runtime host-service success paths now build `DurableMutationUnit` and commit through that executor seam for begin, step, host mutations, and terminal cancel flows
-- scheduler-produced checkpoint writes are now captured first and only then committed with event/catalog/signer/audit truth as one host-visible durable success unit
+- scheduler-produced checkpoint writes are now captured first and only then committed with event/catalog/wait-state/audit truth as one host-visible durable success unit
+
+Current SQLite observability / retention shape:
+- the durable schema is now fixed around:
+  - `runs`
+  - `run_inputs`
+  - `run_events`
+  - `run_audits`
+  - `run_checkpoints`
+  - `run_wait_states`
+  - `run_claim_history`
+  - `maintenance_journal`
+  - `store_maintenance_state`
+- `ais-agent-store-sqlite` is the owner of:
+  - repository adapters
+  - inspect queries
+  - retention / purge / vacuum maintenance
 
 Frozen durability cuts:
 - `begin_run`
@@ -175,7 +191,7 @@ Current durable-first write wiring:
   - host-side durable mutations now also advance checkpoint identity, not just hot revision, for:
     - `submit_evidence`
     - `submit_envelope`
-    - `submit_signer_decision`
+    - `submit_signer_resolution`
   - `RunCatalogRepository` tracks latest checkpoint seq, latest event seq, lifecycle status, boundary kind, and revision
   - failure-injection regressions prove durable write errors do not return success and do not front-run the hot cache save
 
@@ -184,7 +200,7 @@ Current recovery wiring:
   - loads mission from `MissionRepository`
   - loads latest checkpoint from `CheckpointRepository`
   - latest checkpoint selection now follows monotonic checkpoint truth (`checkpoint_seq`, then `plan_epoch`) instead of raw append order
-  - loads durable signer truth from `SignerStateArchive`
+  - loads durable wait-state truth from `RunWaitStateStore`
   - reconstructs `ActiveRun` from durable truth instead of requiring a preexisting hot runtime copy
   - now fails closed when a checkpoint claims `awaiting_confirmation` but is missing:
     - `pending_confirmation_id`
@@ -301,7 +317,7 @@ The host-facing command plane is intentionally small:
 - `submit_evidence`
 - `submit_envelope`
 - `submit_plan_patch`
-- `submit_signer_decision`
+- `submit_signer_resolution`
 - `cancel_run`
 
 For `begin_run`, the current architectural target is:
@@ -311,6 +327,20 @@ For `begin_run`, the current architectural target is:
 - `launch_spec.kind = execution_artifact` should become the primary product path
 - host/outer-agent remains responsible for protocol semantics, external quote/evidence gathering, and staged continuation artifact construction
 - `ais-agent` remains responsible for guarded execution, branch judgment, signer/confirmation, verification, output export, and recovery
+
+Signer boundary semantics are now explicit:
+
+- `submit_signer_resolution(decision = submitted, tx_hash = ...)`
+  - means the host-side backend already broadcast the transaction
+  - `ais-agent` skips local broadcast and moves directly into confirmation waiting
+- `submit_signer_resolution(decision = signed, signed_payload = ...)`
+  - means the host-side backend only signed
+  - `ais-agent` remains the owner of local broadcast, confirmation polling, and verify
+
+This distinction exists so host-side signer backends can evolve independently:
+
+- temporary or hardened signer-only backends can use `signed`
+- signer-and-send backends can continue using `submitted`
 
 The host-facing read plane is:
 - `InspectSnapshot`

@@ -127,7 +127,7 @@ pub(super) fn sample_unit() -> DurableMutationUnit {
                 terminal_at_ms: None,
             },
         },
-        signer_write: None,
+        wait_state_write: None,
         audit_write: AuditWriteBatch {
             records: vec![sample_audit(1)],
         },
@@ -181,6 +181,7 @@ fn sample_event(event_seq: u64) -> RunEventEnvelope {
         event_seq,
         checkpoint_seq: 1,
         plan_epoch: 0,
+        trace_context: None,
         event: RunEvent::Progress(RunProgress {
             event_id: EventId(format!("event-{event_seq}")),
             run_id: RunId("run-1".to_owned()),

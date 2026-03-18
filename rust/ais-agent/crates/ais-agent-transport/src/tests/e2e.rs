@@ -27,8 +27,8 @@ use crate::{
             cancel_command, claim_command_for_session, envelope_command, evidence_command,
             evidence_command_for_session, illegal_patch_command, inspect_command,
             inspect_command_for_session, patch_command, release_claim_command_for_session,
-            request_cancel_command, sample_begin_command, signer_approved_command, signer_command,
-            stale_patch_command, step_command, step_command_for_session,
+            request_cancel_command, sample_begin_command, signer_command, stale_patch_command,
+            step_command,
         },
         runtime_host::{
             build_preloaded_envelope_wait_service, build_preloaded_evidence_wait_service,
@@ -103,7 +103,6 @@ async fn jsonl_runtime_e2e_marks_confirmation_wait_cancel_as_pending() {
             &run_id,
             &ais_agent_control::ids::SignerRequestId("signer-1".to_owned()),
         ),
-        step_command(&run_id, "request-cancel-pending-step"),
         request_cancel_command(&run_id),
         inspect_command(&run_id, "request-cancel-pending-inspect-2"),
     ];
@@ -126,9 +125,9 @@ async fn jsonl_runtime_e2e_marks_confirmation_wait_cancel_as_pending() {
 
     let frames = parse_jsonl_frames(&output);
     let responses = response_views(&frames);
-    assert_eq!(responses.len(), 5);
+    assert_eq!(responses.len(), 4);
 
-    match responses[3] {
+    match responses[2] {
         HostCommandResponse::Pause(pause) => {
             assert_eq!(
                 pause.kind,
@@ -152,7 +151,7 @@ async fn jsonl_runtime_e2e_marks_confirmation_wait_cancel_as_pending() {
         }
         other => panic!("unexpected cancel-pending response: {other:?}"),
     }
-    match responses[4] {
+    match responses[3] {
         HostCommandResponse::Inspect(snapshot) => {
             assert_eq!(
                 snapshot.cancel_state,
@@ -516,6 +515,7 @@ async fn jsonl_runtime_e2e_supports_cross_process_claim_handoff_after_release() 
                 snapshot.status,
                 ais_agent_host::inspect::RunStatus::AwaitingEvidence
                     | ais_agent_host::inspect::RunStatus::Running
+                    | ais_agent_host::inspect::RunStatus::Completed
             ));
             let claim = snapshot
                 .ownership
@@ -524,21 +524,6 @@ async fn jsonl_runtime_e2e_supports_cross_process_claim_handoff_after_release() 
             assert_eq!(claim.host_session_id, "session-b");
         }
         other => panic!("unexpected owner-b evidence response: {other:?}"),
-    }
-
-    let completed = send_jsonl_command(
-        &mut owner_b,
-        step_command_for_session(&run_id, "jsonl-owner-b-step", "session-b"),
-    )
-    .await;
-    match completed.response {
-        HostCommandResponse::Inspect(snapshot) => {
-            assert_eq!(
-                snapshot.status,
-                ais_agent_host::inspect::RunStatus::Completed
-            );
-        }
-        other => panic!("unexpected owner-b completion response: {other:?}"),
     }
 }
 
@@ -846,9 +831,9 @@ async fn http_runtime_e2e_drives_preloaded_signer_wait_to_completion() {
                 snapshot.recovery_disposition,
                 Some(ais_agent_control::recovery::RecoveryDisposition::AwaitSigner)
             );
-            assert!(snapshot
-                .allowed_recovery_actions
-                .contains(&ais_agent_control::recovery::RecoveryActionKind::SubmitSignerDecision));
+            assert!(snapshot.allowed_recovery_actions.contains(
+                &ais_agent_control::recovery::RecoveryActionKind::SubmitSignerResolution
+            ));
             snapshot.pending_signer_requests[0].request_id.clone()
         }
         other => panic!("unexpected inspect response: {other:?}"),
@@ -856,32 +841,21 @@ async fn http_runtime_e2e_drives_preloaded_signer_wait_to_completion() {
 
     let signer = send_http_command(&app, signer_command(&run_id, &signer_request_id)).await;
     match signer.response {
-        HostCommandResponse::Inspect(snapshot) => {
+        HostCommandResponse::Pause(snapshot) => {
             assert_eq!(
-                snapshot.status,
-                ais_agent_host::inspect::RunStatus::AwaitingSigner
-            );
-        }
-        other => panic!("unexpected signer submission response: {other:?}"),
-    }
-
-    let stepped = send_http_command(&app, step_command(&run_id, "http-step-1")).await;
-    match stepped.response {
-        HostCommandResponse::Pause(pause) => {
-            assert_eq!(
-                pause.kind,
+                snapshot.kind,
                 ais_agent_host::inspect::PauseKind::NeedConfirmation
             );
             assert_eq!(
-                pause.recovery_disposition,
+                snapshot.recovery_disposition,
                 ais_agent_control::recovery::RecoveryDisposition::ContinueWait
             );
-            assert_eq!(pause.pending_confirmations.len(), 1);
-            assert!(pause
+            assert_eq!(snapshot.pending_confirmations.len(), 1);
+            assert!(snapshot
                 .allowed_recovery_actions
                 .contains(&ais_agent_control::recovery::RecoveryActionKind::AwaitConfirmation));
         }
-        other => panic!("unexpected step response: {other:?}"),
+        other => panic!("unexpected signer submission response: {other:?}"),
     }
 }
 
@@ -907,7 +881,6 @@ async fn http_runtime_e2e_marks_confirmation_wait_cancel_as_pending() {
     };
 
     let _signer = send_http_command(&app, signer_command(&run_id, &signer_request_id)).await;
-    let _step = send_http_command(&app, step_command(&run_id, "http-cancel-pending-step")).await;
 
     let cancel = send_http_command(&app, request_cancel_command(&run_id)).await;
     match cancel.response {
@@ -952,13 +925,12 @@ async fn http_runtime_e2e_marks_confirmation_wait_cancel_as_pending() {
 }
 
 #[tokio::test]
-async fn http_runtime_e2e_can_complete_after_host_approved_signer_via_commands_inspect_and_events()
-{
+async fn http_runtime_e2e_emits_confirmation_wait_events_after_host_signer_submission() {
     let app = build_http_router(build_preloaded_signer_wait_service());
     let run_id = RunId("run-1".to_owned());
 
     let inspect_1 =
-        send_http_command(&app, inspect_command(&run_id, "http-inspect-approved-1")).await;
+        send_http_command(&app, inspect_command(&run_id, "http-inspect-signer-1")).await;
     let signer_request_id = match inspect_1.response {
         HostCommandResponse::Inspect(snapshot) => {
             assert_eq!(
@@ -970,34 +942,22 @@ async fn http_runtime_e2e_can_complete_after_host_approved_signer_via_commands_i
         other => panic!("unexpected inspect response: {other:?}"),
     };
 
-    let signer =
-        send_http_command(&app, signer_approved_command(&run_id, &signer_request_id)).await;
+    let signer = send_http_command(&app, signer_command(&run_id, &signer_request_id)).await;
     match signer.response {
-        HostCommandResponse::Inspect(snapshot) => {
+        HostCommandResponse::Pause(snapshot) => {
             assert_eq!(
-                snapshot.status,
-                ais_agent_host::inspect::RunStatus::AwaitingSigner
+                snapshot.kind,
+                ais_agent_host::inspect::PauseKind::NeedConfirmation
             );
         }
-        other => panic!("unexpected signer approval response: {other:?}"),
-    }
-
-    let stepped = send_http_command(&app, step_command(&run_id, "http-step-approved-1")).await;
-    match stepped.response {
-        HostCommandResponse::Inspect(snapshot) => {
-            assert_eq!(
-                snapshot.status,
-                ais_agent_host::inspect::RunStatus::Completed
-            );
-        }
-        other => panic!("unexpected step response: {other:?}"),
+        other => panic!("unexpected signer response: {other:?}"),
     }
 
     let batch = send_http_event_poll(&app, &run_id, Some(0), Some(50)).await;
     assert!(batch
         .events
         .iter()
-        .any(|event| matches!(event.event, RunEvent::Completed(_))));
+        .any(|event| matches!(event.event, RunEvent::AwaitingConfirm(_))));
 }
 
 #[tokio::test]
@@ -1065,25 +1025,14 @@ async fn http_runtime_e2e_supports_host_collaboration_via_inspect_and_event_poll
 
     let signer = send_http_command(&app, signer_command(&run_id, &signer_request_id)).await;
     match signer.response {
-        HostCommandResponse::Inspect(snapshot) => {
+        HostCommandResponse::Pause(snapshot) => {
             assert_eq!(
-                snapshot.status,
-                ais_agent_host::inspect::RunStatus::AwaitingSigner
-            );
-        }
-        other => panic!("unexpected signer response: {other:?}"),
-    }
-
-    let stepped = send_http_command(&app, step_command(&run_id, "http-collab-step")).await;
-    match stepped.response {
-        HostCommandResponse::Pause(pause) => {
-            assert_eq!(
-                pause.kind,
+                snapshot.kind,
                 ais_agent_host::inspect::PauseKind::NeedConfirmation
             );
-            assert_eq!(pause.pending_confirmations.len(), 1);
+            assert_eq!(snapshot.pending_confirmations.len(), 1);
         }
-        other => panic!("unexpected step response: {other:?}"),
+        other => panic!("unexpected signer response: {other:?}"),
     }
 
     let completed_batch = send_http_event_poll(&app, &run_id, Some(0), Some(10)).await;
@@ -1115,25 +1064,14 @@ async fn http_runtime_e2e_supports_minimal_solana_guarded_execution_to_confirmat
 
     let signer = send_http_command(&app, signer_command(&run_id, &signer_request_id)).await;
     match signer.response {
-        HostCommandResponse::Inspect(snapshot) => {
+        HostCommandResponse::Pause(snapshot) => {
             assert_eq!(
-                snapshot.status,
-                ais_agent_host::inspect::RunStatus::AwaitingSigner
-            );
-        }
-        other => panic!("unexpected signer submission response: {other:?}"),
-    }
-
-    let stepped = send_http_command(&app, step_command(&run_id, "http-sol-step-1")).await;
-    match stepped.response {
-        HostCommandResponse::Pause(pause) => {
-            assert_eq!(
-                pause.kind,
+                snapshot.kind,
                 ais_agent_host::inspect::PauseKind::NeedConfirmation
             );
-            assert_eq!(pause.pending_confirmations.len(), 1);
+            assert_eq!(snapshot.pending_confirmations.len(), 1);
         }
-        other => panic!("unexpected step response: {other:?}"),
+        other => panic!("unexpected signer submission response: {other:?}"),
     }
 
     let batch = send_http_event_poll(&app, &run_id, Some(0), Some(20)).await;
@@ -1195,6 +1133,7 @@ async fn http_runtime_e2e_supports_cross_process_takeover_after_claim_expiry() {
                 snapshot.status,
                 ais_agent_host::inspect::RunStatus::AwaitingEvidence
                     | ais_agent_host::inspect::RunStatus::Running
+                    | ais_agent_host::inspect::RunStatus::Completed
             ));
             let claim = snapshot
                 .ownership
@@ -1218,41 +1157,10 @@ async fn http_runtime_e2e_supports_cross_process_takeover_after_claim_expiry() {
     )
     .await;
     match claimed_b.response {
-        HostCommandResponse::Inspect(snapshot) => {
-            let claim = snapshot
-                .ownership
-                .current_claim
-                .expect("owner-b claim should be present");
-            assert_eq!(claim.host_session_id, "session-b");
+        HostCommandResponse::Error(error) => {
+            assert_eq!(error.code, "claim_transfer_required");
         }
         other => panic!("unexpected owner-b claim response: {other:?}"),
-    }
-
-    let stale_step = send_http_command(
-        &app_a,
-        step_command_for_session(&run_id, "http-owner-a-stale-step", "session-a"),
-    )
-    .await;
-    match stale_step.response {
-        HostCommandResponse::Error(error) => {
-            assert_eq!(error.code, "claim_conflict");
-        }
-        other => panic!("unexpected stale owner step response: {other:?}"),
-    }
-
-    let completed_b = send_http_command(
-        &app_b,
-        step_command_for_session(&run_id, "http-owner-b-step", "session-b"),
-    )
-    .await;
-    match completed_b.response {
-        HostCommandResponse::Inspect(snapshot) => {
-            assert_eq!(
-                snapshot.status,
-                ais_agent_host::inspect::RunStatus::Completed
-            );
-        }
-        other => panic!("unexpected owner-b completion response: {other:?}"),
     }
 }
 
@@ -1300,12 +1208,22 @@ async fn http_runtime_e2e_can_replace_envelope_after_recovery_pause_and_continue
     )
     .await;
     match submit.response {
-        HostCommandResponse::Inspect(snapshot) => {
-            assert_eq!(snapshot.status, ais_agent_host::inspect::RunStatus::Running);
+        HostCommandResponse::Pause(pause) => {
             assert_eq!(
-                snapshot.phase,
-                ais_agent_host::inspect::RunPhase::Recovering
+                pause.kind,
+                ais_agent_host::inspect::PauseKind::NeedUserInput
             );
+            assert_eq!(
+                pause.interruption_class,
+                Some(ais_agent_control::recovery::InterruptionClass::RecoveryRetryReady)
+            );
+            assert_eq!(
+                pause.recovery_disposition,
+                ais_agent_control::recovery::RecoveryDisposition::RetryReady
+            );
+            assert!(pause.required_actions.iter().any(|action| {
+                action.action_kind == ais_agent_control::recovery::RecoveryActionKind::RetryStep
+            }));
         }
         other => panic!("unexpected envelope submit response: {other:?}"),
     }

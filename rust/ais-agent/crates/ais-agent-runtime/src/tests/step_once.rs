@@ -372,6 +372,78 @@ async fn step_once_resolves_submitted_signer_state_into_verifying_progress() {
 }
 
 #[tokio::test]
+async fn step_once_resolves_signed_signer_state_into_broadcasting_progress() {
+    let mission = sample_mission();
+    let checkpoint =
+        checkpoint_with_nodes(vec![actuate_blocked_node("swap", vec!["simulate-swap"])]);
+    let mut runtime = ActiveRun::new(mission, checkpoint);
+    runtime.pending_signer_state = Some(
+        SignerRequestState::new_pending(
+            SignerRequestId("signer-1".to_owned()),
+            RunId("run-1".to_owned()),
+            "eip155:1",
+            "sign swap",
+        )
+        .with_node_id("swap")
+        .with_timeout(10, Some(20)),
+    );
+    runtime
+        .pending_signer_state
+        .as_mut()
+        .expect("signer state")
+        .status = SignerRequestStatus::Signed;
+    runtime
+        .pending_signer_state
+        .as_mut()
+        .expect("signer state")
+        .signed_payload = Some(json!({
+        "kind": "evm_signed_transaction",
+        "raw_tx": "0x0102"
+    }));
+    runtime
+        .checkpoint
+        .pending_requests
+        .pending_signer_request_id = Some("signer-1".to_owned());
+    runtime
+        .checkpoint
+        .lifecycle
+        .await_signer("await signer", SignerRequestId("signer-1".to_owned()));
+
+    let result = StepOnce::apply(&mut runtime).await;
+
+    assert_eq!(
+        result.applied_transition.as_ref().map(|t| t.kind),
+        Some(StepTransitionKind::Signer)
+    );
+    assert_eq!(
+        runtime
+            .pending_signer_state
+            .as_ref()
+            .map(|state| state.status.clone()),
+        Some(SignerRequestStatus::Signed)
+    );
+    assert_eq!(
+        runtime
+            .checkpoint
+            .pending_requests
+            .pending_signer_request_id
+            .as_deref(),
+        Some("signer-1")
+    );
+    assert_eq!(runtime.checkpoint.lifecycle.status, RunStatus::Running);
+    assert_eq!(runtime.checkpoint.lifecycle.phase, RunPhase::Broadcasting);
+    assert_eq!(
+        runtime
+            .checkpoint
+            .action_graph
+            .nodes
+            .get("swap")
+            .map(|node| node.status.clone()),
+        Some(ActionNodeStatus::Ready)
+    );
+}
+
+#[tokio::test]
 async fn step_once_signer_denial_pauses_for_patch() {
     let mission = sample_mission();
     let checkpoint =
@@ -591,10 +663,7 @@ async fn step_once_execution_artifact_branch_activates_transaction_stage() {
             .unwrap_or_default(),
         vec![ais_agent_core::checkpoint::ArtifactBranchTraceSnapshot {
             branch_stage_id: "stage.branch".into(),
-            available_targets: vec![
-                "stage.swap".to_owned(),
-                "assert:missing_quote".to_owned(),
-            ],
+            available_targets: vec!["stage.swap".to_owned(), "assert:missing_quote".to_owned(),],
             selected_target: "stage.swap".to_owned(),
             predicate_value: true,
         }]

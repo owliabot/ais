@@ -5,7 +5,7 @@ use ais_agent_control::{
         BeginRunCommand, ClaimRunCommand, MissionSubmission, ReleaseRunClaimCommand,
         RenewRunClaimCommand, RunCommand,
     },
-    events::{RunEvent, RunEventEnvelope, RunStarted},
+    events::{RunBroadcastSubmitted, RunEvent, RunEventEnvelope, RunEventFamily, RunStarted},
     ids::{ClaimId, CommandId, EventId, IdempotencyKey, RunId},
     launch_spec::{LaunchSpecSubmission, PrebuiltFragmentLaunchSpec},
     ownership::{OwnershipVisibility, RunClaimMode, RunClaimOwnerKind, RunOwnershipSnapshot},
@@ -20,8 +20,8 @@ use ais_agent_host::{
     events::{HostEventServiceError, HostRunEventBatch, HostRunEventQuery, HostRunEventService},
     inspect::{
         ActiveBoundaryView, BoundaryKind, InspectSnapshot, MissionSummaryView, PauseActionView,
-        PauseBundle, PauseKind, PendingConfirmationView, PendingSignerRequestView, ProgressView,
-        RunPhase, RunStatus,
+        PauseBundle, PauseKind, PendingConfirmationView, PendingSignerRequestView,
+        PendingSignerTimeoutPolicyView, ProgressView, RunPhase, RunStatus,
     },
     session::{
         HostCommandEnvelope, HostRequestId, HostSessionId, HostSessionSnapshot, HostedRunCommand,
@@ -103,6 +103,7 @@ async fn jsonl_server_emits_response_and_events_without_extra_semantics() {
                 event_seq,
                 checkpoint_seq,
                 plan_epoch,
+                trace_context,
                 event: RunEvent::Started(started),
             } => {
                 assert_eq!(run_id.0, "run-1");
@@ -110,9 +111,63 @@ async fn jsonl_server_emits_response_and_events_without_extra_semantics() {
                 assert_eq!(event_seq, 1);
                 assert_eq!(checkpoint_seq, 0);
                 assert_eq!(plan_epoch, 0);
+                assert!(trace_context.is_none());
+                assert_eq!(
+                    RunEvent::Started(started).descriptor().family,
+                    RunEventFamily::Lifecycle
+                );
             }
             other => panic!("unexpected event: {other:?}"),
         },
+        other => panic!("unexpected frame: {other:?}"),
+    }
+}
+
+#[test]
+fn jsonl_codec_round_trips_broadcast_submitted_event_variant() {
+    let frame = JsonlOutboundFrame::Event {
+        event: RunEventEnvelope {
+            run_id: RunId("run-1".to_owned()),
+            event_seq: 2,
+            checkpoint_seq: 1,
+            plan_epoch: 0,
+            trace_context: Some(ais_agent_control::events::RunEventTraceContext {
+                trace_id: "run:run-1:cmd:cmd-1:ckpt:1:epoch:0".to_owned(),
+                span_id: "run.side_effect.broadcast_submitted:broadcast.swap:2".to_owned(),
+            }),
+            event: RunEvent::BroadcastSubmitted(RunBroadcastSubmitted {
+                event_id: EventId("event-2".to_owned()),
+                run_id: RunId("run-1".to_owned()),
+                node_id: "broadcast.swap".to_owned(),
+                chain: Some("eip155:8453".to_owned()),
+                tx_hash: Some("0xabc".to_owned()),
+                summary: "broadcast submitted".to_owned(),
+            }),
+        },
+    };
+
+    let encoded = serde_json::to_string(&frame).expect("encode frame");
+    let decoded: JsonlOutboundFrame = serde_json::from_str(&encoded).expect("decode frame");
+    match decoded {
+        JsonlOutboundFrame::Event { event } => {
+            assert_eq!(
+                event.descriptor().event_type,
+                "run.side_effect.broadcast_submitted"
+            );
+            assert_eq!(
+                event
+                    .trace_context
+                    .as_ref()
+                    .map(|context| context.span_id.as_str()),
+                Some("run.side_effect.broadcast_submitted:broadcast.swap:2")
+            );
+            match event.event {
+                RunEvent::BroadcastSubmitted(side_effect) => {
+                    assert_eq!(side_effect.tx_hash.as_deref(), Some("0xabc"));
+                }
+                other => panic!("unexpected event variant: {other:?}"),
+            }
+        }
         other => panic!("unexpected frame: {other:?}"),
     }
 }
@@ -469,6 +524,7 @@ impl HostCommandService for MockHostService {
                     event_seq: 1,
                     checkpoint_seq: 0,
                     plan_epoch: 0,
+                    trace_context: None,
                     event: RunEvent::Started(RunStarted {
                         event_id: EventId("event-1".to_owned()),
                         run_id: RunId("run-1".to_owned()),
@@ -578,6 +634,7 @@ impl HostRunEventService for MockHostService {
                     event_seq: 1,
                     checkpoint_seq: 0,
                     plan_epoch: 0,
+                    trace_context: None,
                     event: RunEvent::Started(RunStarted {
                         event_id: EventId("event-1".to_owned()),
                         run_id: RunId("run-1".to_owned()),
@@ -776,8 +833,17 @@ fn sample_recovery_aware_pause() -> PauseBundle {
         ],
         pending_signer_requests: vec![PendingSignerRequestView {
             request_id: "signer-1".into(),
+            node_id: Some("govern.swap".to_owned()),
             chain: Some("eip155:1".to_owned()),
             summary: "sign patch".to_owned(),
+            payload: Some(serde_json::json!({
+                "kind": "evm_transaction_request",
+                "to": "0x1111111111111111111111111111111111111111",
+            })),
+            timeout_policy: Some(PendingSignerTimeoutPolicyView {
+                requested_at_ms: 1,
+                expires_at_ms: Some(2),
+            }),
         }],
         pending_confirmations: vec![PendingConfirmationView {
             confirmation_id: "confirm-1".to_owned(),
@@ -896,6 +962,7 @@ fn sample_retry_ready_inspect() -> InspectSnapshot {
             summary: "waiting for confirmation".to_owned(),
         }],
         pending_signer_requests: Vec::new(),
+        recent_events: Vec::new(),
         recent_side_effects: Vec::new(),
         effect_status: None,
         branch_trace: Vec::new(),

@@ -24,7 +24,7 @@ impl RuntimeCommandRouter {
         K: crate::persistence::RunCatalogRepository + Send,
         E: crate::persistence::EventArchive + Send,
         S: ais_agent_host::session::HostSessionStore + Send,
-        G: crate::persistence::SignerStateArchive + Send,
+        G: crate::persistence::SignerStateStore + Send,
         A: crate::persistence::RuntimeAuditArchive + Send,
         Q: crate::persistence::RunClaimRepository + Send,
     {
@@ -51,9 +51,9 @@ impl RuntimeCommandRouter {
                 RunCommand::SubmitEnvelope(command) => {
                     service.submit_envelope(host_session_id, command).await
                 }
-                RunCommand::SubmitSignerDecision(command) => {
+                RunCommand::SubmitSignerResolution(command) => {
                     service
-                        .submit_signer_decision(host_session_id, command)
+                        .submit_signer_resolution(host_session_id, command)
                         .await
                 }
                 RunCommand::SubmitPlanPatch(command) => {

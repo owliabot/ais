@@ -1,5 +1,7 @@
 mod load;
-mod types;
+pub(crate) mod types;
 
 pub use load::load_service_config;
-pub use types::{AisAgentServiceConfig, AisAgentSqliteStorageConfig, AisAgentStorageConfig};
+pub use types::{
+    AisAgentJsonlCaptureConfig, AisAgentLogLevel, AisAgentServiceConfig, AisAgentStorageConfig,
+};

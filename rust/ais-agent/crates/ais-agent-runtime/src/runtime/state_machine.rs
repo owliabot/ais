@@ -2,8 +2,8 @@
 
 use ais_agent_core::{
     action::{kinds::verify::VerifyKind, ActionNodeKind, ActionNodeStatus, ActionPayload},
-    checkpoint::CheckpointSnapshot,
-    runtime::{RunStatus, SignerRequestState},
+    checkpoint::{CheckpointSnapshot, PendingSignerRequestSnapshot, PendingSignerTimeoutSnapshot},
+    runtime::{RunStatus, SignerRequestState, SignerRequestStatus},
 };
 
 use crate::runtime::ActiveRun;
@@ -38,6 +38,10 @@ impl RuntimeStateMachine {
                     .pending_signer_state
                     .as_ref()
                     .map(|state| state.request_id.0.clone());
+                snapshot.pending_requests.pending_signer_request = runtime
+                    .pending_signer_state
+                    .as_ref()
+                    .map(checkpoint_pending_signer_request);
             }
             CheckpointPersistenceMode::Progress => {
                 if !matches!(
@@ -51,12 +55,17 @@ impl RuntimeStateMachine {
                     snapshot.pending_requests.pending_evidence_refs.clear();
                     snapshot.pending_requests.pending_envelope_refs.clear();
                     snapshot.pending_requests.pending_signer_request_id = None;
+                    snapshot.pending_requests.pending_signer_request = None;
                     snapshot.pending_requests.pending_confirmation_id = None;
                 } else {
                     snapshot.pending_requests.pending_signer_request_id = runtime
                         .pending_signer_state
                         .as_ref()
                         .map(|state| state.request_id.0.clone());
+                    snapshot.pending_requests.pending_signer_request = runtime
+                        .pending_signer_state
+                        .as_ref()
+                        .map(checkpoint_pending_signer_request);
                 }
             }
             CheckpointPersistenceMode::SideEffect => {
@@ -64,6 +73,10 @@ impl RuntimeStateMachine {
                     .pending_signer_state
                     .as_ref()
                     .map(|state| state.request_id.0.clone());
+                snapshot.pending_requests.pending_signer_request = runtime
+                    .pending_signer_state
+                    .as_ref()
+                    .map(checkpoint_pending_signer_request);
             }
         }
 
@@ -86,6 +99,7 @@ impl RuntimeStateMachine {
             {
                 Some(state)
             }
+            (None, Some(state)) if state.status == SignerRequestStatus::Signed => Some(state),
             (Some(_), _) => None,
             (None, _) => None,
         }
@@ -123,5 +137,22 @@ impl RuntimeStateMachine {
                     Some((node.node_id.clone(), effect_id.clone()))
                 }
             })
+    }
+}
+
+fn checkpoint_pending_signer_request(state: &SignerRequestState) -> PendingSignerRequestSnapshot {
+    PendingSignerRequestSnapshot {
+        request_id: state.request_id.0.clone(),
+        node_id: state.node_id.clone(),
+        chain: Some(state.chain.clone()),
+        summary: state.summary.clone(),
+        payload: state.payload.clone(),
+        timeout_policy: state
+            .timeout
+            .as_ref()
+            .map(|timeout| PendingSignerTimeoutSnapshot {
+                requested_at_ms: timeout.requested_at_ms,
+                expires_at_ms: timeout.expires_at_ms,
+            }),
     }
 }

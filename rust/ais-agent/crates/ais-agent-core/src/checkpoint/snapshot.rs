@@ -37,8 +37,28 @@ pub struct PendingRequestsSnapshot {
     pub pending_evidence_refs: Vec<String>,
     #[serde(default)]
     pub pending_envelope_refs: Vec<String>,
+    #[serde(default)]
+    pub pending_signer_request: Option<PendingSignerRequestSnapshot>,
     pub pending_signer_request_id: Option<String>,
     pub pending_confirmation_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingSignerTimeoutSnapshot {
+    pub requested_at_ms: u64,
+    pub expires_at_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingSignerRequestSnapshot {
+    pub request_id: String,
+    pub node_id: Option<String>,
+    pub chain: Option<String>,
+    pub summary: String,
+    #[serde(default)]
+    pub payload: Option<Value>,
+    #[serde(default)]
+    pub timeout_policy: Option<PendingSignerTimeoutSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
