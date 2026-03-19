@@ -27,6 +27,15 @@ pub(crate) fn append_checkpoint(
             is_first_wait_checkpoint,
             snapshot_json
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+        ON CONFLICT(run_id, checkpoint_seq, plan_epoch) DO UPDATE SET
+            checkpoint_kind = excluded.checkpoint_kind,
+            retention_tier = excluded.retention_tier,
+            created_at_ms = excluded.created_at_ms,
+            is_terminal = excluded.is_terminal,
+            is_side_effect_boundary = excluded.is_side_effect_boundary,
+            is_recovery_boundary = excluded.is_recovery_boundary,
+            is_first_wait_checkpoint = excluded.is_first_wait_checkpoint,
+            snapshot_json = excluded.snapshot_json
         "#,
         rusqlite::params![
             snapshot.run_id,

@@ -2054,10 +2054,11 @@ fn sqlite_checkpoint_latest_prefers_highest_checkpoint_truth_over_append_order()
 }
 
 #[test]
-fn sqlite_checkpoint_archive_rejects_duplicate_checkpoint_identity() {
+fn sqlite_checkpoint_archive_upserts_duplicate_checkpoint_identity() {
     let mut store = SqliteStore::open_in_memory().expect("open sqlite store");
     let checkpoint = sample_checkpoint();
-    let duplicate = checkpoint.clone();
+    let mut duplicate = checkpoint.clone();
+    duplicate.last_completed_node_id = Some("node-after-retry".to_owned());
 
     CheckpointArchive::append(
         &mut store,
@@ -2068,20 +2069,30 @@ fn sqlite_checkpoint_archive_rejects_duplicate_checkpoint_identity() {
     )
     .expect("append first checkpoint");
 
-    let error = CheckpointArchive::append(
+    CheckpointArchive::append(
         &mut store,
         CheckpointArchiveEntry {
             snapshot: duplicate,
             kind: CheckpointArchiveKind::Boundary,
         },
     )
-    .expect_err("duplicate checkpoint identity should fail");
-    match error {
-        ais_agent_runtime::persistence::CheckpointArchiveError::Storage { message } => {
-            assert!(message.contains("UNIQUE"));
-        }
-        other => panic!("unexpected duplicate checkpoint error: {other:?}"),
-    }
+    .expect("duplicate checkpoint identity should upsert");
+
+    let checkpoint_rows: i64 = store
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM run_checkpoints WHERE run_id = ?1 AND checkpoint_seq = ?2 AND plan_epoch = ?3",
+            rusqlite::params!["run-1", 1_i64, 0_i64],
+            |row| row.get(0),
+        )
+        .expect("count run checkpoints");
+    assert_eq!(checkpoint_rows, 1);
+
+    let latest = CheckpointArchive::latest(&store, "run-1").expect("latest checkpoint");
+    assert_eq!(
+        latest.last_completed_node_id.as_deref(),
+        Some("node-after-retry")
+    );
 }
 
 #[test]
