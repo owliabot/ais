@@ -4,6 +4,17 @@ pub struct CelBuiltins;
 
 impl CelBuiltins {
     pub const SUPPORTED: &'static [&'static str] = &[
-        "size", "contains", "abs", "min", "max", "mul_div", "string", "bool", "type",
+        "size",
+        "contains",
+        "abs",
+        "min",
+        "max",
+        "mul_div",
+        "to_atomic",
+        "to_unit",
+        "int",
+        "string",
+        "bool",
+        "type",
     ];
 }

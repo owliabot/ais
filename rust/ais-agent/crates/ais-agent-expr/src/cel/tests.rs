@@ -1,6 +1,7 @@
 use serde_json::json;
 
 use crate::cel::{typing::CelExpressionKind, CelEvaluator, CelScope, CelTypeChecker};
+use crate::cel::runtime::value::CelValue;
 
 #[test]
 fn cel_evaluates_policy_predicate_with_member_access() {
@@ -56,4 +57,96 @@ fn cel_type_checker_accepts_local_boundary_expression() {
             "size(required_inputs) == 0 || params.force == true",
         )
         .expect("valid expression");
+}
+
+#[test]
+fn cel_converts_between_atomic_and_unit_values_exactly() {
+    let scope = CelScope::new();
+    let mut evaluator = CelEvaluator::new();
+
+    assert_eq!(
+        evaluator
+            .evaluate_value("to_atomic('10', 6)", &scope)
+            .expect("to_atomic"),
+        CelValue::Integer(10_000_000u64.into())
+    );
+    assert_eq!(
+        evaluator
+            .evaluate_value("to_atomic('120.5', 18)", &scope)
+            .expect("to_atomic"),
+        CelValue::Integer("120500000000000000000".parse().expect("bigint"))
+    );
+    assert_eq!(
+        evaluator
+            .evaluate_value("to_unit('10000000', 6)", &scope)
+            .expect("to_unit"),
+        CelValue::Integer(10u8.into())
+    );
+    assert_eq!(
+        evaluator
+            .evaluate_value("to_unit('120500000000000000000', 18)", &scope)
+            .expect("to_unit"),
+        CelValue::Decimal(crate::cel::runtime::numeric::Decimal::parse("120.5").expect("decimal"))
+    );
+}
+
+#[test]
+fn cel_unit_conversion_supports_asset_maps_and_negative_values() {
+    let mut scope = CelScope::new();
+    scope.insert_json("asset", json!({"decimals": 18}));
+
+    let mut evaluator = CelEvaluator::new();
+    assert_eq!(
+        evaluator
+            .evaluate_value("to_atomic('-0.5', asset)", &scope)
+            .expect("to_atomic"),
+        CelValue::Integer("-500000000000000000".parse().expect("bigint"))
+    );
+    assert_eq!(
+        evaluator
+            .evaluate_value("string(to_unit('-500000000000000000', asset))", &scope)
+            .expect("to_unit"),
+        CelValue::String("-0.5".to_owned())
+    );
+}
+
+#[test]
+fn cel_rejects_non_exact_unit_conversion() {
+    let scope = CelScope::new();
+    let mut evaluator = CelEvaluator::new();
+
+    let error = evaluator
+        .evaluate_value("to_atomic('1.1234567', 6)", &scope)
+        .expect_err("must reject excess precision");
+    assert_eq!(error.to_string(), "numeric error: non exact division");
+}
+
+#[test]
+fn cel_int_builtin_coerces_exact_integer_inputs() {
+    let scope = CelScope::new();
+    let mut evaluator = CelEvaluator::new();
+
+    assert_eq!(
+        evaluator.evaluate_value("int('42')", &scope).expect("int"),
+        CelValue::Integer(42u8.into())
+    );
+    assert_eq!(
+        evaluator.evaluate_value("int(42.0)", &scope).expect("int"),
+        CelValue::Integer(42u8.into())
+    );
+    assert_eq!(
+        evaluator.evaluate_value("int(true)", &scope).expect("int"),
+        CelValue::Integer(1u8.into())
+    );
+}
+
+#[test]
+fn cel_int_builtin_rejects_fractional_values() {
+    let scope = CelScope::new();
+    let mut evaluator = CelEvaluator::new();
+
+    let error = evaluator
+        .evaluate_value("int(42.5)", &scope)
+        .expect_err("fractional decimal must fail");
+    assert_eq!(error.to_string(), "numeric error: non exact division");
 }

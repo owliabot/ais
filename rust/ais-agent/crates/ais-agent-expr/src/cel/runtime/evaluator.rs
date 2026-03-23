@@ -303,6 +303,9 @@ fn evaluate_builtin(name: &str, args: &[CelValue]) -> Result<CelValue, EvalError
         "min" => builtin_min_max(args, true),
         "max" => builtin_min_max(args, false),
         "mul_div" => builtin_mul_div(args),
+        "to_atomic" => builtin_to_atomic(args),
+        "to_unit" => builtin_to_unit(args),
+        "int" => builtin_int(args),
         "string" => builtin_string(args),
         "bool" => builtin_bool(args),
         "type" => builtin_type(args),
@@ -369,6 +372,25 @@ fn builtin_mul_div(args: &[CelValue]) -> Result<CelValue, EvalError> {
     Ok(CelValue::Decimal(left.mul(&mul).div(&div)?))
 }
 
+fn builtin_to_atomic(args: &[CelValue]) -> Result<CelValue, EvalError> {
+    ensure_arity(args, 2, "to_atomic")?;
+    let amount = as_numeric(args[0].clone())?.into_decimal();
+    let decimals = extract_decimals(&args[1])?;
+    Ok(CelValue::Integer(amount.to_atomic_int(decimals)?))
+}
+
+fn builtin_to_unit(args: &[CelValue]) -> Result<CelValue, EvalError> {
+    ensure_arity(args, 2, "to_unit")?;
+    let atomic = as_integer_coerce(&args[0])?;
+    let decimals = extract_decimals(&args[1])?;
+    Ok(decimal_to_value(Decimal::from_atomic_int(atomic, decimals)))
+}
+
+fn builtin_int(args: &[CelValue]) -> Result<CelValue, EvalError> {
+    ensure_arity(args, 1, "int")?;
+    Ok(CelValue::Integer(as_integer_coerce(&args[0])?))
+}
+
 fn builtin_string(args: &[CelValue]) -> Result<CelValue, EvalError> {
     ensure_arity(args, 1, "string")?;
     Ok(CelValue::String(match &args[0] {
@@ -429,6 +451,14 @@ fn as_bool(value: &CelValue) -> Result<bool, EvalError> {
         .ok_or_else(|| EvalError::TypeMismatch("expected bool".to_owned()))
 }
 
+fn decimal_to_value(value: Decimal) -> CelValue {
+    if value.scale() == 0 {
+        CelValue::Integer(value.mantissa())
+    } else {
+        CelValue::Decimal(value)
+    }
+}
+
 enum Numeric {
     Integer(BigInt),
     Decimal(Decimal),
@@ -482,4 +512,42 @@ fn numeric_from_string(value: &str) -> Result<Numeric, EvalError> {
         return Ok(Numeric::Decimal(decimal));
     }
     Err(EvalError::TypeMismatch("expected numeric value".to_owned()))
+}
+
+fn as_integer_coerce(value: &CelValue) -> Result<BigInt, EvalError> {
+    match value {
+        CelValue::Integer(value) => Ok(value.clone()),
+        CelValue::Decimal(decimal) if decimal.scale() == 0 => Ok(decimal.mantissa()),
+        CelValue::Decimal(_) => Err(EvalError::Numeric(NumericError::NonExactDivision)),
+        CelValue::String(value) => value
+            .parse::<BigInt>()
+            .map_err(|_| EvalError::TypeMismatch("string is not integer".to_owned())),
+        CelValue::Bool(value) => Ok(if *value {
+            BigInt::from(1u8)
+        } else {
+            BigInt::from(0u8)
+        }),
+        _ => Err(EvalError::TypeMismatch("cannot coerce to int".to_owned())),
+    }
+}
+
+fn extract_decimals(value: &CelValue) -> Result<u32, EvalError> {
+    let decimals = match value {
+        CelValue::Integer(value) => value.clone(),
+        CelValue::Map(map) => map
+            .get("decimals")
+            .ok_or_else(|| EvalError::TypeMismatch("asset map missing decimals".to_owned()))
+            .and_then(as_integer_coerce)?,
+        _ => {
+            return Err(EvalError::TypeMismatch(
+                "decimals must be integer or map{decimals}".to_owned(),
+            ))
+        }
+    };
+    if decimals.sign() == Sign::Minus {
+        return Err(EvalError::TypeMismatch("decimals must be >= 0".to_owned()));
+    }
+    decimals
+        .to_u32()
+        .ok_or_else(|| EvalError::TypeMismatch("decimals out of range".to_owned()))
 }
