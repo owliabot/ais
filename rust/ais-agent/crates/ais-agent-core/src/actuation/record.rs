@@ -26,6 +26,6 @@ pub struct ActuationRecord {
     pub kind: ActuationKind,
     pub status: ActuationStatus,
     pub chain: Option<String>,
-    pub tx_hash: Option<String>,
+    pub submission_id: Option<String>,
     pub summary: String,
 }

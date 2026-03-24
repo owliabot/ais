@@ -156,7 +156,7 @@ fn sample_checkpoint() -> CheckpointSnapshot {
             pending_envelope_refs: Vec::new(),
             pending_signer_request: None,
             pending_signer_request_id: None,
-            pending_confirmation_id: None,
+            pending_submission_id: None,
         },
         last_completed_node_id: None,
         actuation_records: Vec::new(),

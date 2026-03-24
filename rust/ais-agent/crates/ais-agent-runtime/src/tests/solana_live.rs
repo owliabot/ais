@@ -298,13 +298,13 @@ async fn runtime_broadcast_node_can_submit_live_solana_signature_and_enter_confi
         runtime
             .checkpoint
             .pending_requests
-            .pending_confirmation_id
+            .pending_submission_id
             .as_deref(),
         Some(signed_signature_string().as_str())
     );
     assert!(runtime.checkpoint.actuation_records.iter().any(|record| {
         matches!(record.kind, ActuationKind::BroadcastSubmitted)
-            && record.tx_hash.as_deref() == Some(&signed_signature().to_string())
+            && record.submission_id.as_deref() == Some(&signed_signature().to_string())
     }));
 }
 
@@ -384,7 +384,7 @@ async fn runtime_verify_node_can_observe_live_solana_signature_status_and_comple
 
     let mission = sample_mission();
     let mut runtime = ActiveRun::new(mission, checkpoint);
-    runtime.checkpoint.pending_requests.pending_confirmation_id =
+    runtime.checkpoint.pending_requests.pending_submission_id =
         Some(signed_signature().to_string());
 
     let transition = apply_live_solana_verify_with_client(&mut runtime, &FakeSolanaReceiptClient)
@@ -393,7 +393,7 @@ async fn runtime_verify_node_can_observe_live_solana_signature_status_and_comple
 
     assert_eq!(transition.node_id.as_deref(), Some("verify-sol"));
     assert_eq!(
-        runtime.checkpoint.pending_requests.pending_confirmation_id,
+        runtime.checkpoint.pending_requests.pending_submission_id,
         None
     );
     assert_eq!(
@@ -425,7 +425,7 @@ async fn runtime_verify_timeout_enters_retry_ready_with_confirmation_context() {
     ]);
     let mission = sample_mission();
     let mut runtime = ActiveRun::new(mission, checkpoint);
-    runtime.checkpoint.pending_requests.pending_confirmation_id =
+    runtime.checkpoint.pending_requests.pending_submission_id =
         Some(signed_signature().to_string());
 
     let transition = apply_live_solana_verify_with_client(
@@ -471,7 +471,7 @@ async fn runtime_verify_provider_failure_enters_retry_ready_with_provider_error(
     ]);
     let mission = sample_mission();
     let mut runtime = ActiveRun::new(mission, checkpoint);
-    runtime.checkpoint.pending_requests.pending_confirmation_id =
+    runtime.checkpoint.pending_requests.pending_submission_id =
         Some(signed_signature().to_string());
 
     let transition = apply_live_solana_verify_with_client(
@@ -567,7 +567,7 @@ async fn runtime_can_restart_from_durable_side_effect_cut_after_solana_broadcast
 
     assert_eq!(transition.node_id.as_deref(), Some("verify-sol"));
     assert_eq!(
-        restored.checkpoint.pending_requests.pending_confirmation_id,
+        restored.checkpoint.pending_requests.pending_submission_id,
         None
     );
     assert_eq!(

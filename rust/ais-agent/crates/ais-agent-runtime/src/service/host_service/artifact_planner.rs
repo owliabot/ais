@@ -16,7 +16,10 @@ use ais_agent_solana::artifact_planner::{
     plan_execution_artifact as plan_solana_execution_artifact, PlannedSolanaExecutionArtifact,
 };
 
-use super::api_native_evm_common::{RuntimeChainConnectionRef, RuntimeExecutionWiring};
+use super::{
+    api_native_evm_common::{RuntimeChainConnectionRef, RuntimeExecutionWiring},
+    RuntimeHostServiceError,
+};
 
 #[cfg(test)]
 use ais_agent_control::execution_artifact::{
@@ -32,7 +35,7 @@ pub(crate) fn seed_execution_artifact_checkpoint(
     checkpoint: &mut CheckpointSnapshot,
     wiring: &RuntimeExecutionWiring,
     spec: &ExecutionArtifactLaunchSpec,
-) -> Result<(), String> {
+) -> Result<(), RuntimeHostServiceError> {
     let chain_scope = normalize_execution_artifact_chain_scope(spec)?;
     let planned = plan_family_execution_artifact(spec, wiring, chain_scope.as_str())?;
 
@@ -52,9 +55,11 @@ pub(crate) fn seed_execution_artifact_checkpoint(
 
 fn normalize_execution_artifact_chain_scope(
     spec: &ExecutionArtifactLaunchSpec,
-) -> Result<String, String> {
+) -> Result<String, RuntimeHostServiceError> {
     let chain_scope = spec.chain_scope().ok_or_else(|| {
-        "execution_artifact.allowed_chains must contain exactly one chain scope".to_owned()
+        RuntimeHostServiceError::invalid_command(
+            "execution_artifact.allowed_chains must contain exactly one chain scope",
+        )
     })?;
     Ok(match spec.chain_family {
         ExecutionChainFamily::Evm if !chain_scope.contains(':') => {
@@ -69,7 +74,7 @@ fn normalize_execution_artifact_chain_scope(
 
 pub(crate) fn activate_execution_artifact_stage(
     checkpoint: &mut CheckpointSnapshot,
-) -> Result<(), String> {
+) -> Result<(), RuntimeHostServiceError> {
     let Some(snapshot) = checkpoint.execution_artifact.as_ref() else {
         return Ok(());
     };
@@ -80,9 +85,9 @@ pub(crate) fn activate_execution_artifact_stage(
         .launch_spec
         .stage(active_stage_id.as_str())
         .ok_or_else(|| {
-            format!(
+            RuntimeHostServiceError::invalid_command(format!(
                 "execution_artifact runtime references unknown active stage `{active_stage_id}`"
-            )
+            ))
         })?;
     checkpoint.action_graph = match stage {
         ExecutionStage::Transaction(stage) => snapshot
@@ -90,20 +95,20 @@ pub(crate) fn activate_execution_artifact_stage(
             .get(&stage.stage_id)
             .cloned()
             .ok_or_else(|| {
-                format!(
+                RuntimeHostServiceError::invalid_command(format!(
                     "execution_artifact planned graph missing for transaction stage `{}`",
                     stage.stage_id
-                )
+                ))
             })?,
         ExecutionStage::Observe(stage) => snapshot
             .planned_stage_graphs
             .get(&stage.stage_id)
             .cloned()
             .ok_or_else(|| {
-                format!(
+                RuntimeHostServiceError::invalid_command(format!(
                     "execution_artifact planned graph missing for observe stage `{}`",
                     stage.stage_id
-                )
+                ))
             })?,
         ExecutionStage::Branch(_) | ExecutionStage::Continuation(_) => ActionGraph {
             graph_id: Some(format!(
@@ -147,58 +152,58 @@ fn plan_family_execution_artifact(
     spec: &ExecutionArtifactLaunchSpec,
     wiring: &RuntimeExecutionWiring,
     chain_scope: &str,
-) -> Result<PlannedExecutionArtifact, String> {
-    let resolved = wiring.resolve_chain_connection(chain_scope)?;
+) -> Result<PlannedExecutionArtifact, RuntimeHostServiceError> {
+    let resolved = wiring
+        .resolve_chain_connection(chain_scope)
+        .map_err(RuntimeHostServiceError::invalid_command)?;
     match spec.chain_family {
         ExecutionChainFamily::Evm => match resolved {
             Some(resolved) => {
                 let connection = match resolved {
                     RuntimeChainConnectionRef::Evm(connection) => Some(connection),
                     RuntimeChainConnectionRef::Solana(_) => {
-                        return Err(provider_family_mismatch_message(
+                        return Err(RuntimeHostServiceError::provider_family_mismatch(
                             chain_scope,
                             "evm",
                             "solana",
+                            "runtime_execution_wiring.chains",
                         ));
                     }
                 };
-                plan_evm_execution_artifact(spec, connection, chain_scope).map(Into::into)
+                plan_evm_execution_artifact(spec, connection, chain_scope)
+                    .map(Into::into)
+                    .map_err(RuntimeHostServiceError::invalid_command)
             }
-            None => Err(provider_not_configured_message(chain_scope, "evm")),
+            None => Err(RuntimeHostServiceError::provider_not_configured(
+                chain_scope,
+                "evm",
+                "runtime_execution_wiring.chains",
+            )),
         },
         ExecutionChainFamily::Solana => match resolved {
             Some(resolved) => {
                 let connection = match resolved {
                     RuntimeChainConnectionRef::Solana(connection) => Some(connection),
                     RuntimeChainConnectionRef::Evm(_) => {
-                        return Err(provider_family_mismatch_message(
+                        return Err(RuntimeHostServiceError::provider_family_mismatch(
                             chain_scope,
                             "solana",
                             "evm",
+                            "runtime_execution_wiring.chains",
                         ));
                     }
                 };
-                plan_solana_execution_artifact(spec, connection, chain_scope).map(Into::into)
+                plan_solana_execution_artifact(spec, connection, chain_scope)
+                    .map(Into::into)
+                    .map_err(RuntimeHostServiceError::invalid_command)
             }
-            None => Err(provider_not_configured_message(chain_scope, "solana")),
+            None => Err(RuntimeHostServiceError::provider_not_configured(
+                chain_scope,
+                "solana",
+                "runtime_execution_wiring.chains",
+            )),
         },
     }
-}
-
-fn provider_not_configured_message(chain_scope: &str, family: &str) -> String {
-    format!(
-        "provider_not_configured: no provider entry resolved for chain `{chain_scope}` (family `{family}`)"
-    )
-}
-
-fn provider_family_mismatch_message(
-    chain_scope: &str,
-    expected_family: &str,
-    actual_family: &str,
-) -> String {
-    format!(
-        "provider_family_mismatch: chain `{chain_scope}` expected family `{expected_family}` but found `{actual_family}`"
-    )
 }
 
 #[cfg(test)]
@@ -457,7 +462,20 @@ mod tests {
             &spec,
         )
         .expect_err("missing provider");
-        assert!(error.contains("provider_not_configured"));
+        match error {
+            RuntimeHostServiceError::ProviderBinding(
+                crate::service::host_service::error::ProviderBindingFailure::NotConfigured {
+                    chain_scope,
+                    expected_family,
+                    provider_lookup_scope,
+                },
+            ) => {
+                assert_eq!(chain_scope, "eip155:8453");
+                assert_eq!(expected_family, "evm");
+                assert_eq!(provider_lookup_scope, "runtime_execution_wiring.chains");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]

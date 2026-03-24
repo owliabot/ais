@@ -1,7 +1,7 @@
 use serde_json::json;
 
-use crate::cel::{typing::CelExpressionKind, CelEvaluator, CelScope, CelTypeChecker};
 use crate::cel::runtime::value::CelValue;
+use crate::cel::{typing::CelExpressionKind, CelEvaluator, CelScope, CelTypeChecker};
 
 #[test]
 fn cel_evaluates_policy_predicate_with_member_access() {

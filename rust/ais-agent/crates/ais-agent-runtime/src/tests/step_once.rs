@@ -324,7 +324,7 @@ async fn step_once_resolves_submitted_signer_state_into_verifying_progress() {
         .pending_signer_state
         .as_mut()
         .expect("signer state")
-        .submitted_tx_hash = Some("0xabc".to_owned());
+        .submitted_submission_id = Some("0xabc".to_owned());
     runtime
         .checkpoint
         .pending_requests
@@ -355,7 +355,7 @@ async fn step_once_resolves_submitted_signer_state_into_verifying_progress() {
         runtime
             .checkpoint
             .pending_requests
-            .pending_confirmation_id
+            .pending_submission_id
             .as_deref(),
         Some("0xabc")
     );

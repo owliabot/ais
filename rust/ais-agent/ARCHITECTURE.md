@@ -175,8 +175,8 @@ Frozen durability cuts:
 - side-effect cut
   - irreversible external effects like successful broadcast must flush a dedicated durable checkpoint archive entry instead of living only in hot memory
   - the scheduler now forces this cut immediately when a transition enters `awaiting_confirmation` with:
-    - `pending_confirmation_id`
-    - a matching `BroadcastSubmitted` actuation record carrying the chain-native tx id
+    - `pending_submission_id`
+    - a matching `BroadcastSubmitted` actuation record carrying the chain-native submission id
   - the resulting latest checkpoint stays typed as `side_effect` instead of being overwritten by a duplicate boundary append on the same return path
 
 Current durable-first write wiring:
@@ -203,7 +203,7 @@ Current recovery wiring:
   - loads durable wait-state truth from `RunWaitStateStore`
   - reconstructs `ActiveRun` from durable truth instead of requiring a preexisting hot runtime copy
   - now fails closed when a checkpoint claims `awaiting_confirmation` but is missing:
-    - `pending_confirmation_id`
+    - `pending_submission_id`
     - effect-contract entries required by pending verify nodes
 - `RuntimeHostService`
   - prefers the hot `RunRepository`
@@ -222,7 +222,7 @@ Current recovery wiring:
 
 Confirmation / verify resume truth:
 - side-effect checkpoints must carry enough runtime-owned truth to continue receipt/status polling and effect verification:
-  - confirmation id (`tx_hash` / signature)
+  - chain-native `submission_id`
   - pending verify node linkage through action-graph refs
   - checkpoint-owned `effect_contracts`
   - any already-attached pre-state evidence required by verify refs
@@ -348,7 +348,7 @@ For `begin_run`, the current architectural target is:
 
 Signer boundary semantics are now explicit:
 
-- `submit_signer_resolution(decision = submitted, tx_hash = ...)`
+- `submit_signer_resolution(decision = submitted, submission_id = ...)`
   - means the host-side backend already broadcast the transaction
   - `ais-agent` skips local broadcast and moves directly into confirmation waiting
 - `submit_signer_resolution(decision = signed, signed_payload = ...)`

@@ -8,7 +8,7 @@ use ais_agent_control::{
         RunPlanPatchAudit, RunProgress, RunRecoveryAudit, RunStarted, RunVerifyFailed,
         RunVerifyPassed,
     },
-    ids::EventId,
+    ids::{ChainSubmissionId, EventId},
     patch::{PatchOutcome, PlanPatchSubmission},
     recovery::{RunFailureCode, RunFailureStage},
 };
@@ -122,11 +122,12 @@ impl RuntimeEventEmitter {
                 RunEvent::AwaitingConfirm(ais_agent_control::events::RunAwaitingConfirm {
                     event_id: event_id(runtime, "awaiting_confirm"),
                     run_id: runtime.run_id.clone(),
-                    confirmation_id: runtime
+                    submission_id: runtime
                         .checkpoint
                         .pending_requests
-                        .pending_confirmation_id
-                        .clone(),
+                        .pending_submission_id
+                        .clone()
+                        .map(ChainSubmissionId),
                     reason: runtime
                         .checkpoint
                         .lifecycle
@@ -435,7 +436,7 @@ fn broadcast_submitted_event(runtime: &ActiveRun, transition: &StepTransition) -
         run_id: runtime.run_id.clone(),
         node_id: record.node_id.clone(),
         chain: record.chain.clone(),
-        tx_hash: record.tx_hash.clone(),
+        submission_id: record.submission_id.clone().map(ChainSubmissionId),
         summary: record.summary.clone(),
     }))
 }
@@ -446,7 +447,8 @@ fn verify_result_event(runtime: &ActiveRun, transition: &StepTransition) -> Opti
     }
 
     let node_id = transition.node_id.as_ref()?;
-    let tx_hash = latest_broadcast_tx_hash_for_node(runtime, node_id);
+    let submission_id =
+        latest_broadcast_submission_id_for_node(runtime, node_id).map(ChainSubmissionId);
 
     if runtime
         .checkpoint
@@ -460,7 +462,7 @@ fn verify_result_event(runtime: &ActiveRun, transition: &StepTransition) -> Opti
             event_id: event_id(runtime, "verify_failed"),
             run_id: runtime.run_id.clone(),
             node_id: node_id.clone(),
-            tx_hash,
+            submission_id,
             code: Some(failure.code.clone()),
             message: failure.summary.clone(),
         }));
@@ -480,7 +482,7 @@ fn verify_result_event(runtime: &ActiveRun, transition: &StepTransition) -> Opti
         event_id: event_id(runtime, "verify_passed"),
         run_id: runtime.run_id.clone(),
         node_id: node_id.clone(),
-        tx_hash,
+        submission_id,
         summary: transition.summary.clone(),
     }))
 }
@@ -608,7 +610,7 @@ fn log_operator_event(envelope: &RunEventEnvelope) {
                 run_id = %event.run_id.0,
                 node_id = %event.node_id,
                 chain = ?event.chain.as_deref(),
-                tx_hash = ?event.tx_hash.as_deref(),
+                submission_id = ?event.submission_id.as_ref().map(|id| id.0.as_str()),
                 summary = %event.summary,
                 "run.broadcast_submitted"
             );
@@ -617,7 +619,7 @@ fn log_operator_event(envelope: &RunEventEnvelope) {
             info!(
                 parent: None,
                 run_id = %event.run_id.0,
-                confirmation_id = ?event.confirmation_id.as_deref(),
+                submission_id = ?event.submission_id.as_ref().map(|id| id.0.as_str()),
                 reason = %event.reason,
                 "run.awaiting_receipt"
             );
@@ -627,7 +629,7 @@ fn log_operator_event(envelope: &RunEventEnvelope) {
                 parent: None,
                 run_id = %event.run_id.0,
                 node_id = %event.node_id,
-                tx_hash = ?event.tx_hash.as_deref(),
+                submission_id = ?event.submission_id.as_ref().map(|id| id.0.as_str()),
                 summary = %event.summary,
                 "run.verify_passed"
             );
@@ -637,7 +639,7 @@ fn log_operator_event(envelope: &RunEventEnvelope) {
                 parent: None,
                 run_id = %event.run_id.0,
                 node_id = %event.node_id,
-                tx_hash = ?event.tx_hash.as_deref(),
+                submission_id = ?event.submission_id.as_ref().map(|id| id.0.as_str()),
                 code = ?event.code,
                 message = %event.message,
                 "run.verify_failed"
@@ -664,7 +666,7 @@ fn log_operator_event(envelope: &RunEventEnvelope) {
     }
 }
 
-fn latest_broadcast_tx_hash_for_node(runtime: &ActiveRun, node_id: &str) -> Option<String> {
+fn latest_broadcast_submission_id_for_node(runtime: &ActiveRun, node_id: &str) -> Option<String> {
     runtime
         .checkpoint
         .actuation_records
@@ -673,7 +675,7 @@ fn latest_broadcast_tx_hash_for_node(runtime: &ActiveRun, node_id: &str) -> Opti
         .find(|record| {
             record.node_id == node_id && matches!(record.kind, ActuationKind::BroadcastSubmitted)
         })
-        .and_then(|record| record.tx_hash.clone())
+        .and_then(|record| record.submission_id.clone())
 }
 
 fn trace_context_for_event(
@@ -931,7 +933,7 @@ mod tests {
             evidence_graph: EvidenceGraph::default(),
             effect_contracts: Default::default(),
             pending_requests: PendingRequestsSnapshot {
-                pending_confirmation_id: Some("0xabc".to_owned()),
+                pending_submission_id: Some("0xabc".to_owned()),
                 ..PendingRequestsSnapshot::default()
             },
             last_completed_node_id: Some("broadcast.swap".to_owned()),
@@ -941,7 +943,7 @@ mod tests {
                 kind: ActuationKind::BroadcastSubmitted,
                 status: ActuationStatus::Succeeded,
                 chain: Some("eip155:8453".to_owned()),
-                tx_hash: Some("0xabc".to_owned()),
+                submission_id: Some("0xabc".to_owned()),
                 summary: "broadcast submitted for broadcast.swap".to_owned(),
             }],
             execution_artifact: None,
@@ -981,10 +983,13 @@ mod tests {
             Some("run:run-broadcast:cmd:<none>:ckpt:1:epoch:0")
         );
         assert_eq!(event.1.node_id, "broadcast.swap");
-        assert_eq!(event.1.tx_hash.as_deref(), Some("0xabc"));
+        assert_eq!(
+            event.1.submission_id.as_ref().map(|id| id.0.as_str()),
+            Some("0xabc")
+        );
         assert!(output.contains("run.broadcast_submitted"));
         assert!(output.contains("run.awaiting_receipt"));
-        assert!(output.contains("confirmation_id=Some(\"0xabc\")"));
+        assert!(output.contains("submission_id=Some(\"0xabc\")"));
     }
 
     #[test]
@@ -1051,7 +1056,7 @@ mod tests {
                 kind: ActuationKind::BroadcastSubmitted,
                 status: ActuationStatus::Succeeded,
                 chain: Some("eip155:8453".to_owned()),
-                tx_hash: Some("0xdef".to_owned()),
+                submission_id: Some("0xdef".to_owned()),
                 summary: "broadcast submitted".to_owned(),
             }],
             execution_artifact: None,
@@ -1087,9 +1092,16 @@ mod tests {
                 .map(|context| context.span_id.as_str()),
             Some("run.side_effect.verify_passed:verify.swap:2")
         );
-        assert_eq!(success_event.1.tx_hash.as_deref(), Some("0xdef"));
+        assert_eq!(
+            success_event
+                .1
+                .submission_id
+                .as_ref()
+                .map(|id| id.0.as_str()),
+            Some("0xdef")
+        );
         assert!(success_output.contains("run.verify_passed"));
-        assert!(success_output.contains("tx_hash=Some(\"0xdef\")"));
+        assert!(success_output.contains("submission_id=Some(\"0xdef\")"));
 
         let mut failed_lifecycle =
             RunLifecycleState::new(RunId("run-verify-fail".to_owned()), "mission-1");
@@ -1115,7 +1127,7 @@ mod tests {
                 kind: ActuationKind::BroadcastSubmitted,
                 status: ActuationStatus::Succeeded,
                 chain: Some("eip155:8453".to_owned()),
-                tx_hash: Some("0xbeef".to_owned()),
+                submission_id: Some("0xbeef".to_owned()),
                 summary: "broadcast submitted".to_owned(),
             }],
             execution_artifact: None,
@@ -1155,7 +1167,14 @@ mod tests {
             failed_event.1.code,
             Some(ais_agent_control::recovery::RunFailureCode::VerifyMismatch)
         );
-        assert_eq!(failed_event.1.tx_hash.as_deref(), Some("0xbeef"));
+        assert_eq!(
+            failed_event
+                .1
+                .submission_id
+                .as_ref()
+                .map(|id| id.0.as_str()),
+            Some("0xbeef")
+        );
         assert!(failed_output.contains("run.verify_failed"));
         assert!(failed_output.contains("verification mismatch"));
     }

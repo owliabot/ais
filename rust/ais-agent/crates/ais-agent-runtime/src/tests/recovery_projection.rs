@@ -493,7 +493,7 @@ fn paused_provider_failure_checkpoint() -> CheckpointSnapshot {
         evidence_graph: EvidenceGraph::default(),
         effect_contracts: Default::default(),
         pending_requests: PendingRequestsSnapshot {
-            pending_confirmation_id: Some("0xabc".to_owned()),
+            pending_submission_id: Some("0xabc".to_owned()),
             ..PendingRequestsSnapshot::default()
         },
         last_completed_node_id: None,
@@ -537,7 +537,7 @@ fn paused_confirmation_timeout_checkpoint() -> CheckpointSnapshot {
         evidence_graph: EvidenceGraph::default(),
         effect_contracts: Default::default(),
         pending_requests: PendingRequestsSnapshot {
-            pending_confirmation_id: Some("0xabc".to_owned()),
+            pending_submission_id: Some("0xabc".to_owned()),
             ..PendingRequestsSnapshot::default()
         },
         last_completed_node_id: None,
@@ -651,7 +651,7 @@ fn paused_verify_mismatch_checkpoint() -> CheckpointSnapshot {
         evidence_graph: EvidenceGraph::default(),
         effect_contracts: Default::default(),
         pending_requests: PendingRequestsSnapshot {
-            pending_confirmation_id: Some("0xdef".to_owned()),
+            pending_submission_id: Some("0xdef".to_owned()),
             ..PendingRequestsSnapshot::default()
         },
         last_completed_node_id: None,
@@ -740,7 +740,7 @@ fn cancel_pending_confirmation_checkpoint() -> CheckpointSnapshot {
         evidence_graph: EvidenceGraph::default(),
         effect_contracts: Default::default(),
         pending_requests: PendingRequestsSnapshot {
-            pending_confirmation_id: Some("0xdef".to_owned()),
+            pending_submission_id: Some("0xdef".to_owned()),
             ..PendingRequestsSnapshot::default()
         },
         last_completed_node_id: None,

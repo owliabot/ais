@@ -10,7 +10,7 @@ use ais_agent_control::{
         ExecutionChainFamily, ExecutionStage, ExecutionTransactionCandidate, ObservationSpec,
         OutputExportSpec, TransactionStage, ValueRef,
     },
-    ids::{EventId, RunId, SignerRequestId},
+    ids::{ChainSubmissionId, EventId, RunId, SignerRequestId},
     recovery::{
         RecoveryActionKind, RecoveryDisposition, RunFailureCode, RunFailureContext,
         RunFailureStage, StableBoundaryKind,
@@ -327,7 +327,7 @@ fn inspect_snapshot_projects_recent_events_with_trace_context() {
                 run_id: RunId("run-1".to_owned()),
                 node_id: "artifact.stage.swap.broadcast".to_owned(),
                 chain: Some("eip155:1".to_owned()),
-                tx_hash: Some("0xabc".to_owned()),
+                submission_id: Some(ChainSubmissionId("0xabc".to_owned())),
                 summary: "submitted swap transaction".to_owned(),
             }),
         },
@@ -632,7 +632,7 @@ fn sample_checkpoint() -> CheckpointSnapshot {
             pending_envelope_refs: Vec::new(),
             pending_signer_request: None,
             pending_signer_request_id: Some(SignerRequestId("signer-1".to_owned()).0),
-            pending_confirmation_id: None,
+            pending_submission_id: None,
         },
         last_completed_node_id: Some("derive-min-out".to_owned()),
         actuation_records: vec![ActuationRecord {
@@ -641,7 +641,7 @@ fn sample_checkpoint() -> CheckpointSnapshot {
             kind: ActuationKind::EnvelopeBuilt,
             status: ActuationStatus::Pending,
             chain: Some("eip155:1".to_owned()),
-            tx_hash: None,
+            submission_id: None,
             summary: "swap envelope prepared".to_owned(),
         }],
         execution_artifact: None,
@@ -721,7 +721,7 @@ fn paused_verify_mismatch_checkpoint() -> CheckpointSnapshot {
         blocking_refs: vec!["node.verify-swap".to_owned()],
         signer_request_id: None,
     });
-    checkpoint.pending_requests.pending_confirmation_id = Some("0xabc".to_owned());
+    checkpoint.pending_requests.pending_submission_id = Some("0xabc".to_owned());
     checkpoint
 }
 
@@ -797,7 +797,7 @@ fn continuation_wait_checkpoint() -> CheckpointSnapshot {
 fn awaiting_confirmation_checkpoint() -> CheckpointSnapshot {
     let mut checkpoint = sample_checkpoint();
     checkpoint.lifecycle.status = CoreRunStatus::AwaitingConfirmation;
-    checkpoint.pending_requests.pending_confirmation_id = Some("0xconfirm".to_owned());
+    checkpoint.pending_requests.pending_submission_id = Some("0xconfirm".to_owned());
     checkpoint.lifecycle.active_boundary = Some(StableBoundary {
         kind: BoundaryKind::Confirmation,
         summary: "waiting for chain receipt".to_owned(),

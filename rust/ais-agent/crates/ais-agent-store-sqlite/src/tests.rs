@@ -1892,7 +1892,7 @@ fn sqlite_store_updates_and_clears_pending_signer_state() {
         request_id: updated.request_id.clone(),
         kind: ais_agent_core::runtime::SignerResolutionKind::Submitted,
         resolved_at_ms: Some(150),
-        tx_hash: Some("0xabc".to_owned()),
+        submission_id: Some("0xabc".to_owned()),
         signed_payload: None,
     });
 
@@ -2503,7 +2503,7 @@ async fn sqlite_host_service_can_resume_awaiting_signer_with_restored_pending_st
                 resolution: SignerResolutionSubmission {
                     request_id: SignerRequestId("signer-1".to_owned()),
                     kind: SignerResolutionKind::Submitted,
-                    tx_hash: Some("0xabc".to_owned()),
+                    submission_id: Some("0xabc".into()),
                     signed_payload: None,
                     details: BTreeMap::new(),
                 },
@@ -2540,10 +2540,7 @@ async fn sqlite_host_service_can_resume_awaiting_signer_with_restored_pending_st
         None
     );
     assert_eq!(
-        checkpoint
-            .pending_requests
-            .pending_confirmation_id
-            .as_deref(),
+        checkpoint.pending_requests.pending_submission_id.as_deref(),
         Some("0xabc")
     );
     let run_input = run_store
@@ -2630,7 +2627,7 @@ async fn sqlite_host_service_can_resume_awaiting_signer_from_store_after_restart
                 resolution: SignerResolutionSubmission {
                     request_id: SignerRequestId("signer-1".to_owned()),
                     kind: SignerResolutionKind::Submitted,
-                    tx_hash: Some("0xabc".to_owned()),
+                    submission_id: Some("0xabc".into()),
                     signed_payload: None,
                     details: BTreeMap::new(),
                 },
@@ -2689,7 +2686,7 @@ async fn sqlite_host_service_preserves_cancel_pending_after_restart() {
                 resolution: SignerResolutionSubmission {
                     request_id: SignerRequestId("signer-1".to_owned()),
                     kind: SignerResolutionKind::Submitted,
-                    tx_hash: Some("0xabc".to_owned()),
+                    submission_id: Some("0xabc".into()),
                     signed_payload: None,
                     details: BTreeMap::new(),
                 },
@@ -3048,7 +3045,7 @@ fn sqlite_store_round_trips_side_effect_checkpoint_with_verify_resume_truth() {
         latest
             .snapshot
             .pending_requests
-            .pending_confirmation_id
+            .pending_submission_id
             .as_deref(),
         Some("0xabc")
     );
@@ -3070,7 +3067,7 @@ fn sqlite_store_round_trips_side_effect_checkpoint_with_verify_resume_truth() {
         restored
             .checkpoint
             .pending_requests
-            .pending_confirmation_id
+            .pending_submission_id
             .as_deref(),
         Some("0xabc")
     );
@@ -3223,7 +3220,7 @@ fn sample_checkpoint() -> CheckpointSnapshot {
             pending_envelope_refs: Vec::new(),
             pending_signer_request_id: None,
             pending_signer_request: None,
-            pending_confirmation_id: None,
+            pending_submission_id: None,
         },
         execution_artifact: None,
         last_completed_node_id: None,
@@ -3303,7 +3300,7 @@ fn verifying_after_broadcast_checkpoint() -> CheckpointSnapshot {
         ],
     );
     checkpoint.last_completed_node_id = Some("swap".to_owned());
-    checkpoint.pending_requests.pending_confirmation_id = Some("0xabc".to_owned());
+    checkpoint.pending_requests.pending_submission_id = Some("0xabc".to_owned());
     checkpoint
         .effect_contracts
         .insert("effect.swap".to_owned(), sample_effect_contract());

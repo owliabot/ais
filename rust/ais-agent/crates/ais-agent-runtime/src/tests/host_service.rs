@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use ais_agent_control::{
+    audit::RuntimeAudit,
     commands::{
         BeginRunCommand, CancelRunCommand, ClaimRunCommand, EnvelopeKind, EnvelopeSubmission,
         EvidenceKind, EvidenceSubmission, ExpectedRuntimeVersion, MissionBudgetSubmission,
@@ -18,7 +19,7 @@ use ais_agent_control::{
     },
     ids::{CommandId, EventId, IdempotencyKey, RunId, SignerRequestId},
     launch_spec::{LaunchSpecSubmission, PrebuiltFragmentLaunchSpec, ReflectionRequestLaunchSpec},
-    ownership::{RunClaimMode, RunClaimOwnerKind},
+    ownership::{ClaimTransitionKind, RunClaimMode, RunClaimOwnerKind},
     recovery::{
         CancelState, InterruptionClass, RunFailureCode, RunFailureContext, RunFailureStage,
     },
@@ -43,7 +44,7 @@ use ais_agent_core::{
 };
 use ais_agent_evm::read::live::EvmAlloyReadPort;
 use ais_agent_host::{
-    control::{HostCommandResponse, HostCommandService},
+    control::{HostCommandResponse, HostCommandService, HostErrorClass},
     events::{HostRunEventQuery, HostRunEventService},
     inspect::RunStatus,
     session::{
@@ -58,9 +59,10 @@ use crate::{
         CheckpointArchiveEntry, CheckpointArchiveKind, CheckpointRepository, EventArchive,
         EventArchiveError, EventArchiveQuery, InMemoryCheckpointRepository, InMemoryEventArchive,
         InMemoryMissionRepository, InMemoryRunCatalogRepository, InMemoryRunClaimRepository,
-        InMemorySignerStateStore, MissionRepository, MissionRepositoryError, RunCatalogEntry,
-        RunCatalogRepository, RunCatalogRepositoryError, RunClaimRepository, RunWaitStateRecord,
-        RunWaitStateStore, SignerStateStoreError,
+        InMemoryRuntimeAuditArchive, InMemorySignerStateStore, MissionRepository,
+        MissionRepositoryError, RunCatalogEntry, RunCatalogRepository, RunCatalogRepositoryError,
+        RunClaimRepository, RunWaitStateRecord, RunWaitStateStore, RuntimeAuditArchive,
+        RuntimeAuditQuery, SignerStateStoreError,
     },
     runtime::{ActiveRun, InMemoryRunRepository, RunRepository},
     service::{RuntimeExecutionWiring, RuntimeHostService},
@@ -1956,7 +1958,7 @@ async fn runtime_host_service_request_cancel_marks_confirmation_wait_as_pending(
                 resolution: SignerResolutionSubmission {
                     request_id: SignerRequestId("signer-1".to_owned()),
                     kind: SignerResolutionKind::Submitted,
-                    tx_hash: Some("0xabc".to_owned()),
+                    submission_id: Some("0xabc".into()),
                     signed_payload: None,
                     details: BTreeMap::new(),
                 },
@@ -2199,6 +2201,131 @@ async fn runtime_host_service_renews_and_releases_pre_side_effect_claim() {
     assert!(response_ownership(&released.response)
         .current_claim
         .is_none());
+}
+
+#[tokio::test]
+async fn runtime_host_service_claim_commands_append_claim_transition_audits() {
+    let (
+        run_repo,
+        checkpoint_repo,
+        mission_repo,
+        run_catalog_repo,
+        event_archive,
+        _session_store,
+        run_id,
+        _original_session_id,
+    ) = preloaded_evidence_wait_runtime();
+    let host_session_id: HostSessionId = "session-claim-audit".into();
+    let mut service = RuntimeHostService::new_with_archives_and_claim_repo(
+        run_repo,
+        checkpoint_repo,
+        mission_repo,
+        run_catalog_repo,
+        event_archive,
+        InMemoryHostSessionStore::default(),
+        InMemorySignerStateStore::default(),
+        InMemoryRuntimeAuditArchive::default(),
+        InMemoryRunClaimRepository::default(),
+    );
+
+    let claimed = service
+        .handle(HostCommandEnvelope {
+            host_session_id: host_session_id.clone(),
+            host_request_id: Some("request-claim-audit-acquire".into()),
+            command: RunCommand::ClaimRun(ClaimRunCommand {
+                command_id: CommandId("cmd-claim-audit-acquire".to_owned()),
+                run_id: run_id.clone(),
+                owner_kind: RunClaimOwnerKind::InteractiveHost,
+                owner_instance_id: host_session_id.0.clone(),
+                mode: RunClaimMode::ExclusiveMutation,
+                requested_lease_ms: Some(30_000),
+                allow_supersede: false,
+                expected_current_claim_id: None,
+                expected_current_claim_epoch: None,
+            }),
+        })
+        .await;
+    let claim = response_ownership(&claimed.response)
+        .current_claim
+        .as_ref()
+        .expect("claim should exist after acquire")
+        .clone();
+
+    let renewed = service
+        .handle(HostCommandEnvelope {
+            host_session_id: host_session_id.clone(),
+            host_request_id: Some("request-claim-audit-renew".into()),
+            command: RunCommand::RenewRunClaim(RenewRunClaimCommand {
+                command_id: CommandId("cmd-claim-audit-renew".to_owned()),
+                run_id: run_id.clone(),
+                claim_id: claim.claim_id.clone(),
+                claim_epoch: claim.claim_epoch,
+                requested_lease_ms: Some(60_000),
+            }),
+        })
+        .await;
+    let renewed_claim = response_ownership(&renewed.response)
+        .current_claim
+        .as_ref()
+        .expect("claim should remain after renew")
+        .clone();
+
+    let _released = service
+        .handle(HostCommandEnvelope {
+            host_session_id: host_session_id.clone(),
+            host_request_id: Some("request-claim-audit-release".into()),
+            command: RunCommand::ReleaseRunClaim(ReleaseRunClaimCommand {
+                command_id: CommandId("cmd-claim-audit-release".to_owned()),
+                run_id: run_id.clone(),
+                claim_id: renewed_claim.claim_id.clone(),
+                claim_epoch: renewed_claim.claim_epoch,
+                reason: Some("operator handoff".to_owned()),
+            }),
+        })
+        .await;
+
+    let (
+        _run_repo,
+        _checkpoint_repo,
+        _mission_repo,
+        _run_catalog_repo,
+        _event_archive,
+        _session_store,
+        _signer_state_store,
+        audit_archive,
+        _claim_repo,
+    ) = service.into_parts_with_claim_repo();
+    let slice = audit_archive
+        .read(RuntimeAuditQuery {
+            run_id: run_id.clone(),
+            after_audit_seq: None,
+            limit: Some(10),
+        })
+        .expect("read audit slice");
+
+    let transitions: Vec<_> = slice
+        .records
+        .iter()
+        .filter_map(|record| match &record.audit {
+            RuntimeAudit::ClaimTransition(payload) => Some(payload),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(transitions.len(), 3);
+    assert_eq!(
+        transitions[0].transition_kind,
+        ClaimTransitionKind::ClaimAcquired
+    );
+    assert_eq!(
+        transitions[1].transition_kind,
+        ClaimTransitionKind::ClaimRenewed
+    );
+    assert_eq!(
+        transitions[2].transition_kind,
+        ClaimTransitionKind::ClaimReleased
+    );
+    assert_eq!(transitions[2].transition_reason, "operator handoff");
+    assert_eq!(transitions[0].host_session_id, host_session_id.0);
 }
 
 #[tokio::test]
@@ -2862,7 +2989,7 @@ async fn runtime_host_service_accepts_signer_decision_then_steps_to_completion()
                 resolution: SignerResolutionSubmission {
                     request_id: SignerRequestId("signer-1".to_owned()),
                     kind: SignerResolutionKind::Submitted,
-                    tx_hash: Some("0xabc".to_owned()),
+                    submission_id: Some("0xabc".into()),
                     signed_payload: None,
                     details: BTreeMap::new(),
                 },
@@ -2970,7 +3097,7 @@ async fn runtime_host_service_step_run_stops_at_awaiting_signer_without_advancin
         latest.pending_requests.pending_signer_request_id.as_deref(),
         Some("signer-1")
     );
-    assert!(latest.pending_requests.pending_confirmation_id.is_none());
+    assert!(latest.pending_requests.pending_submission_id.is_none());
 }
 
 #[tokio::test]
@@ -3004,7 +3131,7 @@ async fn runtime_host_service_rejects_signed_signer_decision_without_payload() {
                 resolution: SignerResolutionSubmission {
                     request_id: SignerRequestId("signer-1".to_owned()),
                     kind: SignerResolutionKind::Signed,
-                    tx_hash: None,
+                    submission_id: None,
                     signed_payload: None,
                     details: BTreeMap::new(),
                 },
@@ -3023,7 +3150,7 @@ async fn runtime_host_service_rejects_signed_signer_decision_without_payload() {
 }
 
 #[tokio::test]
-async fn runtime_host_service_rejects_submitted_signer_decision_without_tx_hash() {
+async fn runtime_host_service_rejects_submitted_signer_decision_without_submission_id() {
     let (
         run_repo,
         checkpoint_repo,
@@ -3053,7 +3180,7 @@ async fn runtime_host_service_rejects_submitted_signer_decision_without_tx_hash(
                 resolution: SignerResolutionSubmission {
                     request_id: SignerRequestId("signer-1".to_owned()),
                     kind: SignerResolutionKind::Submitted,
-                    tx_hash: None,
+                    submission_id: None,
                     signed_payload: None,
                     details: BTreeMap::new(),
                 },
@@ -3065,7 +3192,7 @@ async fn runtime_host_service_rejects_submitted_signer_decision_without_tx_hash(
     match submit.response {
         HostCommandResponse::Error(error) => {
             assert_eq!(error.code, "invalid_command");
-            assert!(error.message.contains("tx_hash"));
+            assert!(error.message.contains("submission_id"));
         }
         other => panic!("unexpected response: {other:?}"),
     }
@@ -3202,7 +3329,7 @@ async fn runtime_host_service_rejects_second_signer_resolution_for_same_request(
                 resolution: SignerResolutionSubmission {
                     request_id: SignerRequestId("signer-1".to_owned()),
                     kind: SignerResolutionKind::Submitted,
-                    tx_hash: Some("0xabc".to_owned()),
+                    submission_id: Some("0xabc".into()),
                     signed_payload: None,
                     details: BTreeMap::new(),
                 },
@@ -3231,7 +3358,7 @@ async fn runtime_host_service_rejects_second_signer_resolution_for_same_request(
                 resolution: SignerResolutionSubmission {
                     request_id: SignerRequestId("signer-1".to_owned()),
                     kind: SignerResolutionKind::Submitted,
-                    tx_hash: Some("0xdef".to_owned()),
+                    submission_id: Some("0xdef".into()),
                     signed_payload: None,
                     details: BTreeMap::new(),
                 },
@@ -3321,7 +3448,7 @@ async fn runtime_host_service_persists_side_effect_cut_for_signer_submitted_conf
                 resolution: SignerResolutionSubmission {
                     request_id: SignerRequestId("signer-1".to_owned()),
                     kind: SignerResolutionKind::Submitted,
-                    tx_hash: Some("0xabc".to_owned()),
+                    submission_id: Some("0xabc".into()),
                     signed_payload: None,
                     details: BTreeMap::new(),
                 },
@@ -3349,7 +3476,7 @@ async fn runtime_host_service_persists_side_effect_cut_for_signer_submitted_conf
         latest
             .snapshot
             .pending_requests
-            .pending_confirmation_id
+            .pending_submission_id
             .as_deref(),
         Some("0xabc")
     );
@@ -3874,7 +4001,7 @@ async fn runtime_host_service_supports_host_collaboration_loop_for_solana_signer
                 resolution: SignerResolutionSubmission {
                     request_id: SignerRequestId("solana-signer-1".to_owned()),
                     kind: SignerResolutionKind::Submitted,
-                    tx_hash: Some("solana-signature-1".to_owned()),
+                    submission_id: Some("solana-signature-1".into()),
                     signed_payload: None,
                     details: BTreeMap::new(),
                 },
@@ -4375,7 +4502,7 @@ async fn runtime_host_service_fails_closed_when_durable_signer_state_lags_hot_ru
                 resolution: SignerResolutionSubmission {
                     request_id: SignerRequestId("signer-1".to_owned()),
                     kind: SignerResolutionKind::Submitted,
-                    tx_hash: Some("0xabc".to_owned()),
+                    submission_id: Some("0xabc".into()),
                     signed_payload: None,
                     details: BTreeMap::new(),
                 },
@@ -4406,7 +4533,14 @@ async fn runtime_host_service_fails_closed_when_durable_signer_state_lags_hot_ru
         })
         .await;
     match replay.response {
-        HostCommandResponse::Error(error) => assert_eq!(error.code, "restore_error"),
+        HostCommandResponse::Error(error) => {
+            assert_eq!(error.code, "restore_missing_effect_contract");
+            assert!(matches!(
+                error.error_class,
+                HostErrorClass::RecoveryContract
+            ));
+            assert!(error.recovery_hints.requires_patch);
+        }
         other => panic!("unexpected replay response: {other:?}"),
     }
 
@@ -4439,10 +4573,7 @@ async fn runtime_host_service_fails_closed_when_durable_signer_state_lags_hot_ru
         None
     );
     assert_eq!(
-        checkpoint
-            .pending_requests
-            .pending_confirmation_id
-            .as_deref(),
+        checkpoint.pending_requests.pending_submission_id.as_deref(),
         Some("0xabc")
     );
     let catalog = run_catalog_repo
@@ -5305,7 +5436,7 @@ fn confirmation_wait_checkpoint() -> CheckpointSnapshot {
         .lifecycle
         .await_confirmation("waiting for receipt 0xabc");
     checkpoint.lifecycle.phase = RunPhase::AwaitingHost;
-    checkpoint.pending_requests.pending_confirmation_id = Some("0xabc".to_owned());
+    checkpoint.pending_requests.pending_submission_id = Some("0xabc".to_owned());
     checkpoint.last_completed_node_id = Some("swap".to_owned());
     checkpoint
 }

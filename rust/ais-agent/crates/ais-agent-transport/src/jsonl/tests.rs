@@ -6,7 +6,7 @@ use ais_agent_control::{
         RenewRunClaimCommand, RunCommand,
     },
     events::{RunBroadcastSubmitted, RunEvent, RunEventEnvelope, RunEventFamily, RunStarted},
-    ids::{ClaimId, CommandId, EventId, IdempotencyKey, RunId},
+    ids::{ChainSubmissionId, ClaimId, CommandId, EventId, IdempotencyKey, RunId},
     launch_spec::{LaunchSpecSubmission, PrebuiltFragmentLaunchSpec},
     ownership::{OwnershipVisibility, RunClaimMode, RunClaimOwnerKind, RunOwnershipSnapshot},
     recovery::{
@@ -16,7 +16,10 @@ use ais_agent_control::{
     },
 };
 use ais_agent_host::{
-    control::{HostAcceptedResponse, HostCommandOutcome, HostCommandResponse, HostCommandService},
+    control::{
+        HostAcceptedResponse, HostCommandOutcome, HostCommandResponse, HostCommandService,
+        HostErrorClass, HostErrorRecoveryHints,
+    },
     events::{HostEventServiceError, HostRunEventBatch, HostRunEventQuery, HostRunEventService},
     inspect::{
         ActiveBoundaryView, BoundaryKind, InspectSnapshot, MissionSummaryView, PauseActionView,
@@ -140,7 +143,7 @@ fn jsonl_codec_round_trips_broadcast_submitted_event_variant() {
                 run_id: RunId("run-1".to_owned()),
                 node_id: "broadcast.swap".to_owned(),
                 chain: Some("eip155:8453".to_owned()),
-                tx_hash: Some("0xabc".to_owned()),
+                submission_id: Some(ChainSubmissionId("0xabc".to_owned())),
                 summary: "broadcast submitted".to_owned(),
             }),
         },
@@ -163,7 +166,10 @@ fn jsonl_codec_round_trips_broadcast_submitted_event_variant() {
             );
             match event.event {
                 RunEvent::BroadcastSubmitted(side_effect) => {
-                    assert_eq!(side_effect.tx_hash.as_deref(), Some("0xabc"));
+                    assert_eq!(
+                        side_effect.submission_id.as_ref().map(|id| id.0.as_str()),
+                        Some("0xabc")
+                    );
                 }
                 other => panic!("unexpected event variant: {other:?}"),
             }
@@ -604,6 +610,11 @@ impl HostCommandService for OwnershipErrorMockHostService {
                 response: HostCommandResponse::Error(ais_agent_host::control::HostCommandError {
                     code: code.to_owned(),
                     message: format!("ownership error: {code}"),
+                    error_class: HostErrorClass::Ownership,
+                    retryable: false,
+                    recovery_hints: HostErrorRecoveryHints::default(),
+                    correlation: None,
+                    provider_binding: None,
                 }),
                 events: Vec::new(),
             }
@@ -797,7 +808,7 @@ fn sample_recovery_aware_pause() -> PauseBundle {
     failure.node_refs.push("govern.swap".to_owned());
 
     PauseBundle {
-        schema: "ais-agent/pause_bundle/v2".to_owned(),
+        schema: "ais-agent/pause_bundle/v3".to_owned(),
         run_id: RunId("run-1".to_owned()),
         kind: PauseKind::NeedUserInput,
         interruption_class: None,
@@ -846,7 +857,7 @@ fn sample_recovery_aware_pause() -> PauseBundle {
             }),
         }],
         pending_confirmations: vec![PendingConfirmationView {
-            confirmation_id: "confirm-1".to_owned(),
+            submission_id: "confirm-1".into(),
             kind: "chain_confirmation".to_owned(),
             summary: "waiting for confirmation".to_owned(),
         }],
@@ -858,7 +869,7 @@ fn sample_recovery_aware_pause() -> PauseBundle {
 
 fn sample_confirmation_pause() -> PauseBundle {
     PauseBundle {
-        schema: "ais-agent/pause_bundle/v2".to_owned(),
+        schema: "ais-agent/pause_bundle/v3".to_owned(),
         run_id: RunId("run-1".to_owned()),
         kind: PauseKind::NeedConfirmation,
         interruption_class: None,
@@ -896,7 +907,7 @@ fn sample_confirmation_pause() -> PauseBundle {
         ],
         pending_signer_requests: vec![],
         pending_confirmations: vec![PendingConfirmationView {
-            confirmation_id: "confirm-1".to_owned(),
+            submission_id: "confirm-1".into(),
             kind: "chain_confirmation".to_owned(),
             summary: "waiting for confirmation".to_owned(),
         }],
@@ -918,7 +929,7 @@ fn sample_retry_ready_inspect() -> InspectSnapshot {
     failure.confirmation_refs.push("confirm-1".to_owned());
 
     InspectSnapshot {
-        schema: "ais-agent/inspect_snapshot/v1".to_owned(),
+        schema: "ais-agent/inspect_snapshot/v2".to_owned(),
         run_id: RunId("run-1".to_owned()),
         status: RunStatus::AwaitingConfirm,
         phase: RunPhase::AwaitingHost,
@@ -957,7 +968,7 @@ fn sample_retry_ready_inspect() -> InspectSnapshot {
         required_inputs: Vec::new(),
         pending_continuations: Vec::new(),
         pending_confirmations: vec![PendingConfirmationView {
-            confirmation_id: "confirm-1".to_owned(),
+            submission_id: "confirm-1".into(),
             kind: "chain_confirmation".to_owned(),
             summary: "waiting for confirmation".to_owned(),
         }],
@@ -997,7 +1008,7 @@ fn sample_await_user_input_pause() -> PauseBundle {
         .push("confirm-uncertain".to_owned());
 
     PauseBundle {
-        schema: "ais-agent/pause_bundle/v2".to_owned(),
+        schema: "ais-agent/pause_bundle/v3".to_owned(),
         run_id: RunId("run-1".to_owned()),
         kind: PauseKind::NeedUserInput,
         interruption_class: Some(InterruptionClass::BroadcastOutcomeUncertain),
@@ -1033,7 +1044,7 @@ fn sample_await_user_input_pause() -> PauseBundle {
         ],
         pending_signer_requests: Vec::new(),
         pending_confirmations: vec![PendingConfirmationView {
-            confirmation_id: "confirm-uncertain".to_owned(),
+            submission_id: "confirm-uncertain".into(),
             kind: "chain_confirmation".to_owned(),
             summary: "submission outcome uncertain".to_owned(),
         }],

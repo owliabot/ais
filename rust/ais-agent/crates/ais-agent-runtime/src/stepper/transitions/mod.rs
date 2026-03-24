@@ -87,7 +87,7 @@ pub(crate) fn add_actuation_record(
     node_id: &str,
     kind: ActuationKind,
     chain: Option<String>,
-    tx_hash: Option<String>,
+    submission_id: Option<String>,
     summary: impl Into<String>,
 ) {
     let record_index = runtime.checkpoint.actuation_records.len() + 1;
@@ -98,7 +98,7 @@ pub(crate) fn add_actuation_record(
         kind,
         status: ActuationStatus::Succeeded,
         chain,
-        tx_hash,
+        submission_id,
         summary: summary.into(),
     });
 }
@@ -113,7 +113,7 @@ fn actuation_kind_label(kind: &ActuationKind) -> &'static str {
     }
 }
 
-pub(crate) fn latest_broadcast_tx_hash_for_node(
+pub(crate) fn latest_broadcast_submission_id_for_node(
     runtime: &ActiveRun,
     node_id: &str,
 ) -> Option<String> {
@@ -125,5 +125,5 @@ pub(crate) fn latest_broadcast_tx_hash_for_node(
         .find(|record| {
             record.node_id == node_id && matches!(record.kind, ActuationKind::BroadcastSubmitted)
         })
-        .and_then(|record| record.tx_hash.clone())
+        .and_then(|record| record.submission_id.clone())
 }

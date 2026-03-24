@@ -100,7 +100,7 @@ mod tests {
         let mut lifecycle = RunLifecycleState::new(RunId("run-1".to_owned()), "mission-1");
         lifecycle.await_confirmation("waiting");
         let mut checkpoint = checkpoint_with_lifecycle(lifecycle);
-        checkpoint.pending_requests.pending_confirmation_id = Some("tx-1".to_owned());
+        checkpoint.pending_requests.pending_submission_id = Some("tx-1".to_owned());
         checkpoint
     }
 

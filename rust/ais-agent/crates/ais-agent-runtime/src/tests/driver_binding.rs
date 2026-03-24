@@ -140,7 +140,7 @@ async fn standard_like_driver_output_binds_into_runtime_and_executes_live_path()
             request_id: ais_agent_control::ids::SignerRequestId(request_id),
             kind: SignerResolutionKind::Signed,
             resolved_at_ms: None,
-            tx_hash: None,
+            submission_id: None,
             signed_payload: Some(json!({"raw_tx":"0x0102"})),
         });
 
@@ -281,7 +281,7 @@ async fn reflection_output_binds_into_runtime_and_executes_same_actuate_verify_p
             request_id: ais_agent_control::ids::SignerRequestId(request_id),
             kind: SignerResolutionKind::Signed,
             resolved_at_ms: None,
-            tx_hash: None,
+            submission_id: None,
             signed_payload: Some(json!({"raw_tx":"0x0102"})),
         });
 
@@ -420,7 +420,7 @@ async fn api_native_direct_envelope_output_binds_into_same_guarded_path() {
             request_id: ais_agent_control::ids::SignerRequestId(request_id),
             kind: SignerResolutionKind::Signed,
             resolved_at_ms: None,
-            tx_hash: None,
+            submission_id: None,
             signed_payload: Some(json!({"raw_tx":"0x0102"})),
         });
 
@@ -618,7 +618,7 @@ async fn raw_envelope_binding_executes_under_same_guarded_contract() {
             request_id: ais_agent_control::ids::SignerRequestId(request_id),
             kind: SignerResolutionKind::Signed,
             resolved_at_ms: None,
-            tx_hash: None,
+            submission_id: None,
             signed_payload: Some(json!({"raw_tx":"0xfeedbeef"})),
         });
     StepOnce::apply(&mut runtime).await;

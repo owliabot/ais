@@ -296,10 +296,10 @@ where
         if matches!(
             resolution.kind,
             ais_agent_core::runtime::SignerResolutionKind::Submitted
-        ) && resolution.tx_hash.is_none()
+        ) && resolution.submission_id.is_none()
         {
             return Err(RuntimeHostServiceError::invalid_command(
-                "signer resolution `submitted` requires `tx_hash`",
+                "signer resolution `submitted` requires `submission_id`",
             ));
         }
         let Some(signer_state) = runtime.pending_signer_state.as_mut() else {
@@ -460,8 +460,7 @@ where
             &mut runtime.checkpoint,
             &self.execution_wiring,
             &command.artifact,
-        )
-        .map_err(RuntimeHostServiceError::ContinuationRejected)?;
+        )?;
         if let Some(snapshot) = runtime.checkpoint.execution_artifact.as_mut() {
             snapshot.exported_outputs = exported_outputs;
             snapshot.awaiting_continuation = None;

@@ -1,5 +1,8 @@
 use ais_agent_host::{
-    control::{HostCommandError, HostCommandOutcome, HostCommandResponse, HostCommandService},
+    control::{
+        HostCommandError, HostCommandOutcome, HostCommandResponse, HostCommandService,
+        HostErrorClass, HostErrorRecoveryHints,
+    },
     events::{HostEventServiceError, HostRunEventBatch, HostRunEventQuery, HostRunEventService},
     session::HostedRunCommand,
 };
@@ -43,6 +46,14 @@ impl HostCommandService for UnavailableHostService {
                 response: HostCommandResponse::Error(HostCommandError {
                     code: self.code.clone(),
                     message: self.message.clone(),
+                    error_class: HostErrorClass::Unavailable,
+                    retryable: true,
+                    recovery_hints: HostErrorRecoveryHints {
+                        operator_action_recommended: true,
+                        ..HostErrorRecoveryHints::default()
+                    },
+                    correlation: None,
+                    provider_binding: None,
                 }),
                 events: Vec::new(),
             }

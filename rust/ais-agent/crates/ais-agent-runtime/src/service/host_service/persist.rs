@@ -98,7 +98,7 @@ where
         )
     }
 
-    fn archived_latest_audit_seq(
+    pub(super) fn archived_latest_audit_seq(
         &self,
         run_id: &RunId,
     ) -> Result<Option<u64>, RuntimeHostServiceError> {

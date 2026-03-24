@@ -1,6 +1,6 @@
 use serde_json::json;
 
-use ais_agent_control::ids::{RunId, SignerRequestId};
+use ais_agent_control::ids::{ChainSubmissionId, RunId, SignerRequestId};
 use ais_agent_core::evidence::EvidenceKind;
 
 use crate::{
@@ -46,7 +46,7 @@ fn unified_ingest_surface_reports_kind_and_run_id() {
         request_id: SignerRequestId("signer-1".to_owned()),
         kind: HostSignerResolutionKind::Submitted,
         resolved_at_ms: None,
-        tx_hash: Some("0xabc".to_owned()),
+        submission_id: Some(ChainSubmissionId("0xabc".to_owned())),
         signed_payload: None,
         details: Default::default(),
     });

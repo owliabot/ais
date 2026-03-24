@@ -430,7 +430,7 @@ mod tests {
 
                 HostCommandOutcome {
                     response: HostCommandResponse::Pause(PauseBundle {
-                        schema: "ais-agent/pause_bundle/v2".to_owned(),
+                        schema: "ais-agent/pause_bundle/v3".to_owned(),
                         run_id: RunId("run-1".to_owned()),
                         kind: PauseKind::NeedUserInput,
                         interruption_class: None,

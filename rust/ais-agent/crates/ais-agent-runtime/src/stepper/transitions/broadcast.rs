@@ -37,7 +37,7 @@ pub(crate) async fn apply_broadcast_transition(runtime: &mut ActiveRun) -> Optio
         || runtime
             .checkpoint
             .pending_requests
-            .pending_confirmation_id
+            .pending_submission_id
             .is_some()
     {
         return None;
@@ -151,13 +151,13 @@ pub(crate) async fn apply_broadcast_transition(runtime: &mut ActiveRun) -> Optio
             }
         };
 
-        let tx_hash = format!("{:#x}", submission.tx_hash);
+        let submission_id = format!("{:#x}", submission.tx_hash);
         add_actuation_record(
             runtime,
             node_id.as_str(),
             ActuationKind::BroadcastSubmitted,
             actuate.chain.clone().or_else(|| envelope_chain.clone()),
-            Some(tx_hash.clone()),
+            Some(submission_id.clone()),
             format!("broadcast submitted for {node_id}"),
         );
         mark_node_status(runtime, node_id.as_str(), ActionNodeStatus::Succeeded);
@@ -167,9 +167,9 @@ pub(crate) async fn apply_broadcast_transition(runtime: &mut ActiveRun) -> Optio
             .pending_requests
             .pending_signer_request_id = None;
         runtime.checkpoint.pending_requests.pending_signer_request = None;
-        runtime.checkpoint.pending_requests.pending_confirmation_id = Some(tx_hash.clone());
+        runtime.checkpoint.pending_requests.pending_submission_id = Some(submission_id.clone());
         runtime.checkpoint.lifecycle.await_confirmation(format!(
-            "waiting for chain receipt after broadcast {tx_hash}"
+            "waiting for chain receipt after broadcast {submission_id}"
         ));
         runtime.touch_transition();
 
@@ -259,7 +259,7 @@ pub(crate) async fn apply_broadcast_transition(runtime: &mut ActiveRun) -> Optio
             }
         };
 
-        let tx_hash = submission.signature.to_string();
+        let submission_id = submission.signature.to_string();
         add_actuation_record(
             runtime,
             node_id.as_str(),
@@ -268,13 +268,13 @@ pub(crate) async fn apply_broadcast_transition(runtime: &mut ActiveRun) -> Optio
                 .chain
                 .clone()
                 .or_else(|| Some(envelope.chain.clone())),
-            Some(tx_hash.clone()),
+            Some(submission_id.clone()),
             format!("broadcast submitted for {node_id}"),
         );
         mark_node_status(runtime, node_id.as_str(), ActionNodeStatus::Succeeded);
-        runtime.checkpoint.pending_requests.pending_confirmation_id = Some(tx_hash.clone());
+        runtime.checkpoint.pending_requests.pending_submission_id = Some(submission_id.clone());
         runtime.checkpoint.lifecycle.await_confirmation(format!(
-            "waiting for chain receipt after broadcast {tx_hash}"
+            "waiting for chain receipt after broadcast {submission_id}"
         ));
         runtime.touch_transition();
 
@@ -531,7 +531,7 @@ where
         || runtime
             .checkpoint
             .pending_requests
-            .pending_confirmation_id
+            .pending_submission_id
             .is_some()
     {
         return None;
@@ -619,13 +619,13 @@ where
             }
         };
 
-    let tx_hash = format!("{:#x}", submission.tx_hash);
+    let submission_id = format!("{:#x}", submission.tx_hash);
     add_actuation_record(
         runtime,
         node_id.as_str(),
         ActuationKind::BroadcastSubmitted,
         actuate.chain.clone().or_else(|| envelope_chain.clone()),
-        Some(tx_hash.clone()),
+        Some(submission_id.clone()),
         format!("broadcast submitted for {node_id}"),
     );
     mark_node_status(runtime, node_id.as_str(), ActionNodeStatus::Succeeded);
@@ -635,9 +635,9 @@ where
         .pending_requests
         .pending_signer_request_id = None;
     runtime.checkpoint.pending_requests.pending_signer_request = None;
-    runtime.checkpoint.pending_requests.pending_confirmation_id = Some(tx_hash.clone());
+    runtime.checkpoint.pending_requests.pending_submission_id = Some(submission_id.clone());
     runtime.checkpoint.lifecycle.await_confirmation(format!(
-        "waiting for chain receipt after broadcast {tx_hash}"
+        "waiting for chain receipt after broadcast {submission_id}"
     ));
     runtime.touch_transition();
 
@@ -660,7 +660,7 @@ where
         || runtime
             .checkpoint
             .pending_requests
-            .pending_confirmation_id
+            .pending_submission_id
             .is_some()
     {
         return None;
@@ -732,7 +732,7 @@ where
         }
     };
 
-    let tx_hash = submission.signature.to_string();
+    let submission_id = submission.signature.to_string();
     add_actuation_record(
         runtime,
         node_id.as_str(),
@@ -741,13 +741,13 @@ where
             .chain
             .clone()
             .or_else(|| Some(envelope.chain.clone())),
-        Some(tx_hash.clone()),
+        Some(submission_id.clone()),
         format!("broadcast submitted for {node_id}"),
     );
     mark_node_status(runtime, node_id.as_str(), ActionNodeStatus::Succeeded);
-    runtime.checkpoint.pending_requests.pending_confirmation_id = Some(tx_hash.clone());
+    runtime.checkpoint.pending_requests.pending_submission_id = Some(submission_id.clone());
     runtime.checkpoint.lifecycle.await_confirmation(format!(
-        "waiting for chain receipt after broadcast {tx_hash}"
+        "waiting for chain receipt after broadcast {submission_id}"
     ));
     runtime.touch_transition();
 

@@ -1,6 +1,6 @@
 use ais_agent_control::{
     commands::{ClaimRunCommand, ReleaseRunClaimCommand, RenewRunClaimCommand},
-    ownership::{OwnershipErrorCode, RunClaimStatus},
+    ownership::{ClaimTransitionKind, OwnershipErrorCode, RunClaimStatus},
 };
 use ais_agent_host::{control::HostCommandOutcome, session::HostSessionId};
 use tracing::info;
@@ -36,6 +36,7 @@ where
             return Err(RuntimeHostServiceError::OwnershipViolation {
                 code: OwnershipErrorCode::ClaimTransferRequired,
                 run_id: command.run_id.0.clone(),
+                claim_id: None,
                 message: "terminal runs do not accept new exclusive mutation claims".to_owned(),
             });
         }
@@ -46,7 +47,9 @@ where
             None => self.load_effective_claim(&command.run_id)?,
         };
 
-        let (acquired, lifecycle_event, superseded_claim_id) = match current {
+        let claim_now_ms =
+            super::super::RuntimeHostService::<R, C, M, K, E, S, G, A, Q>::claim_now_ms();
+        let (acquired, transition, lifecycle_event, superseded_claim_id) = match current {
             None => (
                 self.acquire_claim(
                     &host_session_id,
@@ -59,36 +62,52 @@ where
                         command.requested_lease_ms,
                     ),
                 )?,
+                Some((
+                    ClaimTransitionKind::ClaimAcquired,
+                    None,
+                    "claim_run acquired new mutation claim".to_owned(),
+                    claim_now_ms,
+                )),
                 None,
                 None,
             ),
-            Some(current) if current.status == RunClaimStatus::Expired => (
-                self.acquire_claim(
-                    &host_session_id,
-                    self.build_claim(
+            Some(current) if current.status == RunClaimStatus::Expired => {
+                let previous_claim_id = current.claim_id.clone();
+                (
+                    self.acquire_claim(
                         &host_session_id,
-                        &command.run_id,
-                        command.owner_kind,
-                        command.owner_instance_id,
-                        command.mode,
-                        command.requested_lease_ms,
-                    ),
-                )?,
-                None,
-                None,
-            ),
+                        self.build_claim(
+                            &host_session_id,
+                            &command.run_id,
+                            command.owner_kind,
+                            command.owner_instance_id,
+                            command.mode,
+                            command.requested_lease_ms,
+                        ),
+                    )?,
+                    Some((
+                        ClaimTransitionKind::ClaimAcquired,
+                        Some(previous_claim_id),
+                        "claim_run reacquired after expiry".to_owned(),
+                        claim_now_ms,
+                    )),
+                    None,
+                    None,
+                )
+            }
             Some(current)
                 if current.host_session_id == host_session_id.0
                     && current.owner_instance_id == command.owner_instance_id
                     && current.mode == command.mode =>
             {
-                (current, None, None)
+                (current, None, None, None)
             }
             Some(current) => {
                 if !command.allow_supersede {
                     return Err(RuntimeHostServiceError::OwnershipViolation {
                         code: OwnershipErrorCode::ClaimConflict,
                         run_id: command.run_id.0.clone(),
+                        claim_id: Some(current.claim_id.clone()),
                         message: format!(
                             "active claim `{}` already exists for run `{}`",
                             current.claim_id.0, command.run_id.0
@@ -99,6 +118,7 @@ where
                     return Err(RuntimeHostServiceError::OwnershipViolation {
                         code: OwnershipErrorCode::ClaimTransferRequired,
                         run_id: command.run_id.0.clone(),
+                        claim_id: Some(current.claim_id.clone()),
                         message: "run state does not allow active-claim supersede".to_owned(),
                     });
                 }
@@ -107,6 +127,7 @@ where
                         RuntimeHostServiceError::OwnershipViolation {
                             code: OwnershipErrorCode::ClaimTransferRequired,
                             run_id: command.run_id.0.clone(),
+                            claim_id: Some(current.claim_id.clone()),
                             message: "active-claim supersede requires expected_current_claim_id"
                                 .to_owned(),
                         }
@@ -116,6 +137,7 @@ where
                         RuntimeHostServiceError::OwnershipViolation {
                             code: OwnershipErrorCode::ClaimTransferRequired,
                             run_id: command.run_id.0.clone(),
+                            claim_id: Some(current.claim_id.clone()),
                             message: "active-claim supersede requires expected_current_claim_epoch"
                                 .to_owned(),
                         }
@@ -125,6 +147,7 @@ where
                     return Err(RuntimeHostServiceError::OwnershipViolation {
                         code: OwnershipErrorCode::ClaimConflict,
                         run_id: command.run_id.0.clone(),
+                        claim_id: Some(current.claim_id.clone()),
                         message: format!(
                             "expected active claim `{}`, found `{}`",
                             expected_claim_id.0, current.claim_id.0
@@ -135,6 +158,7 @@ where
                     return Err(RuntimeHostServiceError::OwnershipViolation {
                         code: OwnershipErrorCode::ClaimEpochStale,
                         run_id: command.run_id.0.clone(),
+                        claim_id: Some(current.claim_id.clone()),
                         message: format!(
                             "expected claim epoch `{expected_claim_epoch}`, found `{}`",
                             current.claim_epoch
@@ -142,7 +166,7 @@ where
                     });
                 }
 
-                let predecessor_claim_id = current.claim_id.0.clone();
+                let predecessor_claim_id = current.claim_id.clone();
                 (
                     self.claim_repo
                         .supersede(crate::persistence::ClaimSupersedeRequest {
@@ -162,13 +186,35 @@ where
                         .map_err(|error| RuntimeHostServiceError::OwnershipViolation {
                             code: OwnershipErrorCode::ClaimTransferRequired,
                             run_id: command.run_id.0.clone(),
+                            claim_id: Some(current.claim_id.clone()),
                             message: error.to_string(),
                         })?,
+                    Some((
+                        ClaimTransitionKind::ClaimSuperseded,
+                        Some(predecessor_claim_id.clone()),
+                        "claim_run superseded active claim".to_owned(),
+                        claim_now_ms,
+                    )),
                     Some("runtime.host.claim_superseded"),
-                    Some(predecessor_claim_id),
+                    Some(predecessor_claim_id.0),
                 )
             }
         };
+        if let Some((
+            transition_kind,
+            previous_claim_id,
+            transition_reason,
+            effective_timestamp_ms,
+        )) = transition
+        {
+            self.append_claim_transition_audit(
+                &acquired,
+                previous_claim_id,
+                transition_kind,
+                transition_reason,
+                effective_timestamp_ms,
+            )?;
+        }
         if let Some(event) = lifecycle_event {
             info!(
                 run_id = %acquired.run_id.0,
@@ -213,6 +259,7 @@ where
             RuntimeHostServiceError::OwnershipViolation {
                 code: OwnershipErrorCode::ClaimRequired,
                 run_id: command.run_id.0.clone(),
+                claim_id: None,
                 message: "run has no active claim to renew".to_owned(),
             }
         })?;
@@ -220,6 +267,7 @@ where
             return Err(RuntimeHostServiceError::OwnershipViolation {
                 code: OwnershipErrorCode::ClaimExpired,
                 run_id: command.run_id.0.clone(),
+                claim_id: Some(current.claim_id.clone()),
                 message: format!("claim `{}` has expired", current.claim_id.0),
             });
         }
@@ -227,6 +275,7 @@ where
             return Err(RuntimeHostServiceError::OwnershipViolation {
                 code: OwnershipErrorCode::ClaimNotOwner,
                 run_id: command.run_id.0.clone(),
+                claim_id: Some(current.claim_id.clone()),
                 message: format!(
                     "active claim `{}` belongs to session `{}`",
                     current.claim_id.0, current.host_session_id
@@ -237,6 +286,7 @@ where
             return Err(RuntimeHostServiceError::OwnershipViolation {
                 code: OwnershipErrorCode::ClaimConflict,
                 run_id: command.run_id.0.clone(),
+                claim_id: Some(current.claim_id.clone()),
                 message: format!(
                     "active claim `{}` does not match requested claim `{}`",
                     current.claim_id.0, command.claim_id.0
@@ -247,6 +297,7 @@ where
             return Err(RuntimeHostServiceError::OwnershipViolation {
                 code: OwnershipErrorCode::ClaimEpochStale,
                 run_id: command.run_id.0.clone(),
+                claim_id: Some(current.claim_id.clone()),
                 message: format!(
                     "expected claim epoch `{}`, found `{}`",
                     command.claim_epoch, current.claim_epoch
@@ -258,7 +309,7 @@ where
             .claim_repo
             .renew(crate::persistence::ClaimRenewRequest {
                 run_id: command.run_id.clone(),
-                claim_id: command.claim_id,
+                claim_id: command.claim_id.clone(),
                 claim_epoch: command.claim_epoch,
                 renewed_at_ms: super::super::RuntimeHostService::<R, C, M, K, E, S, G, A, Q>::claim_now_ms(),
                 lease_expires_at_ms: Some(
@@ -281,8 +332,18 @@ where
             .map_err(|error| RuntimeHostServiceError::OwnershipViolation {
                 code: OwnershipErrorCode::ClaimTransferRequired,
                 run_id: command.run_id.0.clone(),
+                claim_id: Some(command.claim_id.clone()),
                 message: error.to_string(),
             })?;
+        self.append_claim_transition_audit(
+            &renewed,
+            None,
+            ClaimTransitionKind::ClaimRenewed,
+            "renew_run_claim extended active lease",
+            renewed
+                .last_renewed_at_ms
+                .unwrap_or(renewed.lease_started_at_ms),
+        )?;
         info!(
             run_id = %renewed.run_id.0,
             host_session_id = %host_session_id.0,
@@ -318,6 +379,7 @@ where
             RuntimeHostServiceError::OwnershipViolation {
                 code: OwnershipErrorCode::ClaimRequired,
                 run_id: command.run_id.0.clone(),
+                claim_id: None,
                 message: "run has no active claim to release".to_owned(),
             }
         })?;
@@ -325,6 +387,7 @@ where
             return Err(RuntimeHostServiceError::OwnershipViolation {
                 code: OwnershipErrorCode::ClaimExpired,
                 run_id: command.run_id.0.clone(),
+                claim_id: Some(current.claim_id.clone()),
                 message: format!("claim `{}` has expired", current.claim_id.0),
             });
         }
@@ -332,6 +395,7 @@ where
             return Err(RuntimeHostServiceError::OwnershipViolation {
                 code: OwnershipErrorCode::ClaimNotOwner,
                 run_id: command.run_id.0.clone(),
+                claim_id: Some(current.claim_id.clone()),
                 message: format!(
                     "active claim `{}` belongs to session `{}`",
                     current.claim_id.0, current.host_session_id
@@ -342,6 +406,7 @@ where
             return Err(RuntimeHostServiceError::OwnershipViolation {
                 code: OwnershipErrorCode::ClaimConflict,
                 run_id: command.run_id.0.clone(),
+                claim_id: Some(current.claim_id.clone()),
                 message: format!(
                     "active claim `{}` does not match requested claim `{}`",
                     current.claim_id.0, command.claim_id.0
@@ -352,6 +417,7 @@ where
             return Err(RuntimeHostServiceError::OwnershipViolation {
                 code: OwnershipErrorCode::ClaimEpochStale,
                 run_id: command.run_id.0.clone(),
+                claim_id: Some(current.claim_id.clone()),
                 message: format!(
                     "expected claim epoch `{}`, found `{}`",
                     command.claim_epoch, current.claim_epoch
@@ -362,6 +428,7 @@ where
             return Err(RuntimeHostServiceError::OwnershipViolation {
                 code: OwnershipErrorCode::ClaimTransferRequired,
                 run_id: command.run_id.0.clone(),
+                claim_id: Some(current.claim_id.clone()),
                 message: "run state does not allow active-claim release".to_owned(),
             });
         }
@@ -370,14 +437,25 @@ where
             .claim_repo
             .release(crate::persistence::ClaimReleaseRequest {
                 run_id: command.run_id.clone(),
-                claim_id: command.claim_id,
+                claim_id: command.claim_id.clone(),
                 claim_epoch: command.claim_epoch,
             })
             .map_err(|error| RuntimeHostServiceError::OwnershipViolation {
                 code: OwnershipErrorCode::ClaimTransferRequired,
                 run_id: command.run_id.0.clone(),
+                claim_id: Some(command.claim_id.clone()),
                 message: error.to_string(),
             })?;
+        self.append_claim_transition_audit(
+            &released,
+            None,
+            ClaimTransitionKind::ClaimReleased,
+            command
+                .reason
+                .clone()
+                .unwrap_or_else(|| "release_run_claim released active claim".to_owned()),
+            super::super::RuntimeHostService::<R, C, M, K, E, S, G, A, Q>::claim_now_ms(),
+        )?;
         info!(
             run_id = %released.run_id.0,
             host_session_id = %host_session_id.0,

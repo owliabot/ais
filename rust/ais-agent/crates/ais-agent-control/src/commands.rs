@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use crate::{
     execution_artifact::{ExecutionArtifactLaunchSpec, ExecutionPackageEntry},
-    ids::{ClaimId, CommandId, IdempotencyKey, RunId, SignerRequestId},
+    ids::{ChainSubmissionId, ClaimId, CommandId, IdempotencyKey, RunId, SignerRequestId},
     launch_spec::LaunchSpecSubmission,
     ownership::{RunClaimMode, RunClaimOwnerKind},
     patch::PlanPatchSubmission,
@@ -332,7 +332,7 @@ pub struct SignerResolutionSubmission {
     pub request_id: SignerRequestId,
     pub kind: SignerResolutionKind,
     #[serde(default)]
-    pub tx_hash: Option<String>,
+    pub submission_id: Option<ChainSubmissionId>,
     #[serde(default)]
     pub signed_payload: Option<Value>,
     #[serde(default)]

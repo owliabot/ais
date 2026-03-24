@@ -939,7 +939,7 @@ async fn restart_restores_awaiting_signer_and_completes_through_real_host_servic
                 resolution: SignerResolutionSubmission {
                     request_id: SignerRequestId("signer-1".to_owned()),
                     kind: SignerResolutionKind::Submitted,
-                    tx_hash: Some("0xabc".to_owned()),
+                    submission_id: Some("0xabc".into()),
                     signed_payload: None,
                     details: BTreeMap::new(),
                 },
@@ -1074,7 +1074,7 @@ async fn restart_restores_denied_signer_state_and_clears_durable_signer_state_st
                 resolution: SignerResolutionSubmission {
                     request_id: SignerRequestId("signer-1".to_owned()),
                     kind: SignerResolutionKind::Denied,
-                    tx_hash: None,
+                    submission_id: None,
                     signed_payload: None,
                     details: BTreeMap::new(),
                 },
@@ -1342,7 +1342,7 @@ async fn restart_preserves_cancel_pending_confirmation_wait_truth() {
                 resolution: SignerResolutionSubmission {
                     request_id: SignerRequestId("signer-1".to_owned()),
                     kind: SignerResolutionKind::Submitted,
-                    tx_hash: Some("0xabc".to_owned()),
+                    submission_id: Some("0xabc".into()),
                     signed_payload: None,
                     details: BTreeMap::new(),
                 },
@@ -1569,7 +1569,7 @@ fn verifying_after_broadcast_checkpoint() -> CheckpointSnapshot {
         ],
     );
     checkpoint.last_completed_node_id = Some("swap".to_owned());
-    checkpoint.pending_requests.pending_confirmation_id = Some("0xabc".to_owned());
+    checkpoint.pending_requests.pending_submission_id = Some("0xabc".to_owned());
     checkpoint
         .effect_contracts
         .insert("effect.swap".to_owned(), sample_effect_contract());
@@ -1579,7 +1579,7 @@ fn verifying_after_broadcast_checkpoint() -> CheckpointSnapshot {
         kind: ActuationKind::BroadcastSubmitted,
         status: ActuationStatus::Succeeded,
         chain: Some("eip155:1".to_owned()),
-        tx_hash: Some("0xabc".to_owned()),
+        submission_id: Some("0xabc".to_owned()),
         summary: "submitted broadcast before restart".to_owned(),
     });
     checkpoint

@@ -364,7 +364,7 @@ fn persist_side_effect_durability_cut(
             debug!(
                 run_id = %runtime.run_id.0,
                 transition_kind = ?transition.kind,
-                confirmation_id = runtime.checkpoint.pending_requests.pending_confirmation_id.as_deref(),
+                submission_id = runtime.checkpoint.pending_requests.pending_submission_id.as_deref(),
                 checkpoint_seq = runtime.checkpoint_seq(),
                 plan_epoch = runtime.plan_epoch(),
                 revision = runtime.revision,
@@ -396,10 +396,10 @@ fn requires_side_effect_durability_cut(runtime: &ActiveRun, transition: &StepTra
         return false;
     }
 
-    let Some(pending_confirmation_id) = runtime
+    let Some(pending_submission_id) = runtime
         .checkpoint
         .pending_requests
-        .pending_confirmation_id
+        .pending_submission_id
         .as_deref()
     else {
         return false;
@@ -411,7 +411,7 @@ fn requires_side_effect_durability_cut(runtime: &ActiveRun, transition: &StepTra
         .last()
         .is_some_and(|record| {
             matches!(record.kind, ActuationKind::BroadcastSubmitted)
-                && record.tx_hash.as_deref() == Some(pending_confirmation_id)
+                && record.submission_id.as_deref() == Some(pending_submission_id)
         })
 }
 

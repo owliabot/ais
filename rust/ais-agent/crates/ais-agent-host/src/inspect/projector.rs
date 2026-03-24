@@ -57,7 +57,7 @@ pub fn project_inspect_snapshot_with_recovery_and_events(
     let ownership = project_ownership_snapshot(checkpoint);
 
     InspectSnapshot {
-        schema: "ais-agent/inspect_snapshot/v1".to_owned(),
+        schema: "ais-agent/inspect_snapshot/v2".to_owned(),
         run_id: lifecycle.run_id.clone(),
         status: map_run_status(&lifecycle.status),
         phase: map_run_phase(&lifecycle.phase),
@@ -103,7 +103,7 @@ pub fn project_inspect_snapshot_with_recovery_and_events(
             .map(|record| SideEffectView {
                 kind: format!("{:?}", record.kind).to_lowercase(),
                 summary: record.summary.clone(),
-                tx_hash: record.tx_hash.clone(),
+                submission_id: record.submission_id.clone().map(Into::into),
             })
             .collect(),
         recent_events: project_recent_events(recent_events),
@@ -182,10 +182,7 @@ pub fn project_pause_bundle_with_recovery(
         (CoreRunStatus::AwaitingEvidence, _) => PauseKind::NeedEvidence,
         (CoreRunStatus::AwaitingSigner, _) => PauseKind::NeedSigner,
         (CoreRunStatus::AwaitingConfirmation, _) | (_, CoreBoundaryKind::Confirmation)
-            if checkpoint
-                .pending_requests
-                .pending_confirmation_id
-                .is_some() =>
+            if checkpoint.pending_requests.pending_submission_id.is_some() =>
         {
             PauseKind::NeedConfirmation
         }
@@ -197,7 +194,7 @@ pub fn project_pause_bundle_with_recovery(
     };
 
     Some(PauseBundle {
-        schema: "ais-agent/pause_bundle/v2".to_owned(),
+        schema: "ais-agent/pause_bundle/v3".to_owned(),
         run_id: lifecycle.run_id.clone(),
         kind,
         interruption_class: recovery.interruption_class.clone(),
@@ -289,11 +286,7 @@ fn default_recovery_view(checkpoint: &CheckpointSnapshot) -> RecoveryView {
 
 fn project_pause_notes(checkpoint: &CheckpointSnapshot) -> Vec<String> {
     let mut notes = Vec::new();
-    if checkpoint
-        .pending_requests
-        .pending_confirmation_id
-        .is_some()
-    {
+    if checkpoint.pending_requests.pending_submission_id.is_some() {
         notes.push("chain confirmation is still pending".to_owned());
     }
     if checkpoint
@@ -347,11 +340,11 @@ fn project_pending_signer_requests(
 fn project_pending_confirmations(checkpoint: &CheckpointSnapshot) -> Vec<PendingConfirmationView> {
     checkpoint
         .pending_requests
-        .pending_confirmation_id
+        .pending_submission_id
         .clone()
         .into_iter()
-        .map(|confirmation_id| PendingConfirmationView {
-            confirmation_id,
+        .map(|submission_id| PendingConfirmationView {
+            submission_id: submission_id.into(),
             kind: "chain_confirmation".to_owned(),
             summary: "transaction broadcasted; waiting for chain receipt/confirmation".to_owned(),
         })

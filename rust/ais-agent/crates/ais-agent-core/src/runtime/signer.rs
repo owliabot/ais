@@ -35,7 +35,7 @@ pub struct SignerResolution {
     pub request_id: SignerRequestId,
     pub kind: SignerResolutionKind,
     pub resolved_at_ms: Option<u64>,
-    pub tx_hash: Option<String>,
+    pub submission_id: Option<String>,
     pub signed_payload: Option<Value>,
 }
 
@@ -51,7 +51,7 @@ pub struct SignerRequestState {
     pub status: SignerRequestStatus,
     pub timeout: Option<SignerTimeout>,
     pub last_resolution: Option<SignerResolution>,
-    pub submitted_tx_hash: Option<String>,
+    pub submitted_submission_id: Option<String>,
     #[serde(default)]
     pub signed_payload: Option<Value>,
     pub reconcile_required: bool,
@@ -74,7 +74,7 @@ impl SignerRequestState {
             status: SignerRequestStatus::Pending,
             timeout: None,
             last_resolution: None,
-            submitted_tx_hash: None,
+            submitted_submission_id: None,
             signed_payload: None,
             reconcile_required: false,
         }
@@ -106,7 +106,7 @@ impl SignerRequestState {
             SignerResolutionKind::Expired => SignerRequestStatus::Expired,
         };
         if matches!(resolution.kind, SignerResolutionKind::Submitted) {
-            self.submitted_tx_hash = resolution.tx_hash.clone();
+            self.submitted_submission_id = resolution.submission_id.clone();
             self.reconcile_required = true;
         }
         if matches!(resolution.kind, SignerResolutionKind::Signed) {
@@ -129,9 +129,9 @@ impl SignerRequestState {
         false
     }
 
-    pub fn mark_reconciled(&mut self, observed_tx_hash: Option<String>) {
-        if let Some(tx_hash) = observed_tx_hash {
-            self.submitted_tx_hash = Some(tx_hash);
+    pub fn mark_reconciled(&mut self, observed_submission_id: Option<String>) {
+        if let Some(submission_id) = observed_submission_id {
+            self.submitted_submission_id = Some(submission_id);
         }
         self.status = SignerRequestStatus::Reconciled;
         self.reconcile_required = false;

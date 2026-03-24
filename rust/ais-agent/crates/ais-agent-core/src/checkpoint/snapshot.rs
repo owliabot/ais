@@ -40,7 +40,7 @@ pub struct PendingRequestsSnapshot {
     #[serde(default)]
     pub pending_signer_request: Option<PendingSignerRequestSnapshot>,
     pub pending_signer_request_id: Option<String>,
-    pub pending_confirmation_id: Option<String>,
+    pub pending_submission_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

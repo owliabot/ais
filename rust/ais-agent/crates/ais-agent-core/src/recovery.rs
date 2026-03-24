@@ -127,10 +127,7 @@ pub fn classify_cancel_request(checkpoint: &CheckpointSnapshot) -> CancelRequest
     }
 
     let side_effect_phase = classify_side_effect_phase(checkpoint);
-    if checkpoint
-        .pending_requests
-        .pending_confirmation_id
-        .is_some()
+    if checkpoint.pending_requests.pending_submission_id.is_some()
         || matches!(
             side_effect_phase,
             Some(SideEffectPhase::BroadcastSubmitted | SideEffectPhase::AwaitingConfirmation)
@@ -163,11 +160,7 @@ pub fn classify_side_effect_phase(checkpoint: &CheckpointSnapshot) -> Option<Sid
     {
         return Some(SideEffectPhase::Verified);
     }
-    if checkpoint
-        .pending_requests
-        .pending_confirmation_id
-        .is_some()
-    {
+    if checkpoint.pending_requests.pending_submission_id.is_some() {
         return Some(SideEffectPhase::AwaitingConfirmation);
     }
     if checkpoint
@@ -285,11 +278,7 @@ pub fn classify_allowed_recovery_actions(
         ],
         Some(RecoveryDisposition::ContinueWait) => {
             let mut actions = vec![RecoveryActionKind::RetryStep];
-            if checkpoint
-                .pending_requests
-                .pending_confirmation_id
-                .is_some()
-            {
+            if checkpoint.pending_requests.pending_submission_id.is_some() {
                 actions.push(RecoveryActionKind::AwaitConfirmation);
             }
             actions.push(RecoveryActionKind::CancelRun);
@@ -464,7 +453,7 @@ pub fn classify_recovery_suggestions(checkpoint: &CheckpointSnapshot) -> Vec<Rec
         Some(RecoveryDisposition::ContinueWait) => {
             let pending_confirmation_refs = checkpoint
                 .pending_requests
-                .pending_confirmation_id
+                .pending_submission_id
                 .clone()
                 .into_iter()
                 .collect::<Vec<_>>();
@@ -689,7 +678,7 @@ fn confirmation_or_failure_refs(
 
     checkpoint
         .pending_requests
-        .pending_confirmation_id
+        .pending_submission_id
         .clone()
         .into_iter()
         .collect()

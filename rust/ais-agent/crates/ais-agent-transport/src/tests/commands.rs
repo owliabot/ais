@@ -593,7 +593,7 @@ fn signer_decision_command(
             resolution: SignerResolutionSubmission {
                 request_id: request_id.clone(),
                 kind: decision,
-                tx_hash: Some("0xdeadbeef".to_owned()),
+                submission_id: Some("0xdeadbeef".into()),
                 signed_payload,
                 details: BTreeMap::new(),
             },

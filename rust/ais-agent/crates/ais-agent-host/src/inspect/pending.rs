@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use ais_agent_control::{
     execution_artifact::{ExecutionOutputKey, ExecutionPackageEntry, ExecutionStageId},
-    ids::SignerRequestId,
+    ids::{ChainSubmissionId, SignerRequestId},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,7 +27,7 @@ pub struct PendingSignerRequestView {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingConfirmationView {
-    pub confirmation_id: String,
+    pub submission_id: ChainSubmissionId,
     pub kind: String,
     pub summary: String,
 }

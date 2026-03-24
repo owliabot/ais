@@ -114,7 +114,7 @@ fn restart_after_tx_submission_preserves_verification_resume_state() {
         ActuationKind::BroadcastSubmitted
     );
     assert_eq!(
-        restored.actuation_records[0].tx_hash.as_deref(),
+        restored.actuation_records[0].submission_id.as_deref(),
         Some("0xdeadbeef")
     );
 }
@@ -159,7 +159,7 @@ fn sample_evidence_wait_checkpoint() -> CheckpointSnapshot {
             pending_envelope_refs: Vec::new(),
             pending_signer_request: None,
             pending_signer_request_id: None,
-            pending_confirmation_id: None,
+            pending_submission_id: None,
         },
         last_completed_node_id: Some("observe-balance".to_owned()),
         actuation_records: Vec::new(),
@@ -207,7 +207,7 @@ fn sample_signer_wait_checkpoint() -> CheckpointSnapshot {
                 timeout_policy: None,
             }),
             pending_signer_request_id: Some("signer-1".to_owned()),
-            pending_confirmation_id: None,
+            pending_submission_id: None,
         },
         last_completed_node_id: Some("simulate-swap".to_owned()),
         actuation_records: vec![ActuationRecord {
@@ -216,7 +216,7 @@ fn sample_signer_wait_checkpoint() -> CheckpointSnapshot {
             kind: ActuationKind::SignerRequested,
             status: ActuationStatus::Pending,
             chain: Some("eip155:1".to_owned()),
-            tx_hash: None,
+            submission_id: None,
             summary: "signer request issued".to_owned(),
         }],
         execution_artifact: None,
@@ -277,7 +277,7 @@ fn sample_submitted_tx_checkpoint() -> CheckpointSnapshot {
             kind: ActuationKind::BroadcastSubmitted,
             status: ActuationStatus::Pending,
             chain: Some("eip155:1".to_owned()),
-            tx_hash: Some("0xdeadbeef".to_owned()),
+            submission_id: Some("0xdeadbeef".to_owned()),
             summary: "transaction broadcasted; awaiting verification".to_owned(),
         }],
         execution_artifact: None,

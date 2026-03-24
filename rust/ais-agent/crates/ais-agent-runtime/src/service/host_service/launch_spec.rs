@@ -5,14 +5,16 @@ use super::{
     artifact_planner::seed_execution_artifact_checkpoint,
     launch_binding::seed_prebuilt_fragment_checkpoint,
     launch_validation::validate_launch_spec_submission, RuntimeExecutionWiring,
+    RuntimeHostServiceError,
 };
 
 pub(crate) fn seed_launch_spec_checkpoint(
     checkpoint: &mut CheckpointSnapshot,
     wiring: &RuntimeExecutionWiring,
     launch_spec: &LaunchSpecSubmission,
-) -> Result<(), String> {
-    let validated_prebuilt = validate_launch_spec_submission(launch_spec)?;
+) -> Result<(), RuntimeHostServiceError> {
+    let validated_prebuilt = validate_launch_spec_submission(launch_spec)
+        .map_err(RuntimeHostServiceError::invalid_command)?;
 
     match launch_spec {
         LaunchSpecSubmission::PrebuiltFragment(_) => {
@@ -25,7 +27,9 @@ pub(crate) fn seed_launch_spec_checkpoint(
             seed_execution_artifact_checkpoint(checkpoint, wiring, spec)
         }
         LaunchSpecSubmission::ReflectionRequest(_) => {
-            Err("reflection_request launch specs are not implemented yet".to_owned())
+            Err(RuntimeHostServiceError::invalid_command(
+                "reflection_request launch specs are not implemented yet",
+            ))
         }
     }
 }

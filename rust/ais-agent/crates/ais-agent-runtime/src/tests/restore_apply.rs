@@ -145,7 +145,7 @@ fn boundary_progress_and_side_effect_checkpoint_persistence_have_distinct_wait_s
     progress_runtime
         .checkpoint
         .pending_requests
-        .pending_confirmation_id = Some("confirm-1".to_owned());
+        .pending_submission_id = Some("confirm-1".to_owned());
     progress_runtime.set_pending_signer_state(None);
     progress_runtime.touch_transition();
 
@@ -154,7 +154,7 @@ fn boundary_progress_and_side_effect_checkpoint_persistence_have_distinct_wait_s
 
     assert!(progress.pending_requests.pending_evidence_refs.is_empty());
     assert_eq!(progress.pending_requests.pending_signer_request_id, None);
-    assert_eq!(progress.pending_requests.pending_confirmation_id, None);
+    assert_eq!(progress.pending_requests.pending_submission_id, None);
     assert_eq!(checkpoint_repo.history_len("run-1"), 2);
 
     let latest = checkpoint_repo.latest("run-1").expect("latest checkpoint");
@@ -165,7 +165,7 @@ fn boundary_progress_and_side_effect_checkpoint_persistence_have_distinct_wait_s
     side_effect_runtime
         .checkpoint
         .pending_requests
-        .pending_confirmation_id = Some("confirm-2".to_owned());
+        .pending_submission_id = Some("confirm-2".to_owned());
     side_effect_runtime
         .checkpoint
         .pending_requests
@@ -177,7 +177,7 @@ fn boundary_progress_and_side_effect_checkpoint_persistence_have_distinct_wait_s
     assert_eq!(
         side_effect
             .pending_requests
-            .pending_confirmation_id
+            .pending_submission_id
             .as_deref(),
         Some("confirm-2")
     );
@@ -289,7 +289,7 @@ fn side_effect_checkpoint_preserves_confirmation_and_verify_resume_truth() {
         .checkpoint
         .lifecycle
         .await_confirmation("waiting for receipt 0xabc");
-    runtime.checkpoint.pending_requests.pending_confirmation_id = Some("0xabc".to_owned());
+    runtime.checkpoint.pending_requests.pending_submission_id = Some("0xabc".to_owned());
     runtime
         .checkpoint
         .effect_contracts
@@ -311,7 +311,7 @@ fn side_effect_checkpoint_preserves_confirmation_and_verify_resume_truth() {
     assert_eq!(
         side_effect
             .pending_requests
-            .pending_confirmation_id
+            .pending_submission_id
             .as_deref(),
         Some("0xabc")
     );
@@ -343,7 +343,7 @@ fn side_effect_checkpoint_preserves_confirmation_and_verify_resume_truth() {
         restored
             .checkpoint
             .pending_requests
-            .pending_confirmation_id
+            .pending_submission_id
             .as_deref(),
         Some("0xabc")
     );
@@ -359,7 +359,7 @@ fn side_effect_checkpoint_preserves_confirmation_and_verify_resume_truth() {
 }
 
 #[test]
-fn restore_rejects_awaiting_confirmation_checkpoint_without_pending_confirmation_id() {
+fn restore_rejects_awaiting_confirmation_checkpoint_without_pending_submission_id() {
     let mut checkpoint = sample_running_checkpoint();
     checkpoint
         .lifecycle
@@ -382,7 +382,7 @@ fn restore_rejects_confirmation_resume_without_effect_contract() {
     checkpoint
         .lifecycle
         .await_confirmation("waiting for receipt 0xabc");
-    checkpoint.pending_requests.pending_confirmation_id = Some("0xabc".to_owned());
+    checkpoint.pending_requests.pending_submission_id = Some("0xabc".to_owned());
     checkpoint.action_graph.nodes.insert(
         "verify-swap".to_owned(),
         verify_effect_node("verify-swap", Some("state.pre.out"), Some("state.post.out")),
@@ -457,7 +457,7 @@ fn sample_awaiting_signer_checkpoint(signer_state: &SignerRequestState) -> Check
             pending_envelope_refs: Vec::new(),
             pending_signer_request: None,
             pending_signer_request_id: Some(signer_state.request_id.0.clone()),
-            pending_confirmation_id: None,
+            pending_submission_id: None,
         },
         last_completed_node_id: Some("simulate-1".to_owned()),
         actuation_records: Vec::new(),

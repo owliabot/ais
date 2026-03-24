@@ -57,6 +57,7 @@ Current implementation status:
   - `RuntimeAudit`
   - recovery/governor/plan-patch payload records
   - first-pass cancellation/interruption/durable-commit audit payload records
+  - `ClaimTransitionAuditRecord` for acquire / renew / release / expire / supersede ownership truth
 - interruption/cancellation DTOs are now also frozen for the next control-plane phase:
   - `InterruptionClass`
   - `InterruptionState`
@@ -95,7 +96,7 @@ Known gaps:
 - no command/result schema evolution policy yet
 - grouped durable commit execution now exists in runtime/store layers; this crate only freezes the command/audit DTO seam
 - ownership command DTOs are now implemented in runtime/store layers for acquire / renew / release / guarded supersede; remaining work on this seam is narrower:
-  - claim-specific runtime audit payload families are still not frozen here
+  - correlation-id typing beyond `SignerRequestId` is still pending
 - interruption/cancellation legality plus transport/restart proof are now implemented; remaining future work on this seam is narrower:
   - any explicit retry-command split beyond `RetryIntent`
   - automatic terminal-resolution policy for post-side-effect cancel flows

@@ -132,10 +132,7 @@ pub fn restore_active_run_from_parts(
     }
 
     if RuntimeStateMachine::requires_confirmation_resume(&checkpoint)
-        && checkpoint
-            .pending_requests
-            .pending_confirmation_id
-            .is_none()
+        && checkpoint.pending_requests.pending_submission_id.is_none()
     {
         return Err(RestoreRuntimeError::MissingPendingConfirmationId {
             run_id: checkpoint.run_id.clone(),

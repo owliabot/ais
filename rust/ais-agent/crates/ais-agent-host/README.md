@@ -33,6 +33,12 @@ Current implementation status:
   - `HostCommandOutcome`
   - `HostCommandService`
   - `HostCommandOutcome.events` now carries sequenced `RunEventEnvelope` values
+  - `HostCommandError` is now a structured machine-readable contract carrying:
+    - `error_class`
+    - `retryable`
+    - compact `recovery_hints`
+    - optional correlation fields
+    - optional provider-binding context
   - `HostCommandService` is now async end-to-end via boxed futures so transport and runtime no longer need sync shims
 - host event-query contract implemented:
   - `HostRunEventQuery`
@@ -71,7 +77,7 @@ Current implementation status:
 - projector entry points now also accept explicit runtime-owned `RecoveryView` input so transport/session layers do not become the semantic owner of recovery classification
 - default projector entry points now also use the shared core checkpoint-recovery classifier, so direct host projector usage stays aligned with runtime-backed inspect semantics
 - default projector entry points now also use the shared core claim-policy classifier, so direct host projector usage stays aligned with runtime ownership semantics even before durable claims are enforced
-- `PauseBundle` now emits schema `ais-agent/pause_bundle/v2`, where each `required_actions` entry carries:
+- `PauseBundle` now emits schema `ais-agent/pause_bundle/v3`, where each `required_actions` entry carries:
   - typed `action_kind`
   - host command string `action`
   - `requires_mutation_claim`

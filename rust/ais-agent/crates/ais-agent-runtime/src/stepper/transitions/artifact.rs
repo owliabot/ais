@@ -66,7 +66,7 @@ pub(crate) fn apply_execution_artifact_transition(
                         "run.artifact.branch_selected"
                     );
                     if let Err(error) = activate_execution_artifact_stage(&mut runtime.checkpoint) {
-                        return fail_artifact(runtime, active_stage_id.as_str(), error);
+                        return fail_artifact(runtime, active_stage_id.as_str(), error.to_string());
                     }
                     runtime
                         .checkpoint
@@ -137,7 +137,7 @@ pub(crate) fn apply_execution_artifact_transition(
             }
             if let Some(next_stage_id) = stage.next_stage_id.as_ref() {
                 if let Err(error) = activate_execution_artifact_stage(&mut runtime.checkpoint) {
-                    return fail_artifact(runtime, active_stage_id.as_str(), error);
+                    return fail_artifact(runtime, active_stage_id.as_str(), error.to_string());
                 }
                 info!(
                     parent: None,
@@ -208,7 +208,7 @@ pub(crate) fn apply_execution_artifact_transition(
             }
             if let Some(next_stage_id) = stage.next_stage_id.as_ref() {
                 if let Err(error) = activate_execution_artifact_stage(&mut runtime.checkpoint) {
-                    return fail_artifact(runtime, active_stage_id.as_str(), error);
+                    return fail_artifact(runtime, active_stage_id.as_str(), error.to_string());
                 }
                 info!(
                     parent: None,

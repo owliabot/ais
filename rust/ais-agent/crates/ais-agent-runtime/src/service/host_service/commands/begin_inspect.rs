@@ -41,8 +41,7 @@ where
             &mut checkpoint,
             &self.execution_wiring,
             &launch_spec,
-        )
-        .map_err(RuntimeHostServiceError::invalid_command)?;
+        )?;
         let mut runtime = ActiveRun::new(mission.clone(), checkpoint.clone());
         runtime.record_command(command.command_id, None);
 

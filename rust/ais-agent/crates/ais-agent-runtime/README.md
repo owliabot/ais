@@ -93,14 +93,28 @@ Current implementation status:
   - `submit_signer_resolution`
   - `submit_plan_patch`
   - `cancel_run`
+  - host-facing command failures now emit structured `HostCommandError` payloads with:
+    - `error_class`
+    - `retryable`
+    - `recovery_hints`
+    - optional correlation ids
+    - optional provider-binding context
+  - host-visible correlation ids are now explicit and typed for:
+    - `SignerRequestId`
+    - chain-generic `submission_id`
+  - execution-artifact provider lookup failures now surface as formal provider-binding errors instead of formatted strings
 - durable restore path now reconstructs `ActiveRun` from:
   - `MissionRepository`
   - latest `CheckpointArchive` entry
   - durable wait-state store
   instead of relying on a retained hot runtime copy
   and now rejects malformed confirmation-resume checkpoints that are missing:
-    - `pending_confirmation_id`
+    - `pending_submission_id`
     - effect contracts required by pending verify nodes
+  - restore failures now map to machine-readable host codes such as:
+    - `restore_missing_pending_submission_id`
+    - `restore_missing_effect_contract`
+    - `restore_signer_request_mismatch`
 - optimistic concurrency helpers implemented for mutable commands:
   - current version snapshot
   - stale checkpoint sequence guard
@@ -281,7 +295,7 @@ Known observability gaps:
   - confirmation-depth aware receipt projection
   - explicit `awaiting_confirmation` stable boundary
 - EVM live write-path transitions now execute through real `alloy` ports for:
-  - raw signed-transaction broadcast -> live `tx_hash`
+  - raw signed-transaction broadcast -> live chain submission id
   - receipt polling -> observed/missing receipt view
   - confirmation-depth aware receipt projection
   - explicit `awaiting_confirmation` stable boundary
@@ -514,6 +528,12 @@ Known gaps:
   - compare-and-supersede on paused pre-side-effect runs
   - explicit reacquire after durable lease expiry
   - claim-aware idempotent replay across release/reacquire and legacy bootstrap paths
+  - claim transitions are now appended as first-class runtime audit records for:
+    - acquire
+    - renew
+    - release
+    - expire
+    - supersede / reacquire
 - restart/transport proof on the ownership seam now also covers:
   - released-claim restart truth remaining inspect-readable but mutation-closed
   - expired-claim restart truth requiring explicit reacquire
@@ -521,7 +541,6 @@ Known gaps:
   - HTTP expiry-style takeover across separate service instances sharing SQLite durable claim truth
   - stale old-owner mutation rejection after takeover
 - the remaining ownership gap is now narrower:
-  - claim transitions are not yet emitted as first-class runtime audit payloads
   - cross-process takeover still depends on per-process host-session storage plus durable claim truth; there is no shared host-session backend yet
 - only SQLite currently provides a backend-native grouped transaction unit; the reference in-memory executor remains a linear fail-closed seam for tests and non-SQLite wiring
 - no push-based event streaming transport yet

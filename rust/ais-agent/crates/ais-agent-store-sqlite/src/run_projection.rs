@@ -409,6 +409,7 @@ fn runtime_audit_kind(record: &RuntimeAuditRecord) -> &'static str {
         RuntimeAudit::Cancellation(_) => "cancellation",
         RuntimeAudit::Interruption(_) => "interruption",
         RuntimeAudit::DurableCommit(_) => "durable_commit",
+        RuntimeAudit::ClaimTransition(_) => "claim_transition",
     }
 }
 

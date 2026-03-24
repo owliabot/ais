@@ -21,17 +21,17 @@ fn signer_request_tracks_submitted_and_reconciled_states() {
         request_id: SignerRequestId("signer-1".to_owned()),
         kind: SignerResolutionKind::Submitted,
         resolved_at_ms: Some(100),
-        tx_hash: Some("0xabc".to_owned()),
+        submission_id: Some("0xabc".to_owned()),
         signed_payload: None,
     });
 
     assert_eq!(request.status, SignerRequestStatus::Submitted);
-    assert_eq!(request.submitted_tx_hash.as_deref(), Some("0xabc"));
+    assert_eq!(request.submitted_submission_id.as_deref(), Some("0xabc"));
     assert!(request.reconcile_required);
 
     request.mark_reconciled(Some("0xdef".to_owned()));
     assert_eq!(request.status, SignerRequestStatus::Reconciled);
-    assert_eq!(request.submitted_tx_hash.as_deref(), Some("0xdef"));
+    assert_eq!(request.submitted_submission_id.as_deref(), Some("0xdef"));
     assert!(!request.reconcile_required);
 }
 

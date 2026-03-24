@@ -24,7 +24,7 @@ use alloy::providers::Provider;
 use serde_json::{json, Value};
 
 use super::{
-    evm_binding::resolve_evm_verify_binding, latest_broadcast_tx_hash_for_node,
+    evm_binding::resolve_evm_verify_binding, latest_broadcast_submission_id_for_node,
     solana_binding::resolve_solana_verify_binding,
 };
 
@@ -64,16 +64,16 @@ pub(crate) async fn apply_verify_transition(runtime: &mut ActiveRun) -> Option<S
         let Some(connection) = &live.connection else {
             return fail_verify(runtime, &node_id, "evm verify binding missing connection");
         };
-        let Some(tx_hash) = resolve_confirmation_tx_hash(runtime, &node) else {
+        let Some(submission_id) = resolve_confirmation_submission_id(runtime, &node) else {
             return fail_verify(
                 runtime,
                 &node_id,
-                "evm verify binding missing broadcast tx hash",
+                "evm verify binding missing broadcast submission id",
             );
         };
 
         let receipt = match EvmAlloyReceiptPort::new(connection.http_url.clone())
-            .get_transaction_receipt(&tx_hash)
+            .get_transaction_receipt(&submission_id)
             .await
         {
             Ok(receipt) => receipt,
@@ -94,7 +94,7 @@ pub(crate) async fn apply_verify_transition(runtime: &mut ActiveRun) -> Option<S
             &node,
             verify,
             binding,
-            tx_hash,
+            submission_id,
             receipt.payload,
             receipt.observed,
             receipt.success,
@@ -124,16 +124,16 @@ pub(crate) async fn apply_verify_transition(runtime: &mut ActiveRun) -> Option<S
                 "solana verify binding missing connection",
             );
         };
-        let Some(signature) = resolve_confirmation_tx_hash(runtime, &node) else {
+        let Some(submission_id) = resolve_confirmation_submission_id(runtime, &node) else {
             return fail_verify(
                 runtime,
                 &node_id,
-                "solana verify binding missing broadcast signature",
+                "solana verify binding missing broadcast submission id",
             );
         };
 
         let receipt = match SolanaLiveReceiptPort::new(connection.clone())
-            .get_signature_receipt(&signature)
+            .get_signature_receipt(&submission_id)
             .await
         {
             Ok(receipt) => receipt,
@@ -153,7 +153,7 @@ pub(crate) async fn apply_verify_transition(runtime: &mut ActiveRun) -> Option<S
             runtime,
             &node,
             verify,
-            signature,
+            submission_id,
             receipt.payload,
             receipt.observed,
             receipt.success,
@@ -180,29 +180,31 @@ async fn apply_evm_receipt_observation(
     node: &ActionNode,
     verify: &VerifyAction,
     binding: EvmVerifyBinding,
-    tx_hash: String,
+    submission_id: String,
     receipt_payload: Value,
     observed: bool,
     success: Option<bool>,
 ) -> Option<StepTransition> {
     if !observed {
-        runtime.checkpoint.pending_requests.pending_confirmation_id = Some(tx_hash.clone());
+        runtime.checkpoint.pending_requests.pending_submission_id = Some(submission_id.clone());
         runtime
             .checkpoint
             .lifecycle
-            .await_confirmation(format!("waiting for chain receipt {tx_hash}"));
+            .await_confirmation(format!("waiting for chain receipt {submission_id}"));
         runtime.checkpoint.lifecycle.failure = None;
         runtime.touch_transition();
 
         return Some(StepTransition {
             kind: StepTransitionKind::Verify,
             node_id: Some(node.node_id.clone()),
-            summary: format!("receipt not yet observed for {tx_hash}; waiting for confirmation"),
+            summary: format!(
+                "receipt not yet observed for {submission_id}; waiting for confirmation"
+            ),
         });
     }
 
     let node_id = node.node_id.as_str();
-    let receipt_payload = normalized_receipt_payload(receipt_payload, &tx_hash, success);
+    let receipt_payload = normalized_receipt_payload(receipt_payload, &submission_id, success);
     let receipt_evidence_id = format!("receipt.{node_id}");
     insert_observation_record(
         runtime,
@@ -216,25 +218,31 @@ async fn apply_evm_receipt_observation(
         node_id,
         ActuationKind::ReceiptObserved,
         runtime.mission.allowed_chains.first().cloned(),
-        Some(tx_hash.clone()),
-        format!("receipt observed for {tx_hash}"),
+        Some(submission_id.clone()),
+        format!("receipt observed for {submission_id}"),
     );
 
     if is_effect_contract_binding(&binding) {
-        return apply_effect_contract_verification(runtime, node, verify, receipt_payload, tx_hash)
-            .await;
+        return apply_effect_contract_verification(
+            runtime,
+            node,
+            verify,
+            receipt_payload,
+            submission_id,
+        )
+        .await;
     }
 
     if success != Some(true) {
         return pause_verify_mismatch(
             runtime,
             node,
-            format!("receipt observed for {tx_hash} but execution failed"),
-            Some(tx_hash),
+            format!("receipt observed for {submission_id} but execution failed"),
+            Some(submission_id),
         );
     }
 
-    runtime.checkpoint.pending_requests.pending_confirmation_id = None;
+    runtime.checkpoint.pending_requests.pending_submission_id = None;
     runtime
         .checkpoint
         .lifecycle
@@ -254,7 +262,7 @@ async fn apply_effect_contract_verification(
     node: &ActionNode,
     verify: &VerifyAction,
     receipt_payload: Value,
-    tx_hash: String,
+    submission_id: String,
 ) -> Option<StepTransition> {
     let node_id = node.node_id.as_str();
     let Some(effect_id) = node.expected_effect_ref.clone() else {
@@ -301,7 +309,7 @@ async fn apply_effect_contract_verification(
                     "evm.rpc",
                     "eth_call",
                     format!("evm post-state observe failed: {error}"),
-                    Some(tx_hash.clone()),
+                    Some(submission_id.clone()),
                 );
             }
         }
@@ -321,7 +329,7 @@ async fn apply_effect_contract_verification(
         effect_contract,
         receipt_payload,
         post_payload,
-        tx_hash,
+        submission_id,
     )
 }
 
@@ -329,29 +337,32 @@ async fn apply_solana_receipt_observation(
     runtime: &mut ActiveRun,
     node: &ActionNode,
     verify: &VerifyAction,
-    signature: String,
+    submission_id: String,
     receipt_payload: Value,
     observed: bool,
     success: Option<bool>,
 ) -> Option<StepTransition> {
     if !observed {
-        runtime.checkpoint.pending_requests.pending_confirmation_id = Some(signature.clone());
+        runtime.checkpoint.pending_requests.pending_submission_id = Some(submission_id.clone());
         runtime
             .checkpoint
             .lifecycle
-            .await_confirmation(format!("waiting for chain receipt {signature}"));
+            .await_confirmation(format!("waiting for chain receipt {submission_id}"));
         runtime.checkpoint.lifecycle.failure = None;
         runtime.touch_transition();
 
         return Some(StepTransition {
             kind: StepTransitionKind::Verify,
             node_id: Some(node.node_id.clone()),
-            summary: format!("receipt not yet observed for {signature}; waiting for confirmation"),
+            summary: format!(
+                "receipt not yet observed for {submission_id}; waiting for confirmation"
+            ),
         });
     }
 
     let node_id = node.node_id.as_str();
-    let receipt_payload = normalized_solana_receipt_payload(receipt_payload, &signature, success);
+    let receipt_payload =
+        normalized_solana_receipt_payload(receipt_payload, &submission_id, success);
     let receipt_evidence_id = format!("receipt.{node_id}");
     insert_observation_record(
         runtime,
@@ -365,8 +376,8 @@ async fn apply_solana_receipt_observation(
         node_id,
         ActuationKind::ReceiptObserved,
         runtime.mission.allowed_chains.first().cloned(),
-        Some(signature.clone()),
-        format!("receipt observed for {signature}"),
+        Some(submission_id.clone()),
+        format!("receipt observed for {submission_id}"),
     );
 
     let Some(VerifyLiveBinding::Solana(live)) = &verify.live else {
@@ -386,7 +397,7 @@ async fn apply_solana_receipt_observation(
             node,
             verify,
             receipt_payload,
-            signature,
+            submission_id,
         )
         .await;
     }
@@ -395,12 +406,12 @@ async fn apply_solana_receipt_observation(
         return pause_verify_mismatch(
             runtime,
             node,
-            format!("receipt observed for {signature} but execution failed"),
-            Some(signature),
+            format!("receipt observed for {submission_id} but execution failed"),
+            Some(submission_id),
         );
     }
 
-    runtime.checkpoint.pending_requests.pending_confirmation_id = None;
+    runtime.checkpoint.pending_requests.pending_submission_id = None;
     runtime
         .checkpoint
         .lifecycle
@@ -420,7 +431,7 @@ async fn apply_solana_effect_contract_verification(
     node: &ActionNode,
     verify: &VerifyAction,
     receipt_payload: Value,
-    signature: String,
+    submission_id: String,
 ) -> Option<StepTransition> {
     let node_id = node.node_id.as_str();
     let Some(effect_id) = node.expected_effect_ref.clone() else {
@@ -447,7 +458,7 @@ async fn apply_solana_effect_contract_verification(
         effect_contract,
         receipt_payload,
         post_payload,
-        signature,
+        submission_id,
     )
 }
 
@@ -459,7 +470,7 @@ fn apply_effect_contract_verdict(
     effect_contract: ais_agent_core::effect::EffectContract,
     receipt_payload: Value,
     post_payload: Option<Value>,
-    tx_hash: String,
+    submission_id: String,
 ) -> Option<StepTransition> {
     let node_id = node.node_id.as_str();
     let pre_payload = verify
@@ -478,7 +489,7 @@ fn apply_effect_contract_verdict(
             context: Some(json!({
                 "node_id": node_id,
                 "effect_id": effect_id,
-                "tx_hash": tx_hash,
+                "submission_id": submission_id,
             })),
         },
     );
@@ -498,7 +509,7 @@ fn apply_effect_contract_verdict(
 
     match result.final_status {
         EffectDeltaStatus::Satisfied => {
-            runtime.checkpoint.pending_requests.pending_confirmation_id = None;
+            runtime.checkpoint.pending_requests.pending_submission_id = None;
             runtime
                 .checkpoint
                 .lifecycle
@@ -513,7 +524,7 @@ fn apply_effect_contract_verdict(
             })
         }
         EffectDeltaStatus::Violated => {
-            pause_verify_mismatch(runtime, node, result.final_summary, Some(tx_hash))
+            pause_verify_mismatch(runtime, node, result.final_summary, Some(submission_id))
         }
         EffectDeltaStatus::UnknownDueToMissingObservation | EffectDeltaStatus::Pending => {
             let mut missing = result
@@ -548,19 +559,18 @@ fn is_effect_contract_binding(binding: &EvmVerifyBinding) -> bool {
     )
 }
 
-fn resolve_confirmation_tx_hash(runtime: &ActiveRun, node: &ActionNode) -> Option<String> {
+fn resolve_confirmation_submission_id(runtime: &ActiveRun, node: &ActionNode) -> Option<String> {
     runtime
         .checkpoint
         .pending_requests
-        .pending_confirmation_id
+        .pending_submission_id
         .clone()
         .or_else(|| {
-            node.depends_on
-                .iter()
-                .rev()
-                .find_map(|dependency_id| latest_broadcast_tx_hash_for_node(runtime, dependency_id))
+            node.depends_on.iter().rev().find_map(|dependency_id| {
+                latest_broadcast_submission_id_for_node(runtime, dependency_id)
+            })
         })
-        .or_else(|| latest_broadcast_tx_hash_for_node(runtime, node.node_id.as_str()))
+        .or_else(|| latest_broadcast_submission_id_for_node(runtime, node.node_id.as_str()))
 }
 
 fn insert_observation_record(
@@ -616,19 +626,19 @@ fn pause_confirmation_retryable(
     reason: impl Into<String>,
 ) -> Option<StepTransition> {
     let reason = reason.into();
-    let confirmation_ref = resolve_confirmation_tx_hash(runtime, node);
+    let submission_id = resolve_confirmation_submission_id(runtime, node);
     let actuation_ref = latest_actuation_ref_for_node(runtime, node);
     let failure_code = classify_confirmation_failure(reason.as_str());
     let interruption_class = classify_confirmation_interruption_class(&failure_code);
-    if let Some(confirmation_ref) = confirmation_ref.clone() {
-        runtime.checkpoint.pending_requests.pending_confirmation_id = Some(confirmation_ref);
+    if let Some(submission_id) = submission_id.clone() {
+        runtime.checkpoint.pending_requests.pending_submission_id = Some(submission_id);
     }
     runtime.checkpoint.lifecycle.await_confirmation(format!(
         "waiting for chain receipt {}",
         runtime
             .checkpoint
             .pending_requests
-            .pending_confirmation_id
+            .pending_submission_id
             .clone()
             .unwrap_or_else(|| "unknown".to_owned())
     ));
@@ -646,11 +656,11 @@ fn pause_confirmation_retryable(
         if let Some(effect_ref) = node.expected_effect_ref.clone() {
             failure.effect_refs.push(effect_ref);
         }
-        if let Some(actuation_ref) = actuation_ref.clone().or_else(|| confirmation_ref.clone()) {
+        if let Some(actuation_ref) = actuation_ref.clone().or_else(|| submission_id.clone()) {
             failure.actuation_refs.push(actuation_ref);
         }
-        if let Some(confirmation_ref) = confirmation_ref.clone() {
-            failure.confirmation_refs.push(confirmation_ref);
+        if let Some(submission_id) = submission_id.clone() {
+            failure.confirmation_refs.push(submission_id);
         }
         if matches!(failure_code, RunFailureCode::ProviderUnavailable) {
             failure.provider_error = Some(ProviderFailureInfo {
@@ -684,19 +694,19 @@ fn pause_verify_provider_failure(
     provider: &str,
     operation: &str,
     reason: impl Into<String>,
-    confirmation_ref: Option<String>,
+    submission_id: Option<String>,
 ) -> Option<StepTransition> {
     let reason = reason.into();
     let actuation_ref = latest_actuation_ref_for_node(runtime, node);
-    if let Some(confirmation_ref_value) = confirmation_ref.clone() {
-        runtime.checkpoint.pending_requests.pending_confirmation_id = Some(confirmation_ref_value);
+    if let Some(submission_id_value) = submission_id.clone() {
+        runtime.checkpoint.pending_requests.pending_submission_id = Some(submission_id_value);
     }
     runtime.checkpoint.lifecycle.await_confirmation(format!(
         "waiting for chain receipt {}",
         runtime
             .checkpoint
             .pending_requests
-            .pending_confirmation_id
+            .pending_submission_id
             .clone()
             .unwrap_or_else(|| "unknown".to_owned())
     ));
@@ -714,11 +724,11 @@ fn pause_verify_provider_failure(
         if let Some(effect_ref) = node.expected_effect_ref.clone() {
             failure.effect_refs.push(effect_ref);
         }
-        if let Some(actuation_ref) = actuation_ref.clone().or_else(|| confirmation_ref.clone()) {
+        if let Some(actuation_ref) = actuation_ref.clone().or_else(|| submission_id.clone()) {
             failure.actuation_refs.push(actuation_ref);
         }
-        if let Some(confirmation_ref) = confirmation_ref {
-            failure.confirmation_refs.push(confirmation_ref);
+        if let Some(submission_id) = submission_id {
+            failure.confirmation_refs.push(submission_id);
         }
         failure.provider_error = Some(ProviderFailureInfo {
             provider: provider.to_owned(),
@@ -747,13 +757,13 @@ fn pause_verify_mismatch(
     runtime: &mut ActiveRun,
     node: &ActionNode,
     reason: impl Into<String>,
-    confirmation_ref: Option<String>,
+    submission_id: Option<String>,
 ) -> Option<StepTransition> {
     let reason = reason.into();
     let node_id = node.node_id.as_str();
     let actuation_ref = latest_actuation_ref_for_node(runtime, node);
     mark_node_status(runtime, node_id, ActionNodeStatus::Failed);
-    runtime.checkpoint.pending_requests.pending_confirmation_id = None;
+    runtime.checkpoint.pending_requests.pending_submission_id = None;
     runtime.checkpoint.lifecycle.pause_with_failure(
         RunFailureStage::Verify,
         RunFailureCode::VerifyMismatch,
@@ -764,11 +774,11 @@ fn pause_verify_mismatch(
         if let Some(effect_ref) = node.expected_effect_ref.clone() {
             failure.effect_refs.push(effect_ref);
         }
-        if let Some(actuation_ref) = actuation_ref.or_else(|| confirmation_ref.clone()) {
+        if let Some(actuation_ref) = actuation_ref.or_else(|| submission_id.clone()) {
             failure.actuation_refs.push(actuation_ref);
         }
-        if let Some(confirmation_ref) = confirmation_ref {
-            failure.confirmation_refs.push(confirmation_ref);
+        if let Some(submission_id) = submission_id {
+            failure.confirmation_refs.push(submission_id);
         }
         failure.evidence_refs.extend(
             [
@@ -918,16 +928,16 @@ where
             "verify payload missing for solana binding",
         );
     };
-    let Some(signature) = resolve_confirmation_tx_hash(runtime, &node) else {
+    let Some(submission_id) = resolve_confirmation_submission_id(runtime, &node) else {
         return fail_verify(
             runtime,
             &node_id,
-            "solana verify binding missing broadcast signature",
+            "solana verify binding missing broadcast submission id",
         );
     };
     let receipt = match SolanaLiveReceiptPort::get_signature_receipt_with_client(
         client,
-        &signature.parse().ok()?,
+        &submission_id.parse().ok()?,
     )
     .await
     {
@@ -948,7 +958,7 @@ where
         runtime,
         &node,
         verify,
-        signature,
+        submission_id,
         receipt.payload,
         receipt.observed,
         receipt.success,
@@ -986,65 +996,69 @@ where
     let Some(binding) = resolve_evm_verify_binding(&node) else {
         return fail_verify(runtime, &node_id, "missing evm verify binding");
     };
-    let Some(tx_hash) = resolve_confirmation_tx_hash(runtime, &node) else {
+    let Some(submission_id) = resolve_confirmation_submission_id(runtime, &node) else {
         return fail_verify(
             runtime,
             &node_id,
-            "evm verify binding missing broadcast tx hash",
+            "evm verify binding missing broadcast submission id",
         );
     };
-    let parsed_tx_hash = match tx_hash.parse() {
-        Ok(tx_hash) => tx_hash,
+    let parsed_submission_id = match submission_id.parse() {
+        Ok(submission_id) => submission_id,
         Err(error) => {
             return fail_verify(
                 runtime,
                 &node_id,
-                format!("invalid tx hash for verify: {error}"),
+                format!("invalid submission id for verify: {error}"),
             );
         }
     };
 
-    let receipt =
-        match EvmAlloyReceiptPort::get_transaction_receipt_with_provider(provider, parsed_tx_hash)
-            .await
-        {
-            Ok(receipt) => receipt,
-            Err(error) => {
-                return pause_confirmation_retryable(
-                    runtime,
-                    &node,
-                    &node_id,
-                    "evm.rpc",
-                    "eth_getTransactionReceipt",
-                    format!("evm verify via provider failed: {error}"),
-                );
-            }
-        };
+    let receipt = match EvmAlloyReceiptPort::get_transaction_receipt_with_provider(
+        provider,
+        parsed_submission_id,
+    )
+    .await
+    {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            return pause_confirmation_retryable(
+                runtime,
+                &node,
+                &node_id,
+                "evm.rpc",
+                "eth_getTransactionReceipt",
+                format!("evm verify via provider failed: {error}"),
+            );
+        }
+    };
 
     if !receipt.observed {
-        let tx_hash = format!("{:#x}", receipt.tx_hash);
-        runtime.checkpoint.pending_requests.pending_confirmation_id = Some(tx_hash.clone());
+        let submission_id = format!("{:#x}", receipt.tx_hash);
+        runtime.checkpoint.pending_requests.pending_submission_id = Some(submission_id.clone());
         runtime
             .checkpoint
             .lifecycle
-            .await_confirmation(format!("waiting for chain receipt {tx_hash}"));
+            .await_confirmation(format!("waiting for chain receipt {submission_id}"));
         runtime.checkpoint.lifecycle.failure = None;
         runtime.touch_transition();
         return Some(StepTransition {
             kind: StepTransitionKind::Verify,
             node_id: Some(node_id.clone()),
-            summary: format!("receipt not yet observed for {tx_hash}; waiting for confirmation"),
+            summary: format!(
+                "receipt not yet observed for {submission_id}; waiting for confirmation"
+            ),
         });
     }
 
-    let tx_hash = format!("{:#x}", receipt.tx_hash);
+    let submission_id = format!("{:#x}", receipt.tx_hash);
     let raw_receipt_payload = receipt.payload.clone();
     let success = receipt.success;
     let observed = receipt.observed;
 
     if is_effect_contract_binding(&binding) {
         let receipt_payload =
-            normalized_receipt_payload(raw_receipt_payload.clone(), &tx_hash, success);
+            normalized_receipt_payload(raw_receipt_payload.clone(), &submission_id, success);
         let receipt_evidence_id = format!("receipt.{node_id}");
         insert_observation_record(
             runtime,
@@ -1058,8 +1072,8 @@ where
             node_id.as_str(),
             ActuationKind::ReceiptObserved,
             runtime.mission.allowed_chains.first().cloned(),
-            Some(tx_hash.clone()),
-            format!("receipt observed for {tx_hash}"),
+            Some(submission_id.clone()),
+            format!("receipt observed for {submission_id}"),
         );
 
         let Some(VerifyLiveBinding::Evm(live)) = &verify.live else {
@@ -1089,7 +1103,7 @@ where
                         "evm.rpc",
                         "eth_call",
                         format!("evm post-state observe via provider failed: {error}"),
-                        Some(tx_hash.clone()),
+                        Some(submission_id.clone()),
                     );
                 }
             }
@@ -1120,7 +1134,7 @@ where
             effect_contract,
             receipt_payload,
             post_payload,
-            tx_hash,
+            submission_id,
         );
     }
 
@@ -1129,7 +1143,7 @@ where
         &node,
         verify,
         binding,
-        tx_hash,
+        submission_id,
         raw_receipt_payload,
         observed,
         success,

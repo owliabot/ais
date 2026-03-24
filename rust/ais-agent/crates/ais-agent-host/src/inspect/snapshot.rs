@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use ais_agent_control::{
     events::{RunEventFamily, RunEventTraceContext},
-    ids::RunId,
+    ids::{ChainSubmissionId, RunId},
     ownership::RunOwnershipSnapshot,
     recovery::{
         CancelState, InterruptionClass, RecoveryActionKind, RecoveryDisposition,
@@ -80,7 +80,7 @@ pub struct RequiredInputView {
 pub struct SideEffectView {
     pub kind: String,
     pub summary: String,
-    pub tx_hash: Option<String>,
+    pub submission_id: Option<ChainSubmissionId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

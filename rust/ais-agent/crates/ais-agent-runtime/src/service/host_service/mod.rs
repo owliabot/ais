@@ -475,6 +475,7 @@ mod tests {
     use ais_agent_control::ids::RunId;
     use ais_agent_host::control::{
         HostAcceptedResponse, HostCommandError, HostCommandOutcome, HostCommandResponse,
+        HostErrorClass, HostErrorRecoveryHints,
     };
 
     use crate::tests::tracing_capture::capture_tracing_output_at_level;
@@ -493,6 +494,11 @@ mod tests {
             super::response_kind(&HostCommandResponse::Error(HostCommandError {
                 code: "claim_conflict".to_owned(),
                 message: "x".to_owned(),
+                error_class: HostErrorClass::Ownership,
+                retryable: false,
+                recovery_hints: HostErrorRecoveryHints::default(),
+                correlation: None,
+                provider_binding: None,
             })),
             "error"
         );
@@ -539,6 +545,11 @@ mod tests {
             response: HostCommandResponse::Error(HostCommandError {
                 code: "claim_conflict".to_owned(),
                 message: "run claimed elsewhere".to_owned(),
+                error_class: HostErrorClass::Ownership,
+                retryable: false,
+                recovery_hints: HostErrorRecoveryHints::default(),
+                correlation: None,
+                provider_binding: None,
             }),
             events: Vec::new(),
         };

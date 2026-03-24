@@ -1,8 +1,9 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ais_agent_control::{
+    audit::{ClaimTransitionAuditRecord, RuntimeAudit, RuntimeAuditRecord},
     commands::RunCommand,
-    ids::{ClaimId, RunId},
+    ids::{AuditId, ClaimId, RunId},
     ownership::{ClaimTransitionKind, OwnershipErrorCode, RunClaim, RunClaimMode, RunClaimStatus},
 };
 use ais_agent_core::{checkpoint::CheckpointSnapshot, mission::Mission, ownership::ClaimPolicy};
@@ -279,6 +280,37 @@ where
         }
     }
 
+    pub(super) fn append_claim_transition_audit(
+        &mut self,
+        claim: &RunClaim,
+        previous_claim_id: Option<ClaimId>,
+        transition_kind: ClaimTransitionKind,
+        transition_reason: impl Into<String>,
+        effective_timestamp_ms: u64,
+    ) -> Result<(), RuntimeHostServiceError> {
+        let next_audit_seq = self
+            .archived_latest_audit_seq(&claim.run_id)?
+            .unwrap_or(0)
+            .saturating_add(1);
+        self.audit_archive.append(RuntimeAuditRecord {
+            audit_id: AuditId(format!("{}:audit:{next_audit_seq}", claim.run_id.0)),
+            run_id: claim.run_id.clone(),
+            audit_seq: next_audit_seq,
+            checkpoint_seq: 0,
+            plan_epoch: 0,
+            audit: RuntimeAudit::ClaimTransition(ClaimTransitionAuditRecord {
+                claim_id: claim.claim_id.clone(),
+                previous_claim_id,
+                host_session_id: claim.host_session_id.clone(),
+                transition_kind,
+                transition_reason: transition_reason.into(),
+                actor_or_initiator_kind: claim.owner_kind.clone(),
+                effective_timestamp_ms,
+            }),
+        })?;
+        Ok(())
+    }
+
     pub(super) fn load_event_batch(
         &self,
         query: HostRunEventQuery,
@@ -458,6 +490,13 @@ where
             })
             .map_err(|error| Self::map_claim_error(host_session_id, &run_id.0, error))?;
         if let Some(claim) = expired.as_ref() {
+            self.append_claim_transition_audit(
+                claim,
+                None,
+                ClaimTransitionKind::ClaimExpired,
+                "claim lease expired",
+                Self::claim_now_ms(),
+            )?;
             info!(
                 run_id = %claim.run_id.0,
                 host_session_id = %host_session_id.0,
@@ -495,6 +534,7 @@ where
         RuntimeHostServiceError::OwnershipViolation {
             code,
             run_id: run_id.to_owned(),
+            claim_id: None,
             message: format!("session `{}`: {error}", host_session_id.0),
         }
     }
@@ -507,6 +547,7 @@ where
             RuntimeHostServiceError::OwnershipViolation {
                 code: OwnershipErrorCode::ClaimRequired,
                 run_id: run_id.0.clone(),
+                claim_id: None,
                 message: error.to_string(),
             }
         })?
@@ -562,6 +603,7 @@ where
             return Err(RuntimeHostServiceError::OwnershipViolation {
                 code: OwnershipErrorCode::ClaimExpired,
                 run_id: run_id.0.clone(),
+                claim_id: Some(expired.claim_id.clone()),
                 message: format!("active claim `{}` has expired", expired.claim_id.0),
             });
         }
@@ -570,6 +612,7 @@ where
                 Some(previous_claim) => Err(RuntimeHostServiceError::OwnershipViolation {
                     code: OwnershipErrorCode::ClaimRequired,
                     run_id: run_id.0.clone(),
+                    claim_id: Some(previous_claim.claim_id.clone()),
                     message: format!(
                         "run `{}` requires an explicit claim after {:?} `{}`",
                         run_id.0, previous_claim.status, previous_claim.claim_id.0
@@ -583,6 +626,7 @@ where
             return Err(RuntimeHostServiceError::OwnershipViolation {
                 code: OwnershipErrorCode::ClaimExpired,
                 run_id: run_id.0.clone(),
+                claim_id: Some(claim.claim_id.clone()),
                 message: format!("active claim `{}` has expired", claim.claim_id.0),
             });
         }
@@ -590,6 +634,7 @@ where
             return Err(RuntimeHostServiceError::OwnershipViolation {
                 code: OwnershipErrorCode::ObserverOnly,
                 run_id: run_id.0.clone(),
+                claim_id: Some(claim.claim_id.clone()),
                 message: format!("claim `{}` is observer_only", claim.claim_id.0),
             });
         }
@@ -597,6 +642,7 @@ where
             return Err(RuntimeHostServiceError::OwnershipViolation {
                 code: OwnershipErrorCode::ClaimConflict,
                 run_id: run_id.0.clone(),
+                claim_id: Some(claim.claim_id.clone()),
                 message: format!(
                     "active claim `{}` belongs to session `{}`",
                     claim.claim_id.0, claim.host_session_id
@@ -655,6 +701,7 @@ where
             .map_err(|error| RuntimeHostServiceError::OwnershipViolation {
                 code: OwnershipErrorCode::ClaimRequired,
                 run_id: run_id.0.clone(),
+                claim_id: None,
                 message: error.to_string(),
             })
     }

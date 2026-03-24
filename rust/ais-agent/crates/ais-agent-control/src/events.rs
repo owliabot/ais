@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::execution_artifact::{ExecutionOutputKey, ExecutionPackageEntry, ExecutionStageId};
-use crate::ids::{EventId, RunId, SignerRequestId};
+use crate::ids::{ChainSubmissionId, EventId, RunId, SignerRequestId};
 use crate::{
     patch::{PatchOutcome, PlanPatchSubmission},
     recovery::{
@@ -13,8 +13,8 @@ use crate::{
 
 pub use crate::audit::{GovernorDecisionAuditKind, PlanPatchAuditStatus};
 
-pub const RUN_EVENT_SCHEMA_V1: &str = "ais-agent/runtime_event/v1";
-pub const RUN_EVENT_VERSION_V1: u16 = 1;
+pub const RUN_EVENT_SCHEMA_V2: &str = "ais-agent/runtime_event/v2";
+pub const RUN_EVENT_VERSION_V2: u16 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -44,10 +44,10 @@ pub struct RunEventTraceContext {
 impl RunEventDescriptor {
     pub const fn new(family: RunEventFamily, event_type: &'static str) -> Self {
         Self {
-            schema: RUN_EVENT_SCHEMA_V1,
+            schema: RUN_EVENT_SCHEMA_V2,
             family,
             event_type,
-            event_version: RUN_EVENT_VERSION_V1,
+            event_version: RUN_EVENT_VERSION_V2,
         }
     }
 }
@@ -224,7 +224,7 @@ pub struct RunAwaitingEvidence {
 pub struct RunAwaitingConfirm {
     pub event_id: EventId,
     pub run_id: RunId,
-    pub confirmation_id: Option<String>,
+    pub submission_id: Option<ChainSubmissionId>,
     pub reason: String,
 }
 
@@ -255,7 +255,7 @@ pub struct RunBroadcastSubmitted {
     pub run_id: RunId,
     pub node_id: String,
     pub chain: Option<String>,
-    pub tx_hash: Option<String>,
+    pub submission_id: Option<ChainSubmissionId>,
     pub summary: String,
 }
 
@@ -264,7 +264,7 @@ pub struct RunVerifyPassed {
     pub event_id: EventId,
     pub run_id: RunId,
     pub node_id: String,
-    pub tx_hash: Option<String>,
+    pub submission_id: Option<ChainSubmissionId>,
     pub summary: String,
 }
 
@@ -273,7 +273,7 @@ pub struct RunVerifyFailed {
     pub event_id: EventId,
     pub run_id: RunId,
     pub node_id: String,
-    pub tx_hash: Option<String>,
+    pub submission_id: Option<ChainSubmissionId>,
     pub code: Option<RunFailureCode>,
     pub message: String,
 }
@@ -310,10 +310,10 @@ mod tests {
         });
 
         let descriptor = event.descriptor();
-        assert_eq!(descriptor.schema, RUN_EVENT_SCHEMA_V1);
+        assert_eq!(descriptor.schema, RUN_EVENT_SCHEMA_V2);
         assert_eq!(descriptor.family, RunEventFamily::Signer);
         assert_eq!(descriptor.event_type, "run.signer.request_created");
-        assert_eq!(descriptor.event_version, RUN_EVENT_VERSION_V1);
+        assert_eq!(descriptor.event_version, RUN_EVENT_VERSION_V2);
     }
 
     #[test]

@@ -214,10 +214,10 @@ mod tests {
     use serde_json::json;
 
     use crate::{
-        config::types::AisAgentSqliteStorageConfig,
+        config::types::{AisAgentChainConnectionConfig, AisAgentSqliteStorageConfig},
         config::{
-            AisAgentChainConnectionConfig, AisAgentChainProviderEntry, AisAgentProviderConfig,
-            AisAgentServiceConfig, AisAgentStorageConfig,
+            AisAgentChainProviderEntry, AisAgentProviderConfig, AisAgentServiceConfig,
+            AisAgentStorageConfig,
         },
     };
 

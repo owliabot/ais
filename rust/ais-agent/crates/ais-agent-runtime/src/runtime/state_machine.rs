@@ -56,7 +56,7 @@ impl RuntimeStateMachine {
                     snapshot.pending_requests.pending_envelope_refs.clear();
                     snapshot.pending_requests.pending_signer_request_id = None;
                     snapshot.pending_requests.pending_signer_request = None;
-                    snapshot.pending_requests.pending_confirmation_id = None;
+                    snapshot.pending_requests.pending_submission_id = None;
                 } else {
                     snapshot.pending_requests.pending_signer_request_id = runtime
                         .pending_signer_state

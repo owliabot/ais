@@ -26,3 +26,4 @@ string_id!(EventId);
 string_id!(AuditId);
 string_id!(IdempotencyKey);
 string_id!(SignerRequestId);
+string_id!(ChainSubmissionId);

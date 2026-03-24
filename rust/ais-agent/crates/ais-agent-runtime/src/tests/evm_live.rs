@@ -224,13 +224,13 @@ async fn runtime_broadcast_node_can_submit_live_tx_hash_and_enter_confirmation_w
         runtime
             .checkpoint
             .pending_requests
-            .pending_confirmation_id
+            .pending_submission_id
             .as_deref(),
         Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
     );
     assert!(runtime.checkpoint.actuation_records.iter().any(|record| {
         matches!(record.kind, ActuationKind::BroadcastSubmitted)
-            && record.tx_hash.as_deref()
+            && record.submission_id.as_deref()
                 == Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
     }));
 }
@@ -296,7 +296,7 @@ async fn runtime_broadcast_prefers_signed_signer_payload_over_envelope_payload()
         runtime
             .checkpoint
             .pending_requests
-            .pending_confirmation_id
+            .pending_submission_id
             .as_deref(),
         Some("0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
     );
@@ -411,7 +411,7 @@ async fn runtime_can_resume_after_broadcast_and_observe_live_receipt() {
 
     assert_eq!(transition.node_id.as_deref(), Some("verify-swap"));
     assert_eq!(
-        restored.checkpoint.pending_requests.pending_confirmation_id,
+        restored.checkpoint.pending_requests.pending_submission_id,
         None
     );
     assert_eq!(
@@ -425,7 +425,7 @@ async fn runtime_can_resume_after_broadcast_and_observe_live_receipt() {
     );
     assert!(restored.checkpoint.actuation_records.iter().any(|record| {
         matches!(record.kind, ActuationKind::ReceiptObserved)
-            && record.tx_hash.as_deref()
+            && record.submission_id.as_deref()
                 == Some("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
     }));
     assert!(restored
@@ -502,7 +502,7 @@ async fn runtime_can_restart_from_durable_side_effect_cut_after_evm_broadcast_su
 
     assert_eq!(transition.node_id.as_deref(), Some("verify-swap"));
     assert_eq!(
-        restored.checkpoint.pending_requests.pending_confirmation_id,
+        restored.checkpoint.pending_requests.pending_submission_id,
         None
     );
     assert_eq!(
@@ -544,7 +544,7 @@ async fn runtime_effect_verify_can_reach_satisfied_from_live_receipt_and_post_st
 
     let mission = sample_mission();
     let mut runtime = ActiveRun::new(mission, checkpoint);
-    runtime.checkpoint.pending_requests.pending_confirmation_id = Some(format!("{:#x}", tx_hash));
+    runtime.checkpoint.pending_requests.pending_submission_id = Some(format!("{:#x}", tx_hash));
 
     let asserter = Asserter::new();
     let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
@@ -567,7 +567,7 @@ async fn runtime_effect_verify_can_reach_satisfied_from_live_receipt_and_post_st
         Some(ActionNodeStatus::Succeeded)
     );
     assert_eq!(
-        runtime.checkpoint.pending_requests.pending_confirmation_id,
+        runtime.checkpoint.pending_requests.pending_submission_id,
         None
     );
     assert!(runtime
@@ -605,7 +605,7 @@ async fn runtime_effect_verify_mismatch_pauses_with_recovery_context() {
 
     let mission = sample_mission();
     let mut runtime = ActiveRun::new(mission, checkpoint);
-    runtime.checkpoint.pending_requests.pending_confirmation_id = Some(format!("{:#x}", tx_hash));
+    runtime.checkpoint.pending_requests.pending_submission_id = Some(format!("{:#x}", tx_hash));
 
     let asserter = Asserter::new();
     let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
@@ -685,7 +685,7 @@ async fn runtime_effect_verify_can_reach_pending_when_required_pre_state_is_miss
 
     let mission = sample_mission();
     let mut runtime = ActiveRun::new(mission, checkpoint);
-    runtime.checkpoint.pending_requests.pending_confirmation_id = Some(format!("{:#x}", tx_hash));
+    runtime.checkpoint.pending_requests.pending_submission_id = Some(format!("{:#x}", tx_hash));
 
     let asserter = Asserter::new();
     let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
@@ -789,7 +789,7 @@ async fn runtime_evm_guarded_execution_can_complete_end_to_end_with_live_ports()
             ),
             kind: ais_agent_core::runtime::SignerResolutionKind::Signed,
             resolved_at_ms: None,
-            tx_hash: None,
+            submission_id: None,
             signed_payload: Some(serde_json::json!({"raw_tx":"0x0102"})),
         });
 
@@ -922,7 +922,7 @@ async fn native_transfer_launch_spec_can_complete_via_signer_submission_and_live
             request_id: ais_agent_control::ids::SignerRequestId(request_id),
             kind: ais_agent_core::runtime::SignerResolutionKind::Submitted,
             resolved_at_ms: None,
-            tx_hash: Some(format!("{tx_hash:#x}")),
+            submission_id: Some(format!("{tx_hash:#x}")),
             signed_payload: None,
         });
 
@@ -935,7 +935,7 @@ async fn native_transfer_launch_spec_can_complete_via_signer_submission_and_live
         runtime
             .checkpoint
             .pending_requests
-            .pending_confirmation_id
+            .pending_submission_id
             .as_deref(),
         Some("0x1111111111111111111111111111111111111111111111111111111111111111")
     );
@@ -1060,7 +1060,7 @@ async fn native_transfer_launch_spec_signed_payload_can_broadcast_and_complete_v
             request_id: ais_agent_control::ids::SignerRequestId(request_id),
             kind: ais_agent_core::runtime::SignerResolutionKind::Signed,
             resolved_at_ms: None,
-            tx_hash: None,
+            submission_id: None,
             signed_payload: Some(json!({
                 "kind": "evm_signed_transaction",
                 "raw_tx": "0x0102",
@@ -1082,7 +1082,7 @@ async fn native_transfer_launch_spec_signed_payload_can_broadcast_and_complete_v
         Some(SignerRequestStatus::Signed)
     );
     assert_eq!(
-        runtime.checkpoint.pending_requests.pending_confirmation_id,
+        runtime.checkpoint.pending_requests.pending_submission_id,
         None
     );
 
@@ -1101,7 +1101,7 @@ async fn native_transfer_launch_spec_signed_payload_can_broadcast_and_complete_v
         runtime
             .checkpoint
             .pending_requests
-            .pending_confirmation_id
+            .pending_submission_id
             .as_deref(),
         Some("0x2121212121212121212121212121212121212121212121212121212121212121")
     );
@@ -1199,7 +1199,7 @@ async fn execution_artifact_uniswap_v3_lp_mint_can_complete_via_signed_payload_a
             request_id: ais_agent_control::ids::SignerRequestId(request_id),
             kind: ais_agent_core::runtime::SignerResolutionKind::Signed,
             resolved_at_ms: None,
-            tx_hash: None,
+            submission_id: None,
             signed_payload: Some(json!({
                 "kind": "evm_signed_transaction",
                 "raw_tx": "0x0102",
@@ -1225,7 +1225,7 @@ async fn execution_artifact_uniswap_v3_lp_mint_can_complete_via_signed_payload_a
     );
     assert!(runtime.checkpoint.actuation_records.iter().any(|record| {
         matches!(record.kind, ActuationKind::BroadcastSubmitted)
-            && record.tx_hash.as_deref()
+            && record.submission_id.as_deref()
                 == Some("0x1212121212121212121212121212121212121212121212121212121212121212")
     }));
 
@@ -1373,7 +1373,7 @@ async fn query_first_native_transfer_artifact_can_branch_into_write_path() {
             request_id: ais_agent_control::ids::SignerRequestId(request_id),
             kind: ais_agent_core::runtime::SignerResolutionKind::Submitted,
             resolved_at_ms: None,
-            tx_hash: Some(format!("{tx_hash:#x}")),
+            submission_id: Some(format!("{tx_hash:#x}")),
             signed_payload: None,
         });
 
@@ -1453,7 +1453,7 @@ async fn native_transfer_launch_spec_can_restart_from_signer_submitted_side_effe
             request_id: ais_agent_control::ids::SignerRequestId(request_id),
             kind: ais_agent_core::runtime::SignerResolutionKind::Submitted,
             resolved_at_ms: None,
-            tx_hash: Some(format!("{tx_hash:#x}")),
+            submission_id: Some(format!("{tx_hash:#x}")),
             signed_payload: None,
         });
     StepOnce::apply(&mut runtime).await;
@@ -1615,7 +1615,7 @@ async fn erc20_transfer_launch_spec_can_complete_via_signer_submission_and_live_
             request_id: ais_agent_control::ids::SignerRequestId(request_id),
             kind: ais_agent_core::runtime::SignerResolutionKind::Submitted,
             resolved_at_ms: None,
-            tx_hash: Some(format!("{tx_hash:#x}")),
+            submission_id: Some(format!("{tx_hash:#x}")),
             signed_payload: None,
         });
 
@@ -1628,7 +1628,7 @@ async fn erc20_transfer_launch_spec_can_complete_via_signer_submission_and_live_
         runtime
             .checkpoint
             .pending_requests
-            .pending_confirmation_id
+            .pending_submission_id
             .as_deref(),
         Some("0x3333333333333333333333333333333333333333333333333333333333333333")
     );
@@ -1753,7 +1753,7 @@ async fn erc20_transfer_launch_spec_signed_payload_can_broadcast_and_complete_vi
             request_id: ais_agent_control::ids::SignerRequestId(request_id),
             kind: ais_agent_core::runtime::SignerResolutionKind::Signed,
             resolved_at_ms: None,
-            tx_hash: None,
+            submission_id: None,
             signed_payload: Some(json!({
                 "kind": "evm_signed_transaction",
                 "raw_tx": "0x0102",
@@ -1775,7 +1775,7 @@ async fn erc20_transfer_launch_spec_signed_payload_can_broadcast_and_complete_vi
         Some(SignerRequestStatus::Signed)
     );
     assert_eq!(
-        runtime.checkpoint.pending_requests.pending_confirmation_id,
+        runtime.checkpoint.pending_requests.pending_submission_id,
         None
     );
 
@@ -1794,7 +1794,7 @@ async fn erc20_transfer_launch_spec_signed_payload_can_broadcast_and_complete_vi
         runtime
             .checkpoint
             .pending_requests
-            .pending_confirmation_id
+            .pending_submission_id
             .as_deref(),
         Some("0x4343434343434343434343434343434343434343434343434343434343434343")
     );
@@ -1869,7 +1869,7 @@ async fn erc20_transfer_launch_spec_can_restart_from_signer_submitted_side_effec
             request_id: ais_agent_control::ids::SignerRequestId(request_id),
             kind: ais_agent_core::runtime::SignerResolutionKind::Submitted,
             resolved_at_ms: None,
-            tx_hash: Some(format!("{tx_hash:#x}")),
+            submission_id: Some(format!("{tx_hash:#x}")),
             signed_payload: None,
         });
     StepOnce::apply(&mut runtime).await;
@@ -1990,7 +1990,7 @@ async fn execution_artifact_uniswap_exact_in_can_complete_via_generic_branching_
             request_id: ais_agent_control::ids::SignerRequestId(request_id),
             kind: ais_agent_core::runtime::SignerResolutionKind::Submitted,
             resolved_at_ms: None,
-            tx_hash: Some(format!("{tx_hash:#x}")),
+            submission_id: Some(format!("{tx_hash:#x}")),
             signed_payload: None,
         });
 
@@ -2080,7 +2080,7 @@ async fn execution_artifact_uniswap_exact_in_signed_payload_can_broadcast_and_co
             request_id: ais_agent_control::ids::SignerRequestId(request_id),
             kind: ais_agent_core::runtime::SignerResolutionKind::Signed,
             resolved_at_ms: None,
-            tx_hash: None,
+            submission_id: None,
             signed_payload: Some(json!({
                 "kind": "evm_signed_transaction",
                 "raw_tx": "0x0102",
@@ -2102,7 +2102,7 @@ async fn execution_artifact_uniswap_exact_in_signed_payload_can_broadcast_and_co
         Some(SignerRequestStatus::Signed)
     );
     assert_eq!(
-        runtime.checkpoint.pending_requests.pending_confirmation_id,
+        runtime.checkpoint.pending_requests.pending_submission_id,
         None
     );
 
@@ -2121,7 +2121,7 @@ async fn execution_artifact_uniswap_exact_in_signed_payload_can_broadcast_and_co
         runtime
             .checkpoint
             .pending_requests
-            .pending_confirmation_id
+            .pending_submission_id
             .as_deref(),
         Some("0x9494949494949494949494949494949494949494949494949494949494949494")
     );
@@ -2187,7 +2187,7 @@ async fn execution_artifact_uniswap_exact_in_with_approval_branch_can_complete_v
             request_id: ais_agent_control::ids::SignerRequestId(approval_request_id),
             kind: ais_agent_core::runtime::SignerResolutionKind::Submitted,
             resolved_at_ms: None,
-            tx_hash: Some(format!("{approval_tx_hash:#x}")),
+            submission_id: Some(format!("{approval_tx_hash:#x}")),
             signed_payload: None,
         });
     StepOnce::apply(&mut runtime).await;
@@ -2223,7 +2223,7 @@ async fn execution_artifact_uniswap_exact_in_with_approval_branch_can_complete_v
             request_id: ais_agent_control::ids::SignerRequestId(swap_request_id),
             kind: ais_agent_core::runtime::SignerResolutionKind::Submitted,
             resolved_at_ms: None,
-            tx_hash: Some(format!("{swap_tx_hash:#x}")),
+            submission_id: Some(format!("{swap_tx_hash:#x}")),
             signed_payload: None,
         });
     StepOnce::apply(&mut runtime).await;
@@ -2359,7 +2359,7 @@ async fn execution_artifact_uniswap_trading_api_swap_can_complete_without_protoc
             request_id: ais_agent_control::ids::SignerRequestId(request_id),
             kind: ais_agent_core::runtime::SignerResolutionKind::Submitted,
             resolved_at_ms: None,
-            tx_hash: Some(format!("{tx_hash:#x}")),
+            submission_id: Some(format!("{tx_hash:#x}")),
             signed_payload: None,
         });
     StepOnce::apply(&mut runtime).await;
@@ -2434,7 +2434,7 @@ async fn execution_artifact_uniswap_swap_can_continue_into_aave_supply_from_expo
             request_id: ais_agent_control::ids::SignerRequestId(signer_request_id),
             kind: ais_agent_core::runtime::SignerResolutionKind::Submitted,
             resolved_at_ms: None,
-            tx_hash: Some(format!("{swap_tx_hash:#x}")),
+            submission_id: Some(format!("{swap_tx_hash:#x}")),
             signed_payload: None,
         });
 
@@ -2606,7 +2606,7 @@ async fn execution_artifact_uniswap_swap_can_continue_into_aave_supply_from_expo
             request_id: ais_agent_control::ids::SignerRequestId(supply_signer_request_id),
             kind: ais_agent_core::runtime::SignerResolutionKind::Submitted,
             resolved_at_ms: None,
-            tx_hash: Some(format!("{supply_tx_hash:#x}")),
+            submission_id: Some(format!("{supply_tx_hash:#x}")),
             signed_payload: None,
         });
 
@@ -2709,7 +2709,7 @@ async fn execution_artifact_uniswap_v3_lp_mint_can_complete_via_generic_runtime(
             request_id: ais_agent_control::ids::SignerRequestId(request_id),
             kind: ais_agent_core::runtime::SignerResolutionKind::Submitted,
             resolved_at_ms: None,
-            tx_hash: Some(format!("{tx_hash:#x}")),
+            submission_id: Some(format!("{tx_hash:#x}")),
             signed_payload: None,
         });
 
@@ -2841,7 +2841,7 @@ async fn uniswap_v3_lp_launch_spec_mint_can_complete_via_owliabot_boundary_signe
             request_id: ais_agent_control::ids::SignerRequestId(request_id),
             kind: ais_agent_core::runtime::SignerResolutionKind::Submitted,
             resolved_at_ms: None,
-            tx_hash: Some(format!("{tx_hash:#x}")),
+            submission_id: Some(format!("{tx_hash:#x}")),
             signed_payload: None,
         });
 
@@ -2859,7 +2859,7 @@ async fn uniswap_v3_lp_launch_spec_mint_can_complete_via_owliabot_boundary_signe
         runtime
             .checkpoint
             .pending_requests
-            .pending_confirmation_id
+            .pending_submission_id
             .as_deref(),
         Some(tx_hash_string.as_str())
     );
@@ -2947,7 +2947,7 @@ async fn uniswap_v3_lp_launch_spec_mint_can_restart_from_owliabot_boundary_signe
             request_id: ais_agent_control::ids::SignerRequestId(request_id),
             kind: ais_agent_core::runtime::SignerResolutionKind::Submitted,
             resolved_at_ms: None,
-            tx_hash: Some(format!("{tx_hash:#x}")),
+            submission_id: Some(format!("{tx_hash:#x}")),
             signed_payload: None,
         });
     StepOnce::apply(&mut runtime).await;
@@ -2960,7 +2960,7 @@ async fn uniswap_v3_lp_launch_spec_mint_can_restart_from_owliabot_boundary_signe
         runtime
             .checkpoint
             .pending_requests
-            .pending_confirmation_id
+            .pending_submission_id
             .as_deref(),
         Some(tx_hash_string.as_str())
     );
@@ -3613,7 +3613,7 @@ async fn step_until_status(
             .execution_artifact
             .as_ref()
             .and_then(|snapshot| snapshot.active_stage_id.clone()),
-        runtime.checkpoint.pending_requests.pending_confirmation_id
+        runtime.checkpoint.pending_requests.pending_submission_id
     );
     transitions
 }
@@ -4666,7 +4666,7 @@ fn encode_u256_return(value: u64) -> alloy::primitives::Bytes {
 }
 
 fn sample_receipt(
-    tx_hash: alloy::primitives::TxHash,
+    submission_id: alloy::primitives::TxHash,
     block_number: u64,
 ) -> Option<TransactionReceipt> {
     Some(TransactionReceipt {
@@ -4678,7 +4678,7 @@ fn sample_receipt(
             }
             .with_bloom(),
         ),
-        transaction_hash: tx_hash,
+        transaction_hash: submission_id,
         transaction_index: Some(0),
         block_hash: Some(b256!(
             "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"

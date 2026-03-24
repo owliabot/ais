@@ -219,7 +219,7 @@ fn inspect_projection_updates_run_link_cursor() {
     ));
 
     let inspect = InspectSnapshot {
-        schema: "ais-agent/inspect_snapshot/v1".to_owned(),
+        schema: "ais-agent/inspect_snapshot/v2".to_owned(),
         run_id: run_id.clone(),
         status: RunStatus::AwaitingEvidence,
         phase: RunPhase::AwaitingHost,

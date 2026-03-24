@@ -29,12 +29,12 @@ pub(crate) fn apply_signer_transition(runtime: &mut ActiveRun) -> Option<StepTra
                     node_id,
                     ActuationKind::BroadcastSubmitted,
                     Some(signer_state.chain.clone()),
-                    signer_state.submitted_tx_hash.clone(),
+                    signer_state.submitted_submission_id.clone(),
                     "signer submitted transaction",
                 );
             }
-            runtime.checkpoint.pending_requests.pending_confirmation_id =
-                signer_state.submitted_tx_hash.clone();
+            runtime.checkpoint.pending_requests.pending_submission_id =
+                signer_state.submitted_submission_id.clone();
             runtime.pending_signer_state = None;
             runtime
                 .checkpoint
@@ -43,10 +43,10 @@ pub(crate) fn apply_signer_transition(runtime: &mut ActiveRun) -> Option<StepTra
             runtime.checkpoint.pending_requests.pending_signer_request = None;
             runtime.checkpoint.lifecycle.await_confirmation(
                 signer_state
-                    .submitted_tx_hash
+                    .submitted_submission_id
                     .as_ref()
-                    .map(|tx_hash| {
-                        format!("waiting for chain receipt after signer submission {tx_hash}")
+                    .map(|submission_id| {
+                        format!("waiting for chain receipt after signer submission {submission_id}")
                     })
                     .unwrap_or_else(|| {
                         "waiting for chain receipt after signer submission".to_owned()

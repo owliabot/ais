@@ -369,7 +369,7 @@ pub(super) fn host_signer_resolution(
             }
         },
         resolved_at_ms: None,
-        tx_hash: resolution.tx_hash,
+        submission_id: resolution.submission_id,
         signed_payload: resolution.signed_payload,
         details: resolution.details,
     }

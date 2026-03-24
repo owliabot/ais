@@ -312,7 +312,7 @@ async fn scheduler_persists_side_effect_cut_when_signer_submission_enters_confir
         .pending_signer_state
         .as_mut()
         .expect("signer state")
-        .submitted_tx_hash = Some("0xabc".to_owned());
+        .submitted_submission_id = Some("0xabc".to_owned());
 
     let mut repo = InMemoryCheckpointRepository::default();
     let result = StepScheduler::step_until_boundary(
@@ -339,7 +339,7 @@ async fn scheduler_persists_side_effect_cut_when_signer_submission_enters_confir
         history[0]
             .snapshot
             .pending_requests
-            .pending_confirmation_id
+            .pending_submission_id
             .as_deref(),
         Some("0xabc")
     );
