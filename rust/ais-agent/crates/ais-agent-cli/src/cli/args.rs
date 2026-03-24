@@ -219,6 +219,14 @@ pub enum InspectStoreCommand {
             help = "How many recent runs to include in the overview"
         )]
         limit: usize,
+        #[arg(long, help = "Only include runs with this status")]
+        status: Option<String>,
+        #[arg(long, help = "Only include runs with this phase")]
+        phase: Option<String>,
+        #[arg(long, help = "Only include runs with this active boundary kind")]
+        active_boundary_kind: Option<String>,
+        #[arg(long, help = "Only include runs whose ids start with this prefix")]
+        run_id_prefix: Option<String>,
     },
     #[command(
         about = "Inspect one run across catalog, input, checkpoint, wait, and claim views",
@@ -240,6 +248,10 @@ pub enum InspectStoreCommand {
             help = "Only return events strictly after this event sequence number"
         )]
         after_event_seq: Option<u64>,
+        #[arg(long, help = "Only return events recorded at this checkpoint sequence")]
+        checkpoint_seq: Option<u64>,
+        #[arg(long, help = "Only return events with this event kind")]
+        event_kind: Option<String>,
         #[arg(long, help = "Maximum number of events to return")]
         limit: Option<usize>,
     },
@@ -255,6 +267,12 @@ pub enum InspectStoreCommand {
             help = "Only return audits strictly after this audit sequence number"
         )]
         after_audit_seq: Option<u64>,
+        #[arg(long, help = "Only return audits recorded at this checkpoint sequence")]
+        checkpoint_seq: Option<u64>,
+        #[arg(long, help = "Only return audits with this audit type")]
+        audit_type: Option<String>,
+        #[arg(long, help = "Only return audits with this recovery disposition")]
+        recovery_disposition: Option<String>,
         #[arg(long, help = "Maximum number of audits to return")]
         limit: Option<usize>,
     },
@@ -267,6 +285,8 @@ pub enum InspectStoreCommand {
         run_id: String,
         #[arg(long, help = "Only return the latest checkpoint summary")]
         latest: bool,
+        #[arg(long, help = "Only return checkpoints with this archive kind")]
+        archive_kind: Option<String>,
         #[arg(
             long,
             help = "Maximum number of checkpoints to return when not using --latest"
@@ -274,20 +294,40 @@ pub enum InspectStoreCommand {
         limit: Option<usize>,
     },
     #[command(
-        about = "Inspect the current wait-state row for one run",
-        long_about = "Read the current `run_wait_states` row for a run, such as an awaiting signer, evidence, or confirmation pause."
+        about = "Inspect wait-state rows",
+        long_about = "Read the current `run_wait_states` row for a specific run, or list current wait rows filtered by wait kind."
     )]
     Waits {
         #[arg(long, help = "Run identifier to inspect")]
-        run_id: String,
+        run_id: Option<String>,
+        #[arg(long, help = "Only include waits of this kind when listing")]
+        wait_kind: Option<String>,
+        #[arg(
+            long,
+            default_value_t = 20,
+            help = "Maximum number of wait rows to return in listing mode"
+        )]
+        limit: usize,
     },
     #[command(
-        about = "Read claim history for one run",
-        long_about = "Read `run_claim_history` rows for a run, including active, released, expired, or superseded ownership records."
+        about = "Read claim history or filtered claim rows",
+        long_about = "Read `run_claim_history` rows for a specific run, or list filtered claim rows across runs by status, owner kind, or host session."
     )]
     Claims {
         #[arg(long, help = "Run identifier to inspect")]
-        run_id: String,
+        run_id: Option<String>,
+        #[arg(long, help = "Only include claims with this status when listing")]
+        status: Option<String>,
+        #[arg(long, help = "Only include claims with this owner kind when listing")]
+        owner_kind: Option<String>,
+        #[arg(long, help = "Only include claims for this host session when listing")]
+        host_session_id: Option<String>,
+        #[arg(
+            long,
+            default_value_t = 20,
+            help = "Maximum number of claim rows to return in listing mode"
+        )]
+        limit: usize,
     },
     #[command(
         about = "Summarize retention posture and maintenance history",
@@ -540,7 +580,74 @@ mod tests {
             parsed.command,
             CliCommand::Inspect {
                 command: InspectCommand::Store {
-                    command: InspectStoreCommand::Overview { limit: 10 },
+                    command: InspectStoreCommand::Overview {
+                        limit: 10,
+                        status: None,
+                        phase: None,
+                        active_boundary_kind: None,
+                        run_id_prefix: None,
+                    },
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn parses_store_filtered_overview_and_timeline_modes() {
+        let overview = Args::try_parse_from([
+            "ais-agent",
+            "inspect",
+            "store",
+            "overview",
+            "--status",
+            "awaiting_signer",
+            "--phase",
+            "awaiting_host",
+            "--active-boundary-kind",
+            "signer",
+            "--run-id-prefix",
+            "run-",
+        ])
+        .expect("inspect store filtered overview");
+        assert_eq!(
+            overview.command,
+            CliCommand::Inspect {
+                command: InspectCommand::Store {
+                    command: InspectStoreCommand::Overview {
+                        limit: 20,
+                        status: Some("awaiting_signer".to_owned()),
+                        phase: Some("awaiting_host".to_owned()),
+                        active_boundary_kind: Some("signer".to_owned()),
+                        run_id_prefix: Some("run-".to_owned()),
+                    },
+                },
+            }
+        );
+
+        let events = Args::try_parse_from([
+            "ais-agent",
+            "inspect",
+            "store",
+            "events",
+            "--run-id",
+            "run-1",
+            "--checkpoint-seq",
+            "5",
+            "--limit",
+            "30",
+        ])
+        .expect("inspect store filtered events");
+        assert_eq!(
+            events.command,
+            CliCommand::Inspect {
+                command: InspectCommand::Store {
+                    command: InspectStoreCommand::Events {
+                        run_id: "run-1".to_owned(),
+                        after_event_seq: None,
+                        checkpoint_seq: Some(5),
+                        event_kind: None,
+                        limit: Some(30),
+                    },
                 },
             }
         );
@@ -562,7 +669,9 @@ mod tests {
             CliCommand::Inspect {
                 command: InspectCommand::Store {
                     command: InspectStoreCommand::Waits {
-                        run_id: "run-1".to_owned(),
+                        run_id: Some("run-1".to_owned()),
+                        wait_kind: None,
+                        limit: 20,
                     },
                 },
             }
@@ -575,6 +684,96 @@ mod tests {
             CliCommand::Inspect {
                 command: InspectCommand::Store {
                     command: InspectStoreCommand::Retention,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn parses_store_claims_list_mode() {
+        let claims = Args::try_parse_from([
+            "ais-agent",
+            "inspect",
+            "store",
+            "claims",
+            "--status",
+            "active",
+            "--owner-kind",
+            "interactive_host",
+            "--host-session-id",
+            "session-1",
+            "--limit",
+            "15",
+        ])
+        .expect("inspect store claims list");
+        assert_eq!(
+            claims.command,
+            CliCommand::Inspect {
+                command: InspectCommand::Store {
+                    command: InspectStoreCommand::Claims {
+                        run_id: None,
+                        status: Some("active".to_owned()),
+                        owner_kind: Some("interactive_host".to_owned()),
+                        host_session_id: Some("session-1".to_owned()),
+                        limit: 15,
+                    },
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn parses_store_semantic_timeline_filters() {
+        let audits = Args::try_parse_from([
+            "ais-agent",
+            "inspect",
+            "store",
+            "audits",
+            "--run-id",
+            "run-1",
+            "--audit-type",
+            "recovery",
+            "--recovery-disposition",
+            "await_signer",
+        ])
+        .expect("inspect store filtered audits");
+        assert_eq!(
+            audits.command,
+            CliCommand::Inspect {
+                command: InspectCommand::Store {
+                    command: InspectStoreCommand::Audits {
+                        run_id: "run-1".to_owned(),
+                        after_audit_seq: None,
+                        checkpoint_seq: None,
+                        audit_type: Some("recovery".to_owned()),
+                        recovery_disposition: Some("await_signer".to_owned()),
+                        limit: None,
+                    },
+                },
+            }
+        );
+
+        let checkpoints = Args::try_parse_from([
+            "ais-agent",
+            "inspect",
+            "store",
+            "checkpoints",
+            "--run-id",
+            "run-1",
+            "--archive-kind",
+            "side_effect",
+        ])
+        .expect("inspect store filtered checkpoints");
+        assert_eq!(
+            checkpoints.command,
+            CliCommand::Inspect {
+                command: InspectCommand::Store {
+                    command: InspectStoreCommand::Checkpoints {
+                        run_id: "run-1".to_owned(),
+                        latest: false,
+                        archive_kind: Some("side_effect".to_owned()),
+                        limit: None,
+                    },
                 },
             }
         );

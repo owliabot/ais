@@ -9,6 +9,10 @@ use thiserror::Error;
 pub enum StoreInspectCommand {
     Overview {
         limit: usize,
+        status: Option<String>,
+        phase: Option<String>,
+        active_boundary_kind: Option<String>,
+        run_id_prefix: Option<String>,
     },
     Run {
         run_id: String,
@@ -16,23 +20,35 @@ pub enum StoreInspectCommand {
     Events {
         run_id: String,
         after_event_seq: Option<u64>,
+        checkpoint_seq: Option<u64>,
+        event_kind: Option<String>,
         limit: Option<usize>,
     },
     Audits {
         run_id: String,
         after_audit_seq: Option<u64>,
+        checkpoint_seq: Option<u64>,
+        audit_type: Option<String>,
+        recovery_disposition: Option<String>,
         limit: Option<usize>,
     },
     Checkpoints {
         run_id: String,
         latest: bool,
+        archive_kind: Option<String>,
         limit: Option<usize>,
     },
     Waits {
-        run_id: String,
+        run_id: Option<String>,
+        wait_kind: Option<String>,
+        limit: usize,
     },
     Claims {
-        run_id: String,
+        run_id: Option<String>,
+        status: Option<String>,
+        owner_kind: Option<String>,
+        host_session_id: Option<String>,
+        limit: usize,
     },
     Retention,
     Storage,
@@ -66,25 +82,93 @@ pub fn inspect_store(
 ) -> Result<Value, StoreInspectError> {
     let conn = open_readonly(sqlite_path)?;
     match command {
-        StoreInspectCommand::Overview { limit } => query_overview(&conn, sqlite_path, limit),
+        StoreInspectCommand::Overview {
+            limit,
+            status,
+            phase,
+            active_boundary_kind,
+            run_id_prefix,
+        } => query_overview(
+            &conn,
+            sqlite_path,
+            limit,
+            status.as_deref(),
+            phase.as_deref(),
+            active_boundary_kind.as_deref(),
+            run_id_prefix.as_deref(),
+        ),
         StoreInspectCommand::Run { run_id } => query_run(&conn, sqlite_path, &run_id),
         StoreInspectCommand::Events {
             run_id,
             after_event_seq,
+            checkpoint_seq,
+            event_kind,
             limit,
-        } => query_events(&conn, sqlite_path, &run_id, after_event_seq, limit),
+        } => query_events(
+            &conn,
+            sqlite_path,
+            &run_id,
+            after_event_seq,
+            checkpoint_seq,
+            event_kind.as_deref(),
+            limit,
+        ),
         StoreInspectCommand::Audits {
             run_id,
             after_audit_seq,
+            checkpoint_seq,
+            audit_type,
+            recovery_disposition,
             limit,
-        } => query_audits(&conn, sqlite_path, &run_id, after_audit_seq, limit),
+        } => query_audits(
+            &conn,
+            sqlite_path,
+            &run_id,
+            after_audit_seq,
+            checkpoint_seq,
+            audit_type.as_deref(),
+            recovery_disposition.as_deref(),
+            limit,
+        ),
         StoreInspectCommand::Checkpoints {
             run_id,
             latest,
+            archive_kind,
             limit,
-        } => query_checkpoints(&conn, sqlite_path, &run_id, latest, limit),
-        StoreInspectCommand::Waits { run_id } => query_waits(&conn, sqlite_path, &run_id),
-        StoreInspectCommand::Claims { run_id } => query_claims(&conn, sqlite_path, &run_id),
+        } => query_checkpoints(
+            &conn,
+            sqlite_path,
+            &run_id,
+            latest,
+            archive_kind.as_deref(),
+            limit,
+        ),
+        StoreInspectCommand::Waits {
+            run_id,
+            wait_kind,
+            limit,
+        } => query_waits(
+            &conn,
+            sqlite_path,
+            run_id.as_deref(),
+            wait_kind.as_deref(),
+            limit,
+        ),
+        StoreInspectCommand::Claims {
+            run_id,
+            status,
+            owner_kind,
+            host_session_id,
+            limit,
+        } => query_claims(
+            &conn,
+            sqlite_path,
+            run_id.as_deref(),
+            status.as_deref(),
+            owner_kind.as_deref(),
+            host_session_id.as_deref(),
+            limit,
+        ),
         StoreInspectCommand::Retention => query_retention(&conn, sqlite_path),
         StoreInspectCommand::Storage => query_storage(&conn, sqlite_path),
         StoreInspectCommand::Sql { query, limit } => query_sql(&conn, sqlite_path, &query, limit),
@@ -109,6 +193,10 @@ fn query_overview(
     conn: &Connection,
     sqlite_path: &Path,
     limit: usize,
+    status: Option<&str>,
+    phase: Option<&str>,
+    active_boundary_kind: Option<&str>,
+    run_id_prefix: Option<&str>,
 ) -> Result<Value, StoreInspectError> {
     let schema_version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
     let table_counts = json!({
@@ -123,7 +211,14 @@ fn query_overview(
         "run_claim_history": count_rows(conn, "run_claim_history")?,
     });
 
-    let rows = query_overview_runs(conn, limit)?;
+    let rows = query_overview_runs(
+        conn,
+        limit,
+        status,
+        phase,
+        active_boundary_kind,
+        run_id_prefix,
+    )?;
 
     Ok(json!(StoreOverviewOutput {
         sqlite_path: sqlite_path.display().to_string(),
@@ -140,7 +235,7 @@ fn query_run(
 ) -> Result<Value, StoreInspectError> {
     let catalog = query_run_catalog(conn, run_id)?;
     let mission = query_run_mission(conn, run_id)?;
-    let latest_checkpoint = query_latest_checkpoint(conn, run_id)?;
+    let latest_checkpoint = query_latest_checkpoint(conn, run_id, None)?;
     let wait_state = query_wait_state(conn, run_id)?;
     let active_claim = query_active_claim(conn, run_id)?;
     let latest_claim = query_latest_claim(conn, run_id)?;
@@ -168,14 +263,25 @@ fn query_events(
     sqlite_path: &Path,
     run_id: &str,
     after_event_seq: Option<u64>,
+    checkpoint_seq: Option<u64>,
+    event_kind: Option<&str>,
     limit: Option<usize>,
 ) -> Result<Value, StoreInspectError> {
-    let (latest_event_seq, rows) = query_event_rows(conn, run_id, after_event_seq, limit)?;
+    let (latest_event_seq, rows) = query_event_rows(
+        conn,
+        run_id,
+        after_event_seq,
+        checkpoint_seq,
+        event_kind,
+        limit,
+    )?;
 
     Ok(json!({
         "sqlite_path": sqlite_path.display().to_string(),
         "run_id": run_id,
         "after_event_seq": after_event_seq,
+        "checkpoint_seq": checkpoint_seq,
+        "event_kind": event_kind,
         "latest_event_seq": latest_event_seq,
         "events": rows,
     }))
@@ -186,14 +292,28 @@ fn query_audits(
     sqlite_path: &Path,
     run_id: &str,
     after_audit_seq: Option<u64>,
+    checkpoint_seq: Option<u64>,
+    audit_type: Option<&str>,
+    recovery_disposition: Option<&str>,
     limit: Option<usize>,
 ) -> Result<Value, StoreInspectError> {
-    let (latest_audit_seq, rows) = query_audit_rows(conn, run_id, after_audit_seq, limit)?;
+    let (latest_audit_seq, rows) = query_audit_rows(
+        conn,
+        run_id,
+        after_audit_seq,
+        checkpoint_seq,
+        audit_type,
+        recovery_disposition,
+        limit,
+    )?;
 
     Ok(json!({
         "sqlite_path": sqlite_path.display().to_string(),
         "run_id": run_id,
         "after_audit_seq": after_audit_seq,
+        "checkpoint_seq": checkpoint_seq,
+        "audit_type": audit_type,
+        "recovery_disposition": recovery_disposition,
         "latest_audit_seq": latest_audit_seq,
         "audits": rows,
     }))
@@ -204,22 +324,25 @@ fn query_checkpoints(
     sqlite_path: &Path,
     run_id: &str,
     latest: bool,
+    archive_kind: Option<&str>,
     limit: Option<usize>,
 ) -> Result<Value, StoreInspectError> {
-    let latest_checkpoint = query_latest_checkpoint(conn, run_id)?;
+    let latest_checkpoint = query_latest_checkpoint(conn, run_id, archive_kind)?;
     if latest {
         return Ok(json!({
             "sqlite_path": sqlite_path.display().to_string(),
             "run_id": run_id,
+            "archive_kind": archive_kind,
             "latest_checkpoint": latest_checkpoint,
         }));
     }
 
-    let rows = query_checkpoint_rows(conn, run_id, limit)?;
+    let rows = query_checkpoint_rows(conn, run_id, archive_kind, limit)?;
 
     Ok(json!({
         "sqlite_path": sqlite_path.display().to_string(),
         "run_id": run_id,
+        "archive_kind": archive_kind,
         "latest_checkpoint": latest_checkpoint,
         "checkpoints": rows,
     }))
@@ -228,25 +351,55 @@ fn query_checkpoints(
 fn query_waits(
     conn: &Connection,
     sqlite_path: &Path,
-    run_id: &str,
+    run_id: Option<&str>,
+    wait_kind: Option<&str>,
+    limit: usize,
 ) -> Result<Value, StoreInspectError> {
-    let wait_state = query_wait_state(conn, run_id)?;
+    if let Some(run_id) = run_id {
+        let wait_state = query_wait_state(conn, run_id)?;
+        return Ok(json!({
+            "sqlite_path": sqlite_path.display().to_string(),
+            "run_id": run_id,
+            "wait_state": wait_state,
+        }));
+    }
+
+    let waits = query_wait_rows(conn, wait_kind, limit)?;
     Ok(json!({
         "sqlite_path": sqlite_path.display().to_string(),
-        "run_id": run_id,
-        "wait_state": wait_state,
+        "run_id": Value::Null,
+        "wait_kind": wait_kind,
+        "limit": limit,
+        "waits": waits,
     }))
 }
 
 fn query_claims(
     conn: &Connection,
     sqlite_path: &Path,
-    run_id: &str,
+    run_id: Option<&str>,
+    status: Option<&str>,
+    owner_kind: Option<&str>,
+    host_session_id: Option<&str>,
+    limit: usize,
 ) -> Result<Value, StoreInspectError> {
-    let claims = query_claim_rows(conn, run_id)?;
+    if let Some(run_id) = run_id {
+        let claims = query_claim_rows(conn, run_id)?;
+        return Ok(json!({
+            "sqlite_path": sqlite_path.display().to_string(),
+            "run_id": run_id,
+            "claims": claims,
+        }));
+    }
+
+    let claims = query_claim_rows_filtered(conn, status, owner_kind, host_session_id, limit)?;
     Ok(json!({
         "sqlite_path": sqlite_path.display().to_string(),
-        "run_id": run_id,
+        "run_id": Value::Null,
+        "status": status,
+        "owner_kind": owner_kind,
+        "host_session_id": host_session_id,
+        "limit": limit,
         "claims": claims,
     }))
 }
@@ -650,7 +803,14 @@ fn checkpoint_tier_counts(conn: &Connection) -> Result<Value, StoreInspectError>
     Ok(Value::Object(object))
 }
 
-fn query_overview_runs(conn: &Connection, limit: usize) -> Result<Vec<Value>, StoreInspectError> {
+fn query_overview_runs(
+    conn: &Connection,
+    limit: usize,
+    status: Option<&str>,
+    phase: Option<&str>,
+    active_boundary_kind: Option<&str>,
+    run_id_prefix: Option<&str>,
+) -> Result<Vec<Value>, StoreInspectError> {
     let mut stmt = conn.prepare(
         r#"
         SELECT
@@ -666,12 +826,25 @@ fn query_overview_runs(conn: &Connection, limit: usize) -> Result<Vec<Value>, St
             updated_at_ms,
             terminal_at_ms
         FROM runs
+        WHERE (?1 IS NULL OR status = ?1)
+          AND (?2 IS NULL OR phase = ?2)
+          AND (?3 IS NULL OR active_boundary_kind = ?3)
+          AND (?4 IS NULL OR run_id LIKE (?4 || '%'))
         ORDER BY COALESCE(updated_at_ms, created_at_ms, 0) DESC, run_id DESC
-        LIMIT ?1
+        LIMIT ?5
         "#,
     )?;
     let rows = stmt
-        .query_map([limit as i64], run_head_row_to_value)?
+        .query_map(
+            (
+                status,
+                phase,
+                active_boundary_kind,
+                run_id_prefix,
+                limit as i64,
+            ),
+            run_head_row_to_value,
+        )?
         .collect::<Result<Vec<_>, _>>()
         .map_err(StoreInspectError::from)?;
     Ok(rows)
@@ -714,17 +887,22 @@ fn query_run_mission(conn: &Connection, run_id: &str) -> Result<Value, StoreInsp
         .unwrap_or(Value::Null))
 }
 
-fn query_latest_checkpoint(conn: &Connection, run_id: &str) -> Result<Value, StoreInspectError> {
+fn query_latest_checkpoint(
+    conn: &Connection,
+    run_id: &str,
+    archive_kind: Option<&str>,
+) -> Result<Value, StoreInspectError> {
     Ok(conn
         .query_row(
             r#"
             SELECT checkpoint_seq, plan_epoch, checkpoint_kind, snapshot_json
             FROM run_checkpoints
             WHERE run_id = ?1
+              AND (?2 IS NULL OR checkpoint_kind = ?2)
             ORDER BY checkpoint_seq DESC, plan_epoch DESC, checkpoint_id DESC
             LIMIT 1
             "#,
-            [run_id],
+            (run_id, archive_kind),
             checkpoint_row_to_value,
         )
         .optional()?
@@ -808,6 +986,8 @@ fn query_event_rows(
     conn: &Connection,
     run_id: &str,
     after_event_seq: Option<u64>,
+    checkpoint_seq: Option<u64>,
+    event_kind: Option<&str>,
     limit: Option<usize>,
 ) -> Result<(Option<i64>, Vec<Value>), StoreInspectError> {
     let latest_event_seq: Option<i64> = conn.query_row(
@@ -817,32 +997,47 @@ fn query_event_rows(
     )?;
     let sql = if limit.is_some() {
         r#"
-        SELECT event_seq, checkpoint_seq, payload_json
+        SELECT event_seq, checkpoint_seq, event_kind, payload_json
         FROM run_events
         WHERE run_id = ?1
           AND (?2 IS NULL OR event_seq > ?2)
+          AND (?3 IS NULL OR checkpoint_seq = ?3)
+          AND (?4 IS NULL OR event_kind = ?4)
         ORDER BY event_seq ASC
-        LIMIT ?3
+        LIMIT ?5
         "#
     } else {
         r#"
-        SELECT event_seq, checkpoint_seq, payload_json
+        SELECT event_seq, checkpoint_seq, event_kind, payload_json
         FROM run_events
         WHERE run_id = ?1
           AND (?2 IS NULL OR event_seq > ?2)
+          AND (?3 IS NULL OR checkpoint_seq = ?3)
+          AND (?4 IS NULL OR event_kind = ?4)
         ORDER BY event_seq ASC
         "#
     };
     let mut stmt = conn.prepare(sql)?;
     let rows = if let Some(limit) = limit {
         stmt.query_map(
-            (run_id, after_event_seq.map(|v| v as i64), limit as i64),
+            (
+                run_id,
+                after_event_seq.map(|v| v as i64),
+                checkpoint_seq.map(|v| v as i64),
+                event_kind,
+                limit as i64,
+            ),
             event_row_to_value,
         )?
         .collect::<Result<Vec<_>, _>>()?
     } else {
         stmt.query_map(
-            (run_id, after_event_seq.map(|v| v as i64)),
+            (
+                run_id,
+                after_event_seq.map(|v| v as i64),
+                checkpoint_seq.map(|v| v as i64),
+                event_kind,
+            ),
             event_row_to_value,
         )?
         .collect::<Result<Vec<_>, _>>()?
@@ -854,6 +1049,9 @@ fn query_audit_rows(
     conn: &Connection,
     run_id: &str,
     after_audit_seq: Option<u64>,
+    checkpoint_seq: Option<u64>,
+    audit_type: Option<&str>,
+    recovery_disposition: Option<&str>,
     limit: Option<usize>,
 ) -> Result<(Option<i64>, Vec<Value>), StoreInspectError> {
     let latest_audit_seq: Option<i64> = conn.query_row(
@@ -863,32 +1061,51 @@ fn query_audit_rows(
     )?;
     let sql = if limit.is_some() {
         r#"
-        SELECT audit_seq, checkpoint_seq, payload_json
+        SELECT audit_seq, checkpoint_seq, audit_kind, decision_class, payload_json
         FROM run_audits
         WHERE run_id = ?1
           AND (?2 IS NULL OR audit_seq > ?2)
+          AND (?3 IS NULL OR checkpoint_seq = ?3)
+          AND (?4 IS NULL OR audit_kind = ?4)
+          AND (?5 IS NULL OR json_extract(payload_json, '$.audit.recovery_disposition') = ?5)
         ORDER BY audit_seq ASC
-        LIMIT ?3
+        LIMIT ?6
         "#
     } else {
         r#"
-        SELECT audit_seq, checkpoint_seq, payload_json
+        SELECT audit_seq, checkpoint_seq, audit_kind, decision_class, payload_json
         FROM run_audits
         WHERE run_id = ?1
           AND (?2 IS NULL OR audit_seq > ?2)
+          AND (?3 IS NULL OR checkpoint_seq = ?3)
+          AND (?4 IS NULL OR audit_kind = ?4)
+          AND (?5 IS NULL OR json_extract(payload_json, '$.audit.recovery_disposition') = ?5)
         ORDER BY audit_seq ASC
         "#
     };
     let mut stmt = conn.prepare(sql)?;
     let rows = if let Some(limit) = limit {
         stmt.query_map(
-            (run_id, after_audit_seq.map(|v| v as i64), limit as i64),
+            (
+                run_id,
+                after_audit_seq.map(|v| v as i64),
+                checkpoint_seq.map(|v| v as i64),
+                audit_type,
+                recovery_disposition,
+                limit as i64,
+            ),
             audit_row_to_value,
         )?
         .collect::<Result<Vec<_>, _>>()?
     } else {
         stmt.query_map(
-            (run_id, after_audit_seq.map(|v| v as i64)),
+            (
+                run_id,
+                after_audit_seq.map(|v| v as i64),
+                checkpoint_seq.map(|v| v as i64),
+                audit_type,
+                recovery_disposition,
+            ),
             audit_row_to_value,
         )?
         .collect::<Result<Vec<_>, _>>()?
@@ -899,6 +1116,7 @@ fn query_audit_rows(
 fn query_checkpoint_rows(
     conn: &Connection,
     run_id: &str,
+    archive_kind: Option<&str>,
     limit: Option<usize>,
 ) -> Result<Vec<Value>, StoreInspectError> {
     let sql = if limit.is_some() {
@@ -906,24 +1124,26 @@ fn query_checkpoint_rows(
         SELECT checkpoint_seq, plan_epoch, checkpoint_kind, snapshot_json
         FROM run_checkpoints
         WHERE run_id = ?1
+          AND (?2 IS NULL OR checkpoint_kind = ?2)
         ORDER BY checkpoint_seq DESC, plan_epoch DESC, checkpoint_id DESC
-        LIMIT ?2
+        LIMIT ?3
         "#
     } else {
         r#"
         SELECT checkpoint_seq, plan_epoch, checkpoint_kind, snapshot_json
         FROM run_checkpoints
         WHERE run_id = ?1
+          AND (?2 IS NULL OR checkpoint_kind = ?2)
         ORDER BY checkpoint_seq DESC, plan_epoch DESC, checkpoint_id DESC
         "#
     };
     let mut stmt = conn.prepare(sql)?;
     if let Some(limit) = limit {
-        stmt.query_map((run_id, limit as i64), checkpoint_row_to_value)?
+        stmt.query_map((run_id, archive_kind, limit as i64), checkpoint_row_to_value)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(StoreInspectError::from)
     } else {
-        stmt.query_map([run_id], checkpoint_row_to_value)?
+        stmt.query_map((run_id, archive_kind), checkpoint_row_to_value)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(StoreInspectError::from)
     }
@@ -950,6 +1170,66 @@ fn query_claim_rows(conn: &Connection, run_id: &str) -> Result<Vec<Value>, Store
     )?;
     let claims = stmt
         .query_map([run_id], stored_claim_row_to_value)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(StoreInspectError::from)?;
+    Ok(claims)
+}
+
+fn query_wait_rows(
+    conn: &Connection,
+    wait_kind: Option<&str>,
+    limit: usize,
+) -> Result<Vec<Value>, StoreInspectError> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT run_id, wait_kind, request_id, entered_at_ms, expires_at_ms, state_json
+        FROM run_wait_states
+        WHERE (?1 IS NULL OR wait_kind = ?1)
+        ORDER BY entered_at_ms DESC, run_id DESC
+        LIMIT ?2
+        "#,
+    )?;
+    let rows = stmt
+        .query_map((wait_kind, limit as i64), wait_row_to_value)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(StoreInspectError::from)?;
+    Ok(rows)
+}
+
+fn query_claim_rows_filtered(
+    conn: &Connection,
+    status: Option<&str>,
+    owner_kind: Option<&str>,
+    host_session_id: Option<&str>,
+    limit: usize,
+) -> Result<Vec<Value>, StoreInspectError> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT
+            claim_id,
+            run_id,
+            host_session_id,
+            owner_kind,
+            owner_instance_id,
+            lease_started_at_ms,
+            lease_expires_at_ms,
+            last_renewed_at_ms,
+            claim_epoch,
+            mode,
+            status
+        FROM run_claim_history
+        WHERE (?1 IS NULL OR status = ?1)
+          AND (?2 IS NULL OR owner_kind = ?2)
+          AND (?3 IS NULL OR host_session_id = ?3)
+        ORDER BY lease_started_at_ms DESC, claim_epoch DESC, claim_id DESC
+        LIMIT ?4
+        "#,
+    )?;
+    let claims = stmt
+        .query_map(
+            (status, owner_kind, host_session_id, limit as i64),
+            filtered_claim_row_to_value,
+        )?
         .collect::<Result<Vec<_>, _>>()
         .map_err(StoreInspectError::from)?;
     Ok(claims)
@@ -986,6 +1266,33 @@ fn stored_claim_row_to_value(row: &Row<'_>) -> rusqlite::Result<Value> {
     }))
 }
 
+fn filtered_claim_row_to_value(row: &Row<'_>) -> rusqlite::Result<Value> {
+    Ok(json!({
+        "claim_id": row.get::<_, String>(0)?,
+        "run_id": row.get::<_, String>(1)?,
+        "host_session_id": row.get::<_, String>(2)?,
+        "owner_kind": row.get::<_, String>(3)?,
+        "owner_instance_id": row.get::<_, String>(4)?,
+        "lease_started_at_ms": row.get::<_, i64>(5)?,
+        "lease_expires_at_ms": row.get::<_, Option<i64>>(6)?,
+        "last_renewed_at_ms": row.get::<_, Option<i64>>(7)?,
+        "claim_epoch": row.get::<_, i64>(8)?,
+        "mode": row.get::<_, String>(9)?,
+        "status": row.get::<_, String>(10)?,
+    }))
+}
+
+fn wait_row_to_value(row: &Row<'_>) -> rusqlite::Result<Value> {
+    Ok(json!({
+        "run_id": row.get::<_, String>(0)?,
+        "wait_kind": row.get::<_, String>(1)?,
+        "request_id": row.get::<_, String>(2)?,
+        "entered_at_ms": row.get::<_, i64>(3)?,
+        "expires_at_ms": row.get::<_, Option<i64>>(4)?,
+        "state": parse_json_text(row.get::<_, String>(5)?),
+    }))
+}
+
 fn checkpoint_row_to_value(row: &Row<'_>) -> rusqlite::Result<Value> {
     Ok(json!({
         "checkpoint_seq": row.get::<_, i64>(0)?,
@@ -996,25 +1303,34 @@ fn checkpoint_row_to_value(row: &Row<'_>) -> rusqlite::Result<Value> {
 }
 
 fn event_row_to_value(row: &Row<'_>) -> rusqlite::Result<Value> {
-    let event = parse_json_text(row.get::<_, String>(2)?);
+    let event = parse_json_text(row.get::<_, String>(3)?);
     let plan_epoch = event.get("plan_epoch").cloned().unwrap_or(Value::Null);
     Ok(json!({
         "event_seq": row.get::<_, i64>(0)?,
         "checkpoint_seq": row.get::<_, Option<i64>>(1)?,
+        "event_kind": row.get::<_, String>(2)?,
         "plan_epoch": plan_epoch,
         "event": event,
     }))
 }
 
 fn audit_row_to_value(row: &Row<'_>) -> rusqlite::Result<Value> {
-    let audit = parse_json_text(row.get::<_, String>(2)?);
+    let audit = parse_json_text(row.get::<_, String>(4)?);
     let plan_epoch = audit.get("plan_epoch").cloned().unwrap_or(Value::Null);
     let audit_id = audit.get("audit_id").cloned().unwrap_or(Value::Null);
+    let recovery_disposition = audit
+        .get("audit")
+        .and_then(|entry| entry.get("recovery_disposition"))
+        .cloned()
+        .unwrap_or(Value::Null);
     Ok(json!({
         "audit_seq": row.get::<_, i64>(0)?,
         "checkpoint_seq": row.get::<_, Option<i64>>(1)?,
+        "audit_type": row.get::<_, String>(2)?,
+        "decision_class": row.get::<_, Option<String>>(3)?,
         "plan_epoch": plan_epoch,
         "audit_id": audit_id,
+        "recovery_disposition": recovery_disposition,
         "audit": audit,
     }))
 }
@@ -1271,8 +1587,17 @@ mod tests {
         let path = temp_sqlite_path("overview");
         seed_store(&path);
 
-        let output =
-            inspect_store(&path, StoreInspectCommand::Overview { limit: 5 }).expect("overview");
+        let output = inspect_store(
+            &path,
+            StoreInspectCommand::Overview {
+                limit: 5,
+                status: None,
+                phase: None,
+                active_boundary_kind: None,
+                run_id_prefix: None,
+            },
+        )
+        .expect("overview");
 
         assert_eq!(output["table_counts"]["runs"], 1);
         assert_eq!(output["table_counts"]["run_inputs"], 1);
@@ -1315,8 +1640,17 @@ mod tests {
         let path = temp_sqlite_path("run-final");
         seed_store(&path);
 
-        let overview =
-            inspect_store(&path, StoreInspectCommand::Overview { limit: 5 }).expect("overview");
+        let overview = inspect_store(
+            &path,
+            StoreInspectCommand::Overview {
+                limit: 5,
+                status: None,
+                phase: None,
+                active_boundary_kind: None,
+                run_id_prefix: None,
+            },
+        )
+        .expect("overview");
         assert_eq!(overview["table_counts"]["runs"], 1);
         assert_eq!(overview["runs"][0]["run_id"], "run-1");
         assert_eq!(overview["runs"][0]["status"], "completed");
@@ -1351,6 +1685,8 @@ mod tests {
             StoreInspectCommand::Events {
                 run_id: "run-1".to_owned(),
                 after_event_seq: None,
+                checkpoint_seq: None,
+                event_kind: None,
                 limit: Some(10),
             },
         )
@@ -1364,6 +1700,9 @@ mod tests {
             StoreInspectCommand::Audits {
                 run_id: "run-1".to_owned(),
                 after_audit_seq: None,
+                checkpoint_seq: None,
+                audit_type: None,
+                recovery_disposition: None,
                 limit: Some(10),
             },
         )
@@ -1377,6 +1716,7 @@ mod tests {
             StoreInspectCommand::Checkpoints {
                 run_id: "run-1".to_owned(),
                 latest: false,
+                archive_kind: None,
                 limit: Some(10),
             },
         )
@@ -1387,7 +1727,9 @@ mod tests {
         let waits = inspect_store(
             &path,
             StoreInspectCommand::Waits {
-                run_id: "run-1".to_owned(),
+                run_id: Some("run-1".to_owned()),
+                wait_kind: None,
+                limit: 10,
             },
         )
         .expect("waits");
@@ -1397,7 +1739,11 @@ mod tests {
         let claims = inspect_store(
             &path,
             StoreInspectCommand::Claims {
-                run_id: "run-1".to_owned(),
+                run_id: Some("run-1".to_owned()),
+                status: None,
+                owner_kind: None,
+                host_session_id: None,
+                limit: 10,
             },
         )
         .expect("claims");
@@ -1494,6 +1840,365 @@ mod tests {
                 > 0
         );
         assert!(output["growth_trend"]["delta_since_last_recorded_sample"]["db_bytes"].is_i64());
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn overview_filters_by_status_phase_boundary_and_prefix() {
+        let path = temp_sqlite_path("overview-filters");
+        seed_store(&path);
+
+        let store = SqliteStore::open_path(&path).expect("open sqlite");
+        let conn = store.connection();
+        conn.execute(
+            r#"
+            INSERT INTO runs (
+                run_id, mission_id, status, phase, active_boundary_kind, active_wait_kind,
+                latest_checkpoint_seq, latest_event_seq, latest_audit_seq, latest_claim_epoch,
+                retention_mode, created_at_ms, updated_at_ms, terminal_at_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            "#,
+            rusqlite::params![
+                "debug-2",
+                "mission-2",
+                "awaiting_signer",
+                "awaiting_host",
+                "signer",
+                "signer",
+                2i64,
+                3i64,
+                1i64,
+                1i64,
+                "active_full",
+                3000i64,
+                4000i64,
+                Option::<i64>::None
+            ],
+        )
+        .expect("insert second run");
+
+        let output = inspect_store(
+            &path,
+            StoreInspectCommand::Overview {
+                limit: 10,
+                status: Some("awaiting_signer".to_owned()),
+                phase: Some("awaiting_host".to_owned()),
+                active_boundary_kind: Some("signer".to_owned()),
+                run_id_prefix: Some("debug-".to_owned()),
+            },
+        )
+        .expect("overview");
+
+        assert_eq!(output["runs"].as_array().map(Vec::len), Some(1));
+        assert_eq!(output["runs"][0]["run_id"], "debug-2");
+        assert_eq!(output["runs"][0]["status"], "awaiting_signer");
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn waits_support_filtered_list_mode() {
+        let path = temp_sqlite_path("waits-filtered-list");
+        seed_store(&path);
+
+        let store = SqliteStore::open_path(&path).expect("open sqlite");
+        let conn = store.connection();
+        conn.execute(
+            r#"
+            INSERT INTO run_wait_states (run_id, wait_kind, request_id, entered_at_ms, expires_at_ms, state_json)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
+            rusqlite::params![
+                "run-2",
+                "confirmation",
+                "submission-2",
+                2100i64,
+                Option::<i64>::None,
+                r#"{"run_id":"run-2","request_id":"submission-2","status":"waiting"}"#
+            ],
+        )
+        .expect("insert confirmation wait");
+
+        let output = inspect_store(
+            &path,
+            StoreInspectCommand::Waits {
+                run_id: None,
+                wait_kind: Some("signer".to_owned()),
+                limit: 10,
+            },
+        )
+        .expect("waits");
+
+        assert_eq!(output["waits"].as_array().map(Vec::len), Some(1));
+        assert_eq!(output["waits"][0]["run_id"], "run-1");
+        assert_eq!(output["waits"][0]["wait_kind"], "signer");
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn claims_support_filtered_list_mode() {
+        let path = temp_sqlite_path("claims-filtered-list");
+        seed_store(&path);
+
+        let store = SqliteStore::open_path(&path).expect("open sqlite");
+        let conn = store.connection();
+        conn.execute(
+            r#"
+            INSERT INTO run_claim_history (
+                claim_id, run_id, host_session_id, owner_kind, owner_instance_id,
+                lease_started_at_ms, lease_expires_at_ms, last_renewed_at_ms, claim_epoch, mode, status
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            "#,
+            rusqlite::params![
+                "claim-2",
+                "run-2",
+                "session-2",
+                "interactive_host",
+                "ais-agent-dev-2",
+                3000i64,
+                3600i64,
+                3200i64,
+                1i64,
+                "exclusive_mutation",
+                "released"
+            ],
+        )
+        .expect("insert second claim");
+
+        let output = inspect_store(
+            &path,
+            StoreInspectCommand::Claims {
+                run_id: None,
+                status: Some("active".to_owned()),
+                owner_kind: Some("host_session".to_owned()),
+                host_session_id: Some("session-1".to_owned()),
+                limit: 10,
+            },
+        )
+        .expect("claims");
+
+        assert_eq!(output["claims"].as_array().map(Vec::len), Some(1));
+        assert_eq!(output["claims"][0]["claim_id"], "claim-1");
+        assert_eq!(output["claims"][0]["host_session_id"], "session-1");
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn events_and_audits_support_checkpoint_seq_filter() {
+        let path = temp_sqlite_path("timeline-checkpoint-filter");
+        seed_store(&path);
+
+        let store = SqliteStore::open_path(&path).expect("open sqlite");
+        let conn = store.connection();
+        conn.execute(
+            r#"
+            INSERT INTO run_events (
+                run_id, event_seq, event_kind, phase, boundary_kind, emitted_at_ms,
+                checkpoint_seq, revision, payload_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "#,
+            rusqlite::params![
+                "run-1",
+                2i64,
+                "run.progressed",
+                "executing",
+                "pause",
+                1200i64,
+                2i64,
+                2i64,
+                r#"{"run_id":"run-1","event_seq":2,"checkpoint_seq":2,"plan_epoch":0,"event":{"type":"progressed"}}"#
+            ],
+        )
+        .expect("insert second event");
+        conn.execute(
+            r#"
+            INSERT INTO run_audits (
+                run_id, audit_seq, audit_kind, decision_class, emitted_at_ms,
+                checkpoint_seq, revision, payload_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "#,
+            rusqlite::params![
+                "run-1",
+                2i64,
+                "recovery",
+                "allow",
+                1600i64,
+                3i64,
+                3i64,
+                r#"{"audit_id":"audit-2","run_id":"run-1","audit_seq":2,"checkpoint_seq":3,"plan_epoch":0,"audit":{"type":"recovery"}}"#
+            ],
+        )
+        .expect("insert second audit");
+
+        let events = inspect_store(
+            &path,
+            StoreInspectCommand::Events {
+                run_id: "run-1".to_owned(),
+                after_event_seq: None,
+                checkpoint_seq: Some(2),
+                event_kind: None,
+                limit: Some(10),
+            },
+        )
+        .expect("events");
+        assert_eq!(events["events"].as_array().map(Vec::len), Some(1));
+        assert_eq!(events["events"][0]["event_seq"], 2);
+        assert_eq!(events["events"][0]["event_kind"], "run.progressed");
+
+        let audits = inspect_store(
+            &path,
+            StoreInspectCommand::Audits {
+                run_id: "run-1".to_owned(),
+                after_audit_seq: None,
+                checkpoint_seq: Some(3),
+                audit_type: None,
+                recovery_disposition: None,
+                limit: Some(10),
+            },
+        )
+        .expect("audits");
+        assert_eq!(audits["audits"].as_array().map(Vec::len), Some(1));
+        assert_eq!(audits["audits"][0]["audit_id"], "audit-2");
+        assert_eq!(audits["audits"][0]["audit_type"], "recovery");
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn events_audits_and_checkpoints_support_semantic_filters() {
+        let path = temp_sqlite_path("timeline-semantic-filters");
+        seed_store(&path);
+
+        let store = SqliteStore::open_path(&path).expect("open sqlite");
+        let conn = store.connection();
+        conn.execute(
+            r#"
+            INSERT INTO run_checkpoints (
+                run_id, checkpoint_seq, plan_epoch, checkpoint_kind, retention_tier,
+                created_at_ms, is_terminal, is_side_effect_boundary, is_recovery_boundary,
+                is_first_wait_checkpoint, snapshot_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            "#,
+            rusqlite::params![
+                "run-1",
+                2i64,
+                0i64,
+                "side_effect",
+                "active_full",
+                1800i64,
+                0i64,
+                1i64,
+                0i64,
+                0i64,
+                r#"{"run_id":"run-1","checkpoint_seq":2,"plan_epoch":0,"status":"running"}"#
+            ],
+        )
+        .expect("insert second checkpoint");
+        conn.execute(
+            r#"
+            INSERT INTO run_events (
+                run_id, event_seq, event_kind, phase, boundary_kind, emitted_at_ms,
+                checkpoint_seq, revision, payload_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "#,
+            rusqlite::params![
+                "run-1",
+                2i64,
+                "awaiting_signer",
+                "awaiting_host",
+                "signer",
+                1200i64,
+                2i64,
+                2i64,
+                r#"{"run_id":"run-1","event_seq":2,"checkpoint_seq":2,"plan_epoch":0,"event":{"type":"awaiting_signer"}}"#
+            ],
+        )
+        .expect("insert second event");
+        conn.execute(
+            r#"
+            INSERT INTO run_audits (
+                run_id, audit_seq, audit_kind, decision_class, emitted_at_ms,
+                checkpoint_seq, revision, payload_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "#,
+            rusqlite::params![
+                "run-1",
+                2i64,
+                "recovery",
+                "allow",
+                1600i64,
+                3i64,
+                3i64,
+                r#"{"audit_id":"audit-2","run_id":"run-1","audit_seq":2,"checkpoint_seq":3,"plan_epoch":0,"audit":{"type":"recovery","recovery_disposition":"await_signer"}}"#
+            ],
+        )
+        .expect("insert second audit");
+
+        let events = inspect_store(
+            &path,
+            StoreInspectCommand::Events {
+                run_id: "run-1".to_owned(),
+                after_event_seq: None,
+                checkpoint_seq: None,
+                event_kind: Some("awaiting_signer".to_owned()),
+                limit: Some(10),
+            },
+        )
+        .expect("events");
+        assert_eq!(events["events"].as_array().map(Vec::len), Some(1));
+        assert_eq!(events["events"][0]["event_kind"], "awaiting_signer");
+
+        let audits = inspect_store(
+            &path,
+            StoreInspectCommand::Audits {
+                run_id: "run-1".to_owned(),
+                after_audit_seq: None,
+                checkpoint_seq: None,
+                audit_type: Some("recovery".to_owned()),
+                recovery_disposition: Some("await_signer".to_owned()),
+                limit: Some(10),
+            },
+        )
+        .expect("audits");
+        assert_eq!(audits["audits"].as_array().map(Vec::len), Some(1));
+        assert_eq!(audits["audits"][0]["audit_type"], "recovery");
+        assert_eq!(audits["audits"][0]["recovery_disposition"], "await_signer");
+
+        let checkpoints = inspect_store(
+            &path,
+            StoreInspectCommand::Checkpoints {
+                run_id: "run-1".to_owned(),
+                latest: false,
+                archive_kind: Some("side_effect".to_owned()),
+                limit: Some(10),
+            },
+        )
+        .expect("checkpoints");
+        assert_eq!(checkpoints["checkpoints"].as_array().map(Vec::len), Some(1));
+        assert_eq!(checkpoints["checkpoints"][0]["archive_kind"], "side_effect");
+        assert_eq!(checkpoints["checkpoints"][0]["checkpoint_seq"], 2);
+
+        let latest_side_effect_checkpoint = inspect_store(
+            &path,
+            StoreInspectCommand::Checkpoints {
+                run_id: "run-1".to_owned(),
+                latest: true,
+                archive_kind: Some("side_effect".to_owned()),
+                limit: Some(10),
+            },
+        )
+        .expect("latest filtered checkpoint");
+        assert_eq!(
+            latest_side_effect_checkpoint["latest_checkpoint"]["archive_kind"],
+            "side_effect"
+        );
+        assert_eq!(
+            latest_side_effect_checkpoint["latest_checkpoint"]["checkpoint_seq"],
+            2
+        );
 
         let _ = fs::remove_file(path);
     }

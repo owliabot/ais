@@ -90,8 +90,24 @@ Current implementation status:
   - `SqliteStore` claim repository
 - store inspection now opens SQLite in read-only mode and supports:
   - overview summaries over `runs`
+  - filtered overview slices over:
+    - `status`
+    - `phase`
+    - `active_boundary_kind`
+    - `run_id_prefix`
   - per-run mission/checkpoint/wait-state/claim aggregation
+  - filtered wait-state listings by `wait_kind`
+  - filtered claim listings by:
+    - `status`
+    - `owner_kind`
+    - `host_session_id`
   - paged reads of `run_events` and `run_audits`
+  - checkpoint-scoped event/audit filtering via `checkpoint_seq`
+  - semantic timeline filtering via:
+    - `events.event_kind`
+    - `audits.audit_type`
+    - `audits.recovery_disposition`
+    - `checkpoints.archive_kind`
   - latest or historical `run_checkpoints` reads
   - retention and storage summaries, including growth trend deltas and recent maintenance windows
   - raw read-only SQL escape hatches for deeper forensics
@@ -108,6 +124,47 @@ Current implementation status:
   - `./var/log/ais-agent/ais-agent-YYYY-MM-DD.log`
   - `./var/captures/jsonl/inbound-YYYY-MM-DD.jsonl`
   - `./var/captures/jsonl/outbound-YYYY-MM-DD.jsonl`
+
+Common store filtering examples:
+
+```bash
+ais-agent --sqlite-path ./var/ais-agent.db inspect store overview \
+  --status awaiting_signer \
+  --active-boundary-kind signer \
+  --limit 10
+
+ais-agent --sqlite-path ./var/ais-agent.db inspect store waits \
+  --wait-kind signer \
+  --limit 10
+
+ais-agent --sqlite-path ./var/ais-agent.db inspect store claims \
+  --status active \
+  --host-session-id session-1 \
+  --limit 10
+
+ais-agent --sqlite-path ./var/ais-agent.db inspect store events \
+  --run-id run-4 \
+  --checkpoint-seq 5 \
+  --limit 50
+
+ais-agent --sqlite-path ./var/ais-agent.db inspect store events \
+  --run-id run-4 \
+  --event-kind awaiting_signer \
+  --limit 50
+
+ais-agent --sqlite-path ./var/ais-agent.db inspect store audits \
+  --run-id run-4 \
+  --audit-type recovery \
+  --recovery-disposition await_signer \
+  --limit 50
+
+ais-agent --sqlite-path ./var/ais-agent.db inspect store checkpoints \
+  --run-id run-4 \
+  --archive-kind side_effect \
+  --limit 20
+```
+
+Use `inspect store sql --query ...` when you need JSON-payload-specific forensics beyond the built-in filters.
 
 Known gaps:
 - SQLite bootstrap still uses an in-memory hot `RunRepository` and in-memory host-session store on top of the durable SQLite archives
