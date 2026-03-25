@@ -1,1 +1,0 @@
-- batch_confirm_hint: {{approve_all_bundle}}

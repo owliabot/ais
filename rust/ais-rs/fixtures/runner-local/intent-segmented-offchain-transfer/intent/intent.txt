@@ -1,2 +1,0 @@
-在 eip155:31338 链上，先查询我的 native 与 TOKEN 余额；
-如果两者都大于 100，则给地址 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 转 5 native。
