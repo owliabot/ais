@@ -1,0 +1,67 @@
+schema: "ais-pack/0.0.2"
+
+meta:
+  name: "uniswap-v3-lp"
+  version: "0.0.1"
+  description: "Uniswap V3 LP management pack — add liquidity, remove, collect fees, auto-rebalance"
+
+includes:
+  - protocol: "uniswap-v3-lp"
+    version: "0.0.1"
+    source: "local"
+    # Restrict chain scope as needed; remove to allow all deployments.
+    # chain_scope: ["eip155:1"]
+
+policy:
+  approvals:
+    auto_execute_max_risk_level: 1   # only collect-fees auto-executes
+    require_approval_min_risk_level: 3  # mint/decrease require user approval
+
+
+token_policy:
+  resolution:
+    allow_symbol_input: true
+    require_user_confirm_asset_address: false
+    require_allowlist_for_symbol_resolution: true
+
+  # Extend this allowlist with the tokens you need.
+  allowlist:
+    - chain: "eip155:1"
+      symbol: "WETH"
+      address: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+      decimals: 18
+      tags: ["wrapped"]
+
+    - chain: "eip155:1"
+      symbol: "USDC"
+      address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+      decimals: 6
+      tags: ["stable"]
+
+    - chain: "eip155:1"
+      symbol: "USDT"
+      address: "0xdAC17F958D2ee523a2206206994597C13D831ec7"
+      decimals: 6
+      tags: ["stable"]
+
+    # Sepolia testnet
+    - chain: "eip155:11155111"
+      symbol: "WETH"
+      address: "0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14"
+      decimals: 18
+      tags: ["wrapped"]
+
+    - chain: "eip155:11155111"
+      symbol: "USDC"
+      address: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"
+      decimals: 6
+      tags: ["stable"]
+
+plugins:
+  execution:
+    enabled:
+      - type: "evm_rpc"
+      - type: "evm_read"
+      - type: "evm_call"
+
+extensions: {}
